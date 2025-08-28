@@ -1,4 +1,4 @@
-from .adapter import NotConnectedError, SQLiteAdapter
+from .adapter import AsyncSQLiteAdapter, NotConnectedError, SQLiteAdapter
 from .db import SQLerDB
 from .db.async_db import AsyncSQLerDB
 from .models import (
@@ -10,6 +10,8 @@ from .models import (
     SQLerSafeModel,
     StaleVersionError,
 )
+from .query import SQLerExpression, SQLerField, SQLerQuery
+from .registry import register, resolve, tables
 
 __all__ = [
     "SQLiteAdapter",
@@ -24,4 +26,10 @@ __all__ = [
     "AsyncSQLerModel",
     "AsyncSQLerQuerySet",
     "AsyncSQLerSafeModel",
+    "SQLerQuery",
+    "SQLerExpression",
+    "SQLerField",
+    "register",
+    "resolve",
+    "tables",
 ]
