@@ -1,0 +1,13 @@
+*.db
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+.coverage
+*.coverage
+dist/
+build/
+*.egg-info/
+.DS_Store
+
+sandbox/
