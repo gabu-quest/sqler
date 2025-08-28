@@ -41,9 +41,8 @@ jobs:
 
       - name: Install project (dev)
         run: |
-          # If your dev deps live under extras "dev", this works:
-          uv pip install -e .[dev]
-          # If your extras key is different, adjust the line above.
+          # create .venv and install deps + dev group
+          uv sync --dev
 
       - name: Lint (ruff)
         run: |
