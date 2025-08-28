@@ -1,5 +1,7 @@
 # SQLer
 
+**English | [日本語はこちら](README.ja.md)**
+
 [![PyPI version](https://img.shields.io/pypi/v/sqler)](https://pypi.org/project/sqler/)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
 [![Tests](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml/badge.svg)](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml)
