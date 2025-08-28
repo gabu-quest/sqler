@@ -309,7 +309,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.24.0" },
     { name = "pytest-benchmark", specifier = ">=5.1.0" },
     { name = "pytest-cov", specifier = ">=5.0.0" },
-    { name = "ruff", specifier = ">=0.8.0" },
+    { name = "ruff", specifier = "==0.12.10" },
 ]
 
 [[package]]
