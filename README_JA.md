@@ -5,8 +5,8 @@
 [![Tests](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml/badge.svg)](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**SQLite 向けの軽量・JSONファーストなマイクロ ORM（同期/非同期対応）。**
-Pydantic 風のモデルを定義し、JSON として保存。流れるような API でクエリできます。必要に応じて、楽観的同時実行制御を行う *Safe Model* も利用可能です。
+**SQLite 向けの軽量・JSON ファーストなマイクロ ORM（同期/非同期対応）。**
+Pydantic 風のモデルを定義し、JSON として保存。流れるような API でクエリできます。必要に応じて、楽観的同時実行制御を行う _Safe Model_ も利用可能です。
 
 ---
 
@@ -291,6 +291,7 @@ db.create_index("users", "address.city")
 ## 並行性モデル（WAL）
 
 - SQLer は **スレッドローカル接続** を用い、**WAL** を有効化：
+
   - `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`
   - 多数リーダ・単一ライタ（SQLite の原則）
 
@@ -360,6 +361,17 @@ except StaleVersionError:
 uv run python examples/sync_model_quickstart.py
 ```
 
+### FastAPI サンプルの実行方法
+
+SQLer には `examples/fastapi/app.py` に最小の FastAPI デモが含まれています。
+
+実行手順:
+
+```bash
+pip install fastapi uvicorn
+uv run uvicorn examples.fastapi.app:app --reload
+```
+
 ---
 
 ## テスト
@@ -396,4 +408,3 @@ Issue テンプレートや方針は `CONTRIBUTING.md` を参照してくださ�
 ## ライセンス
 
 MIT © Contributors
-
