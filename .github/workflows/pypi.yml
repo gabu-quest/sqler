@@ -9,10 +9,15 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-publish:
     name: Build & Publish
     runs-on: ubuntu-latest
+    environment: pypi # must match the Environment name on your PyPI Trusted Publisher entry
 
     steps:
       - name: Checkout
@@ -26,7 +31,6 @@ jobs:
 
       - name: Build sdist/wheel
         run: |
-          # Use uv’s PEP 517 backend to build
           uv build
           ls -l dist
 
