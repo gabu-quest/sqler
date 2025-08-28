@@ -1,5 +1,4 @@
 import pytest
-
 from sqler import NotConnectedError
 
 

@@ -1,7 +1,6 @@
 from sqlite3 import OperationalError, ProgrammingError
 
 import pytest
-
 from sqler.adapter import AdapterABC, NotConnectedError, SQLiteAdapter
 
 

@@ -5,12 +5,12 @@ import time
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.concurrency import run_in_threadpool
-
 from sqler.models import StaleVersionError
 from sqler.query import SQLerField as F
+from starlette.concurrency import run_in_threadpool
+
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 
 from .db import close_db, init_db
 from .errors import install_exception_handlers

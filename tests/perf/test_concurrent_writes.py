@@ -2,7 +2,6 @@ import threading
 import time
 
 import pytest
-
 from sqler import SQLerDB
 from sqler.models import SQLerSafeModel, StaleVersionError
 from sqler.query import SQLerField as F

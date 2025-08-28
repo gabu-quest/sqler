@@ -1,5 +1,4 @@
 import pytest
-
 from sqler.models import StaleVersionError
 from sqler.models.async_safe import AsyncSQLerSafeModel
 from sqler.query import SQLerField as F

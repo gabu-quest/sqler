@@ -1,7 +1,6 @@
 import asyncio
 
 import pytest_asyncio
-
 from sqler.adapter import AsyncSQLiteAdapter
 from sqler.db.async_db import AsyncSQLerDB
 
