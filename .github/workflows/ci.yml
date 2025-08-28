@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Tests • ${{ matrix.os }} • py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Show versions
+        run: |
+          python --version
+          uv --version
+
+      - name: Install project (dev)
+        run: |
+          # If your dev deps live under extras "dev", this works:
+          uv pip install -e .[dev]
+          # If your extras key is different, adjust the line above.
+
+      - name: Lint (ruff)
+        run: |
+          ruff version
+          ruff check .
+
+      - name: Run unit tests (perf excluded)
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          pytest -q -m "not perf" --disable-warnings
+
+      # Optional: smoke one example script on Linux only
+      - name: Smoke example
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          if [ -f examples/sync_model_quickstart.py ]; then
+            python examples/sync_model_quickstart.py > /dev/null
+          fi
