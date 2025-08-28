@@ -1,5 +1,4 @@
 import pytest
-
 from sqler import SQLerDB
 from sqler.models import ReferentialIntegrityError, SQLerModel
 

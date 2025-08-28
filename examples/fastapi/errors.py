@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from sqler.models import StaleVersionError
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-
-from sqler.models import StaleVersionError
 
 """
 Exception handlers for the FastAPI example.
