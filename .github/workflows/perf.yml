@@ -2,9 +2,8 @@ name: Perf
 
 on:
   workflow_dispatch:
-  schedule:
-    # Monthly at 05:00 UTC (14:00 JST) on the first day of the month idk if this is necessary
-    - cron: "0 5 1 * *"
+  push:
+    branches: [perf/**]
 
 concurrency:
   group: perf-${{ github.ref }}
@@ -14,9 +13,10 @@ permissions:
   contents: read
 
 jobs:
-  perf:
-    name: Benchmarks • Ubuntu • py3.12
+  perf-benchmarks:
+    name: Benchmarks • ubuntu-latest • py3.12
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -28,16 +28,34 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      - name: Install project (dev)
+      - name: Sync deps (dev) from lock
+        run: uv sync --dev --frozen
+
+      - name: Show versions
         run: |
-          uv pip install -e .[dev]
+          uv run python --version
+          uv run pytest --version
 
       - name: Run perf suite
+        env:
+          PYTHONUTF8: "1"
         run: |
-          pytest -q -m perf --benchmark-save=ci-latest --benchmark-min-time=0.2
+          mkdir -p .bench
+          # Run only tests marked 'perf'; save benchmark data as JSON
+          uv run pytest -m perf --benchmark-json=.bench/bench.json --benchmark-autosave
 
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: perf-benchmarks
-          path: ./.benchmarks/**
+          name: benchmark-results
+          path: .bench/
+
+      - name: Summarize
+        if: always()
+        run: |
+          echo "### Benchmark run summary" >> $GITHUB_STEP_SUMMARY
+          if [ -f .bench/bench.json ]; then
+            echo "- Results saved in the 'benchmark-results' artifact." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- No benchmark JSON produced." >> $GITHUB_STEP_SUMMARY
+          fi
