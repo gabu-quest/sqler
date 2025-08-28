@@ -358,6 +358,17 @@ Run:
 uv run python examples/sync_model_quickstart.py
 ```
 
+### Running the FastAPI Example
+
+SQLer ships with a minimal FastAPI demo under `examples/fastapi/app.py`.
+
+To run it:
+
+```bash
+pip install fastapi uvicorn
+uv run uvicorn examples.fastapi.app:app --reload
+```
+
 ---
 
 ## Testing
