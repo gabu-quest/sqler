@@ -185,7 +185,18 @@ async def ui_user_create(
                 u.save()
 
     await _db_call(_create)
-    return await ui_users_table(request)
+    # Re-render table with default params
+    return await ui_users_table(
+        request,
+        min_age=None,
+        city=None,
+        q=None,
+        limit=20,
+        offset=0,
+        sort="age",
+        dir="asc",
+        include=None,
+    )
 
 
 @router.post("/users/{user_id}", response_class=HTMLResponse)
@@ -225,10 +236,11 @@ async def ui_user_update(
             status_code=412,
         )
     u, etag = res
+    # Return only the detail panel partial and trigger modal close
     return templates.TemplateResponse(
-        "users/detail.html",
+        "users/_detail_panel.html",
         {"request": request, "user": _pack_user(u), "etag": etag, "include": "address,orders"},
-        headers={"ETag": etag},
+        headers={"ETag": etag, "HX-Trigger": "close-modal"},
     )
 
 
@@ -296,4 +308,4 @@ async def ui_addresses_create(
         a.save()
 
     await _db_call(_create)
-    return await ui_addresses_table(request)
+    return await ui_addresses_table(request, q=None, city=None, country=None)

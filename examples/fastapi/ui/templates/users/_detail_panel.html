@@ -1,0 +1,22 @@
+<div id="detail-panel">
+  <article>
+    <header>
+      <h3>User #{{ user._id }}</h3>
+      <small>ETag: {{ etag }}</small>
+    </header>
+    <p><strong>Name:</strong> {{ user.name }}</p>
+    <p><strong>Age:</strong> {{ user.age }}</p>
+    <p><strong>Address:</strong>
+      {% if user.get('address') %}
+        {{ user.address.city }}, {{ user.address.country }}
+      {% else %}
+        -
+      {% endif %}
+    </p>
+    <footer>
+      <a hx-get="/ui/users/{{ user._id }}/edit" hx-target="#modal-body" hx-swap="innerHTML" role="button">Edit</a>
+      <a hx-boost="true" href="/ui/users">Back</a>
+    </footer>
+  </article>
+</div>
+

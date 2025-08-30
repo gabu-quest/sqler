@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
   <h2>Users</h2>
-  <form class="grid" hx-get="/ui/users/partial/table" hx-target="#user-table" hx-push-url="true">
+  <form class="grid" hx-get="/ui/users/partial/table" hx-target="#user-table" hx-swap="innerHTML" hx-push-url="true">
     <input name="q" type="search" placeholder="Search name…" value="{{ params.q or '' }}" hx-trigger="keyup changed delay:300ms">
     <select name="city" hx-trigger="change">
       <option value="">Any city</option>
@@ -21,12 +21,12 @@
     <input type="hidden" name="include" value="{{ params.include or '' }}">
   </form>
 
-  <section id="user-table" hx-get="/ui/users/partial/table" hx-trigger="load" hx-vals='{"q":"{{ params.q or '' }}","city":"{{ params.city or '' }}","min_age":"{{ params.min_age or '' }}","sort":"{{ params.sort }}","dir":"{{ params.dir }}","limit":"{{ params.limit }}","offset":"{{ params.offset }}","include":"{{ params.include or '' }}"}'>
+  <section id="user-table" hx-get="/ui/users/partial/table" hx-trigger="load" hx-swap="innerHTML" hx-vals='{"q":"{{ params.q or '' }}","city":"{{ params.city or '' }}","min_age":"{{ params.min_age or '' }}","sort":"{{ params.sort }}","dir":"{{ params.dir }}","limit":"{{ params.limit }}","offset":"{{ params.offset }}","include":"{{ params.include or '' }}"}'>
   </section>
 
   <details>
     <summary>New user</summary>
-    <form hx-post="/ui/users" hx-target="#user-table" hx-swap="outerHTML">
+    <form hx-post="/ui/users" hx-target="#user-table" hx-swap="innerHTML">
       <div class="grid">
         <input name="name" placeholder="Name" required>
         <input name="age" type="number" min="0" placeholder="Age" required>

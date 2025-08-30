@@ -1,18 +1,18 @@
 {% extends 'base.html' %}
 {% block content %}
   <h2>Addresses</h2>
-  <form class="grid" hx-get="/ui/addresses/partial/table" hx-target="#addr-table" hx-push-url="true">
+  <form class="grid" hx-get="/ui/addresses/partial/table" hx-target="#addr-table" hx-swap="innerHTML" hx-push-url="true">
     <input name="q" type="search" placeholder="Search city/country…" value="{{ params.q or '' }}" hx-trigger="keyup changed delay:300ms">
     <input name="city" type="text" placeholder="City" value="{{ params.city or '' }}" hx-trigger="keyup changed delay:300ms">
     <input name="country" type="text" placeholder="Country" value="{{ params.country or '' }}" hx-trigger="keyup changed delay:300ms">
   </form>
 
-  <section id="addr-table" hx-get="/ui/addresses/partial/table" hx-trigger="load" hx-vals='{"q":"{{ params.q or '' }}","city":"{{ params.city or '' }}","country":"{{ params.country or '' }}"}'>
+  <section id="addr-table" hx-get="/ui/addresses/partial/table" hx-trigger="load" hx-swap="innerHTML" hx-vals='{"q":"{{ params.q or '' }}","city":"{{ params.city or '' }}","country":"{{ params.country or '' }}"}'>
   </section>
 
   <details>
     <summary>New address</summary>
-    <form hx-post="/ui/addresses" hx-target="#addr-table" hx-swap="outerHTML">
+    <form hx-post="/ui/addresses" hx-target="#addr-table" hx-swap="innerHTML">
       <div class="grid">
         <input name="city" placeholder="City" required>
         <input name="country" placeholder="Country" required>
@@ -21,4 +21,3 @@
     </form>
   </details>
 {% endblock %}
-
