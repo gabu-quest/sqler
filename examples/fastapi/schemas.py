@@ -65,7 +65,7 @@ class UserOut(BaseModel):
     name: str
     age: int
     address: Optional[dict] = None
-    orders: list[dict] = []
+    orders: list[dict] = Field(default_factory=list)
 
 
 class OrderCreate(BaseModel):

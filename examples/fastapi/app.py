@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 
 from sqler.models import StaleVersionError
 from sqler.query import SQLerField as F
@@ -82,7 +82,7 @@ def _etag(obj_id: int, version: int | None) -> str:
     日本語: id とバージョンから弱い ETag を生成します。
     """
     v = 0 if version is None else int(version)
-    return f'W/"{obj_id}-{v}"'
+    return f'"{obj_id}-{v}"'
 
 
 async def _db_call(fn, *args, **kwargs):
@@ -121,9 +121,11 @@ async def get_address(address_id: int, request: Request, response: Response):
         raise HTTPException(status_code=404, detail="address not found")
     etag = _etag(a._id, getattr(a, "_version", 0))  # ETag は id と _version 由来
     if request.headers.get("if-none-match") == etag:
+        # Keep the same Response so mutated headers (ETag) are preserved.
+        # 日本語: 新しい Response を作らずに既存の response を使い、ヘッダ(ETag)を保持する。
         response.status_code = status.HTTP_304_NOT_MODIFIED
         response.headers["ETag"] = etag
-        return Response(status_code=304)
+        return
     response.headers["ETag"] = etag
     return AddressOut.model_validate(
         a.model_dump() | {"_id": a._id, "_version": getattr(a, "_version", 0)}
@@ -164,9 +166,11 @@ async def get_user(user_id: int, request: Request, response: Response):
         raise HTTPException(status_code=404, detail="user not found")
     etag = _etag(u._id, getattr(u, "_version", 0))
     if request.headers.get("if-none-match") == etag:
+        # Keep the same Response so mutated headers (ETag) are preserved.
+        # 日本語: 新しい Response を作らずに既存の response を使い、ヘッダ(ETag)を保持する。
         response.status_code = status.HTTP_304_NOT_MODIFIED
         response.headers["ETag"] = etag
-        return Response(status_code=304)
+        return
     response.headers["ETag"] = etag
     return UserOut.model_validate(
         u.model_dump() | {"_id": u._id, "_version": getattr(u, "_version", 0)}
@@ -179,6 +183,10 @@ async def list_users(
     city: Annotated[str | None, Query()] = None,
     q: Annotated[str | None, Query(description="substring match on name")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    sort: Annotated[Literal["id", "name", "age"], Query()] = "age",
+    dir: Annotated[Literal["asc", "desc"], Query()] = "asc",
+    include: Annotated[str | None, Query(description="comma list: address,orders")] = None,
 ):
     """List users with filters and pagination.
 
@@ -193,12 +201,89 @@ async def list_users(
             qs = qs.filter(User.ref("address").field("city") == city)
         if q:
             qs = qs.filter(F("name").like(f"%{q}%"))
-        return [
-            UserOut.model_validate(
-                u.model_dump() | {"_id": u._id, "_version": getattr(u, "_version", 0)}
+
+        desc = dir == "desc"
+
+        # Sort and page
+        users: list[User]
+        if sort in {"name", "age"}:
+            users = qs.order_by(sort, desc).limit(limit + offset).all()
+            users = users[offset : offset + limit]
+        else:
+            users = qs.all()
+            users.sort(key=lambda u: int(u._id or 0), reverse=desc)
+            users = users[offset : offset + limit]
+
+        # Optional batch hydration
+        inc = set((include or "").split(",")) & {"address", "orders"}
+        if not inc:
+            return [
+                UserOut.model_validate(
+                    u.model_dump() | {"_id": u._id, "_version": getattr(u, "_version", 0)}
+                )
+                for u in users
+            ]
+
+        addr_ids = (
+            {int(u.address["_id"]) for u in users if getattr(u, "address", None)}
+            if "address" in inc
+            else set()
+        )
+        order_ids = (
+            {int(ref["_id"]) for u in users for ref in (u.orders or []) if "_id" in ref}
+            if "orders" in inc
+            else set()
+        )
+
+        adapter = User.db().adapter  # type: ignore[attr-defined]
+        import json
+
+        addr_by_id: dict[int, Address] = {}
+        if addr_ids:
+            placeholders = ",".join(["?"] * len(addr_ids))
+            cur = adapter.execute(
+                f"SELECT _id, data FROM addresses WHERE _id IN ({placeholders})",
+                list(addr_ids),
             )
-            for u in qs.order_by("age").limit(limit).all()
-        ]
+            addr_by_id = {
+                int(_id): Address.model_validate(json.loads(data) | {"_id": _id})
+                for _id, data in cur.fetchall()
+            }
+
+        order_by_id: dict[int, Order] = {}
+        if order_ids:
+            placeholders = ",".join(["?"] * len(order_ids))
+            cur = adapter.execute(
+                f"SELECT _id, data FROM orders WHERE _id IN ({placeholders})",
+                list(order_ids),
+            )
+            order_by_id = {
+                int(_id): Order.model_validate(json.loads(data) | {"_id": _id})
+                for _id, data in cur.fetchall()
+            }
+
+        out: list[UserOut] = []
+        for u in users:
+            base = u.model_dump() | {"_id": u._id, "_version": getattr(u, "_version", 0)}
+            if "address" in inc and getattr(u, "address", None):
+                a = addr_by_id.get(int(u.address["_id"]))
+                base["address"] = (
+                    a.model_dump() | {"_id": a._id, "_version": getattr(a, "_version", 0)}
+                ) if a else None
+            if "orders" in inc:
+                base["orders"] = [
+                    (
+                        order_by_id[i["_id"]].model_dump()
+                        | {
+                            "_id": order_by_id[i["_id"]]._id,
+                            "_version": getattr(order_by_id[i["_id"]], "_version", 0),
+                        }
+                    )
+                    for i in (u.orders or [])
+                    if i.get("_id") in order_by_id
+                ]
+            out.append(UserOut.model_validate(base))
+        return out
 
     return await _db_call(_list)
 
@@ -234,7 +319,7 @@ async def patch_user(user_id: int, patch: UserPatch, request: Request, response:
         for k, v in data.items():
             setattr(u, k, v)
 
-        try:
+        # no local try/except (handled globally)
             u.save()
         except StaleVersionError:
             raise HTTPException(status_code=409, detail="version conflict")  # 同時更新競合
