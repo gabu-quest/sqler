@@ -236,6 +236,11 @@ async def ui_user_update(
             status_code=412,
         )
     u, etag = res
+    # Resolve address for display after update
+    if isinstance(u.address, dict) and u.address.get("_id") is not None:
+        addr = Address.from_id(int(u.address["_id"]))
+        if addr:
+            u.address = _pack_user(addr)  # type: ignore[assignment]
     # Return only the detail panel partial and trigger modal close
     return templates.TemplateResponse(
         "users/_detail_panel.html",
