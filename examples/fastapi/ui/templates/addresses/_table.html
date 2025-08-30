@@ -1,0 +1,17 @@
+<table role="grid">
+  <thead>
+    <tr>
+      <th>ID</th><th>City</th><th>Country</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for a in addresses %}
+    <tr>
+      <td>{{ a._id }}</td>
+      <td>{{ a.city }}</td>
+      <td>{{ a.country }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
