@@ -1,0 +1,22 @@
+<table role="grid">
+  <thead>
+    <tr>
+      <th>ID</th><th>Name</th><th>Age</th><th>Address</th><th>Orders</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for u in users %}
+    <tr>
+      <td>{{ u._id }}</td>
+      <td>{{ u.name }}</td>
+      <td>{{ u.age }}</td>
+      <td>{{ (u.address.city if u.address else '-') if u.get('address') else '-' }}</td>
+      <td>{{ (u.orders | length) if u.get('orders') else 0 }}</td>
+      <td>
+        <a hx-boost="true" hx-push-url="true" href="/ui/users/{{ u._id }}" role="button">Open</a>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+

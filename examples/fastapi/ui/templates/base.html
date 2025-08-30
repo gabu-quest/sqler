@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SQLer × FastAPI Demo</title>
+    <link rel="stylesheet" href="https://unpkg.com/@picocss/pico@2/css/pico.min.css">
+    <link rel="stylesheet" href="/static/app.css">
+    <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+    <script src="https://unpkg.com/hyperscript.org@0.9.12" defer></script>
+  </head>
+  <body>
+    <header class="container">
+      <nav>
+        <ul>
+          <li><strong>SQLer × FastAPI</strong></li>
+        </ul>
+        <ul>
+          <li><a hx-boost="true" href="/ui/users">Users</a></li>
+          <li><a href="/docs" target="_blank">API Docs</a></li>
+          <li><a href="https://github.com/gabu-quest/SQLer" target="_blank">GitHub</a></li>
+        </ul>
+      </nav>
+    </header>
+
+    <main class="container" hx-boost="true">
+      {% block content %}{% endblock %}
+    </main>
+
+    <div id="toast" class="toast htmx-indicator">Loading…</div>
+
+    <dialog id="modal">
+      <article id="modal-body"></article>
+    </dialog>
+
+    <script>
+      document.body.addEventListener('htmx:afterSwap', (e) => {
+        if (e.target.id === 'modal-body') {
+          document.getElementById('modal').showModal();
+        }
+      });
+      document.body.addEventListener('close-modal', () => {
+        document.getElementById('modal').close();
+      });
+    </script>
+  </body>
+  </html>
+

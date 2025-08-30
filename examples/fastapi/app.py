@@ -3,14 +3,14 @@ from __future__ import annotations
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Literal
 
 from sqler.models import StaleVersionError
-from sqler.query import SQLerField as F
-from starlette.concurrency import run_in_threadpool
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .db import close_db, init_db
 from .errors import install_exception_handlers
@@ -25,6 +25,9 @@ from .schemas import (
     UserOut,
     UserPatch,
 )
+from .services.users import query_users
+from .utils import db_call as _db_call
+from .utils import etag as _etag
 
 """
 FastAPI demo using SQLer safely from async routes (threadpool handoff).
@@ -75,22 +78,9 @@ async def add_process_time_header(request: Request, call_next):
 
 install_exception_handlers(app)
 
-
-def _etag(obj_id: int, version: int | None) -> str:
-    """Build a weak ETag from id and version.
-
-    日本語: id とバージョンから弱い ETag を生成します。
-    """
-    v = 0 if version is None else int(version)
-    return f'"{obj_id}-{v}"'
-
-
-async def _db_call(fn, *args, **kwargs):
-    """Run a blocking SQLer call in the threadpool.
-
-    日本語: ブロッキングな SQLer 処理をスレッドプールで実行します。
-    """
-    return await run_in_threadpool(fn, *args, **kwargs)
+# UI mounting configuration
+UI_ENABLED = os.getenv("UI_ENABLED", "1") not in {"0", "false", "False"}
+UI_ROOT = Path(__file__).resolve().parent / "ui"
 
 
 router_users = APIRouter(prefix="/users", tags=["Users"])
@@ -114,15 +104,13 @@ async def create_address(payload: AddressCreate):
 async def get_address(address_id: int, request: Request, response: Response):
     """Get an address by id with ETag support (304 on If-None-Match).
 
-    日本語: ETag 対応で住所を取得します（If-None-Match が一致すれば 304）。
+    日本語: ETag 対応の id 取得（If-None-Match なら 304）。
     """
     a = await _db_call(lambda: Address.from_id(address_id))
     if not a:
         raise HTTPException(status_code=404, detail="address not found")
-    etag = _etag(a._id, getattr(a, "_version", 0))  # ETag は id と _version 由来
+    etag = _etag(a._id, getattr(a, "_version", 0))
     if request.headers.get("if-none-match") == etag:
-        # Return 304 with ETag header set.
-        # 日本語: 304 を返し、ETag ヘッダを付ける。
         return Response(status_code=304, headers={"ETag": etag})
     response.headers["ETag"] = etag
     return AddressOut.model_validate(
@@ -134,7 +122,7 @@ async def get_address(address_id: int, request: Request, response: Response):
 async def create_user(payload: UserCreate):
     """Create a user and optionally link an existing address.
 
-    日本語: ユーザを作成し、必要に応じて既存住所を関連付けます。
+    日本語: ユーザを作成し、必要なら既存住所を関連付けます。
     """
 
     def _create():
@@ -157,15 +145,13 @@ async def create_user(payload: UserCreate):
 async def get_user(user_id: int, request: Request, response: Response):
     """Get a user by id with ETag support.
 
-    日本語: ETag 対応でユーザを取得します。
+    日本語: ETag 対応の id 取得。
     """
     u = await _db_call(lambda: User.from_id(user_id))
     if not u:
         raise HTTPException(status_code=404, detail="user not found")
     etag = _etag(u._id, getattr(u, "_version", 0))
     if request.headers.get("if-none-match") == etag:
-        # Return 304 with ETag header set.
-        # 日本語: 304 を返し、ETag ヘッダを付ける。
         return Response(status_code=304, headers={"ETag": etag})
     response.headers["ETag"] = etag
     return UserOut.model_validate(
@@ -186,32 +172,11 @@ async def list_users(
 ):
     """List users with filters and pagination.
 
-    日本語: フィルタ/ページング付きでユーザ一覧を返します。
+    日本語: フィルタとページング付きユーザ一覧。
     """
 
     def _list():
-        qs = User.query()
-        if min_age is not None:
-            qs = qs.filter(F("age") >= min_age)
-        if city:
-            qs = qs.filter(User.ref("address").field("city") == city)
-        if q:
-            qs = qs.filter(F("name").like(f"%{q}%"))
-
-        desc = dir == "desc"
-
-        def fetch(resolved: bool) -> list[User]:
-            local = qs.resolve(resolved)
-            if sort in {"name", "age"}:
-                arr = local.order_by(sort, desc).limit(limit + offset).all()
-                return arr[offset : offset + limit]
-            arr = local.all()
-            arr.sort(key=lambda u: int(u._id or 0), reverse=desc)
-            return arr[offset : offset + limit]
-
-        inc = set((include or "").split(",")) & {"address", "orders"}
-        users = fetch(resolved=bool(inc))
-
+        users = query_users(min_age, city, q, limit, offset, sort, dir, include)
         return [
             UserOut.model_validate(
                 u.model_dump() | {"_id": u._id, "_version": getattr(u, "_version", 0)}
@@ -226,18 +191,16 @@ async def list_users(
 async def patch_user(user_id: int, patch: UserPatch, request: Request, response: Response):
     """Apply a partial update with If-Match and optimistic locking.
 
-    日本語: If-Match と楽観的ロックで部分更新を適用します。
+    日本語: If-Match と楽観的ロックで部分更新。
     """
 
     def _patch():
         u = User.from_id(user_id)
         if not u:
             raise HTTPException(status_code=404, detail="user not found")
-        current_etag = _etag(u._id, getattr(u, "_version", 0))  # 現在の ETag を算出
+        current_etag = _etag(u._id, getattr(u, "_version", 0))
         if (if_match := request.headers.get("if-match")) and if_match != current_etag:
-            raise HTTPException(
-                status_code=412, detail="If-Match precondition failed"
-            )  # 事前条件不一致
+            raise HTTPException(status_code=412, detail="If-Match precondition failed")
 
         data = patch.model_dump(exclude_unset=True)
         if "address_id" in data:
@@ -256,7 +219,7 @@ async def patch_user(user_id: int, patch: UserPatch, request: Request, response:
         try:
             u.save()
         except StaleVersionError:
-            raise HTTPException(status_code=409, detail="version conflict")  # 同時更新競合
+            raise HTTPException(status_code=409, detail="version conflict")
         return u
 
     u = await _db_call(_patch)
@@ -301,3 +264,14 @@ async def attach_order(user_id: int, order_id: int):
 app.include_router(router_addresses)
 app.include_router(router_users)
 app.include_router(router_orders)
+
+if UI_ENABLED:
+    STATIC_DIR = UI_ROOT / "static"
+    TEMPLATES_DIR = UI_ROOT / "templates"
+    if not TEMPLATES_DIR.exists():
+        raise RuntimeError(f"UI_ENABLED=1 but templates not found: {TEMPLATES_DIR}")
+    if STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    from .ui.routes import router as ui_router
+
+    app.include_router(ui_router)
