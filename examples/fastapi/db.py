@@ -34,6 +34,8 @@ def init_db(path: str | None = None):
     User.ensure_index("address._id")
     Address.ensure_index("city")
     Order.ensure_index("total")
+    # Optional: improve sorting/search
+    # User.ensure_index("name")
 
     return _db
 

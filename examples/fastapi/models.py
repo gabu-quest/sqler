@@ -1,5 +1,6 @@
 from typing import List, Optional
 
+from pydantic import Field
 from sqler.models import SQLerSafeModel
 from sqler.models.ref import as_ref
 
@@ -34,7 +35,7 @@ class User(SQLerSafeModel):
     age: int
     # reference to Address and list of references to Orders
     address: Optional[dict] = None
-    orders: List[dict] = []
+    orders: List[dict] = Field(default_factory=list)
 
     def set_address(self, addr: Address):
         """Attach a saved Address reference to this user.
