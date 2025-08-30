@@ -1,0 +1,7 @@
+main { margin-top: 1rem; }
+.toast { position: fixed; right: 1rem; bottom: 1rem; padding: .75rem 1rem; border-radius: .5rem; }
+.toast.error { background: #fee; color: #900; }
+.htmx-indicator{ opacity:0; transition: opacity .2s ease; }
+.htmx-request .htmx-indicator{ opacity:1; }
+#modal[open] { max-width: 720px; }
+

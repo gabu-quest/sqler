@@ -1,0 +1,23 @@
+<article>
+  <header>
+    <h3>Edit User #{{ user._id }}</h3>
+  </header>
+  <form hx-post="/ui/users/{{ user._id }}" hx-target="#modal-body" hx-swap="outerHTML" _="on htmx:afterSwap trigger close-modal">
+    <input type="hidden" name="if_match" value="{{ etag }}">
+    <div class="grid">
+      <input name="name" value="{{ user.name }}" placeholder="Name">
+      <input name="age" type="number" min="0" value="{{ user.age }}" placeholder="Age">
+      <select name="address_id">
+        <option value="">(no change)</option>
+        {% for a in addresses %}
+          <option value="{{ a._id }}">{{ a.city }}, {{ a.country }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <footer>
+      <button type="submit">Save</button>
+      <button type="button" onclick="document.getElementById('modal').close()">Cancel</button>
+    </footer>
+  </form>
+</article>
+
