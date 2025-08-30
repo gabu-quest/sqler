@@ -79,7 +79,7 @@ async def add_process_time_header(request: Request, call_next):
 install_exception_handlers(app)
 
 # UI mounting configuration
-UI_ENABLED = os.getenv("UI_ENABLED", "1") not in {"0", "false", "False"}
+UI_ENABLED = os.getenv("UI_ENABLED", "0") not in {"0", "false", "False"}
 UI_ROOT = Path(__file__).resolve().parent / "ui"
 
 
@@ -266,6 +266,13 @@ app.include_router(router_users)
 app.include_router(router_orders)
 
 if UI_ENABLED:
+    # Ensure optional dependency for Form parsing is present
+    try:
+        pass  # type: ignore  # provided by python-multipart
+    except Exception as exc:
+        raise RuntimeError(
+            "UI_ENABLED=1 but 'python-multipart' is not installed; install it to enable UI"
+        ) from exc
     STATIC_DIR = UI_ROOT / "static"
     TEMPLATES_DIR = UI_ROOT / "templates"
     if not TEMPLATES_DIR.exists():
