@@ -30,10 +30,14 @@
       <div class="grid">
         <input name="name" placeholder="Name" required>
         <input name="age" type="number" min="0" placeholder="Age" required>
-        <input name="address_id" type="number" min="1" placeholder="Address ID (optional)">
+        <select name="address_id">
+          <option value="">(no address)</option>
+          {% for a in addresses %}
+            <option value="{{ a._id }}">#{{ a._id }} — {{ a.city }}, {{ a.country }}</option>
+          {% endfor %}
+        </select>
         <button type="submit">Create</button>
       </div>
     </form>
   </details>
 {% endblock %}
-

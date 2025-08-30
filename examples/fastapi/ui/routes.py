@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Literal
 
+from sqler.query import SQLerField as F
+
 from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -42,6 +44,14 @@ async def ui_users(
     dir: Dir = "asc",
     include: str | None = None,
 ):
+    # load addresses for the new-user form picker (top 100 by _id)
+    def _addresses():
+        addrs = Address.query().limit(200).all()
+        addrs.sort(key=lambda a: int(a._id or 0))
+        return addrs
+
+    addresses = await _db_call(_addresses)
+
     ctx = {
         "request": request,
         "params": {
@@ -54,6 +64,7 @@ async def ui_users(
             "dir": dir,
             "include": include,
         },
+        "addresses": [{"_id": a._id, "city": a.city, "country": a.country} for a in addresses],
     }
     return templates.TemplateResponse("users/index.html", ctx)
 
@@ -61,7 +72,7 @@ async def ui_users(
 @router.get("/users/partial/table", response_class=HTMLResponse)
 async def ui_users_table(
     request: Request,
-    min_age: int | None = Query(default=None, ge=0),
+    min_age: str | None = Query(default=None),
     city: str | None = Query(default=None),
     q: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=200),
@@ -70,7 +81,16 @@ async def ui_users_table(
     dir: Dir = "asc",
     include: str | None = None,
 ):
-    users = await _db_call(lambda: query_users(min_age, city, q, limit, offset, sort, dir, include))
+    # Coerce blank string to None for min_age
+    min_age_int = None
+    if min_age not in (None, ""):
+        try:
+            min_age_int = int(min_age)
+        except ValueError:
+            min_age_int = None
+    users = await _db_call(
+        lambda: query_users(min_age_int, city or None, q or None, limit, offset, sort, dir, include)
+    )
     users = [_pack_user(u) for u in users]
     return templates.TemplateResponse(
         "users/_table.html",
@@ -152,13 +172,13 @@ async def ui_user_edit(request: Request, user_id: int):
 async def ui_user_create(
     request: Request,
     name: Annotated[str, Form(...)],
-    age: Annotated[int, Form(...)],
-    address_id: Annotated[int | None, Form()] = None,
+    age: Annotated[str, Form(...)],
+    address_id: Annotated[str | None, Form()] = None,
 ):
     def _create():
         u = User(name=name, age=int(age))
         u.save()
-        if address_id:
+        if address_id not in (None, ""):
             addr = Address.from_id(int(address_id))
             if addr:
                 u.set_address(addr)
@@ -174,8 +194,8 @@ async def ui_user_update(
     user_id: int,
     if_match: Annotated[str, Form(...)],
     name: Annotated[str | None, Form()] = None,
-    age: Annotated[int | None, Form()] = None,
-    address_id: Annotated[int | None, Form()] = None,
+    age: Annotated[str | None, Form()] = None,
+    address_id: Annotated[str | None, Form()] = None,
 ):
     def _update():
         u = User.from_id(user_id)
@@ -184,11 +204,11 @@ async def ui_user_update(
         current_etag = _etag(u._id, getattr(u, "_version", 0))
         if if_match != current_etag:
             return "precondition", None
-        if name is not None:
+        if name not in (None, ""):
             u.name = name
-        if age is not None:
+        if age not in (None, ""):
             u.age = int(age)
-        if address_id is not None:
+        if address_id not in (None, ""):
             addr = Address.from_id(int(address_id))
             if addr:
                 u.set_address(addr)
@@ -216,3 +236,64 @@ async def ui_user_update(
 async def ui_healthz():
     return {"status": "ok"}
 
+
+# ---- Addresses pages ----
+
+
+@router.get("/addresses", response_class=HTMLResponse)
+async def ui_addresses(
+    request: Request,
+    q: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    country: str | None = Query(default=None),
+):
+    ctx = {
+        "request": request,
+        "params": {"q": q, "city": city, "country": country},
+    }
+    return templates.TemplateResponse("addresses/index.html", ctx)
+
+
+@router.get("/addresses/partial/table", response_class=HTMLResponse)
+async def ui_addresses_table(
+    request: Request,
+    q: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    country: str | None = Query(default=None),
+):
+    def _list():
+        qs = Address.query()
+        if city:
+            qs = qs.filter(F("city").like(f"%{city}%"))
+        if country:
+            qs = qs.filter(F("country").like(f"%{country}%"))
+        if q:
+            qs = qs.filter((F("city").like(f"%{q}%")) | (F("country").like(f"%{q}%")))
+        addrs = qs.limit(200).all()
+        addrs.sort(key=lambda a: int(a._id or 0))
+        return addrs
+
+    addresses = await _db_call(_list)
+    addresses = [{"_id": a._id, "city": a.city, "country": a.country} for a in addresses]
+    return templates.TemplateResponse(
+        "addresses/_table.html",
+        {
+            "request": request,
+            "addresses": addresses,
+            "params": {"q": q, "city": city, "country": country},
+        },
+    )
+
+
+@router.post("/addresses", response_class=HTMLResponse)
+async def ui_addresses_create(
+    request: Request,
+    city: Annotated[str, Form(...)],
+    country: Annotated[str, Form(...)],
+):
+    def _create():
+        a = Address(city=city, country=country)
+        a.save()
+
+    await _db_call(_create)
+    return await ui_addresses_table(request)
