@@ -400,8 +400,6 @@ uv run pytest -q -m perf
   uv run pytest -q --cov=src --cov-report=term-missing
   ```
 
-Issue templates and guidelines live in `CONTRIBUTING.md`. PRs welcome.
-
 ---
 
 ## License
