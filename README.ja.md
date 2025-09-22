@@ -401,8 +401,6 @@ uv run pytest -q -m perf
   uv run pytest -q --cov=src --cov-report=term-missing
   ```
 
-Issue テンプレートや方針は `CONTRIBUTING.md` を参照してください。PR 歓迎です。
-
 ---
 
 ## ライセンス
