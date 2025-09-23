@@ -399,7 +399,7 @@ class SQLerModel(BaseModel):
                         cur2 = db.adapter.execute(f"SELECT 1 FROM {t} WHERE _id = ?;", [i])
                         if not cur2.fetchone():
                             broken.append(
-                                BrokenRef(
+                                _BrokenRef(
                                     table=table,
                                     row_id=int(_id),
                                     path=path or "$",
