@@ -26,12 +26,15 @@ class AsyncSQLerModel(BaseModel):
     @classmethod
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
         cls._db = db
+        explicit = getattr(cls, "__tablename__", None)
         base = cls.__name__.lower()
         if not base.endswith("s"):
             base = base + "s"
         if base in {"as"}:
             base = base + "_tbl"
-        cls._table = table or base
+        chosen = table or explicit or base
+        cls._table = chosen
+        cls.__tablename__ = chosen
         registry.register(cls._table, cls)
 
     @classmethod

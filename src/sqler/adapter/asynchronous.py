@@ -1,6 +1,6 @@
-from typing import Any, List, Optional, Self
-
 import aiosqlite
+import uuid
+from typing import Any, List, Optional, Self
 
 
 class AsyncSQLiteAdapter:
@@ -64,7 +64,7 @@ class AsyncSQLiteAdapter:
 
     # factories
     @classmethod
-    def in_memory(cls, shared: bool = True) -> Self:
+    def in_memory(cls, shared: bool = True, name: Optional[str] = None) -> Self:
         pragmas = [
             "PRAGMA foreign_keys = ON",
             "PRAGMA synchronous = OFF",
@@ -73,7 +73,11 @@ class AsyncSQLiteAdapter:
             "PRAGMA cache_size = -32000",
             "PRAGMA locking_mode = EXCLUSIVE",
         ]
-        uri = "file::memory:?cache=shared" if shared else ":memory:"
+        if shared:
+            ident = name or f"sqler-{uuid.uuid4().hex}"
+            uri = f"file:{ident}?mode=memory&cache=shared"
+        else:
+            uri = ":memory:"
         return cls(uri, pragmas=pragmas)
 
     @classmethod

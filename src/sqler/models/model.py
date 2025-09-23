@@ -59,10 +59,19 @@ class SQLerModel(BaseModel):
             table: Optional table name. Defaults to lowercase plural of the
                 class name (e.g., ``User`` → ``users``).
         """
+        explicit = getattr(cls, "__tablename__", None)
+        chosen = table or explicit or _default_table_name(cls.__name__)
         cls._db = db
-        cls._table = table or _default_table_name(cls.__name__)
+        cls._table = chosen
+        cls.__tablename__ = chosen
         cls._db._ensure_table(cls._table)
         registry.register(cls._table, cls)
+
+    @classmethod
+    def db(cls: Type[TModel]) -> SQLerDB:
+        """Return the bound database for this model."""
+        db, _ = cls._require_binding()
+        return db
 
     # ergonomic relation field builder
     @classmethod
@@ -251,8 +260,14 @@ class SQLerModel(BaseModel):
         cls, db: SQLerDB, target_table: str, target_id: int
     ) -> list[tuple[str, int, dict]]:
         candidates: list[tuple[str, int, dict]] = []
-        like1 = f'%"_table":"{target_table}"%'
-        like2 = f'%"_id":{target_id}%'
+        target_cls = registry.resolve(target_table)
+        allowed_tables: set[str] = {target_table}
+        if target_cls is not None:
+            allowed_tables.add(target_cls.__name__.lower())
+            alias = getattr(target_cls, "__tablename__", None)
+            if isinstance(alias, str):
+                allowed_tables.add(alias)
+        like_id = f'%"_id":{target_id}%'
         for table in registry.tables().keys():
             # skip tables not present in this DB
             exists = db.adapter.execute(
@@ -261,8 +276,8 @@ class SQLerModel(BaseModel):
             if not exists:
                 continue
             cur = db.adapter.execute(
-                f"SELECT _id, data FROM {table} WHERE data LIKE ? AND data LIKE ?;",
-                [like1, like2],
+                f"SELECT _id, data FROM {table} WHERE data LIKE ?;",
+                [like_id],
             )
             rows = cur.fetchall()
             import json
@@ -272,18 +287,23 @@ class SQLerModel(BaseModel):
                     data = json.loads(data_json)
                 except Exception:
                     continue
-                paths = cls._find_ref_paths(data, target_table, target_id)
+                paths = cls._find_ref_paths(data, allowed_tables, target_id)
                 if paths:
                     candidates.append((table, int(_id), {"paths": paths}))
         return candidates
 
     @classmethod
-    def _find_ref_paths(cls, data: dict, target_table: str, target_id: int) -> list[str]:
+    def _find_ref_paths(
+        cls, data: dict, allowed_tables: set[str], target_id: int
+    ) -> list[str]:
         paths: list[str] = []
 
         def walk(value, path: str):
             if isinstance(value, dict):
-                if value.get("_table") == target_table and int(value.get("_id", -1)) == target_id:
+                if (
+                    value.get("_table") in allowed_tables
+                    and int(value.get("_id", -1)) == target_id
+                ):
                     paths.append(path or "$")
                 for k, v in value.items():
                     walk(v, f"{path}.{k}" if path else k)
@@ -300,6 +320,14 @@ class SQLerModel(BaseModel):
     ) -> None:
         import json
 
+        target_cls = registry.resolve(target_table)
+        allowed_tables: set[str] = {target_table}
+        if target_cls is not None:
+            allowed_tables.add(target_cls.__name__.lower())
+            alias = getattr(target_cls, "__tablename__", None)
+            if isinstance(alias, str):
+                allowed_tables.add(alias)
+
         for table, row_id, meta in referrers:
             cur = db.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [row_id])
             row = cur.fetchone()
@@ -310,7 +338,7 @@ class SQLerModel(BaseModel):
             def replace(value):
                 if (
                     isinstance(value, dict)
-                    and value.get("_table") == target_table
+                    and value.get("_table") in allowed_tables
                     and int(value.get("_id", -1)) == target_id
                 ):
                     return None

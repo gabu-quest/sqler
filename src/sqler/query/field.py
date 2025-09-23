@@ -3,6 +3,20 @@ from typing import Any, List, Optional, Tuple, Union
 from sqler.query import SQLerExpression
 
 
+def _normalize_alias_stack(
+    alias_stack: List[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]]
+) -> List[tuple[str, str, Optional[SQLerExpression]]]:
+    norm: List[tuple[str, str, Optional[SQLerExpression]]] = []
+    for entry in alias_stack:
+        if len(entry) == 2:  # type: ignore[arg-type]
+            a, f = entry  # type: ignore[misc]
+            norm.append((a, f, None))
+        else:
+            a, f, w = entry  # type: ignore[misc]
+            norm.append((a, f, w))
+    return norm
+
+
 class SQLerField:
     """
     proxy for a json field lets you do: field == x, field > 5, field['a'], field / 'b', field.any(), etc
@@ -240,14 +254,7 @@ class SQLerAnyExpression(SQLerExpression):
         val: comparison value
         """
         # array_keys: just the array fields we .any()'d over
-        norm: List[tuple[str, str, Optional[SQLerExpression]]] = []
-        for entry in alias_stack:
-            if len(entry) == 2:  # type: ignore[arg-type]
-                a, f = entry  # type: ignore[misc]
-                norm.append((a, f, None))
-            else:
-                a, f, w = entry  # type: ignore[misc]
-                norm.append((a, f, w))
+        norm = _normalize_alias_stack(alias_stack)
 
         array_keys = [field for _, field, _ in norm]
         aliases = [alias for alias, _, _ in norm]
@@ -317,6 +324,7 @@ class SQLerAnyContext:
     def __init__(self, field: SQLerField, alias: str):
         self._field = field
         self._alias = alias
+        self._cached_expression: Optional[SQLerExpression] = None
 
     def where(self, expression: SQLerExpression) -> "SQLerAnyContext":
         # attach to last alias entry
@@ -331,6 +339,7 @@ class SQLerAnyContext:
             a, f, _ = last  # type: ignore[misc]
             new_stack[-1] = (a, f, expression)
         self._field = SQLerField(self._field.path, new_stack)
+        self._cached_expression = None
         return self
 
     def __getitem__(self, item: Union[str, int]) -> SQLerField:
@@ -338,3 +347,76 @@ class SQLerAnyContext:
 
     def __truediv__(self, other: str) -> SQLerField:
         return SQLerField(self._field.path + [other], self._field.alias_stack)
+
+    def _build_exists_expression(self) -> SQLerExpression:
+        if not self._field.alias_stack:
+            raise ValueError("any() context requires alias stack")
+        norm = _normalize_alias_stack(self._field.alias_stack)
+        path = list(self._field.path)
+        array_keys = [field for _, field, _ in norm]
+        first_array_key = array_keys[0]
+        try:
+            idx0 = path.index(first_array_key)
+        except ValueError:
+            idx0 = len(path) - 1
+        base_path = path[: idx0 + 1]
+        base_json = SQLerField(base_path)._json_path()
+
+        joins: List[str] = []
+        where_clauses: List[str] = []
+        params: List[Any] = []
+
+        first_alias, _, first_where = norm[0]
+        joins.append(f"json_each(json_extract(data, '{base_json}')) AS {first_alias}")
+        if first_where is not None:
+            wsql, wparams = _scope_expr(first_where, first_alias)
+            where_clauses.append(wsql)
+            params += wparams
+        prev_alias = first_alias
+
+        for alias, array_key, wexpr in norm[1:]:
+            joins.append(f"json_each(json_extract({prev_alias}.value, '$.{array_key}')) AS {alias}")
+            if wexpr is not None:
+                wsql, wparams = _scope_expr(wexpr, alias)
+                where_clauses.append(wsql)
+                params += wparams
+            prev_alias = alias
+
+        join_sql = " JOIN ".join(joins)
+        if where_clauses:
+            where_sql = " AND ".join(where_clauses)
+            sql = f"EXISTS (SELECT 1 FROM {join_sql} WHERE {where_sql})"
+        else:
+            sql = f"EXISTS (SELECT 1 FROM {join_sql})"
+        return SQLerExpression(sql, params)
+
+    def to_expression(self) -> SQLerExpression:
+        if self._cached_expression is None:
+            self._cached_expression = self._build_exists_expression()
+        return self._cached_expression
+
+    @property
+    def sql(self) -> str:
+        return self.to_expression().sql
+
+    @property
+    def params(self) -> list[Any]:
+        return self.to_expression().params
+
+    def __and__(self, other: SQLerExpression) -> SQLerExpression:
+        return self.to_expression() & other
+
+    def __rand__(self, other: SQLerExpression) -> SQLerExpression:
+        return other & self.to_expression()
+
+    def __or__(self, other: SQLerExpression) -> SQLerExpression:
+        return self.to_expression() | other
+
+    def __ror__(self, other: SQLerExpression) -> SQLerExpression:
+        return other | self.to_expression()
+
+    def __invert__(self) -> SQLerExpression:
+        return ~self.to_expression()
+
+    def __repr__(self) -> str:
+        return f"SQLerAnyContext(field={self._field!r}, alias={self._alias!r})"

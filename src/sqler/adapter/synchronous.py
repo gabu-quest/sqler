@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import uuid
 from typing import Any, Optional, Self
 
 from .abstract import AdapterABC, NotConnectedError
@@ -132,7 +133,7 @@ class SQLiteAdapter(AdapterABC):
     ### factories
 
     @classmethod
-    def in_memory(cls, shared: bool = True) -> Self:
+    def in_memory(cls, shared: bool = True, name: Optional[str] = None) -> Self:
         """Connects to an in memory db with some pragmas applied"""
         pragmas = [
             "PRAGMA foreign_keys = ON",
@@ -143,7 +144,8 @@ class SQLiteAdapter(AdapterABC):
             "PRAGMA locking_mode = EXCLUSIVE",
         ]
         if shared:
-            uri = "file::memory:?cache=shared"
+            ident = name or f"sqler-{uuid.uuid4().hex}"
+            uri = f"file:{ident}?mode=memory&cache=shared"
         else:
             uri = ":memory:"
         return cls(uri, pragmas=pragmas)

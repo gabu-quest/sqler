@@ -62,7 +62,7 @@ class SQLerSafeModel(SQLerModel):
         # Capture initial intent as numeric scalar deltas from snapshot → target
         snap = getattr(self, "_snapshot", None)
         has_snapshot = isinstance(snap, dict) and len(snap) > 0
-        orig = snap if has_snapshot else None
+        orig = {k: v for k, v in snap.items() if k != "_version"} if has_snapshot else None
         target_payload = self._dump_with_relations()
         delta = _compute_numeric_scalar_deltas(orig or {}, target_payload) if has_snapshot else None
         # Only allow rebase for simple RMW counters: exactly one numeric field with ±1 delta
@@ -79,13 +79,19 @@ class SQLerSafeModel(SQLerModel):
 
         for attempt in range(max_retries):
             try:
+                attempt_payload = dict(target_payload)
+                attempt_payload["_version"] = 0 if self._id is None else self._version + 1
                 new_id, new_version = db.upsert_with_version(
-                    table, self._id, target_payload, self._version
+                    table, self._id, attempt_payload, self._version
                 )
                 self._id = new_id
                 self._version = new_version
+                target_payload = attempt_payload
                 try:
-                    self._snapshot = {k: v for k, v in target_payload.items()}  # type: ignore[attr-defined]
+                    snap_payload = {
+                        k: v for k, v in target_payload.items() if k not in {"_id", "_version"}
+                    }
+                    self._snapshot = snap_payload  # type: ignore[attr-defined]
                 except Exception:
                     pass
                 return self
@@ -114,7 +120,10 @@ class SQLerSafeModel(SQLerModel):
                 target_payload = rebased
                 self._version = getattr(latest, "_version", 0)
                 try:
-                    self._snapshot = {k: v for k, v in latest_payload.items()}  # type: ignore[attr-defined]
+                    snap_payload = {
+                        k: v for k, v in latest_payload.items() if k not in {"_id", "_version"}
+                    }
+                    self._snapshot = snap_payload  # type: ignore[attr-defined]
                 except Exception:
                     pass
 

@@ -16,17 +16,19 @@ class SQLerDB:
     """
 
     @classmethod
-    def in_memory(cls, shared: bool = True) -> "SQLerDB":
+    def in_memory(cls, shared: bool = True, *, name: Optional[str] = None) -> "SQLerDB":
         """Create a SQLerDB backed by an in-memory SQLite database.
 
         Args:
             shared: When True, use a shared-cache URI so multiple connections
                 see the same in-memory database.
+            name: Optional shared cache identifier; use the same name to
+                connect multiple adapters to a shared in-memory database.
 
         Returns:
             SQLerDB: Connected database instance.
         """
-        adapter = SQLiteAdapter.in_memory(shared=shared)
+        adapter = SQLiteAdapter.in_memory(shared=shared, name=name)
         return cls(adapter)
 
     @classmethod
@@ -115,39 +117,28 @@ class SQLerDB:
             list[int]: The ``_id`` for each input document, preserving order.
         """
         self._ensure_table(table)
-        params = []
-        new_docs = []
-
-        for doc in docs:
-            doc_id = doc.get("_id")
-            payload_dict = {k: v for k, v in doc.items() if k != "_id"}
-            payload = json.dumps(payload_dict)
-            if doc_id is None:
-                params.append((None, payload))
-                new_docs.append(doc)
-            else:
-                params.append((doc_id, payload))
-
-        query = f"""
-            INSERT INTO {table} (_id, data)
-            VALUES (?, json(?))
-            ON CONFLICT(_id) DO UPDATE SET data = excluded.data
-        """
-
+        assigned: list[int] = []
         with self.adapter as adapter:
-            cursor = adapter.execute(f"SELECT COALESCE(MAX(_id), 0) FROM {table};")
-            max_id_before = cursor.fetchone()[0]
-            adapter.executemany(query, params)
-            cursor = adapter.execute(f"SELECT MAX(_id) FROM {table};")
-            max_id_after = cursor.fetchone()[0]
-
-        if new_docs:
-            expected_new = max_id_after - max_id_before
-            assert expected_new == len(new_docs), "Mismatch in _id assignment count"
-            for doc, new_id in zip(new_docs, range(max_id_before + 1, max_id_after + 1)):
-                doc["_id"] = new_id
-
-        return [doc.get("_id") for doc in docs]
+            for doc in docs:
+                doc_id = doc.get("_id")
+                payload_dict = {k: v for k, v in doc.items() if k != "_id"}
+                payload = json.dumps(payload_dict)
+                if doc_id is None:
+                    cursor = adapter.execute(
+                        f"INSERT INTO {table} (data) VALUES (json(?));",
+                        [payload],
+                    )
+                    new_id = int(cursor.lastrowid)
+                    assigned.append(new_id)
+                    doc["_id"] = new_id
+                else:
+                    adapter.execute(
+                        f"INSERT INTO {table} (_id, data) VALUES (?, json(?)) "
+                        "ON CONFLICT(_id) DO UPDATE SET data = excluded.data;",
+                        [int(doc_id), payload],
+                    )
+                    assigned.append(int(doc_id))
+        return assigned
 
     def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         """Fetch a document by id.
@@ -181,10 +172,12 @@ class SQLerDB:
         self.adapter.commit()
 
     def execute_sql(self, query: str, params: Optional[list[Any]] = None) -> list[dict[str, Any]]:
-        """Run a custom SELECT and return decoded documents.
+        """Run a custom SELECT and return lightweight row mappings.
 
-        The SQL must select rows as ``(_id, data)`` where ``data`` is JSON.
-        Each row is decoded into a dict and enriched with ``_id``.
+        When the result set exposes a ``data`` column alongside ``_id``, the
+        JSON payload is decoded and merged with ``_id``. For ad-hoc projections
+        (e.g. ``SELECT _id``) the method returns simple dicts keyed by the
+        selected columns so callers can hydrate with :meth:`SQLerModel.from_id`.
 
         Args:
             query: SQL SELECT statement.
@@ -195,11 +188,35 @@ class SQLerDB:
         """
         cursor = self.adapter.execute(query, params or [])
         rows = cursor.fetchall()
-        docs = []
+        docs: list[dict[str, Any]] = []
         for row in rows:
-            obj = json.loads(row[1])
-            obj["_id"] = row[0]
-            docs.append(obj)
+            mapping = None
+            try:
+                mapping = row.keys()  # type: ignore[attr-defined]
+            except Exception:
+                mapping = None
+            if mapping:
+                keys = list(mapping)
+                if "data" in keys:
+                    raw = row["data"]
+                    obj = json.loads(raw)
+                    if "_id" in keys:
+                        obj["_id"] = int(row["_id"])
+                    docs.append(obj)
+                    continue
+                if keys == ["_id"]:
+                    docs.append({"_id": int(row["_id"])})
+                    continue
+                docs.append({k: row[k] for k in keys})
+                continue
+            if len(row) >= 2:
+                obj = json.loads(row[1])
+                obj["_id"] = int(row[0])
+                docs.append(obj)
+            elif len(row) == 1:
+                docs.append({"_id": int(row[0])})
+            else:
+                docs.append({})
         return docs
 
     def query(self, table: str) -> SQLerQuery:
@@ -355,8 +372,9 @@ class SQLerDB:
             # tolerate if already in a transaction
             pass
         cur = self.adapter.execute(
-            f"UPDATE {table} SET data = json(?), _version = _version + 1 WHERE _id = ? AND _version = ?;",
-            [payload, _id, expected_version],
+            f"UPDATE {table} SET data = json(?), _version = _version + 1 "
+            f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
+            [payload, _id, expected_version, expected_version, expected_version],
         )
         self.adapter.commit()
         rc = getattr(cur, "rowcount", -1)

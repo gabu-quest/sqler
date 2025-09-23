@@ -43,6 +43,246 @@ Requires Python **3.12+** and SQLite with JSON1 (bundled on most platforms).
 
 ---
 
+## Public API Contract
+
+> Each subsection carries a **Contract ID**. The suite in `tests/test_readme.py` executes these snippets using only the documented public APIs. When the contract section changes, the tests must change with it — CI proves the README.
+
+### [C01] Sync quickstart: models, save, query
+
+```python
+from sqler import SQLerDB, SQLerModel
+from sqler.query import SQLerField as F
+
+class Prefecture(SQLerModel):
+    name: str
+    region: str
+    population: int
+    foods: list[str] | None = None
+
+class City(SQLerModel):
+    name: str
+    population: int
+    prefecture: Prefecture | None = None
+
+db = SQLerDB.in_memory()
+Prefecture.set_db(db); City.set_db(db)
+
+kyoto = Prefecture(name="Kyoto", region="Kansai", population=2_585_000, foods=["matcha","yudofu"]).save()
+osaka = Prefecture(name="Osaka", region="Kansai", population=8_839_000, foods=["takoyaki"]).save()
+shiga = Prefecture(name="Shiga", region="Kansai", population=1_413_000, foods=["funazushi"]).save()
+
+City(name="Kyoto City", population=1_469_000, prefecture=kyoto).save()
+City(name="Osaka City", population=2_750_000, prefecture=osaka).save()
+City(name="Otsu", population=343_000, prefecture=shiga).save()
+
+big = Prefecture.query().filter(F("population") > 1_000_000).order_by("population", desc=True).all()
+assert [p.name for p in big][:2] == ["Osaka", "Kyoto"]
+```
+
+### [C02] Async quickstart (matching semantics)
+
+```python
+import asyncio
+from sqler import AsyncSQLerDB, AsyncSQLerModel
+from sqler.query import SQLerField as F
+
+class AUser(AsyncSQLerModel):
+    name: str
+    age: int
+
+async def main():
+    db = AsyncSQLerDB.in_memory()
+    await db.connect()
+    AUser.set_db(db)
+    await AUser(name="Ada", age=36).save()
+    adults = await AUser.query().filter(F("age") >= 18).order_by("age").all()
+    assert any(u.name == "Ada" for u in adults)
+    await db.close()
+
+asyncio.run(main())
+```
+
+### [C03] Query builder: `.any().where(...)`
+
+```python
+from sqler import SQLerDB, SQLerModel
+from sqler.query import SQLerField as F
+
+class Order(SQLerModel):
+    customer: str
+    items: list[dict] | None = None
+
+db = SQLerDB.in_memory()
+Order.set_db(db)
+Order(customer="C1", items=[{"sku":"RamenSet","qty":3}, {"sku":"Gyoza","qty":1}]).save()
+Order(customer="C2", items=[{"sku":"RamenSet","qty":1}]).save()
+
+expr = F(["items"]).any().where((F("sku") == "RamenSet") & (F("qty") >= 2))
+hits = Order.query().filter(expr).all()
+assert [h.customer for h in hits] == ["C1"]
+```
+
+### [C04] Relationships: hydration & cross-filtering
+
+```python
+from sqler import SQLerDB, SQLerModel
+
+class Address(SQLerModel):
+    city: str
+    country: str
+
+class User(SQLerModel):
+    name: str
+    address: Address | None = None
+
+db = SQLerDB.in_memory()
+Address.set_db(db); User.set_db(db)
+home = Address(city="Kyoto", country="JP").save()
+user = User(name="Alice", address=home).save()
+
+got = User.from_id(user._id)
+assert got.address.city == "Kyoto"
+
+qs = User.query().filter(User.ref("address").field("city") == "Kyoto")
+assert any(row.name == "Alice" for row in qs.all())
+```
+
+### [C05] Index helpers, `debug()`, and `explain_query_plan()`
+
+```python
+from sqler import SQLerDB, SQLerModel
+from sqler.query import SQLerField as F
+
+db = SQLerDB.in_memory()
+
+class Prefecture(SQLerModel):
+    name: str
+    region: str
+    population: int
+
+Prefecture.set_db(db)
+Prefecture(name="A", region="x", population=10).save()
+Prefecture(name="B", region="x", population=2_000_000).save()
+
+db.create_index("prefectures", "population")
+Prefecture.ensure_index("population")
+
+q = Prefecture.query().filter(F("population") >= 1_000_000)
+sql, params = q.debug()
+assert isinstance(sql, str) and isinstance(params, list)
+
+plan = q.explain_query_plan(Prefecture.db().adapter)
+assert plan and len(list(plan)) >= 1
+```
+
+### [C06] Safe models: optimistic versioning
+
+```python
+from sqler import SQLerDB, SQLerSafeModel, StaleVersionError
+
+class Account(SQLerSafeModel):
+    owner: str
+    balance: int
+
+db = SQLerDB.in_memory()
+Account.set_db(db)
+
+acc = Account(owner="Ada", balance=100).save()
+acc.balance = 120
+acc.save()
+
+table = getattr(Account, "__tablename__", "accounts")
+db.adapter.execute(
+    f"UPDATE {table} SET data = json_set(data,'$._version', json_extract(data,'$._version') + 1) WHERE _id = ?;",
+    [acc._id],
+)
+db.adapter.commit()
+
+acc.balance = 130
+try:
+    acc.save()
+except StaleVersionError:
+    pass
+else:
+    raise AssertionError("stale writes must raise")
+```
+
+### [C07] `bulk_upsert` — one id per input, order preserved
+
+```python
+from sqler import SQLerDB, SQLerModel
+
+class BU(SQLerModel):
+    name: str
+    age: int
+
+db = SQLerDB.in_memory()
+BU.set_db(db)
+
+rows = [{"name":"A"}, {"name":"B"}, {"_id": 42, "name":"C"}]
+ids = db.bulk_upsert("bus", rows)
+
+assert ids[2] == 42
+assert all(isinstance(i, int) and i > 0 for i in ids)
+```
+
+### [C08] Raw SQL escape hatch + `Model.from_id`
+
+```python
+rows = db.execute_sql(
+    "SELECT _id FROM bus WHERE json_extract(data,'$.name') = ?",
+    ["A"],
+)
+ids = [r.get("_id") if isinstance(r, dict) else r[0] for r in rows]
+hydrated = [BU.from_id(i) for i in ids]
+assert all(isinstance(h, BU) for h in hydrated)
+```
+
+### [C09] Delete policies: `restrict`
+
+```python
+from sqler import SQLerDB, SQLerModel, ReferentialIntegrityError
+
+class U(SQLerModel):
+    name: str
+
+class Post(SQLerModel):
+    title: str
+    author: dict | None = None
+
+db = SQLerDB.in_memory()
+U.set_db(db); Post.set_db(db)
+
+u = U(name="Writer").save()
+Post(title="Post A", author={"_table":"u","_id":u._id}).save()
+
+try:
+    u.delete_with_policy(on_delete="restrict")
+except ReferentialIntegrityError:
+    pass
+else:
+    raise AssertionError("restrict deletes must block when referenced")
+```
+
+### [C10] Index variants: unique + partial
+
+```python
+from sqler import SQLerDB, SQLerModel
+
+class X(SQLerModel):
+    name: str
+    email: str | None = None
+
+db = SQLerDB.in_memory()
+X.set_db(db)
+
+db.create_index("xs", "email", unique=True)
+db.create_index("xs", "name", where="json_extract(data,'$.name') IS NOT NULL")
+```
+
+---
+
+
 ## Quickstart (Sync)
 
 ```python
