@@ -283,6 +283,8 @@ db.create_index("xs", "name", where="json_extract(data,'$.name') IS NOT NULL")
 
 ## クイックスタート（同期）
 
+### [C11] 作成・検索・クローズ
+
 ```python
 from sqler import SQLerDB, SQLerModel
 from sqler.query import SQLerField as F
@@ -309,6 +311,8 @@ db.close()
 ---
 
 ## クイックスタート（非同期）
+
+### [C12] 非同期クイックスタート
 
 ```python
 import asyncio
@@ -340,6 +344,8 @@ asyncio.run(main())
 ## Safe Model と楽観的バージョニング
 
 同時実行の安全性が必要な場合は `SQLerSafeModel` を使います。新規行の `_version` は 0 で開始。更新時はメモリ上の `_version` が一致した場合のみ書き込み、成功時に +1 されます。並行更新で行が変わっていた場合は `StaleVersionError` を送出します。
+
+### [C13] Safe Model 競合検出
 
 ```python
 from sqler import SQLerDB, SQLerSafeModel, StaleVersionError
@@ -375,6 +381,8 @@ except StaleVersionError:
 
 他モデルへの参照を JSON に保存し、読み込み時/更新時にハイドレート（モデル化）します。
 
+### [C14] 参照の保存とクロスフィルタ
+
 ```python
 from sqler import SQLerDB, SQLerModel
 
@@ -389,19 +397,14 @@ class User(SQLerModel):
 db = SQLerDB.in_memory()
 Address.set_db(db); User.set_db(db)
 
-home = Address(city="Kyoto", country="JP"); home.save()
-user = User(name="Alice", address=home);   user.save()
+home = Address(city="Kyoto", country="JP").save()
+user = User(name="Alice", address=home).save()
 
-u = User.from_id(user._id)
-print(u.address.city)  # "Kyoto"
-```
+loaded = User.from_id(user._id)
+assert loaded.address.city == "Kyoto"
 
-**参照先フィールドでのフィルタ**
-
-```python
-from sqler.query import SQLerField as F
-# Address.city が "Kyoto"
-q = User.query().filter(F(["address","city"]) == "Kyoto")
+q = User.query().filter(User.ref("address").field("city") == "Kyoto")
+assert [row.name for row in q.all()] == ["Alice"]
 ```
 
 ---
@@ -414,28 +417,46 @@ q = User.query().filter(F(["address","city"]) == "Kyoto")
 - **除外**：`exclude` で条件セットを反転
 - **配列**：`.any()` と スコープ付き `.any().where(...)`
 
+### [C15] クエリビルダーの典型パターン
+
 ```python
+from sqler import SQLerDB, SQLerModel
 from sqler.query import SQLerField as F
 
+class QueryUser(SQLerModel):
+    name: str
+    age: int
+    tags: list[str] | None = None
+    tier: int | None = None
+
+class QueryOrder(SQLerModel):
+    customer: str
+    items: list[dict] | None = None
+
+db = SQLerDB.in_memory()
+QueryUser.set_db(db); QueryOrder.set_db(db)
+
+QueryUser(name="Ada", age=36, tags=["pro", "python"], tier=1).save()
+QueryUser(name="Bob", age=20, tags=["hobby"], tier=3).save()
+
+QueryOrder(customer="Ada", items=[{"sku": "ABC", "qty": 3}]).save()
+QueryOrder(customer="Bob", items=[{"sku": "XYZ", "qty": 1}]).save()
+
 # 包含
-q1 = User.query().filter(F("tags").contains("pro"))
+q1 = QueryUser.query().filter(F("tags").contains("pro"))
 
 # メンバーシップ
-q2 = User.query().filter(F("tier").isin([1, 2]))
+q2 = QueryUser.query().filter(F("tier").isin([1, 2]))
 
 # 除外
-q3 = User.query().exclude(F("name").like("test%")).order_by("name")
+q3 = QueryUser.query().exclude(F("name").like("test%")).order_by("name")
 
 # オブジェクト配列
 expr = F(["items"]).any().where((F("sku") == "ABC") & (F("qty") >= 2))
-q4 = Order.query().filter(expr)
-```
+q4 = QueryOrder.query().filter(expr)
 
-**デバッグ & EXPLAIN**
-
-```python
-sql, params = User.query().filter(F("age") >= 18).debug()
-plan = User.query().filter(F("age") >= 18).explain_query_plan(User.db().adapter)
+sql, params = QueryUser.query().filter(F("age") >= 18).debug()
+plan = QueryUser.query().filter(F("age") >= 18).explain_query_plan(QueryUser.db().adapter)
 ```
 
 ---
@@ -450,27 +471,70 @@ plan = User.query().filter(F("age") >= 18).explain_query_plan(User.db().adapter)
 - `set_null`：参照を保持する JSON フィールドを `null` にする（フィールドが null 許可であること）
 - `cascade`：参照元を再帰的に削除（深さ優先、循環は安全に処理）
 
+### [C16] 削除ポリシーの挙動
+
 ```python
-# 投稿がまだユーザーを参照しているなら削除を禁止
-user.delete_with_policy(on_delete="restrict")
+from sqler import SQLerDB, SQLerModel, ReferentialIntegrityError
 
-# JSON 参照を null にしてから削除
-post.delete_with_policy(on_delete="set_null")
-user.delete_with_policy(on_delete="restrict")
+class DIUser(SQLerModel):
+    name: str
 
-# カスケード例（擬似）
-user.delete_with_policy(on_delete=("cascade", {"Post": "author"}))
+class Post(SQLerModel):
+    title: str
+    author: dict | None = None
+
+# restrict: 参照が残れば例外
+restrict_db = SQLerDB.in_memory()
+DIUser.set_db(restrict_db); Post.set_db(restrict_db)
+writer = DIUser(name="Writer").save()
+Post(title="Post A", author={"_table": "diusers", "_id": writer._id}).save()
+try:
+    writer.delete_with_policy(on_delete="restrict")
+except ReferentialIntegrityError:
+    pass
+
+# set_null: JSON 参照を null にして削除
+set_null_db = SQLerDB.in_memory()
+DIUser.set_db(set_null_db); Post.set_db(set_null_db)
+nullable = DIUser(name="Nullable").save()
+p = Post(title="Post B", author={"_table": "diusers", "_id": nullable._id}).save()
+nullable.delete_with_policy(on_delete="set_null")
+assert Post.from_id(p._id).author is None
+
+# cascade: 参照元を再帰的に削除
+cascade_db = SQLerDB.in_memory()
+DIUser.set_db(cascade_db); Post.set_db(cascade_db)
+cascade = DIUser(name="Cascade").save()
+Post(title="Post C", author={"_table": "diusers", "_id": cascade._id}).save()
+cascade.delete_with_policy(on_delete="cascade")
+assert Post.query().count() == 0
 ```
 
 ### 参照バリデーション
 
 孤立参照（orphan）を事前に検出します：
 
+### [C17] 参照バリデーション
+
 ```python
-broken = Post.validate_references({"author": ("users", "id")})
-if broken:
-    for table, rid, ref in broken:
-        print("Broken ref:", table, rid, "→", ref)
+from sqler import SQLerDB, SQLerModel
+
+class RefUser(SQLerModel):
+    name: str
+
+class RefPost(SQLerModel):
+    title: str
+    author: dict | None = None
+
+db = SQLerDB.in_memory()
+RefUser.set_db(db); RefPost.set_db(db)
+
+user = RefUser(name="Ada").save()
+dangling = RefPost(title="Lost", author={"_table": RefUser.__tablename__, "_id": user._id}).save()
+db.delete_document(RefUser.__tablename__, user._id)
+
+broken = RefPost.validate_references()
+assert broken and broken[0].row_id == dangling._id
 ```
 
 ---
@@ -479,9 +543,21 @@ if broken:
 
 多数のドキュメントを効率的に書き込みます。
 
+### [C18] バルク upsert
+
 ```python
+from sqler import SQLerDB, SQLerModel
+
+class BulkUser(SQLerModel):
+    name: str
+    age: int | None = None
+
+db = SQLerDB.in_memory()
+BulkUser.set_db(db)
+
 rows = [{"name": "A"}, {"name": "B"}, {"_id": 42, "name": "C"}]
-ids = db.bulk_upsert("users", rows)   # 入力順の _id リストを返す
+ids = db.bulk_upsert(BulkUser.__tablename__, rows)
+assert len(ids) == 3 and 42 in ids
 ```
 
 補足：
@@ -497,33 +573,61 @@ ids = db.bulk_upsert("users", rows)   # 入力順の _id リストを返す
 
 パラメータ化された SQL を実行します。あとでモデルにハイドレートする場合は `_id` と `data` を返してください。
 
+### [C19] 生 SQL の実行
+
 ```python
+from sqler import SQLerDB, SQLerModel
+
+class ReportUser(SQLerModel):
+    name: str
+    email: str | None = None
+
+db = SQLerDB.in_memory()
+ReportUser.set_db(db)
+ReportUser(name="Ada", email="ada@example.com").save()
+ReportUser(name="Bob", email="bob@example.com").save()
+
 rows = db.execute_sql(
     """
   SELECT u._id, u.data
-  FROM users u
+  FROM reportusers u
   WHERE json_extract(u.data,'$.name') LIKE ?
 """,
     ["A%"],
 )
+assert len(rows) == 1 and rows[0]["_id"] == 1
 ```
 
 ### インデックス（JSON パス）
 
 フィルタ/ソートで多用するフィールドにインデックスを張ります。
 
+### [C20] インデックス作成
+
 ```python
+from sqler import SQLerDB, SQLerModel
+
+class IndexedUser(SQLerModel):
+    name: str
+    age: int | None = None
+    email: str | None = None
+    address: dict | None = None
+
+db = SQLerDB.in_memory()
+IndexedUser.set_db(db)
+
 # DB レベル
-db.create_index("users", "age")  # -> json_extract(data,'$.age')
-db.create_index("users", "email", unique=True)
-db.create_index("users", "age", where="json_extract(data,'$.age') IS NOT NULL")
-```
+db.create_index("indexedusers", "age")
+db.create_index("indexedusers", "email", unique=True)
+db.create_index(
+    "indexedusers",
+    "age",
+    where="json_extract(data,'$.age') IS NOT NULL",
+)
 
-リレーション周りでは参照パスにもインデックスを検討：
-
-```python
-db.create_index("users", "address._id")
-db.create_index("users", "address.city")
+# リレーション周り
+db.create_index("indexedusers", "address._id")
+db.create_index("indexedusers", "address.city")
 ```
 
 ---
@@ -549,8 +653,17 @@ db.create_index("users", "address.city")
 
 **HTTP への写像（FastAPI）**
 
+### [C21] FastAPI での競合ハンドリング
+
 ```python
-from fastapi import HTTPException
+try:
+    from fastapi import HTTPException
+except ImportError:  # pragma: no cover - docs fallback
+    class HTTPException(Exception):
+        def __init__(self, status_code: int, detail: str):
+            self.status_code = status_code
+            self.detail = detail
+
 from sqler.models import StaleVersionError
 
 try:

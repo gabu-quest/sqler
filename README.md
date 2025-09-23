@@ -14,7 +14,7 @@ Define Pydantic-style models, persist them as JSON, and query with a fluent API 
 
 ## Why SQLer?
 
-This started as a personal toolkit for **very fast prototyping** — small scripts that made it effortless to sketch data models, shove them into SQLite as JSON, and iterate. The result became SQLer: a tidy, dependency-light package that keeps that prototyping speed, but adds the pieces you need for real projects (indexes, relationships, integrity policies, and honest concurrency).
+This started as a personal toolkit for **very fast prototyping**; small scripts that made it effortless to sketch data models, shove them into SQLite as JSON, and iterate. The result became SQLer: a tidy, dependency-light package that keeps that prototyping speed, but adds the pieces you need for real projects (indexes, relationships, integrity policies, and honest concurrency).
 
 ---
 
@@ -285,6 +285,8 @@ db.create_index("xs", "name", where="json_extract(data,'$.name') IS NOT NULL")
 
 ## Quickstart (Sync)
 
+### [C11] Create, query, close
+
 ```python
 from sqler import SQLerDB, SQLerModel
 from sqler.query import SQLerField as F
@@ -311,6 +313,8 @@ db.close()
 ---
 
 ## Quickstart (Async)
+
+### [C12] Async match to sync
 
 ```python
 import asyncio
@@ -342,6 +346,8 @@ asyncio.run(main())
 ## Safe Models & Optimistic Versioning
 
 Use `SQLerSafeModel` when you need concurrency safety. New rows start with `_version = 0`. Updates require the in-memory `_version`; on success it bumps by 1. If the row changed underneath you, a `StaleVersionError` is raised.
+
+### [C13] Safe model collision handling
 
 ```python
 from sqler import SQLerDB, SQLerSafeModel, StaleVersionError
@@ -375,7 +381,9 @@ except StaleVersionError:
 
 ## Relationships
 
-Store references to other models and hydrate them on load/refresh.
+Store references to other models, hydrate them automatically, and filter across JSON references.
+
+### [C14] Store and query relationships
 
 ```python
 from sqler import SQLerDB, SQLerModel
@@ -391,19 +399,14 @@ class User(SQLerModel):
 db = SQLerDB.in_memory()
 Address.set_db(db); User.set_db(db)
 
-home = Address(city="Kyoto", country="JP"); home.save()
-user = User(name="Alice", address=home);   user.save()
+home = Address(city="Kyoto", country="JP").save()
+user = User(name="Alice", address=home).save()
 
-u = User.from_id(user._id)
-print(u.address.city)  # "Kyoto"
-```
+loaded = User.from_id(user._id)
+assert loaded.address.city == "Kyoto"
 
-**Filtering by referenced fields**
-
-```python
-from sqler.query import SQLerField as F
-# Address city equals "Kyoto"
-q = User.query().filter(F(["address","city"]) == "Kyoto")
+q = User.query().filter(User.ref("address").field("city") == "Kyoto")
+assert [row.name for row in q.all()] == ["Alice"]
 ```
 
 ---
@@ -416,28 +419,39 @@ q = User.query().filter(F(["address","city"]) == "Kyoto")
 - **Exclude:** invert a predicate set
 - **Arrays:** `.any()` and scoped `.any().where(...)`
 
+### [C15] Query builder patterns
+
 ```python
+from sqler import SQLerDB, SQLerModel
 from sqler.query import SQLerField as F
 
-# containments
-q1 = User.query().filter(F("tags").contains("pro"))
+class QueryUser(SQLerModel):
+    name: str
+    age: int
+    tags: list[str] | None = None
+    tier: int | None = None
 
-# membership
-q2 = User.query().filter(F("tier").isin([1, 2]))
+class QueryOrder(SQLerModel):
+    customer: str
+    items: list[dict] | None = None
 
-# exclude
-q3 = User.query().exclude(F("name").like("test%")).order_by("name")
+db = SQLerDB.in_memory()
+QueryUser.set_db(db); QueryOrder.set_db(db)
 
-# arrays of objects
+QueryUser(name="Ada", age=36, tags=["pro", "python"], tier=1).save()
+QueryUser(name="Bob", age=20, tags=["hobby"], tier=3).save()
+
+QueryOrder(customer="Ada", items=[{"sku": "ABC", "qty": 3}]).save()
+QueryOrder(customer="Bob", items=[{"sku": "XYZ", "qty": 1}]).save()
+
+q1 = QueryUser.query().filter(F("tags").contains("pro"))
+q2 = QueryUser.query().filter(F("tier").isin([1, 2]))
+q3 = QueryUser.query().exclude(F("name").like("test%")).order_by("name")
 expr = F(["items"]).any().where((F("sku") == "ABC") & (F("qty") >= 2))
-q4 = Order.query().filter(expr)
-```
+q4 = QueryOrder.query().filter(expr)
 
-**Debug & explain**
-
-```python
-sql, params = User.query().filter(F("age") >= 18).debug()
-plan = User.query().filter(F("age") >= 18).explain_query_plan(User.db().adapter)
+sql, params = QueryUser.query().filter(F("age") >= 18).debug()
+plan = QueryUser.query().filter(F("age") >= 18).explain_query_plan(QueryUser.db().adapter)
 ```
 
 ---
@@ -452,27 +466,70 @@ Control how deletions affect JSON references in related rows.
 - `set_null`: null out the JSON field that holds the reference (field must be nullable)
 - `cascade`: recursively delete referrers (depth-first, cycle-safe)
 
+### [C16] Delete policies in action
+
 ```python
-# Prevent delete if posts still reference the user
-user.delete_with_policy(on_delete="restrict")
+from sqler import SQLerDB, SQLerModel, ReferentialIntegrityError
 
-# Null-out JSON refs before deleting
-post.delete_with_policy(on_delete="set_null")
-user.delete_with_policy(on_delete="restrict")
+class DIUser(SQLerModel):
+    name: str
 
-# Cascade example (pseudo)
-user.delete_with_policy(on_delete=("cascade", {"Post": "author"}))
+class Post(SQLerModel):
+    title: str
+    author: dict | None = None
+
+# restrict: raises while references exist
+restrict_db = SQLerDB.in_memory()
+DIUser.set_db(restrict_db); Post.set_db(restrict_db)
+writer = DIUser(name="Writer").save()
+Post(title="Post A", author={"_table": "diusers", "_id": writer._id}).save()
+try:
+    writer.delete_with_policy(on_delete="restrict")
+except ReferentialIntegrityError:
+    pass
+
+# set_null: clears JSON ref before delete
+set_null_db = SQLerDB.in_memory()
+DIUser.set_db(set_null_db); Post.set_db(set_null_db)
+nullable = DIUser(name="Nullable").save()
+p = Post(title="Post B", author={"_table": "diusers", "_id": nullable._id}).save()
+nullable.delete_with_policy(on_delete="set_null")
+assert Post.from_id(p._id).author is None
+
+# cascade: remove dependents recursively
+cascade_db = SQLerDB.in_memory()
+DIUser.set_db(cascade_db); Post.set_db(cascade_db)
+cascade = DIUser(name="Cascade").save()
+Post(title="Post C", author={"_table": "diusers", "_id": cascade._id}).save()
+cascade.delete_with_policy(on_delete="cascade")
+assert Post.query().count() == 0
 ```
 
 ### Reference Validation
 
 Detect orphans proactively:
 
+### [C17] Reference validation
+
 ```python
-broken = Post.validate_references({"author": ("users", "id")})
-if broken:
-    for table, rid, ref in broken:
-        print("Broken ref:", table, rid, "→", ref)
+from sqler import SQLerDB, SQLerModel
+
+class RefUser(SQLerModel):
+    name: str
+
+class RefPost(SQLerModel):
+    title: str
+    author: dict | None = None
+
+db = SQLerDB.in_memory()
+RefUser.set_db(db); RefPost.set_db(db)
+
+user = RefUser(name="Ada").save()
+dangling = RefPost(title="Lost", author={"_table": RefUser.__tablename__, "_id": user._id}).save()
+db.delete_document(RefUser.__tablename__, user._id)  # simulate manual deletion
+
+broken = RefPost.validate_references()
+assert broken and broken[0].row_id == dangling._id
 ```
 
 ---
@@ -481,9 +538,21 @@ if broken:
 
 Write many documents efficiently.
 
+### [C18] Bulk upsert
+
 ```python
+from sqler import SQLerDB, SQLerModel
+
+class BulkUser(SQLerModel):
+    name: str
+    age: int | None = None
+
+db = SQLerDB.in_memory()
+BulkUser.set_db(db)
+
 rows = [{"name": "A"}, {"name": "B"}, {"_id": 42, "name": "C"}]
-ids = db.bulk_upsert("users", rows)   # returns list of _ids in input order
+ids = db.bulk_upsert(BulkUser.__tablename__, rows)
+assert len(ids) == 3 and 42 in ids
 ```
 
 Notes:
@@ -499,30 +568,58 @@ Notes:
 
 Run parameterized SQL. To hydrate models later, return `_id` and `data` columns.
 
+### [C19] Raw SQL (`execute_sql`)
+
 ```python
+from sqler import SQLerDB, SQLerModel
+
+class ReportUser(SQLerModel):
+    name: str
+    email: str | None = None
+
+db = SQLerDB.in_memory()
+ReportUser.set_db(db)
+ReportUser(name="Ada", email="ada@example.com").save()
+ReportUser(name="Bob", email="bob@example.com").save()
+
 rows = db.execute_sql("""
   SELECT u._id, u.data
-  FROM users u
+  FROM reportusers u
   WHERE json_extract(u.data,'$.name') LIKE ?
 """, ["A%"])
+assert len(rows) == 1 and rows[0]["_id"] == 1
 ```
 
 ### Indexes (JSON paths)
 
 Build indexes for fields you filter/sort on.
 
-```python
-# DB-level
-db.create_index("users", "age")  # -> json_extract(data,'$.age')
-db.create_index("users", "email", unique=True)
-db.create_index("users", "age", where="json_extract(data,'$.age') IS NOT NULL")
-```
-
-For relationships, consider indexes on reference paths:
+### [C20] Index helpers
 
 ```python
-db.create_index("users", "address._id")
-db.create_index("users", "address.city")
+from sqler import SQLerDB, SQLerModel
+
+class IndexedUser(SQLerModel):
+    name: str
+    age: int | None = None
+    email: str | None = None
+    address: dict | None = None
+
+db = SQLerDB.in_memory()
+IndexedUser.set_db(db)
+
+# DB-level indexes on JSON paths
+db.create_index("indexedusers", "age")
+db.create_index("indexedusers", "email", unique=True)
+db.create_index(
+    "indexedusers",
+    "age",
+    where="json_extract(data,'$.age') IS NOT NULL",
+)
+
+# Relationship-friendly indexes
+db.create_index("indexedusers", "address._id")
+db.create_index("indexedusers", "address.city")
 ```
 
 ---
@@ -548,8 +645,17 @@ db.create_index("users", "address.city")
 
 **HTTP mapping (FastAPI)**
 
+### [C21] FastAPI stale version
+
 ```python
-from fastapi import HTTPException
+try:
+    from fastapi import HTTPException
+except ImportError:  # pragma: no cover - docs fallback
+    class HTTPException(Exception):
+        def __init__(self, status_code: int, detail: str):
+            self.status_code = status_code
+            self.detail = detail
+
 from sqler.models import StaleVersionError
 
 try:
