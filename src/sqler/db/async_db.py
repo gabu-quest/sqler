@@ -8,8 +8,8 @@ class AsyncSQLerDB:
     """Async document store for JSON blobs on SQLite."""
 
     @classmethod
-    def in_memory(cls, shared: bool = True) -> "AsyncSQLerDB":
-        adapter = AsyncSQLiteAdapter.in_memory(shared=shared)
+    def in_memory(cls, shared: bool = True, *, name: Optional[str] = None) -> "AsyncSQLerDB":
+        adapter = AsyncSQLiteAdapter.in_memory(shared=shared, name=name)
         return cls(adapter)
 
     @classmethod
@@ -98,8 +98,9 @@ class AsyncSQLerDB:
         if expected_version is None:
             raise ValueError("expected_version required for update")
         cur = await self.adapter.execute(
-            f"UPDATE {table} SET data = json(?), _version = _version + 1 WHERE _id = ? AND _version = ?;",
-            [payload, _id, expected_version],
+            f"UPDATE {table} SET data = json(?), _version = _version + 1 "
+            f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
+            [payload, _id, expected_version, expected_version, expected_version],
         )
         await self.adapter.commit()
         await cur.close()
