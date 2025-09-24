@@ -63,7 +63,8 @@ class City(SQLerModel):
     prefecture: Prefecture | None = None
 
 db = SQLerDB.in_memory()
-Prefecture.set_db(db); City.set_db(db)
+Prefecture.set_db(db)
+City.set_db(db)
 
 kyoto = Prefecture(name="Kyoto", region="Kansai", population=2_585_000, foods=["matcha","yudofu"]).save()
 osaka = Prefecture(name="Osaka", region="Kansai", population=8_839_000, foods=["takoyaki"]).save()
@@ -134,7 +135,8 @@ class User(SQLerModel):
     address: Address | None = None
 
 db = SQLerDB.in_memory()
-Address.set_db(db); User.set_db(db)
+Address.set_db(db)
+User.set_db(db)
 home = Address(city="Kyoto", country="JP").save()
 user = User(name="Alice", address=home).save()
 
@@ -249,7 +251,8 @@ class Post(SQLerModel):
     author: dict | None = None
 
 db = SQLerDB.in_memory()
-U.set_db(db); Post.set_db(db)
+U.set_db(db)
+Post.set_db(db)
 
 u = U(name="Writer").save()
 Post(title="Post A", author={"_table":"u","_id":u._id}).save()
@@ -395,7 +398,8 @@ class User(SQLerModel):
     address: Address | None = None
 
 db = SQLerDB.in_memory()
-Address.set_db(db); User.set_db(db)
+Address.set_db(db)
+User.set_db(db)
 
 home = Address(city="Kyoto", country="JP").save()
 user = User(name="Alice", address=home).save()
@@ -417,6 +421,8 @@ assert [row.name for row in q.all()] == ["Alice"]
 - **除外**：`exclude` で条件セットを反転
 - **配列**：`.any()` と スコープ付き `.any().where(...)`
 
+`Model.query()` からは `.debug()`（`(sql, params)` を返す）に加えて `.sql()` や `.params()` メソッドで SQL / パラメータを参照できます。
+
 ### [C15] クエリビルダーの典型パターン
 
 ```python
@@ -434,7 +440,8 @@ class QueryOrder(SQLerModel):
     items: list[dict] | None = None
 
 db = SQLerDB.in_memory()
-QueryUser.set_db(db); QueryOrder.set_db(db)
+QueryUser.set_db(db)
+QueryOrder.set_db(db)
 
 QueryUser(name="Ada", age=36, tags=["pro", "python"], tier=1).save()
 QueryUser(name="Bob", age=20, tags=["hobby"], tier=3).save()
@@ -444,19 +451,26 @@ QueryOrder(customer="Bob", items=[{"sku": "XYZ", "qty": 1}]).save()
 
 # 包含
 q1 = QueryUser.query().filter(F("tags").contains("pro"))
+assert [u.name for u in q1.all()] == ["Ada"]
 
 # メンバーシップ
 q2 = QueryUser.query().filter(F("tier").isin([1, 2]))
+assert [u.name for u in q2.all()] == ["Ada"]
 
 # 除外
-q3 = QueryUser.query().exclude(F("name").like("test%")).order_by("name")
+q3 = QueryUser.query().exclude(F("name").like("test%"))
+assert {u.name for u in q3.all()} == {"Ada", "Bob"}
 
 # オブジェクト配列
 expr = F(["items"]).any().where((F("sku") == "ABC") & (F("qty") >= 2))
 q4 = QueryOrder.query().filter(expr)
+assert [o.customer for o in q4.all()] == ["Ada"]
 
 sql, params = QueryUser.query().filter(F("age") >= 18).debug()
+assert isinstance(sql, str) and params == [18]
+
 plan = QueryUser.query().filter(F("age") >= 18).explain_query_plan(QueryUser.db().adapter)
+assert plan and len(list(plan)) >= 1
 ```
 
 ---
@@ -485,7 +499,8 @@ class Post(SQLerModel):
 
 # restrict: 参照が残れば例外
 restrict_db = SQLerDB.in_memory()
-DIUser.set_db(restrict_db); Post.set_db(restrict_db)
+DIUser.set_db(restrict_db)
+Post.set_db(restrict_db)
 writer = DIUser(name="Writer").save()
 Post(title="Post A", author={"_table": "diusers", "_id": writer._id}).save()
 try:
@@ -495,15 +510,17 @@ except ReferentialIntegrityError:
 
 # set_null: JSON 参照を null にして削除
 set_null_db = SQLerDB.in_memory()
-DIUser.set_db(set_null_db); Post.set_db(set_null_db)
+DIUser.set_db(set_null_db)
+Post.set_db(set_null_db)
 nullable = DIUser(name="Nullable").save()
-p = Post(title="Post B", author={"_table": "diusers", "_id": nullable._id}).save()
+post = Post(title="Post B", author={"_table": "diusers", "_id": nullable._id}).save()
 nullable.delete_with_policy(on_delete="set_null")
-assert Post.from_id(p._id).author is None
+assert Post.from_id(post._id).author is None
 
 # cascade: 参照元を再帰的に削除
 cascade_db = SQLerDB.in_memory()
-DIUser.set_db(cascade_db); Post.set_db(cascade_db)
+DIUser.set_db(cascade_db)
+Post.set_db(cascade_db)
 cascade = DIUser(name="Cascade").save()
 Post(title="Post C", author={"_table": "diusers", "_id": cascade._id}).save()
 cascade.delete_with_policy(on_delete="cascade")
@@ -527,7 +544,8 @@ class RefPost(SQLerModel):
     author: dict | None = None
 
 db = SQLerDB.in_memory()
-RefUser.set_db(db); RefPost.set_db(db)
+RefUser.set_db(db)
+RefPost.set_db(db)
 
 user = RefUser(name="Ada").save()
 dangling = RefPost(title="Lost", author={"_table": RefUser.__tablename__, "_id": user._id}).save()
@@ -535,6 +553,8 @@ db.delete_document(RefUser.__tablename__, user._id)
 
 broken = RefPost.validate_references()
 assert broken and broken[0].row_id == dangling._id
+
+# 戻り値は sqler.models.BrokenRef データクラスです
 ```
 
 ---
