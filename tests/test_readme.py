@@ -1,17 +1,17 @@
 import asyncio
-import json
-import pytest
 
+import pytest
 from sqler import (
+    AsyncSQLerDB,
+    AsyncSQLerModel,
     SQLerDB,
     SQLerModel,
     SQLerSafeModel,
     StaleVersionError,
-    AsyncSQLerDB,
-    AsyncSQLerModel,
 )
 from sqler.models import ReferentialIntegrityError
 from sqler.query import SQLerField as F
+
 
 # ---------------- [C01] Sync quickstart ----------------
 class Prefecture(SQLerModel):
@@ -27,7 +27,8 @@ class City(SQLerModel):
 
 def test_C01_sync_quickstart():
     db = SQLerDB.in_memory()
-    Prefecture.set_db(db); City.set_db(db)
+    Prefecture.set_db(db)
+    City.set_db(db)
 
     kyoto = Prefecture(name="Kyoto", region="Kansai", population=2_585_000, foods=["matcha","yudofu"]).save()
     osaka = Prefecture(name="Osaka", region="Kansai", population=8_839_000, foods=["takoyaki"]).save()
@@ -81,7 +82,8 @@ class User(SQLerModel):
 
 def test_C04_relationships_hydration_and_filter():
     db = SQLerDB.in_memory()
-    Address.set_db(db); User.set_db(db)
+    Address.set_db(db)
+    User.set_db(db)
     home = Address(city="Kyoto", country="JP").save()
     user = User(name="Alice", address=home).save()
 
@@ -179,9 +181,10 @@ class Post(SQLerModel):
 
 def test_C09_delete_policy_restrict():
     db = SQLerDB.in_memory()
-    U.set_db(db); Post.set_db(db)
+    U.set_db(db)
+    Post.set_db(db)
     u = U(name="Writer").save()
-    p = Post(title="Post A", author={"_table":"u","_id":u._id}).save()
+    _ = Post(title="Post A", author={"_table":"u","_id":u._id}).save()
 
     assert hasattr(u, "delete_with_policy"), "delete_with_policy must exist"
     # The contract: deleting with restrict must not remove the row if referenced.
@@ -279,7 +282,8 @@ def test_C13_safe_models_doc(tmp_path, monkeypatch):
 # ---------------- [C14] README relationships snippet ----------------
 def test_C14_relationships_readme():
     db = SQLerDB.in_memory()
-    Address.set_db(db); User.set_db(db)
+    Address.set_db(db)
+    User.set_db(db)
 
     home = Address(city="Kyoto", country="JP").save()
     user = User(name="Alice", address=home).save()
@@ -304,7 +308,8 @@ def test_C15_query_builder_patterns():
         items: list[dict] | None = None
 
     db = SQLerDB.in_memory()
-    QBUser.set_db(db); QBOrder.set_db(db)
+    QBUser.set_db(db)
+    QBOrder.set_db(db)
 
     QBUser(name="Ada", age=36, tags=["pro", "python"], tier=1).save()
     QBUser(name="Bob", age=20, tags=["hobby"], tier=3).save()
@@ -343,7 +348,8 @@ def test_C16_delete_policies_readme():
 
     # restrict scenario
     restrict_db = SQLerDB.in_memory()
-    DIUser.set_db(restrict_db); DIPost.set_db(restrict_db)
+    DIUser.set_db(restrict_db)
+    DIPost.set_db(restrict_db)
     writer = DIUser(name="Writer").save()
     DIPost(title="Post A", author={"_table": "diusers", "_id": writer._id}).save()
     with pytest.raises(ReferentialIntegrityError):
@@ -351,7 +357,8 @@ def test_C16_delete_policies_readme():
 
     # set_null scenario
     set_null_db = SQLerDB.in_memory()
-    DIUser.set_db(set_null_db); DIPost.set_db(set_null_db)
+    DIUser.set_db(set_null_db)
+    DIPost.set_db(set_null_db)
     nullable = DIUser(name="Nullable").save()
     post = DIPost(title="Post B", author={"_table": "diusers", "_id": nullable._id}).save()
     nullable.delete_with_policy(on_delete="set_null")
@@ -359,7 +366,8 @@ def test_C16_delete_policies_readme():
 
     # cascade scenario
     cascade_db = SQLerDB.in_memory()
-    DIUser.set_db(cascade_db); DIPost.set_db(cascade_db)
+    DIUser.set_db(cascade_db)
+    DIPost.set_db(cascade_db)
     cascade = DIUser(name="Cascade").save()
     DIPost(title="Post C", author={"_table": "diusers", "_id": cascade._id}).save()
     cascade.delete_with_policy(on_delete="cascade")
@@ -376,7 +384,8 @@ def test_C17_reference_validation_readme():
         author: dict | None = None
 
     db = SQLerDB.in_memory()
-    RefUser.set_db(db); RefPost.set_db(db)
+    RefUser.set_db(db)
+    RefPost.set_db(db)
 
     user = RefUser(name="Ada").save()
     dangling = RefPost(
