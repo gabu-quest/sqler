@@ -58,7 +58,11 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         has_snapshot = isinstance(snap, dict) and len(snap) > 0
         base_snapshot = {k: v for k, v in snap.items() if k != "_version"} if has_snapshot else None
         target_payload = await self._adump_with_relations()
-        delta = _compute_numeric_scalar_deltas(base_snapshot or {}, target_payload) if has_snapshot else None
+        delta = (
+            _compute_numeric_scalar_deltas(base_snapshot or {}, target_payload)
+            if has_snapshot
+            else None
+        )
         # Only rebase for canonical counter fields
         _can = False
         if has_snapshot and delta and len(delta) == 1:

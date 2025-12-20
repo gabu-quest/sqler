@@ -1,9 +1,27 @@
 import json
+import re
 import threading
 from typing import Any, Optional
 
 from sqler.adapter import SQLiteAdapter
 from sqler.query import SQLerQuery
+
+
+def _validate_table_name(table: str) -> str:
+    """Validate and sanitize table name to prevent SQL injection.
+
+    Args:
+        table: Table name to validate.
+
+    Returns:
+        str: The validated table name.
+
+    Raises:
+        ValueError: If the table name contains invalid characters.
+    """
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
+        raise ValueError(f"Invalid table name: {table!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*")
+    return table
 
 
 class SQLerDB:
@@ -58,6 +76,7 @@ class SQLerDB:
         Args:
             table: Table name to ensure.
         """
+        table = _validate_table_name(table)
         ddl = f"""
         CREATE TABLE IF NOT EXISTS {table} (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -302,7 +321,8 @@ class SQLerDB:
                     name = row["name"]
                 else:
                     name = row[1]
-            except Exception:
+            except (KeyError, IndexError, TypeError):
+                # Skip malformed rows
                 continue
             cols.add(name)
         if "_version" in cols:
@@ -320,7 +340,8 @@ class SQLerDB:
                         name = row["name"]
                     else:
                         name = row[1]
-                except Exception:
+                except (KeyError, IndexError, TypeError):
+                    # Skip malformed rows
                     continue
                 cols.add(name)
             if "_version" not in cols:
@@ -368,7 +389,7 @@ class SQLerDB:
         # Acquire write lock early to reduce live-lock under contention
         try:
             self.adapter.execute("BEGIN IMMEDIATE;")
-        except Exception:
+        except (RuntimeError, ValueError):
             # tolerate if already in a transaction
             pass
         cur = self.adapter.execute(
@@ -407,7 +428,8 @@ class SQLerDB:
             obj = json.loads(row["data"])  # type: ignore[index]
             obj["_id"] = row["_id"]  # type: ignore[index]
             obj["_version"] = row["_version"]  # type: ignore[index]
-        except Exception:
+        except (KeyError, TypeError):
+            # Fallback to index-based access
             obj = json.loads(row[1])
             obj["_id"] = row[0]
             obj["_version"] = row[2]

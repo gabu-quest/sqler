@@ -256,165 +256,48 @@ class SQLerModel(BaseModel):
     def _find_referrers(
         cls, db: SQLerDB, target_table: str, target_id: int
     ) -> list[tuple[str, int, dict]]:
-        candidates: list[tuple[str, int, dict]] = []
-        target_cls = registry.resolve(target_table)
-        allowed_tables: set[str] = {target_table}
-        if target_cls is not None:
-            allowed_tables.add(target_cls.__name__.lower())
-            alias = getattr(target_cls, "__tablename__", None)
-            if isinstance(alias, str):
-                allowed_tables.add(alias)
-        like_id = f'%"_id":{target_id}%'
-        for table in registry.tables().keys():
-            # skip tables not present in this DB
-            exists = db.adapter.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?;", [table]
-            ).fetchone()
-            if not exists:
-                continue
-            cur = db.adapter.execute(
-                f"SELECT _id, data FROM {table} WHERE data LIKE ?;",
-                [like_id],
-            )
-            rows = cur.fetchall()
-            import json
+        """Find all rows across all tables that reference the target row."""
+        from .integrity import find_referrers
 
-            for _id, data_json in rows:
-                try:
-                    data = json.loads(data_json)
-                except Exception:
-                    continue
-                paths = cls._find_ref_paths(data, allowed_tables, target_id)
-                if paths:
-                    candidates.append((table, int(_id), {"paths": paths}))
-        return candidates
+        return find_referrers(db, target_table, target_id)
 
     @classmethod
-    def _find_ref_paths(
-        cls, data: dict, allowed_tables: set[str], target_id: int
-    ) -> list[str]:
-        paths: list[str] = []
+    def _find_ref_paths(cls, data: dict, allowed_tables: set[str], target_id: int) -> list[str]:
+        """Recursively find JSON paths containing references to a target row."""
+        from .integrity import find_ref_paths
 
-        def walk(value, path: str):
-            if isinstance(value, dict):
-                if (
-                    value.get("_table") in allowed_tables
-                    and int(value.get("_id", -1)) == target_id
-                ):
-                    paths.append(path or "$")
-                for k, v in value.items():
-                    walk(v, f"{path}.{k}" if path else k)
-            elif isinstance(value, list):
-                for i, v in enumerate(value):
-                    walk(v, f"{path}[{i}]")
-
-        walk(data, "")
-        return paths
+        return find_ref_paths(data, allowed_tables, target_id)
 
     @classmethod
     def _set_null_referrers(
         cls, db: SQLerDB, target_table: str, target_id: int, referrers: list[tuple[str, int, dict]]
     ) -> None:
-        import json
+        """Nullify all references to the target row in referring documents."""
+        from .integrity import set_null_referrers
 
-        target_cls = registry.resolve(target_table)
-        allowed_tables: set[str] = {target_table}
-        if target_cls is not None:
-            allowed_tables.add(target_cls.__name__.lower())
-            alias = getattr(target_cls, "__tablename__", None)
-            if isinstance(alias, str):
-                allowed_tables.add(alias)
-
-        for table, row_id, meta in referrers:
-            cur = db.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [row_id])
-            row = cur.fetchone()
-            if not row:
-                continue
-            obj = json.loads(row[1])
-
-            def replace(value):
-                if (
-                    isinstance(value, dict)
-                    and value.get("_table") in allowed_tables
-                    and int(value.get("_id", -1)) == target_id
-                ):
-                    return None
-                if isinstance(value, dict):
-                    return {k: replace(v) for k, v in value.items()}
-                if isinstance(value, list):
-                    return [replace(v) for v in value]
-                return value
-
-            new_obj = replace(obj)
-            payload = json.dumps(new_obj)
-            db.adapter.execute(
-                f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, row_id]
-            )
-            db.adapter.commit()
+        set_null_referrers(db, target_table, target_id, referrers)
 
     @classmethod
     def _cascade_delete(
         cls, db: SQLerDB, referrers: list[tuple[str, int, dict]], visited: set[tuple[str, int]]
     ) -> None:
-        for table, row_id, _ in referrers:
-            key = (table, row_id)
-            if key in visited:
-                continue
-            visited.add(key)
-            # recurse
-            kid_refs = cls._find_referrers(db, table, row_id)
-            cls._cascade_delete(db, kid_refs, visited)
-            db.delete_document(table, row_id)
+        """Recursively delete referring rows and their dependents."""
+        from .integrity import cascade_delete
+
+        cascade_delete(db, referrers, visited)
 
     # ----- reference validation -----
     @classmethod
     def validate_references(cls):
+        """Validate all references across all tables in the database.
+
+        Returns:
+            List of BrokenRef instances describing dangling references.
+        """
+        from .integrity import validate_references
+
         db, _ = cls._require_binding()
-        from . import BrokenRef as _BrokenRef
-
-        broken: list[_BrokenRef] = []
-        import json
-
-        for table in registry.tables().keys():
-            exists = db.adapter.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?;", [table]
-            ).fetchone()
-            if not exists:
-                continue
-            cur = db.adapter.execute(f"SELECT _id, data FROM {table};")
-            for _id, data_json in cur.fetchall():
-                try:
-                    data = json.loads(data_json)
-                except Exception:
-                    continue
-
-                def walk(value, path: str):
-                    if isinstance(value, dict) and "_table" in value and "_id" in value:
-                        t = value.get("_table")
-                        i = int(value.get("_id", -1))
-                        # check existence
-                        cur2 = db.adapter.execute(f"SELECT 1 FROM {t} WHERE _id = ?;", [i])
-                        if not cur2.fetchone():
-                            broken.append(
-                                _BrokenRef(
-                                    table=table,
-                                    row_id=int(_id),
-                                    path=path or "$",
-                                    target_table=t,
-                                    target_id=i,
-                                )
-                            )
-                        return
-                    if isinstance(value, dict):
-                        for k, v in value.items():
-                            walk(v, f"{path}.{k}" if path else k)
-                    elif isinstance(value, list):
-                        for idx, v in enumerate(value):
-                            walk(v, f"{path}[{idx}]")
-
-                walk(data, "")
-
-        return broken
+        return validate_references(db)
 
     # ----- relationship encoding/decoding -----
     @classmethod
@@ -432,7 +315,8 @@ class SQLerModel(BaseModel):
                     if mdl is not None and hasattr(mdl, "from_id"):
                         try:
                             return mdl.from_id(rid)
-                        except Exception:
+                        except (LookupError, RuntimeError, ValueError):
+                            # Return raw ref if hydration fails
                             return value
                 return {k: decode(v) for k, v in value.items()}
             if isinstance(value, list):
