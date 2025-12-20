@@ -1,12 +1,12 @@
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 from sqler.query import SQLerExpression
 
 
 def _normalize_alias_stack(
-    alias_stack: List[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]]
-) -> List[tuple[str, str, Optional[SQLerExpression]]]:
-    norm: List[tuple[str, str, Optional[SQLerExpression]]] = []
+    alias_stack: list[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]],
+) -> list[tuple[str, str, Optional[SQLerExpression]]]:
+    norm: list[tuple[str, str, Optional[SQLerExpression]]] = []
     for entry in alias_stack:
         if len(entry) == 2:  # type: ignore[arg-type]
             a, f = entry  # type: ignore[misc]
@@ -61,9 +61,9 @@ class SQLerField:
 
     def __init__(
         self,
-        path: Union[str, List[Union[str, int]]],
+        path: Union[str, list[Union[str, int]]],
         alias_stack: Optional[
-            List[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]]
+            list[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]]
         ] = None,
     ):
         """
@@ -74,10 +74,10 @@ class SQLerField:
           ex: [('a','arr1'), ('b','arr2')] for arr1[].arr2[]
         """
         if isinstance(path, str):
-            self.path: List[Union[str, int]] = [path]
+            self.path: list[Union[str, int]] = [path]
         else:
             self.path = list(path)
-        self.alias_stack: List[
+        self.alias_stack: list[
             Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]
         ] = alias_stack or []
 
@@ -192,7 +192,7 @@ class SQLerField:
         expr = f"EXISTS (SELECT 1 FROM json_each(data, '{json_path}') WHERE json_each.value = ?)"
         return SQLerExpression(expr, [value])
 
-    def isin(self, values: List[Any]) -> SQLerExpression:
+    def isin(self, values: list[Any]) -> SQLerExpression:
         """
         check if array at this field contains any of the given values
           SQLerField('tags').isin(['red','green'])
@@ -241,8 +241,8 @@ class SQLerAnyExpression(SQLerExpression):
 
     def __init__(
         self,
-        path: List[Union[str, int]],
-        alias_stack: List[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]],
+        path: list[Union[str, int]],
+        alias_stack: list[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]],
         op: str,
         val: Any,
     ):
@@ -260,9 +260,9 @@ class SQLerAnyExpression(SQLerExpression):
         aliases = [alias for alias, _, _ in norm]
         last_field = path[-1]
 
-        joins: List[str] = []
-        where_clauses: List[str] = []
-        where_params: List[Any] = []
+        joins: list[str] = []
+        where_clauses: list[str] = []
+        where_params: list[Any] = []
 
         # where does the arrays start in the path?
         first_array_key = array_keys[0]
@@ -307,7 +307,7 @@ class SQLerAnyExpression(SQLerExpression):
         super().__init__(sql, where_params + [val])
 
 
-def _scope_expr(expr: SQLerExpression, alias: str) -> Tuple[str, list[Any]]:
+def _scope_expr(expr: SQLerExpression, alias: str) -> tuple[str, list[Any]]:
     """Transform an expression on root data into alias-scoped expression.
 
     Rewrites JSON_EXTRACT(data, ...) to json_extract(<alias>.value, ...).
@@ -362,9 +362,9 @@ class SQLerAnyContext:
         base_path = path[: idx0 + 1]
         base_json = SQLerField(base_path)._json_path()
 
-        joins: List[str] = []
-        where_clauses: List[str] = []
-        params: List[Any] = []
+        joins: list[str] = []
+        where_clauses: list[str] = []
+        params: list[Any] = []
 
         first_alias, _, first_where = norm[0]
         joins.append(f"json_each(json_extract(data, '{base_json}')) AS {first_alias}")
