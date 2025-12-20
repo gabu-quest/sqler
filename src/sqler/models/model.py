@@ -256,6 +256,21 @@ class SQLerModel(BaseModel):
     def _find_referrers(
         cls, db: SQLerDB, target_table: str, target_id: int
     ) -> list[tuple[str, int, dict]]:
+        """Find all rows across all tables that reference the target row.
+
+        Scans all registered tables for JSON documents containing references
+        (``{"_table": ..., "_id": ...}``) pointing to the specified target.
+
+        Args:
+            db: The database instance to search.
+            target_table: Table name of the target row.
+            target_id: Row ``_id`` of the target.
+
+        Returns:
+            List of tuples: ``(referring_table, referring_row_id, metadata)``.
+            Metadata is a dict with ``"paths"`` listing JSON paths containing
+            the reference.
+        """
         candidates: list[tuple[str, int, dict]] = []
         target_cls = registry.resolve(target_table)
         allowed_tables: set[str] = {target_table}
@@ -282,7 +297,8 @@ class SQLerModel(BaseModel):
             for _id, data_json in rows:
                 try:
                     data = json.loads(data_json)
-                except Exception:
+                except (json.JSONDecodeError, TypeError):
+                    # Skip rows with invalid JSON
                     continue
                 paths = cls._find_ref_paths(data, allowed_tables, target_id)
                 if paths:
@@ -290,17 +306,26 @@ class SQLerModel(BaseModel):
         return candidates
 
     @classmethod
-    def _find_ref_paths(
-        cls, data: dict, allowed_tables: set[str], target_id: int
-    ) -> list[str]:
+    def _find_ref_paths(cls, data: dict, allowed_tables: set[str], target_id: int) -> list[str]:
+        """Recursively find JSON paths containing references to a target row.
+
+        Walks through a document searching for reference dictionaries (with
+        ``_table`` and ``_id`` keys) that point to the specified target.
+
+        Args:
+            data: The document to search.
+            allowed_tables: Set of table names that are valid reference targets.
+            target_id: The row ``_id`` we're looking for.
+
+        Returns:
+            List of JSON paths (e.g., ``['$.author', '$.comments[0].user']``)
+            where references to the target were found.
+        """
         paths: list[str] = []
 
         def walk(value, path: str):
             if isinstance(value, dict):
-                if (
-                    value.get("_table") in allowed_tables
-                    and int(value.get("_id", -1)) == target_id
-                ):
+                if value.get("_table") in allowed_tables and int(value.get("_id", -1)) == target_id:
                     paths.append(path or "$")
                 for k, v in value.items():
                     walk(v, f"{path}.{k}" if path else k)
@@ -315,6 +340,18 @@ class SQLerModel(BaseModel):
     def _set_null_referrers(
         cls, db: SQLerDB, target_table: str, target_id: int, referrers: list[tuple[str, int, dict]]
     ) -> None:
+        """Nullify all references to the target row in referring documents.
+
+        For each referring row, replaces reference dictionaries pointing to
+        the target with ``None`` before the target is deleted.
+
+        Args:
+            db: The database instance.
+            target_table: Table name of the target being deleted.
+            target_id: Row ``_id`` of the target being deleted.
+            referrers: List of ``(table, row_id, metadata)`` from
+                :meth:`_find_referrers`.
+        """
         import json
 
         target_cls = registry.resolve(target_table)
@@ -356,6 +393,17 @@ class SQLerModel(BaseModel):
     def _cascade_delete(
         cls, db: SQLerDB, referrers: list[tuple[str, int, dict]], visited: set[tuple[str, int]]
     ) -> None:
+        """Recursively delete referring rows and their dependents.
+
+        Implements cascade deletion by recursively finding and deleting all
+        rows that reference deleted rows, preventing orphaned references.
+
+        Args:
+            db: The database instance.
+            referrers: List of ``(table, row_id, metadata)`` to delete.
+            visited: Set of ``(table, row_id)`` tuples already processed to
+                prevent infinite loops.
+        """
         for table, row_id, _ in referrers:
             key = (table, row_id)
             if key in visited:
@@ -385,7 +433,8 @@ class SQLerModel(BaseModel):
             for _id, data_json in cur.fetchall():
                 try:
                     data = json.loads(data_json)
-                except Exception:
+                except (json.JSONDecodeError, TypeError):
+                    # Skip rows with invalid JSON
                     continue
 
                 def walk(value, path: str):
@@ -432,7 +481,8 @@ class SQLerModel(BaseModel):
                     if mdl is not None and hasattr(mdl, "from_id"):
                         try:
                             return mdl.from_id(rid)
-                        except Exception:
+                        except (LookupError, RuntimeError, ValueError):
+                            # Return raw ref if hydration fails
                             return value
                 return {k: decode(v) for k, v in value.items()}
             if isinstance(value, list):
