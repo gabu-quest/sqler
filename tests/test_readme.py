@@ -20,32 +20,47 @@ class Prefecture(SQLerModel):
     population: int
     foods: list[str] | None = None
 
+
 class City(SQLerModel):
     name: str
     population: int
     prefecture: Prefecture | None = None
+
 
 def test_C01_sync_quickstart():
     db = SQLerDB.in_memory()
     Prefecture.set_db(db)
     City.set_db(db)
 
-    kyoto = Prefecture(name="Kyoto", region="Kansai", population=2_585_000, foods=["matcha","yudofu"]).save()
-    osaka = Prefecture(name="Osaka", region="Kansai", population=8_839_000, foods=["takoyaki"]).save()
-    shiga = Prefecture(name="Shiga", region="Kansai", population=1_413_000, foods=["funazushi"]).save()
+    kyoto = Prefecture(
+        name="Kyoto", region="Kansai", population=2_585_000, foods=["matcha", "yudofu"]
+    ).save()
+    osaka = Prefecture(
+        name="Osaka", region="Kansai", population=8_839_000, foods=["takoyaki"]
+    ).save()
+    shiga = Prefecture(
+        name="Shiga", region="Kansai", population=1_413_000, foods=["funazushi"]
+    ).save()
 
     City(name="Kyoto City", population=1_469_000, prefecture=kyoto).save()
     City(name="Osaka City", population=2_750_000, prefecture=osaka).save()
-    City(name="Otsu",       population=343_000,  prefecture=shiga).save()
+    City(name="Otsu", population=343_000, prefecture=shiga).save()
 
-    big = Prefecture.query().filter(F("population") > 1_000_000).order_by("population", desc=True).all()
+    big = (
+        Prefecture.query()
+        .filter(F("population") > 1_000_000)
+        .order_by("population", desc=True)
+        .all()
+    )
     names = [p.name for p in big]
     assert names[0:2] == ["Osaka", "Kyoto"]
+
 
 # ---------------- [C02] Async quickstart ----------------
 class AUser(AsyncSQLerModel):
     name: str
     age: int
+
 
 @pytest.mark.asyncio
 async def test_C02_async_quickstart():
@@ -57,28 +72,33 @@ async def test_C02_async_quickstart():
     assert any(u.name == "Ada" for u in adults)
     await db.close()
 
+
 # ---------------- [C03] Query builder: .any().where ----------------
 class Order(SQLerModel):
     customer: str
     items: list[dict] | None = None
 
+
 def test_C03_any_where_arrays_of_objects():
     db = SQLerDB.in_memory()
     Order.set_db(db)
-    Order(customer="C1", items=[{"sku":"RamenSet","qty":3}, {"sku":"Gyoza","qty":1}]).save()
-    Order(customer="C2", items=[{"sku":"RamenSet","qty":1}]).save()
+    Order(customer="C1", items=[{"sku": "RamenSet", "qty": 3}, {"sku": "Gyoza", "qty": 1}]).save()
+    Order(customer="C2", items=[{"sku": "RamenSet", "qty": 1}]).save()
     expr = F(["items"]).any().where((F("sku") == "RamenSet") & (F("qty") >= 2))
     hits = Order.query().filter(expr).all()
     assert [h.customer for h in hits] == ["C1"]
+
 
 # ---------------- [C04] Relationships: hydration & cross-ref ----------------
 class Address(SQLerModel):
     city: str
     country: str
 
+
 class User(SQLerModel):
     name: str
     address: Address | None = None
+
 
 def test_C04_relationships_hydration_and_filter():
     db = SQLerDB.in_memory()
@@ -92,6 +112,7 @@ def test_C04_relationships_hydration_and_filter():
 
     qs = User.query().filter(User.ref("address").field("city") == "Kyoto")
     assert any(row.name == "Alice" for row in qs.all())
+
 
 # ---------------- [C05] Indexing + debug + explain ----------------
 def test_C05_indexing_debug_explain():
@@ -113,10 +134,12 @@ def test_C05_indexing_debug_explain():
     plan = q.explain_query_plan(Prefecture.db().adapter)
     assert plan is not None and len(list(plan)) >= 1
 
+
 # ---------------- [C06] Safe models: optimistic versioning ----------------
 class Account(SQLerSafeModel):
     owner: str
     balance: int
+
 
 def test_C06_safe_models_stale_write_raises():
     db = SQLerDB.in_memory()
@@ -127,32 +150,38 @@ def test_C06_safe_models_stale_write_raises():
 
     # bump stored version using public adapter (JSON path)
     table = getattr(Account, "__tablename__", "accounts")
-    db.adapter.execute(f"""
+    db.adapter.execute(
+        f"""
         UPDATE {table}
         SET data = json_set(data,'$._version', json_extract(data,'$._version') + 1)
         WHERE _id = ?
-    """, (acc._id,))
+    """,
+        (acc._id,),
+    )
     db.adapter.commit()
 
     with pytest.raises(StaleVersionError):
         acc.balance = 130
         acc.save()
 
+
 # ---------------- [C07] Bulk upsert ----------------
 class BU(SQLerModel):
     name: str
     age: int
 
+
 def test_C07_bulk_upsert_contract():
     db = SQLerDB.in_memory()
     BU.set_db(db)
-    rows = [{"name":"A"}, {"name":"B"}, {"_id": 42, "name":"C"}]
+    rows = [{"name": "A"}, {"name": "B"}, {"_id": 42, "name": "C"}]
     assert hasattr(db, "bulk_upsert"), "bulk_upsert must exist"
     ids = db.bulk_upsert("bus", rows)
     assert isinstance(ids, list) and len(ids) == len(rows)
     assert 42 in ids
     new_ids = [i for i in ids if i != 42]
     assert all(isinstance(i, int) and i > 0 for i in new_ids)
+
 
 # ---------------- [C08] Raw SQL escape hatch + from_id hydration ----------------
 def test_C08_execute_sql_and_hydrate_with_from_id():
@@ -171,20 +200,23 @@ def test_C08_execute_sql_and_hydrate_with_from_id():
     hydrated = [BU.from_id(i) for i in ids]
     assert all(isinstance(h, BU) for h in hydrated)
 
+
 # ---------------- [C09] Delete policies: restrict ----------------
 class U(SQLerModel):
     name: str
 
+
 class Post(SQLerModel):
     title: str
     author: dict | None = None
+
 
 def test_C09_delete_policy_restrict():
     db = SQLerDB.in_memory()
     U.set_db(db)
     Post.set_db(db)
     u = U(name="Writer").save()
-    _ = Post(title="Post A", author={"_table":"u","_id":u._id}).save()
+    _ = Post(title="Post A", author={"_table": "u", "_id": u._id}).save()
 
     assert hasattr(u, "delete_with_policy"), "delete_with_policy must exist"
     # The contract: deleting with restrict must not remove the row if referenced.
@@ -194,10 +226,12 @@ def test_C09_delete_policy_restrict():
         pass
     assert U.from_id(u._id) is not None
 
+
 # ---------------- [C10] Index variants: unique + partial ----------------
 class X(SQLerModel):
     name: str
     email: str | None = None
+
 
 def test_C10_index_variants_unique_partial():
     db = SQLerDB.in_memory()
@@ -461,6 +495,7 @@ def test_C21_fastapi_mapping_readme():
     try:
         from fastapi import HTTPException  # type: ignore
     except ImportError:  # pragma: no cover - docs fallback
+
         class HTTPException(Exception):
             def __init__(self, status_code: int, detail: str):
                 self.status_code = status_code
