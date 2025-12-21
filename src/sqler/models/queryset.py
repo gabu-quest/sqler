@@ -96,6 +96,34 @@ class SQLerQuerySet(Generic[T]):
         """Return the count of matching rows."""
         return self._query.count()
 
+    def sum(self, field: str) -> Optional[float]:
+        """Return the sum of values for the specified field."""
+        return self._query.sum(field)
+
+    def avg(self, field: str) -> Optional[float]:
+        """Return the average of values for the specified field."""
+        return self._query.avg(field)
+
+    def min(self, field: str) -> Optional[Any]:
+        """Return the minimum value for the specified field."""
+        return self._query.min(field)
+
+    def max(self, field: str) -> Optional[Any]:
+        """Return the maximum value for the specified field."""
+        return self._query.max(field)
+
+    def exists(self) -> bool:
+        """Check if any rows match the query."""
+        return self._query.exists()
+
+    def paginate(self, page: int, per_page: int = 20):
+        """Return a paginated result set."""
+        return self._query.paginate(page, per_page)
+
+    def offset(self, n: int) -> "SQLerQuerySet[T]":
+        """Return a new queryset with an OFFSET clause."""
+        return self.__class__(self._model_cls, self._query.offset(n))
+
     # inspection
     def sql(self) -> str:
         """Return the underlying SELECT SQL string."""
