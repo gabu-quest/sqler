@@ -3,8 +3,10 @@ from typing import Any, List, Optional, Self
 
 import aiosqlite
 
+from .abstract import AsyncAdapterABC
 
-class AsyncSQLiteAdapter:
+
+class AsyncSQLiteAdapter(AsyncAdapterABC):
     """Asynchronous SQLite connector using aiosqlite with built-in PRAGMAs."""
 
     def __init__(self, path: str = "sqler.db", pragmas: Optional[list[str]] = None):
@@ -14,8 +16,7 @@ class AsyncSQLiteAdapter:
 
     async def connect(self) -> None:
         self.connection = await aiosqlite.connect(self.path, uri=True)
-        # ensure row returns tuples, not dicts
-        await self.connection.execute("PRAGMA foreign_keys = ON")
+        # Apply configured pragmas (foreign_keys is included in factory defaults)
         for pragma in self.pragmas:
             await self.connection.execute(pragma)
         await self.connection.commit()
