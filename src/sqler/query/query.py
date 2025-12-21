@@ -36,7 +36,9 @@ class SQLerQuery:
         order: Optional[str] = None,
         desc: bool = False,
         limit: Optional[int] = None,
+        offset: Optional[int] = None,
         include_version: bool = False,
+        select_fields: Optional[list[str]] = None,
     ):
         self._table = table
         self._adapter = adapter
@@ -44,7 +46,23 @@ class SQLerQuery:
         self._order = order
         self._desc = desc
         self._limit = limit
+        self._offset = offset
         self._include_version = include_version
+        self._select_fields = select_fields
+
+    def _clone(self, **kwargs) -> Self:
+        """Create a clone with optional overrides."""
+        return self.__class__(
+            table=kwargs.get("table", self._table),
+            adapter=kwargs.get("adapter", self._adapter),
+            expression=kwargs.get("expression", self._expression),
+            order=kwargs.get("order", self._order),
+            desc=kwargs.get("desc", self._desc),
+            limit=kwargs.get("limit", self._limit),
+            offset=kwargs.get("offset", self._offset),
+            include_version=kwargs.get("include_version", self._include_version),
+            select_fields=kwargs.get("select_fields", self._select_fields),
+        )
 
     def filter(self, expression: SQLerExpression) -> Self:
         """Return a new query with the expression AND-ed in.
@@ -56,15 +74,7 @@ class SQLerQuery:
             SQLerQuery: New query instance.
         """
         new_expression = expression if self._expression is None else (self._expression & expression)
-        return self.__class__(
-            self._table,
-            self._adapter,
-            new_expression,
-            self._order,
-            self._desc,
-            self._limit,
-            self._include_version,
-        )
+        return self._clone(expression=new_expression)
 
     def exclude(self, expression: SQLerExpression) -> Self:
         """Return a new query with the NOT of expression AND-ed in.
@@ -77,15 +87,7 @@ class SQLerQuery:
         """
         not_expr = ~expression
         new_expression = not_expr if self._expression is None else (self._expression & not_expr)
-        return self.__class__(
-            self._table,
-            self._adapter,
-            new_expression,
-            self._order,
-            self._desc,
-            self._limit,
-            self._include_version,
-        )
+        return self._clone(expression=new_expression)
 
     def order_by(self, field: str, desc: bool = False) -> Self:
         """Return a new query ordered by the given JSON field.
@@ -97,15 +99,7 @@ class SQLerQuery:
         Returns:
             SQLerQuery: New query instance.
         """
-        return self.__class__(
-            self._table,
-            self._adapter,
-            self._expression,
-            field,
-            desc,
-            self._limit,
-            self._include_version,
-        )
+        return self._clone(order=field, desc=desc)
 
     def limit(self, n: int) -> Self:
         """Return a new query with a LIMIT clause.
@@ -116,27 +110,33 @@ class SQLerQuery:
         Returns:
             SQLerQuery: New query instance.
         """
-        return self.__class__(
-            self._table,
-            self._adapter,
-            self._expression,
-            self._order,
-            self._desc,
-            n,
-            self._include_version,
-        )
+        return self._clone(limit=n)
+
+    def offset(self, n: int) -> Self:
+        """Return a new query with an OFFSET clause.
+
+        Args:
+            n: Number of rows to skip.
+
+        Returns:
+            SQLerQuery: New query instance.
+        """
+        return self._clone(offset=n)
+
+    def select(self, *fields: str) -> Self:
+        """Return a new query that only retrieves specified fields.
+
+        Args:
+            *fields: Field names to retrieve from the JSON document.
+
+        Returns:
+            SQLerQuery: New query instance.
+        """
+        return self._clone(select_fields=list(fields))
 
     def with_version(self) -> Self:
         """Return a new query that includes `_version` column in results."""
-        return self.__class__(
-            self._table,
-            self._adapter,
-            self._expression,
-            self._order,
-            self._desc,
-            self._limit,
-            True,
-        )
+        return self._clone(include_version=True)
 
     def _build_query(
         self, *, include_id: bool = False, include_version: bool = False
@@ -156,15 +156,45 @@ class SQLerQuery:
             order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
                 " DESC" if self._desc else ""
             )
-        limit = f"LIMIT {self._limit}" if self._limit is not None else ""
+        limit_offset = ""
+        if self._limit is not None:
+            limit_offset = f"LIMIT {self._limit}"
+            if self._offset is not None:
+                limit_offset += f" OFFSET {self._offset}"
+        elif self._offset is not None:
+            # SQLite requires LIMIT with OFFSET, use -1 for unlimited
+            limit_offset = f"LIMIT -1 OFFSET {self._offset}"
+
         if include_id:
             select = "_id, data" + (
                 ", _version" if (include_version or self._include_version) else ""
             )
         else:
             select = "data"
-        sql = f"SELECT {select} FROM {self._table} {where} {order} {limit}".strip()
+        sql = f"SELECT {select} FROM {self._table} {where} {order} {limit_offset}".strip()
         sql = " ".join(sql.split())  # collapse double spaces
+        params = self._expression.params if self._expression else []
+        return sql, params
+
+    def _build_aggregate_query(self, func: str, field: Optional[str] = None) -> tuple[str, list[Any]]:
+        """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX).
+
+        Args:
+            func: Aggregate function name.
+            field: Optional field to aggregate on.
+
+        Returns:
+            tuple[str, list[Any]]: SQL string and parameter list.
+        """
+        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        if field is None:
+            select = f"{func}(*)"
+        elif field == "_id":
+            select = f"{func}(_id)"
+        else:
+            select = f"{func}(json_extract(data, '$.{field}'))"
+        sql = f"SELECT {select} FROM {self._table} {where}".strip()
+        sql = " ".join(sql.split())
         params = self._expression.params if self._expression else []
         return sql, params
 
@@ -220,7 +250,8 @@ class SQLerQuery:
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        return self.limit(1).all()[0] if self.limit(1).all() else None
+        results = self.limit(1).all()
+        return results[0] if results else None
 
     def count(self) -> int:
         """Return the count of matching rows.
@@ -230,11 +261,133 @@ class SQLerQuery:
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        sql, params = self._build_query()
-        count_sql = sql.replace("SELECT data", "SELECT count(*)")
-        cur = self._adapter.execute(count_sql, params)
+        sql, params = self._build_aggregate_query("COUNT")
+        cur = self._adapter.execute(sql, params)
         row = cur.fetchone()
         return int(row[0]) if row else 0
+
+    def sum(self, field: str) -> Optional[float]:
+        """Return the sum of values for the specified field.
+
+        Args:
+            field: JSON field path to sum.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Returns:
+            float | None: Sum of values, or None if no rows match.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        sql, params = self._build_aggregate_query("SUM", field)
+        cur = self._adapter.execute(sql, params)
+        row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def avg(self, field: str) -> Optional[float]:
+        """Return the average of values for the specified field.
+
+        Args:
+            field: JSON field path to average.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Returns:
+            float | None: Average of values, or None if no rows match.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        sql, params = self._build_aggregate_query("AVG", field)
+        cur = self._adapter.execute(sql, params)
+        row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def min(self, field: str) -> Optional[Any]:
+        """Return the minimum value for the specified field.
+
+        Args:
+            field: JSON field path to find minimum.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Returns:
+            Any | None: Minimum value, or None if no rows match.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        sql, params = self._build_aggregate_query("MIN", field)
+        cur = self._adapter.execute(sql, params)
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def max(self, field: str) -> Optional[Any]:
+        """Return the maximum value for the specified field.
+
+        Args:
+            field: JSON field path to find maximum.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Returns:
+            Any | None: Maximum value, or None if no rows match.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        sql, params = self._build_aggregate_query("MAX", field)
+        cur = self._adapter.execute(sql, params)
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def exists(self) -> bool:
+        """Check if any rows match the query.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Returns:
+            bool: True if at least one row matches.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        return self.limit(1).count() > 0
+
+    def paginate(self, page: int, per_page: int = 20) -> "PaginatedResult":
+        """Return a paginated result set.
+
+        Args:
+            page: Page number (1-indexed).
+            per_page: Number of items per page.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+            ValueError: If page < 1 or per_page < 1.
+
+        Returns:
+            PaginatedResult: Object with items, pagination info, and helpers.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        if page < 1:
+            raise ValueError("Page must be >= 1")
+        if per_page < 1:
+            raise ValueError("per_page must be >= 1")
+
+        total = self.count()
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 0
+        offset = (page - 1) * per_page
+        items = self.offset(offset).limit(per_page).all_dicts()
+
+        return PaginatedResult(
+            items=items,
+            page=page,
+            per_page=per_page,
+            total=total,
+            total_pages=total_pages,
+        )
 
     def all_dicts(self) -> list[dict[str, Any]]:
         """Execute and return parsed dicts with ``_id`` attached.
@@ -262,6 +415,11 @@ class SQLerQuery:
             if data_json is None:
                 raise InvariantViolationError(f"Row {_id} in {self._table} has NULL data JSON")
             obj = json.loads(data_json)
+
+            # Apply field selection if specified
+            if self._select_fields:
+                obj = {k: obj.get(k) for k in self._select_fields if k in obj}
+
             obj["_id"] = _id
             if ver is not None:
                 obj["_version"] = ver
@@ -281,3 +439,62 @@ class SQLerQuery:
             raise NoAdapterError("No adapter set for query")
         results = self.limit(1).all_dicts()
         return results[0] if results else None
+
+
+class PaginatedResult:
+    """Result of a paginated query with navigation helpers."""
+
+    def __init__(
+        self,
+        items: list[dict[str, Any]],
+        page: int,
+        per_page: int,
+        total: int,
+        total_pages: int,
+    ):
+        self.items = items
+        self.page = page
+        self.per_page = per_page
+        self.total = total
+        self.total_pages = total_pages
+
+    @property
+    def has_next(self) -> bool:
+        """Return True if there is a next page."""
+        return self.page < self.total_pages
+
+    @property
+    def has_prev(self) -> bool:
+        """Return True if there is a previous page."""
+        return self.page > 1
+
+    @property
+    def next_page(self) -> Optional[int]:
+        """Return the next page number, or None if on last page."""
+        return self.page + 1 if self.has_next else None
+
+    @property
+    def prev_page(self) -> Optional[int]:
+        """Return the previous page number, or None if on first page."""
+        return self.page - 1 if self.has_prev else None
+
+    def __iter__(self):
+        """Iterate over items."""
+        return iter(self.items)
+
+    def __len__(self):
+        """Return number of items on this page."""
+        return len(self.items)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return pagination info as a dictionary."""
+        return {
+            "items": self.items,
+            "page": self.page,
+            "per_page": self.per_page,
+            "total": self.total,
+            "total_pages": self.total_pages,
+            "has_next": self.has_next,
+            "has_prev": self.has_prev,
+        }
+

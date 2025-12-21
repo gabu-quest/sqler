@@ -59,3 +59,49 @@ class AdapterABC(ABC):
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit context manager."""
         pass
+
+
+class AsyncAdapterABC(ABC):
+    """Abstract base for an asynchronous DB adapter."""
+
+    @abstractmethod
+    async def connect(self) -> None:
+        """Connect to the db"""
+        pass
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Close connection to db"""
+        pass
+
+    @abstractmethod
+    async def execute(self, query: str, params: Optional[List[Any]] = None) -> Any:
+        """Execute a single query with optional params.
+        Returns a cursor-like object.
+        """
+        pass
+
+    @abstractmethod
+    async def executemany(self, query: str, param_list: List[List[Any]]) -> Any:
+        """Executes a query with many params."""
+        pass
+
+    @abstractmethod
+    async def executescript(self, script: str) -> Any:
+        """Executes the script passed to it."""
+        pass
+
+    @abstractmethod
+    async def commit(self) -> None:
+        """Commit the current transaction."""
+        pass
+
+    @abstractmethod
+    async def __aenter__(self):
+        """Enter async context manager."""
+        pass
+
+    @abstractmethod
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Exit async context manager."""
+        pass
