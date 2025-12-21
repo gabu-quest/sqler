@@ -96,6 +96,34 @@ class SQLerQuerySet(Generic[T]):
         """Return the count of matching rows."""
         return self._query.count()
 
+    def sum(self, field: str) -> Optional[float]:
+        """Return the sum of values for the specified field."""
+        return self._query.sum(field)
+
+    def avg(self, field: str) -> Optional[float]:
+        """Return the average of values for the specified field."""
+        return self._query.avg(field)
+
+    def min(self, field: str) -> Optional[Any]:
+        """Return the minimum value for the specified field."""
+        return self._query.min(field)
+
+    def max(self, field: str) -> Optional[Any]:
+        """Return the maximum value for the specified field."""
+        return self._query.max(field)
+
+    def exists(self) -> bool:
+        """Check if any rows match the query."""
+        return self._query.exists()
+
+    def paginate(self, page: int, per_page: int = 20):
+        """Return a paginated result set."""
+        return self._query.paginate(page, per_page)
+
+    def offset(self, n: int) -> "SQLerQuerySet[T]":
+        """Return a new queryset with an OFFSET clause."""
+        return self.__class__(self._model_cls, self._query.offset(n))
+
     # inspection
     def sql(self) -> str:
         """Return the underlying SELECT SQL string."""
@@ -116,7 +144,25 @@ class SQLerQuerySet(Generic[T]):
         return self._query.explain_query_plan(adapter)
 
     # --- internal: batch resolve references to avoid N+1 ---
-    def _batch_resolve(self, docs: list[dict]) -> list[dict]:
+    def _batch_resolve(self, docs: list[dict], max_depth: int = 5) -> list[dict]:
+        """Recursively resolve all relationship references in batch.
+
+        This method collects all references across all documents, fetches them
+        in batch per table (avoiding N+1 queries), then recursively resolves
+        any nested references in the fetched documents.
+
+        Args:
+            docs: List of documents to resolve.
+            max_depth: Maximum recursion depth to prevent infinite loops.
+
+        Returns:
+            list[dict]: Documents with references replaced by actual data.
+        """
+        if max_depth <= 0 or not docs:
+            return docs
+
+        import json
+
         # collect refs grouped by table
         refs_by_table: dict[str, set[int]] = {}
 
@@ -133,9 +179,14 @@ class SQLerQuerySet(Generic[T]):
         for d in docs:
             collect(d)
 
+        if not refs_by_table:
+            return docs
+
         # fetch all refs per table
         resolved: dict[tuple[str, int], dict] = {}
         adapter = self._query._adapter  # type: ignore[attr-defined]
+        nested_docs: list[dict] = []
+
         for table, ids in refs_by_table.items():
             if not ids:
                 continue
@@ -144,11 +195,14 @@ class SQLerQuerySet(Generic[T]):
             cur = adapter.execute(sql, list(ids))
             rows = cur.fetchall()
             for _id, data_json in rows:
-                import json
-
                 obj = json.loads(data_json)
                 obj["_id"] = _id
                 resolved[(table, int(_id))] = obj
+                nested_docs.append(obj)
+
+        # recursively resolve nested references in fetched documents
+        if nested_docs:
+            self._batch_resolve(nested_docs, max_depth - 1)
 
         # replace in-doc refs with fetched payloads, per-document visited guard
         def make_replace():

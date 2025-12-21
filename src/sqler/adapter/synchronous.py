@@ -72,9 +72,7 @@ class SQLiteAdapter(AdapterABC):
 
     def execute(self, query: str, params: Optional[list[Any]] = None) -> sqlite3.Cursor:
         """Execute a SQL query with optional parameters and return cursor"""
-        conn = self._conn()
-        if conn is None:
-            raise NotConnectedError("Database not connected, call connect() first")
+        conn = self._conn()  # Raises NotConnectedError if not connected
         cursor = conn.cursor()
         if params is not None:
             if isinstance(params, list):
@@ -86,9 +84,7 @@ class SQLiteAdapter(AdapterABC):
 
     def executemany(self, query: str, param_list: Optional[list[Any]]) -> sqlite3.Cursor:
         """Execute a param query multiple times with different parameter sets"""
-        conn = self._conn()
-        if conn is None:
-            raise NotConnectedError("Database not connected, call connect() first")
+        conn = self._conn()  # Raises NotConnectedError if not connected
         cursor = conn.cursor()
         cursor.executemany(query, param_list or [])
         conn.commit()
@@ -96,9 +92,7 @@ class SQLiteAdapter(AdapterABC):
 
     def executescript(self, script: str) -> sqlite3.Cursor:
         """Execute multiple statements from a script in a single action"""
-        conn = self._conn()
-        if conn is None:
-            raise NotConnectedError("Database not connected, call connect() first")
+        conn = self._conn()  # Raises NotConnectedError if not connected
         cursor = conn.cursor()
         cursor.executescript(script)
         conn.commit()
@@ -106,9 +100,7 @@ class SQLiteAdapter(AdapterABC):
 
     def commit(self) -> None:
         """Commit the current transaction."""
-        conn = self._conn()
-        if conn is None:
-            raise NotConnectedError("Database not connected, call connect() first")
+        conn = self._conn()  # Raises NotConnectedError if not connected
         conn.commit()
 
     def __enter__(self):
@@ -117,7 +109,7 @@ class SQLiteAdapter(AdapterABC):
             self.connect()
         return self
 
-    def __exit__(self, exception_type, exception_value, exception_tracebak):
+    def __exit__(self, exception_type, exception_value, exception_traceback):
         """Exit context manager; commit or rollback depending on exceptions"""
         conn = getattr(self._local, "conn", None)
         if conn is None:

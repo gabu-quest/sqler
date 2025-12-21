@@ -22,10 +22,14 @@ This started as a personal toolkit for **very fast prototyping**; small scripts 
 
 - **Document-style models** backed by SQLite JSON1
 - **Fluent query builder**: `filter`, `exclude`, `contains`, `isin`, `.any().where(...)`
+- **Aggregations**: `sum`, `avg`, `min`, `max`, `exists`, `paginate`
 - **Relationships** with simple reference storage and hydration
 - **Safe models** with `_version` and optimistic locking (stale writes raise)
 - **Bulk operations** (`bulk_upsert`)
+- **Transactions** with commit/rollback context managers
+- **Model mixins**: timestamps, soft delete, lifecycle hooks
 - **Integrity policies** on delete: `restrict`, `set_null`, `cascade`
+- **Query logging** for debugging and performance profiling
 - **Raw SQL escape hatch** (parameterized), with model hydration when returning `_id, data`
 - **Sync & Async** APIs with matching semantics
 - **WAL-friendly concurrency** via thread-local connections (many readers, one writer)
@@ -585,6 +589,267 @@ Notes:
 
 ---
 
+## Transactions
+
+Use explicit transactions for atomic multi-operation batches.
+
+### [C22] Transaction context manager
+
+```python
+from sqler import SQLerDB, SQLerModel
+
+class TxUser(SQLerModel):
+    name: str
+    balance: int = 0
+
+db = SQLerDB.in_memory()
+TxUser.set_db(db)
+
+# Verify transaction API exists and works
+tx = db.transaction()
+assert hasattr(tx, "__enter__")
+assert hasattr(tx, "__exit__")
+assert hasattr(tx, "commit")
+assert hasattr(tx, "rollback")
+
+# Transaction context manager usage
+with db.transaction():
+    db.insert_document("txusers", {"name": "Alice", "balance": 100})
+    db.insert_document("txusers", {"name": "Bob", "balance": 200})
+
+assert TxUser.query().count() == 2
+
+# Explicit commit/rollback methods
+tx = db.transaction()
+tx.__enter__()
+db.insert_document("txusers", {"name": "Charlie", "balance": 300})
+tx.commit()
+
+assert TxUser.query().count() == 3
+```
+
+---
+
+## Query Aggregations
+
+Perform aggregate calculations directly in the database.
+
+### [C23] Sum, avg, min, max
+
+```python
+from sqler import SQLerDB, SQLerModel
+from sqler.query import SQLerField as F
+
+class Product(SQLerModel):
+    name: str
+    price: float
+    quantity: int
+
+db = SQLerDB.in_memory()
+Product.set_db(db)
+
+Product(name="Apple", price=1.50, quantity=100).save()
+Product(name="Banana", price=0.75, quantity=150).save()
+Product(name="Cherry", price=3.00, quantity=50).save()
+
+q = Product.query()
+assert q.sum("quantity") == 300
+assert q.avg("price") == 1.75
+assert q.min("price") == 0.75
+assert q.max("price") == 3.00
+
+# With filters
+expensive = Product.query().filter(F("price") > 1.0)
+assert expensive.sum("quantity") == 150  # Apple + Cherry
+```
+
+### [C24] Exists check
+
+```python
+from sqler import SQLerDB, SQLerModel
+from sqler.query import SQLerField as F
+
+class Item(SQLerModel):
+    name: str
+    active: bool = True
+
+db = SQLerDB.in_memory()
+Item.set_db(db)
+
+Item(name="Widget", active=True).save()
+
+assert Item.query().filter(F("active") == True).exists() == True
+assert Item.query().filter(F("name") == "Missing").exists() == False
+```
+
+---
+
+## Pagination
+
+Built-in pagination with navigation helpers.
+
+### [C25] Paginate results
+
+```python
+from sqler import SQLerDB, SQLerModel, PaginatedResult
+
+class Article(SQLerModel):
+    title: str
+    views: int = 0
+
+db = SQLerDB.in_memory()
+Article.set_db(db)
+
+for i in range(25):
+    Article(title=f"Article {i}", views=i * 10).save()
+
+# Get page 2 with 10 items per page
+page = Article.query().order_by("views", desc=True).paginate(page=2, per_page=10)
+
+assert isinstance(page, PaginatedResult)
+assert len(page.items) == 10
+assert page.page == 2
+assert page.total == 25
+assert page.total_pages == 3
+assert page.has_next == True
+assert page.has_prev == True
+assert page.next_page == 3
+assert page.prev_page == 1
+```
+
+---
+
+## Model Mixins
+
+Reusable mixins for common functionality.
+
+### [C26] Timestamps
+
+```python
+from sqler import SQLerDB, SQLerModel, TimestampMixin
+
+class Post(TimestampMixin, SQLerModel):
+    title: str
+    content: str
+
+db = SQLerDB.in_memory()
+Post.set_db(db)
+
+post = Post(title="Hello", content="World")
+post._set_timestamps()  # Call before save for auto-timestamps
+post = post.save()
+
+assert post.created_at is not None
+assert post.updated_at is not None
+```
+
+### [C27] Soft delete
+
+```python
+from sqler import SQLerDB, SQLerModel, SoftDeleteMixin
+
+class Comment(SoftDeleteMixin, SQLerModel):
+    text: str
+
+db = SQLerDB.in_memory()
+Comment.set_db(db)
+
+c = Comment(text="Nice post!").save()
+assert c.is_deleted == False
+
+c.soft_delete()
+assert c.is_deleted == True
+assert c.deleted_at is not None
+
+c.restore()
+assert c.is_deleted == False
+assert c.deleted_at is None
+
+# Verify the comment was restored and can be queried
+all_comments = Comment.query().all()
+assert len(all_comments) == 1
+assert all_comments[0].is_deleted == False
+```
+
+### [C28] Lifecycle hooks
+
+```python
+from sqler import SQLerDB, SQLerModel, HooksMixin
+
+class AuditedUser(HooksMixin, SQLerModel):
+    email: str
+    normalized: bool = False
+
+    def before_save(self) -> bool:
+        self.email = self.email.lower().strip()
+        self.normalized = True
+        return True  # Continue with save
+
+    def after_save(self) -> None:
+        pass  # Log, notify, etc.
+
+db = SQLerDB.in_memory()
+AuditedUser.set_db(db)
+
+# Hooks are called manually by caller
+u = AuditedUser(email="  ALICE@Example.COM  ")
+if u.before_save():
+    u = u.save()
+    u.after_save()
+
+assert u.email == "alice@example.com"
+assert u.normalized == True
+```
+
+---
+
+## Query Logging
+
+Debug and profile queries with the built-in logger.
+
+### [C29] Query logging
+
+```python
+from sqler import SQLerDB, SQLerModel, query_logger
+from sqler.query import SQLerField as F
+
+class LoggedUser(SQLerModel):
+    name: str
+    age: int
+
+db = SQLerDB.in_memory()
+LoggedUser.set_db(db)
+
+# Enable logging
+query_logger.enable()
+
+LoggedUser(name="Ada", age=36).save()
+LoggedUser(name="Bob", age=25).save()
+
+# Note: query_logger captures queries when integrated with adapter
+# Here we demonstrate the logger API
+query_logger.log("SELECT * FROM loggedusers", [], 0.5)
+query_logger.log("SELECT * FROM loggedusers WHERE age > ?", [30], 1.2)
+
+# Get logged queries
+logs = query_logger.logs
+assert len(logs) >= 2
+
+# Get slow queries
+slow = query_logger.get_slow_queries(threshold_ms=1.0)
+assert len(slow) >= 1
+
+# Get stats
+stats = query_logger.get_stats()
+assert "count" in stats
+assert "avg_time_ms" in stats
+
+query_logger.disable()
+query_logger.clear()
+```
+
+---
+
 ## Advanced Usage
 
 ### Raw SQL (`execute_sql`)
@@ -706,10 +971,31 @@ except StaleVersionError:
 
 ## Errors
 
-- `StaleVersionError` — optimistic check failed (HTTP 409)
-- `InvariantViolationError` — malformed row invariant (e.g., NULL JSON)
-- `NotConnectedError` — adapter closed / not connected
-- SQLite exceptions (`sqlite3.*`) bubble with context
+SQLer provides a unified exception hierarchy under `sqler.exceptions`:
+
+- **Connection errors**
+  - `NotConnectedError` — adapter closed / not connected
+  - `ConnectionPoolExhaustedError` — no connections available
+- **Query errors**
+  - `NoAdapterError` — query executed without adapter
+  - `InvariantViolationError` — malformed row invariant (e.g., NULL JSON)
+  - `QueryTimeoutError` — query exceeded timeout
+- **Concurrency errors**
+  - `StaleVersionError` — optimistic check failed (HTTP 409)
+  - `DeadlockError` — deadlock detected
+  - `LockTimeoutError` — unable to acquire lock
+- **Integrity errors**
+  - `ReferentialIntegrityError` — foreign key constraint violated
+  - `UniqueConstraintError` — unique constraint violated
+- **Model errors**
+  - `NotBoundError` — model not bound to database
+  - `NotFoundError` — model instance not found
+  - `ValidationError` — model validation failed
+- **Hook errors**
+  - `BeforeSaveError`, `AfterSaveError` — save hook failures
+  - `BeforeDeleteError`, `AfterDeleteError` — delete hook failures
+
+All exceptions inherit from `SQLerError` for unified catching. SQLite exceptions (`sqlite3.*`) bubble with context.
 
 ---
 

@@ -77,6 +77,34 @@ class AsyncSQLerQuerySet(Generic[T]):
     async def count(self) -> int:
         return await self._query.count()
 
+    async def sum(self, field: str) -> Optional[float]:
+        """Return the sum of values for the specified field."""
+        return await self._query.sum(field)
+
+    async def avg(self, field: str) -> Optional[float]:
+        """Return the average of values for the specified field."""
+        return await self._query.avg(field)
+
+    async def min(self, field: str) -> Optional[Any]:
+        """Return the minimum value for the specified field."""
+        return await self._query.min(field)
+
+    async def max(self, field: str) -> Optional[Any]:
+        """Return the maximum value for the specified field."""
+        return await self._query.max(field)
+
+    async def exists(self) -> bool:
+        """Check if any rows match the query."""
+        return await self._query.exists()
+
+    async def paginate(self, page: int, per_page: int = 20):
+        """Return a paginated result set."""
+        return await self._query.paginate(page, per_page)
+
+    def offset(self, n: int) -> "AsyncSQLerQuerySet[T]":
+        """Return a new queryset with an OFFSET clause."""
+        return self.__class__(self._model_cls, self._query.offset(n))
+
     # inspection
     def sql(self) -> str:
         return self._query.sql
@@ -102,7 +130,25 @@ class AsyncSQLerQuerySet(Generic[T]):
         await cur.close()
         return rows
 
-    async def _abatch_resolve(self, docs: list[dict]) -> list[dict]:
+    async def _abatch_resolve(self, docs: list[dict], max_depth: int = 5) -> list[dict]:
+        """Recursively resolve all relationship references in batch (async).
+
+        This method collects all references across all documents, fetches them
+        in batch per table (avoiding N+1 queries), then recursively resolves
+        any nested references in the fetched documents.
+
+        Args:
+            docs: List of documents to resolve.
+            max_depth: Maximum recursion depth to prevent infinite loops.
+
+        Returns:
+            list[dict]: Documents with references replaced by actual data.
+        """
+        if max_depth <= 0 or not docs:
+            return docs
+
+        import json
+
         refs_by_table: dict[str, set[int]] = {}
 
         def collect(value):
@@ -118,8 +164,13 @@ class AsyncSQLerQuerySet(Generic[T]):
         for d in docs:
             collect(d)
 
+        if not refs_by_table:
+            return docs
+
         resolved: dict[tuple[str, int], dict] = {}
         adapter = self._query._adapter  # type: ignore[attr-defined]
+        nested_docs: list[dict] = []
+
         for table, ids in refs_by_table.items():
             if not ids:
                 continue
@@ -129,25 +180,31 @@ class AsyncSQLerQuerySet(Generic[T]):
             rows = await cur.fetchall()
             await cur.close()
             for _id, data_json in rows:
-                import json
-
                 obj = json.loads(data_json)
                 obj["_id"] = _id
                 resolved[(table, int(_id))] = obj
+                nested_docs.append(obj)
 
-        visited: set[tuple[str, int]] = set()
+        # recursively resolve nested references in fetched documents
+        if nested_docs:
+            await self._abatch_resolve(nested_docs, max_depth - 1)
 
-        def replace(value):
-            if isinstance(value, dict) and "_table" in value and "_id" in value:
-                key = (value["_table"], int(value["_id"]))
-                if key in visited:
-                    return value
-                visited.add(key)
-                return resolved.get(key, value)
-            if isinstance(value, dict):
-                return {k: replace(v) for k, v in value.items()}
-            if isinstance(value, list):
-                return [replace(v) for v in value]
-            return value
+        def make_replace():
+            visited: set[tuple[str, int]] = set()
 
-        return [replace(d) for d in docs]
+            def replace(value):
+                if isinstance(value, dict) and "_table" in value and "_id" in value:
+                    key = (value["_table"], int(value["_id"]))
+                    if key in visited:
+                        return value
+                    visited.add(key)
+                    return resolved.get(key, value)
+                if isinstance(value, dict):
+                    return {k: replace(v) for k, v in value.items()}
+                if isinstance(value, list):
+                    return [replace(v) for v in value]
+                return value
+
+            return replace
+
+        return [make_replace()(d) for d in docs]
