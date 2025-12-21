@@ -6,12 +6,25 @@ enforcing deletion policies, and validating reference consistency.
 """
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 from sqler import registry
 
 if TYPE_CHECKING:
     from sqler.db.sqler_db import SQLerDB
+
+
+def _is_valid_table_name(table: str) -> bool:
+    """Check if a table name is valid (safe for SQL use).
+
+    Args:
+        table: Table name to validate.
+
+    Returns:
+        bool: True if the table name is valid.
+    """
+    return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table))
 
 
 def find_referrers(db: "SQLerDB", target_table: str, target_id: int) -> list[tuple[str, int, dict]]:
@@ -193,6 +206,19 @@ def validate_references(db: "SQLerDB"):
                 if isinstance(value, dict) and "_table" in value and "_id" in value:
                     t = value.get("_table")
                     i = int(value.get("_id", -1))
+                    # Validate table name to prevent SQL injection
+                    if not isinstance(t, str) or not _is_valid_table_name(t):
+                        # Invalid table name in reference - treat as broken
+                        broken.append(
+                            BrokenRef(
+                                table=table,
+                                row_id=int(_id),
+                                path=path or "$",
+                                target_table=str(t),
+                                target_id=i,
+                            )
+                        )
+                        return
                     # check existence
                     cur2 = db.adapter.execute(f"SELECT 1 FROM {t} WHERE _id = ?;", [i])
                     if not cur2.fetchone():

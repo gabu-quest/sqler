@@ -220,7 +220,8 @@ class SQLerQuery:
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        return self.limit(1).all()[0] if self.limit(1).all() else None
+        results = self.limit(1).all()
+        return results[0] if results else None
 
     def count(self) -> int:
         """Return the count of matching rows.

@@ -11,6 +11,7 @@ from sqler.query.async_query import AsyncSQLerQuery
 
 from .async_model import AsyncSQLerModel
 from .async_queryset import AsyncSQLerQuerySet
+from .utils import apply_numeric_scalar_deltas, compute_numeric_scalar_deltas
 
 TASafe = TypeVar("TASafe", bound="AsyncSQLerSafeModel")
 
@@ -59,7 +60,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         base_snapshot = {k: v for k, v in snap.items() if k != "_version"} if has_snapshot else None
         target_payload = await self._adump_with_relations()
         delta = (
-            _compute_numeric_scalar_deltas(base_snapshot or {}, target_payload)
+            compute_numeric_scalar_deltas(base_snapshot or {}, target_payload)
             if has_snapshot
             else None
         )
@@ -108,7 +109,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     if delta is None or k not in delta:
                         rebased[k] = v
                 if delta is not None:
-                    rebased = _apply_numeric_scalar_deltas(rebased, delta)
+                    rebased = apply_numeric_scalar_deltas(rebased, delta)
                 target_payload = rebased
                 self._version = getattr(latest, "_version", 0)
                 try:
@@ -148,26 +149,3 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         except Exception:
             pass
         return self
-
-
-def _compute_numeric_scalar_deltas(orig: dict, target: dict) -> dict[str, int]:
-    deltas: dict[str, int] = {}
-    for k, v in target.items():
-        if isinstance(v, int):
-            base = orig.get(k, 0)
-            if isinstance(base, int):
-                dv = v - base
-                if dv != 0:
-                    deltas[k] = dv
-    return deltas
-
-
-def _apply_numeric_scalar_deltas(base: dict, delta: dict[str, int]) -> dict:
-    out = {**base}
-    for k, dv in delta.items():
-        cur = out.get(k, 0)
-        if isinstance(cur, int):
-            out[k] = cur + dv
-        else:
-            out[k] = dv
-    return out

@@ -20,7 +20,8 @@ def register(table: str, cls: type) -> None:
         cls: Model class associated with the table.
     """
     _REGISTRY[table] = cls
-    # Clear cache when registry changes
+    # Clear all caches when registry changes
+    resolve.cache_clear()
     _get_allowed_tables.cache_clear()
 
 

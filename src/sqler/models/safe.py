@@ -9,6 +9,7 @@ from pydantic import PrivateAttr
 
 from .model import SQLerModel
 from .queryset import SQLerQuerySet
+from .utils import apply_numeric_scalar_deltas, compute_numeric_scalar_deltas
 
 
 class StaleVersionError(RuntimeError):
@@ -64,7 +65,7 @@ class SQLerSafeModel(SQLerModel):
         has_snapshot = isinstance(snap, dict) and len(snap) > 0
         orig = {k: v for k, v in snap.items() if k != "_version"} if has_snapshot else None
         target_payload = self._dump_with_relations()
-        delta = _compute_numeric_scalar_deltas(orig or {}, target_payload) if has_snapshot else None
+        delta = compute_numeric_scalar_deltas(orig or {}, target_payload) if has_snapshot else None
         # Only allow rebase for simple RMW counters: exactly one numeric field with ±1 delta
         # Only rebase for canonical counter fields
         _can = False
@@ -116,7 +117,7 @@ class SQLerSafeModel(SQLerModel):
                         rebased[k] = v
                 # Apply numeric deltas on top
                 if delta is not None:
-                    rebased = _apply_numeric_scalar_deltas(rebased, delta)
+                    rebased = apply_numeric_scalar_deltas(rebased, delta)
                 target_payload = rebased
                 self._version = getattr(latest, "_version", 0)
                 try:
@@ -153,26 +154,3 @@ class SQLerSafeModel(SQLerModel):
         except Exception:
             pass
         return self
-
-
-def _compute_numeric_scalar_deltas(orig: dict, target: dict) -> dict[str, int]:
-    deltas: dict[str, int] = {}
-    for k, v in target.items():
-        if isinstance(v, int):
-            base = orig.get(k, 0)
-            if isinstance(base, int):
-                dv = v - base
-                if dv != 0:
-                    deltas[k] = dv
-    return deltas
-
-
-def _apply_numeric_scalar_deltas(base: dict, delta: dict[str, int]) -> dict:
-    out = {**base}
-    for k, dv in delta.items():
-        cur = out.get(k, 0)
-        if isinstance(cur, int):
-            out[k] = cur + dv
-        else:
-            out[k] = dv
-    return out
