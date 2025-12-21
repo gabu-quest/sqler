@@ -77,6 +77,34 @@ class AsyncSQLerQuerySet(Generic[T]):
     async def count(self) -> int:
         return await self._query.count()
 
+    async def sum(self, field: str) -> Optional[float]:
+        """Return the sum of values for the specified field."""
+        return await self._query.sum(field)
+
+    async def avg(self, field: str) -> Optional[float]:
+        """Return the average of values for the specified field."""
+        return await self._query.avg(field)
+
+    async def min(self, field: str) -> Optional[Any]:
+        """Return the minimum value for the specified field."""
+        return await self._query.min(field)
+
+    async def max(self, field: str) -> Optional[Any]:
+        """Return the maximum value for the specified field."""
+        return await self._query.max(field)
+
+    async def exists(self) -> bool:
+        """Check if any rows match the query."""
+        return await self._query.exists()
+
+    async def paginate(self, page: int, per_page: int = 20):
+        """Return a paginated result set."""
+        return await self._query.paginate(page, per_page)
+
+    def offset(self, n: int) -> "AsyncSQLerQuerySet[T]":
+        """Return a new queryset with an OFFSET clause."""
+        return self.__class__(self._model_cls, self._query.offset(n))
+
     # inspection
     def sql(self) -> str:
         return self._query.sql

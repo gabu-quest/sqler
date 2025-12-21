@@ -326,6 +326,8 @@ class SQLerModel(BaseModel):
         return {k: decode(v) for k, v in data.items()}
 
     def _dump_with_relations(self) -> dict:
+        from datetime import date, datetime
+
         visited: set[tuple[str, int]] = set()
 
         def encode(value: object):
@@ -348,6 +350,11 @@ class SQLerModel(BaseModel):
                 return {k: encode(v) for k, v in value.items()}
             if isinstance(value, BaseModel):
                 return value.model_dump()
+            # Handle datetime/date serialization
+            if isinstance(value, datetime):
+                return value.isoformat()
+            if isinstance(value, date):
+                return value.isoformat()
             return value
 
         payload: dict = {}

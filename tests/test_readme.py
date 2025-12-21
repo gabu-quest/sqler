@@ -513,3 +513,220 @@ def test_C21_fastapi_mapping_readme():
             raise HTTPException(409, "Version conflict")
 
     assert getattr(excinfo.value, "status_code", 409) == 409
+
+
+# ---------------- [C22] Transaction context manager ----------------
+def test_C22_transaction_context_manager():
+    class TxUser(SQLerModel):
+        name: str
+        balance: int = 0
+
+    db = SQLerDB.in_memory()
+    TxUser.set_db(db)
+
+    # Verify transaction API exists and works
+    tx = db.transaction()
+    assert hasattr(tx, "__enter__")
+    assert hasattr(tx, "__exit__")
+    assert hasattr(tx, "commit")
+    assert hasattr(tx, "rollback")
+
+    # Transaction context manager usage
+    with db.transaction():
+        db.insert_document("txusers", {"name": "Alice", "balance": 100})
+        db.insert_document("txusers", {"name": "Bob", "balance": 200})
+
+    assert TxUser.query().count() == 2
+
+    # Explicit commit/rollback methods
+    tx = db.transaction()
+    tx.__enter__()
+    db.insert_document("txusers", {"name": "Charlie", "balance": 300})
+    tx.commit()
+
+    assert TxUser.query().count() == 3
+
+
+# ---------------- [C23] Aggregations: sum, avg, min, max ----------------
+def test_C23_aggregations():
+    class Product(SQLerModel):
+        name: str
+        price: float
+        quantity: int
+
+    db = SQLerDB.in_memory()
+    Product.set_db(db)
+
+    Product(name="Apple", price=1.50, quantity=100).save()
+    Product(name="Banana", price=0.75, quantity=150).save()
+    Product(name="Cherry", price=3.00, quantity=50).save()
+
+    q = Product.query()
+    assert q.sum("quantity") == 300
+    assert q.avg("price") == 1.75
+    assert q.min("price") == 0.75
+    assert q.max("price") == 3.00
+
+    # With filters
+    expensive = Product.query().filter(F("price") > 1.0)
+    assert expensive.sum("quantity") == 150  # Apple + Cherry
+
+
+# ---------------- [C24] Exists check ----------------
+def test_C24_exists_check():
+    class Item(SQLerModel):
+        name: str
+        active: bool = True
+
+    db = SQLerDB.in_memory()
+    Item.set_db(db)
+
+    Item(name="Widget", active=True).save()
+
+    assert Item.query().filter(F("active") == True).exists() == True
+    assert Item.query().filter(F("name") == "Missing").exists() == False
+
+
+# ---------------- [C25] Pagination ----------------
+def test_C25_pagination():
+    from sqler import PaginatedResult
+
+    class Article(SQLerModel):
+        title: str
+        views: int = 0
+
+    db = SQLerDB.in_memory()
+    Article.set_db(db)
+
+    for i in range(25):
+        Article(title=f"Article {i}", views=i * 10).save()
+
+    # Get page 2 with 10 items per page
+    page = Article.query().order_by("views", desc=True).paginate(page=2, per_page=10)
+
+    assert isinstance(page, PaginatedResult)
+    assert len(page.items) == 10
+    assert page.page == 2
+    assert page.total == 25
+    assert page.total_pages == 3
+    assert page.has_next == True
+    assert page.has_prev == True
+    assert page.next_page == 3
+    assert page.prev_page == 1
+
+
+# ---------------- [C26] Timestamps mixin ----------------
+def test_C26_timestamp_mixin():
+    from sqler import TimestampMixin
+
+    class Post(TimestampMixin, SQLerModel):
+        title: str
+        content: str
+
+    db = SQLerDB.in_memory()
+    Post.set_db(db)
+
+    post = Post(title="Hello", content="World")
+    post._set_timestamps()  # Call before save for auto-timestamps
+    post = post.save()
+
+    assert post.created_at is not None
+    assert post.updated_at is not None
+
+
+# ---------------- [C27] Soft delete mixin ----------------
+def test_C27_soft_delete_mixin():
+    from sqler import SoftDeleteMixin
+
+    class Comment(SoftDeleteMixin, SQLerModel):
+        text: str
+
+    db = SQLerDB.in_memory()
+    Comment.set_db(db)
+
+    c = Comment(text="Nice post!").save()
+    assert c.is_deleted == False
+
+    c.soft_delete()
+    assert c.is_deleted == True
+    assert c.deleted_at is not None
+
+    c.restore()
+    assert c.is_deleted == False
+    assert c.deleted_at is None
+
+    # Verify the comment was restored and can be queried
+    all_comments = Comment.query().all()
+    assert len(all_comments) == 1
+    assert all_comments[0].is_deleted == False
+
+
+# ---------------- [C28] Lifecycle hooks mixin ----------------
+def test_C28_lifecycle_hooks_mixin():
+    from sqler import HooksMixin
+
+    class AuditedUser(HooksMixin, SQLerModel):
+        email: str
+        normalized: bool = False
+
+        def before_save(self) -> bool:
+            self.email = self.email.lower().strip()
+            self.normalized = True
+            return True  # Continue with save
+
+        def after_save(self) -> None:
+            pass  # Log, notify, etc.
+
+    db = SQLerDB.in_memory()
+    AuditedUser.set_db(db)
+
+    # Hooks are called manually by caller
+    u = AuditedUser(email="  ALICE@Example.COM  ")
+    if u.before_save():
+        u = u.save()
+        u.after_save()
+
+    assert u.email == "alice@example.com"
+    assert u.normalized == True
+
+
+# ---------------- [C29] Query logging ----------------
+def test_C29_query_logging():
+    from sqler import query_logger
+
+    class LoggedUser(SQLerModel):
+        name: str
+        age: int
+
+    db = SQLerDB.in_memory()
+    LoggedUser.set_db(db)
+
+    # Clear any existing logs first
+    query_logger.clear()
+
+    # Enable logging
+    query_logger.enable()
+
+    LoggedUser(name="Ada", age=36).save()
+    LoggedUser(name="Bob", age=25).save()
+
+    # Note: query_logger captures queries when integrated with adapter
+    # Here we demonstrate the logger API
+    query_logger.log("SELECT * FROM loggedusers", [], 0.5)
+    query_logger.log("SELECT * FROM loggedusers WHERE age > ?", [30], 1.2)
+
+    # Get logged queries
+    logs = query_logger.logs
+    assert len(logs) >= 2
+
+    # Get slow queries
+    slow = query_logger.get_slow_queries(threshold_ms=1.0)
+    assert len(slow) >= 1
+
+    # Get stats
+    stats = query_logger.get_stats()
+    assert "count" in stats
+    assert "avg_time_ms" in stats
+
+    query_logger.disable()
+    query_logger.clear()
