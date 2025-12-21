@@ -258,6 +258,80 @@ class SQLerDB:
         """Connect the underlying adapter if not already connected."""
         self.adapter.connect()
 
+    def transaction(self) -> "Transaction":
+        """Return a context manager for explicit transactions.
+
+        Usage::
+
+            with db.transaction():
+                db.insert_document("users", {"name": "Alice"})
+                db.insert_document("users", {"name": "Bob"})
+                # commits on exit, rolls back on exception
+
+        Returns:
+            Transaction: Context manager for transaction scope.
+        """
+        return Transaction(self.adapter)
+
+    def __enter__(self):
+        """Enter context manager; begin transaction."""
+        self.adapter.execute("BEGIN;")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager; commit or rollback."""
+        if exc_type is None:
+            self.adapter.commit()
+        else:
+            try:
+                self.adapter.execute("ROLLBACK;")
+            except Exception:
+                pass
+        return False
+
+
+class Transaction:
+    """Context manager for explicit database transactions."""
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self._active = False
+
+    def __enter__(self):
+        """Begin the transaction."""
+        self.adapter.execute("BEGIN;")
+        self._active = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Commit on success, rollback on exception."""
+        if not self._active:
+            return False
+        self._active = False
+        if exc_type is None:
+            self.adapter.commit()
+        else:
+            try:
+                self.adapter.execute("ROLLBACK;")
+            except Exception:
+                pass
+        return False
+
+    def commit(self):
+        """Explicitly commit the transaction."""
+        if self._active:
+            self.adapter.commit()
+            self._active = False
+
+    def rollback(self):
+        """Explicitly rollback the transaction."""
+        if self._active:
+            try:
+                self.adapter.execute("ROLLBACK;")
+            except Exception:
+                pass
+            self._active = False
+
     def create_index(
         self,
         table: str,
