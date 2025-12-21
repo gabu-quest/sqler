@@ -298,3 +298,77 @@ class AsyncSQLerDB:
 
         await self._ensure_table(table)
         return AsyncSQLerQuery(table=table, adapter=self.adapter)
+
+    def transaction(self) -> "AsyncTransaction":
+        """Return a context manager for explicit transactions.
+
+        Usage::
+
+            async with db.transaction():
+                await db.insert_document("users", {"name": "Alice"})
+                await db.insert_document("users", {"name": "Bob"})
+                # commits on exit, rolls back on exception
+
+        Returns:
+            AsyncTransaction: Async context manager for transaction scope.
+        """
+        return AsyncTransaction(self.adapter)
+
+    async def __aenter__(self):
+        """Enter async context manager; begin transaction."""
+        await self.adapter.execute("BEGIN;")
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Exit async context manager; commit or rollback."""
+        if exc_type is None:
+            await self.adapter.commit()
+        else:
+            try:
+                await self.adapter.execute("ROLLBACK;")
+            except Exception:
+                pass
+        return False
+
+
+class AsyncTransaction:
+    """Async context manager for explicit database transactions."""
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self._active = False
+
+    async def __aenter__(self):
+        """Begin the transaction."""
+        await self.adapter.execute("BEGIN;")
+        self._active = True
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Commit on success, rollback on exception."""
+        if not self._active:
+            return False
+        self._active = False
+        if exc_type is None:
+            await self.adapter.commit()
+        else:
+            try:
+                await self.adapter.execute("ROLLBACK;")
+            except Exception:
+                pass
+        return False
+
+    async def commit(self):
+        """Explicitly commit the transaction."""
+        if self._active:
+            await self.adapter.commit()
+            self._active = False
+
+    async def rollback(self):
+        """Explicitly rollback the transaction."""
+        if self._active:
+            try:
+                await self.adapter.execute("ROLLBACK;")
+            except Exception:
+                pass
+            self._active = False
