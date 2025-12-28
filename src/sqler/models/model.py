@@ -160,6 +160,44 @@ class SQLerModel(BaseModel):
         return inst  # type: ignore[return-value]
 
     @classmethod
+    def from_ids(cls: Type[TModel], ids: list[int]) -> list[TModel]:
+        """Hydrate multiple instances by id list (batch operation).
+
+        Fetches all documents in a single query and resolves relations
+        in batch. This is much faster than looping over `from_id()`.
+
+        Args:
+            ids: List of row ids to load.
+
+        Returns:
+            List of model instances (in same order as input ids).
+            Missing ids are silently omitted from result.
+        """
+        if not ids:
+            return []
+        db, table = cls._require_binding()
+        docs = db.find_documents(table, ids)
+        if not docs:
+            return []
+        # Batch resolve relations using queryset's batch resolution
+        qs = cls.query()
+        docs = qs._batch_resolve(docs)
+        instances = []
+        for doc in docs:
+            inst = cls.model_validate(doc)
+            inst._id = doc.get("_id")
+            instances.append(inst)
+        return instances
+
+    @classmethod
+    def count(cls: Type[TModel]) -> int:
+        """Return total count of rows in this model's table.
+
+        Shorthand for ``cls.query().count()``.
+        """
+        return cls.query().count()
+
+    @classmethod
     def query(cls: Type[TModel]) -> SQLerQuerySet[TModel]:
         """Return a queryset for chaining and execution."""
         db, table = cls._require_binding()

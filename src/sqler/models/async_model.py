@@ -76,6 +76,46 @@ class AsyncSQLerModel(BaseModel):
         return inst  # type: ignore[return-value]
 
     @classmethod
+    async def from_ids(cls: Type[TAModel], ids: list[int]) -> list[TAModel]:
+        """Hydrate multiple instances by id list (batch operation).
+
+        Fetches all documents in a single query and resolves relations
+        in batch. This is much faster than looping over `from_id()`.
+
+        Args:
+            ids: List of row ids to load.
+
+        Returns:
+            List of model instances (in same order as input ids).
+            Missing ids are silently omitted from result.
+        """
+        if not ids:
+            return []
+        db, table = cls._require_binding()
+        docs = await db.find_documents(table, ids)
+        if not docs:
+            return []
+        # Batch resolve relations using queryset's batch resolution
+        qs = cls.query()
+        docs = await qs._abatch_resolve(docs)
+        instances = []
+        for doc in docs:
+            inst = cls.model_validate(doc)
+            inst._id = doc.get("_id")
+            instances.append(inst)
+        return instances
+
+    @classmethod
+    async def count(cls: Type[TAModel]) -> int:
+        """Return total count of rows in this model's table.
+
+        Shorthand for ``await cls.query().count()``.
+        """
+        db, table = cls._require_binding()
+        await db._ensure_table(table)
+        return await cls.query().count()
+
+    @classmethod
     def query(cls: Type[TAModel]) -> AsyncSQLerQuerySet[TAModel]:
         db, table = cls._require_binding()
         q = AsyncSQLerQuery(table=table, adapter=db.adapter)

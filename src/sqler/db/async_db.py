@@ -74,6 +74,38 @@ class AsyncSQLerDB:
         obj["_id"] = row[0]
         return obj
 
+    async def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
+        """Fetch multiple documents by id list (batch operation).
+
+        Documents are returned in the same order as the input ids. If an id
+        is not found, it is omitted from the result (no None placeholder).
+
+        Args:
+            table: Table name.
+            ids: List of row ids to fetch.
+
+        Returns:
+            list[dict]: Decoded documents with ``_id`` merged in.
+        """
+        if not ids:
+            return []
+        await self._ensure_table(table)
+        placeholders = ",".join("?" for _ in ids)
+        cur = await self.adapter.execute(
+            f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
+            list(ids),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        # Build lookup dict for ordering
+        by_id: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            obj = json.loads(row[1])
+            obj["_id"] = row[0]
+            by_id[row[0]] = obj
+        # Return in input order, skipping missing
+        return [by_id[i] for i in ids if i in by_id]
+
     async def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
 
