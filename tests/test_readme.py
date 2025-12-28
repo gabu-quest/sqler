@@ -730,3 +730,249 @@ def test_C29_query_logging():
 
     query_logger.disable()
     query_logger.clear()
+
+
+# ---------------- [C30] Transaction-aware model.save() ----------------
+def test_C30_transaction_aware_save():
+    class TxItem(SQLerModel):
+        name: str
+
+    db = SQLerDB.in_memory()
+    TxItem.set_db(db)
+
+    # Saves inside transaction respect rollback
+    try:
+        with db.transaction():
+            TxItem(name="A").save()
+            TxItem(name="B").save()
+            raise RuntimeError("abort!")
+    except RuntimeError:
+        pass
+
+    # Nothing was saved due to rollback
+    assert TxItem.query().count() == 0
+
+    # Without transaction, saves commit immediately
+    TxItem(name="C").save()
+    TxItem(name="D").save()
+    assert TxItem.query().count() == 2
+
+
+# ---------------- [C31] Field operations ----------------
+def test_C31_field_operations():
+    class Employee(SQLerModel):
+        name: str
+        age: int
+        email: str
+
+    db = SQLerDB.in_memory()
+    Employee.set_db(db)
+
+    Employee(name="Alice", age=25, email="alice@example.com").save()
+    Employee(name="Bob", age=35, email="bob@test.org").save()
+    Employee(name="Charlie", age=45, email="charlie@example.com").save()
+
+    # between (inclusive)
+    mid_age = Employee.query().filter(F("age").between(30, 40)).all()
+    assert [e.name for e in mid_age] == ["Bob"]
+
+    # startswith
+    alice = Employee.query().filter(F("name").startswith("Al")).all()
+    assert [e.name for e in alice] == ["Alice"]
+
+    # endswith
+    example_emails = Employee.query().filter(F("email").endswith("@example.com")).all()
+    assert len(example_emails) == 2
+
+    # is_null / is_not_null
+    Employee(name="NoEmail", age=30, email="").save()  # empty but not null
+    all_with_email = Employee.query().filter(F("email").is_not_null()).all()
+    assert len(all_with_email) == 4
+
+
+# ---------------- [C32] NULL-safe comparison ----------------
+def test_C32_null_safe_comparison():
+    from sqler import SoftDeleteMixin
+
+    class SoftUser(SoftDeleteMixin, SQLerModel):
+        name: str
+
+    db = SQLerDB.in_memory()
+    SoftUser.set_db(db)
+
+    active = SoftUser(name="Active").save()
+    deleted = SoftUser(name="Deleted").save()
+    deleted.soft_delete()
+
+    # F("field") == None generates IS NULL (correct SQL)
+    # F("field") != None generates IS NOT NULL
+    active_users = SoftUser.query().filter(F("deleted_at") == None).all()
+    deleted_users = SoftUser.query().filter(F("deleted_at") != None).all()
+
+    assert len(active_users) == 1 and active_users[0].name == "Active"
+    assert len(deleted_users) == 1 and deleted_users[0].name == "Deleted"
+
+
+# ---------------- [C33] in_list for multiple value matching ----------------
+def test_C33_in_list():
+    class Status(SQLerModel):
+        code: str
+        label: str
+
+    db = SQLerDB.in_memory()
+    Status.set_db(db)
+
+    Status(code="A", label="Active").save()
+    Status(code="P", label="Pending").save()
+    Status(code="C", label="Closed").save()
+    Status(code="D", label="Draft").save()
+
+    # in_list with values
+    open_statuses = Status.query().filter(F("code").in_list(["A", "P"])).all()
+    assert len(open_statuses) == 2
+
+    # Empty list returns nothing
+    empty = Status.query().filter(F("code").in_list([])).all()
+    assert len(empty) == 0
+
+
+# ---------------- [C34] SoftDeleteMixin class methods ----------------
+def test_C34_soft_delete_class_methods():
+    from sqler import SoftDeleteMixin
+
+    class Document(SoftDeleteMixin, SQLerModel):
+        title: str
+
+    db = SQLerDB.in_memory()
+    Document.set_db(db)
+
+    doc1 = Document(title="Active Doc").save()
+    doc2 = Document(title="Deleted Doc").save()
+    doc3 = Document(title="Another Active").save()
+    doc2.soft_delete()
+
+    # active() - only non-deleted
+    active = Document.active().all()
+    assert len(active) == 2
+    assert all(d.deleted_at is None for d in active)
+
+    # only_deleted() - only deleted
+    deleted = Document.only_deleted().all()
+    assert len(deleted) == 1
+    assert deleted[0].title == "Deleted Doc"
+
+    # with_deleted() - all records
+    all_docs = Document.with_deleted().all()
+    assert len(all_docs) == 3
+
+
+# ---------------- [C35] list_indexes and index_exists ----------------
+def test_C35_index_management():
+    class Product(SQLerModel):
+        sku: str
+        price: float
+
+    db = SQLerDB.in_memory()
+    Product.set_db(db)
+
+    # Create indexes
+    db.create_index("products", "sku", unique=True, name="idx_products_sku")
+    db.create_index("products", "price", name="idx_products_price")
+
+    # List all indexes
+    all_indexes = db.list_indexes()
+    assert len(all_indexes) >= 2
+
+    # List indexes for specific table
+    product_indexes = db.list_indexes("products")
+    assert len(product_indexes) == 2
+
+    # Check if index exists
+    assert db.index_exists("idx_products_sku") == True
+    assert db.index_exists("nonexistent_index") == False
+
+    # Index info includes uniqueness
+    sku_idx = next(i for i in product_indexes if i["name"] == "idx_products_sku")
+    assert sku_idx["unique"] == True
+
+
+# ---------------- [C36] RebaseConfig for safe models ----------------
+def test_C36_rebase_config():
+    from sqler.models.utils import PERMISSIVE_REBASE_CONFIG, NO_REBASE_CONFIG
+    from sqler import SQLerSafeModel
+
+    class Counter(SQLerSafeModel):
+        value: int = 0
+        count: int = 0
+        # Allow rebasing any numeric field with delta ±1
+        _rebase_config = PERMISSIVE_REBASE_CONFIG
+
+    class StrictCounter(SQLerSafeModel):
+        value: int = 0
+        # No rebasing - any conflict raises
+        _rebase_config = NO_REBASE_CONFIG
+
+    db = SQLerDB.in_memory()
+    Counter.set_db(db)
+    StrictCounter.set_db(db)
+
+    # Permissive: increments can be rebased
+    c = Counter(value=0, count=0).save()
+    c.value += 1
+    c.count += 1
+    c.save()  # Works even if version changed (for small deltas)
+
+    # Strict: no automatic rebasing
+    s = StrictCounter(value=0).save()
+    s.value += 1
+    s.save()
+    assert s._version == 1
+
+
+# ---------------- [C37] HooksMixin auto-calling ----------------
+def test_C37_hooks_mixin_auto_calling():
+    from sqler import HooksMixin
+
+    class AuditedItem(HooksMixin, SQLerModel):
+        name: str
+        normalized: bool = False
+        save_count: int = 0
+
+        def before_save(self) -> bool:
+            self.name = self.name.strip().lower()
+            self.normalized = True
+            return True  # Continue with save
+
+        def after_save(self) -> None:
+            self.save_count += 1
+
+    db = SQLerDB.in_memory()
+    AuditedItem.set_db(db)
+
+    # Hooks are called automatically in save()
+    item = AuditedItem(name="  HELLO WORLD  ")
+    item = item.save()
+
+    assert item.name == "hello world"
+    assert item.normalized == True
+    assert item.save_count == 1
+
+    # before_save returning False aborts the save
+    class AbortableItem(HooksMixin, SQLerModel):
+        name: str
+        valid: bool = True
+
+        def before_save(self) -> bool:
+            return self.valid  # Abort if not valid
+
+    db2 = SQLerDB.in_memory()
+    AbortableItem.set_db(db2)
+
+    try:
+        AbortableItem(name="test", valid=False).save()
+        raised = False
+    except RuntimeError as e:
+        raised = True
+        assert "before_save" in str(e).lower() or "abort" in str(e).lower()
+
+    assert raised, "Expected RuntimeError when before_save returns False"

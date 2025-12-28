@@ -22,18 +22,122 @@ This started as a personal toolkit for **very fast prototyping**; small scripts 
 
 - **Document-style models** backed by SQLite JSON1
 - **Fluent query builder**: `filter`, `exclude`, `contains`, `isin`, `.any().where(...)`
+- **Extended field operations**: `between`, `is_null`, `is_not_null`, `startswith`, `endswith`, `glob`, `in_list`
+- **NULL-safe comparisons**: `F("field") == None` generates proper `IS NULL`
 - **Aggregations**: `sum`, `avg`, `min`, `max`, `exists`, `paginate`
 - **Relationships** with simple reference storage and hydration
 - **Safe models** with `_version` and optimistic locking (stale writes raise)
-- **Bulk operations** (`bulk_upsert`)
-- **Transactions** with commit/rollback context managers
-- **Model mixins**: timestamps, soft delete, lifecycle hooks
+- **Configurable intent rebasing** for automatic conflict resolution
+- **Bulk operations** (`bulk_upsert`, `bulk_insert`)
+- **Transaction-aware saves**: `model.save()` respects explicit transactions (rollback works!)
+- **Index management**: `create_index`, `drop_index`, `list_indexes`, `index_exists`
+- **Model mixins**: timestamps, soft delete (with `active()`, `only_deleted()`, `with_deleted()`), lifecycle hooks
+- **Auto-calling hooks**: `HooksMixin` automatically calls `before_save`/`after_save` in `save()`
 - **Integrity policies** on delete: `restrict`, `set_null`, `cascade`
 - **Query logging** for debugging and performance profiling
 - **Raw SQL escape hatch** (parameterized), with model hydration when returning `_id, data`
 - **Sync & Async** APIs with matching semantics
 - **WAL-friendly concurrency** via thread-local connections (many readers, one writer)
+- **Smart table naming**: proper English pluralization (category→categories, box→boxes)
 - **Opt-in perf tests** and practical indexing guidance
+
+---
+
+## What's New (Latest)
+
+### Transaction-Aware Saves
+
+`model.save()` now respects explicit transactions. Previously, saves would commit immediately even inside a transaction block, breaking rollback behavior. Now:
+
+```python
+with db.transaction():
+    User(name="Alice").save()  # NOT committed yet
+    User(name="Bob").save()    # NOT committed yet
+    raise RuntimeError("Oops!")
+# Both saves are rolled back!
+```
+
+### Soft Delete Convenience Methods
+
+`SoftDeleteMixin` now provides class methods for querying:
+
+```python
+User.active()       # Only non-deleted records
+User.only_deleted() # Only deleted records
+User.with_deleted() # All records including deleted
+```
+
+### Extended Query Builder
+
+New field operations for more expressive queries:
+
+```python
+F("age").between(18, 65)           # BETWEEN ? AND ?
+F("email").is_null()               # IS NULL
+F("email").is_not_null()           # IS NOT NULL
+F("name").startswith("Al")         # LIKE 'Al%' ESCAPE '\'
+F("email").endswith("@gmail.com")  # LIKE '%@gmail.com' ESCAPE '\'
+F("path").glob("/home/*")          # GLOB pattern
+F("status").in_list(["a", "b"])    # IN (?, ?)
+```
+
+### NULL-Safe Comparisons
+
+`F("field") == None` now generates `IS NULL` (not `= NULL`):
+
+```python
+# Before: broken SQL "= NULL" (always false)
+# After: correct SQL "IS NULL"
+User.query().filter(F("deleted_at") == None)  # Works correctly!
+```
+
+### Configurable Intent Rebasing
+
+Control automatic conflict resolution for safe models:
+
+```python
+from sqler import RebaseConfig, PERMISSIVE_REBASE_CONFIG, NO_REBASE_CONFIG
+
+class Counter(SQLerSafeModel):
+    count: int = 0
+    _rebase_config = PERMISSIVE_REBASE_CONFIG  # Allow rebasing any numeric field
+```
+
+### Auto-Calling Lifecycle Hooks
+
+`HooksMixin` now automatically calls hooks in `save()` and `delete()`:
+
+```python
+class AuditedUser(HooksMixin, SQLerModel):
+    email: str
+
+    def before_save(self) -> bool:
+        self.email = self.email.lower()
+        return True  # False aborts save
+
+user = AuditedUser(email="ALICE@TEST.COM")
+user.save()  # Hooks called automatically!
+```
+
+### Index Management
+
+Query and manage indexes programmatically:
+
+```python
+db.list_indexes()                    # All indexes
+db.list_indexes("users")             # Indexes on 'users' table
+db.index_exists("idx_users_email")   # Check if exists
+```
+
+### Smart Table Naming
+
+Proper English pluralization for table names:
+
+```python
+class Category(SQLerModel): ...  # → categories (not categorys)
+class Box(SQLerModel): ...       # → boxes (not boxs)
+class Company(SQLerModel): ...   # → companies (not companys)
+```
 
 ---
 
@@ -846,6 +950,303 @@ assert "avg_time_ms" in stats
 
 query_logger.disable()
 query_logger.clear()
+```
+
+---
+
+## Transaction-Aware Operations
+
+Model operations now respect explicit transactions, allowing proper rollback behavior.
+
+### [C30] Transaction-aware model.save()
+
+```python
+from sqler import SQLerDB, SQLerModel
+
+class TxItem(SQLerModel):
+    name: str
+
+db = SQLerDB.in_memory()
+TxItem.set_db(db)
+
+# Saves inside transaction respect rollback
+try:
+    with db.transaction():
+        TxItem(name="A").save()
+        TxItem(name="B").save()
+        raise RuntimeError("abort!")
+except RuntimeError:
+    pass
+
+# Nothing was saved due to rollback
+assert TxItem.query().count() == 0
+
+# Without transaction, saves commit immediately
+TxItem(name="C").save()
+TxItem(name="D").save()
+assert TxItem.query().count() == 2
+```
+
+---
+
+## Extended Query Builder
+
+New field operations for more expressive queries.
+
+### [C31] Field operations: between, startswith, endswith, glob
+
+```python
+from sqler import SQLerDB, SQLerModel
+from sqler.query import SQLerField as F
+
+class Employee(SQLerModel):
+    name: str
+    age: int
+    email: str
+
+db = SQLerDB.in_memory()
+Employee.set_db(db)
+
+Employee(name="Alice", age=25, email="alice@example.com").save()
+Employee(name="Bob", age=35, email="bob@test.org").save()
+Employee(name="Charlie", age=45, email="charlie@example.com").save()
+
+# between (inclusive)
+mid_age = Employee.query().filter(F("age").between(30, 40)).all()
+assert [e.name for e in mid_age] == ["Bob"]
+
+# startswith
+alice = Employee.query().filter(F("name").startswith("Al")).all()
+assert [e.name for e in alice] == ["Alice"]
+
+# endswith
+example_emails = Employee.query().filter(F("email").endswith("@example.com")).all()
+assert len(example_emails) == 2
+
+# is_null / is_not_null
+Employee(name="NoEmail", age=30, email="").save()  # empty but not null
+all_with_email = Employee.query().filter(F("email").is_not_null()).all()
+assert len(all_with_email) == 4
+```
+
+### [C32] NULL-safe comparison with == None
+
+```python
+from sqler import SQLerDB, SQLerModel, SoftDeleteMixin
+from sqler.query import SQLerField as F
+
+class SoftUser(SoftDeleteMixin, SQLerModel):
+    name: str
+
+db = SQLerDB.in_memory()
+SoftUser.set_db(db)
+
+active = SoftUser(name="Active").save()
+deleted = SoftUser(name="Deleted").save()
+deleted.soft_delete()
+
+# F("field") == None generates IS NULL (correct SQL)
+# F("field") != None generates IS NOT NULL
+active_users = SoftUser.query().filter(F("deleted_at") == None).all()
+deleted_users = SoftUser.query().filter(F("deleted_at") != None).all()
+
+assert len(active_users) == 1 and active_users[0].name == "Active"
+assert len(deleted_users) == 1 and deleted_users[0].name == "Deleted"
+```
+
+### [C33] in_list for multiple value matching
+
+```python
+from sqler import SQLerDB, SQLerModel
+from sqler.query import SQLerField as F
+
+class Status(SQLerModel):
+    code: str
+    label: str
+
+db = SQLerDB.in_memory()
+Status.set_db(db)
+
+Status(code="A", label="Active").save()
+Status(code="P", label="Pending").save()
+Status(code="C", label="Closed").save()
+Status(code="D", label="Draft").save()
+
+# in_list with values
+open_statuses = Status.query().filter(F("code").in_list(["A", "P"])).all()
+assert len(open_statuses) == 2
+
+# Empty list returns nothing
+empty = Status.query().filter(F("code").in_list([])).all()
+assert len(empty) == 0
+```
+
+---
+
+## Soft Delete Convenience Methods
+
+Query soft-deleted records easily with class methods.
+
+### [C34] SoftDeleteMixin class methods
+
+```python
+from sqler import SQLerDB, SQLerModel, SoftDeleteMixin
+
+class Document(SoftDeleteMixin, SQLerModel):
+    title: str
+
+db = SQLerDB.in_memory()
+Document.set_db(db)
+
+doc1 = Document(title="Active Doc").save()
+doc2 = Document(title="Deleted Doc").save()
+doc3 = Document(title="Another Active").save()
+doc2.soft_delete()
+
+# active() - only non-deleted
+active = Document.active().all()
+assert len(active) == 2
+assert all(d.deleted_at is None for d in active)
+
+# only_deleted() - only deleted
+deleted = Document.only_deleted().all()
+assert len(deleted) == 1
+assert deleted[0].title == "Deleted Doc"
+
+# with_deleted() - all records
+all_docs = Document.with_deleted().all()
+assert len(all_docs) == 3
+```
+
+---
+
+## Index Management
+
+Query and manage database indexes programmatically.
+
+### [C35] list_indexes and index_exists
+
+```python
+from sqler import SQLerDB, SQLerModel
+
+class Product(SQLerModel):
+    sku: str
+    price: float
+
+db = SQLerDB.in_memory()
+Product.set_db(db)
+
+# Create indexes
+db.create_index("products", "sku", unique=True, name="idx_products_sku")
+db.create_index("products", "price", name="idx_products_price")
+
+# List all indexes
+all_indexes = db.list_indexes()
+assert len(all_indexes) >= 2
+
+# List indexes for specific table
+product_indexes = db.list_indexes("products")
+assert len(product_indexes) == 2
+
+# Check if index exists
+assert db.index_exists("idx_products_sku") == True
+assert db.index_exists("nonexistent_index") == False
+
+# Index info includes uniqueness
+sku_idx = next(i for i in product_indexes if i["name"] == "idx_products_sku")
+assert sku_idx["unique"] == True
+```
+
+---
+
+## Configurable Intent Rebasing
+
+Control how safe models handle concurrent numeric field updates.
+
+### [C36] RebaseConfig for safe models
+
+```python
+from sqler import SQLerDB, SQLerSafeModel, StaleVersionError
+from sqler.models.utils import RebaseConfig, PERMISSIVE_REBASE_CONFIG, NO_REBASE_CONFIG
+
+class Counter(SQLerSafeModel):
+    value: int = 0
+    count: int = 0
+    # Allow rebasing any numeric field with delta ±1
+    _rebase_config = PERMISSIVE_REBASE_CONFIG
+
+class StrictCounter(SQLerSafeModel):
+    value: int = 0
+    # No rebasing - any conflict raises
+    _rebase_config = NO_REBASE_CONFIG
+
+db = SQLerDB.in_memory()
+Counter.set_db(db)
+StrictCounter.set_db(db)
+
+# Permissive: increments can be rebased
+c = Counter(value=0, count=0).save()
+c.value += 1
+c.count += 1
+c.save()  # Works even if version changed (for small deltas)
+
+# Strict: no automatic rebasing
+s = StrictCounter(value=0).save()
+s.value += 1
+s.save()
+assert s._version == 1
+```
+
+---
+
+## Auto-Calling Lifecycle Hooks
+
+`HooksMixin` automatically invokes hooks when using `save()` and `delete()`.
+
+### [C37] HooksMixin auto-calling
+
+```python
+from sqler import SQLerDB, SQLerModel, HooksMixin
+
+class AuditedItem(HooksMixin, SQLerModel):
+    name: str
+    normalized: bool = False
+    save_count: int = 0
+
+    def before_save(self) -> bool:
+        self.name = self.name.strip().lower()
+        self.normalized = True
+        return True  # Continue with save
+
+    def after_save(self) -> None:
+        self.save_count += 1
+
+db = SQLerDB.in_memory()
+AuditedItem.set_db(db)
+
+# Hooks are called automatically in save()
+item = AuditedItem(name="  HELLO WORLD  ")
+item = item.save()
+
+assert item.name == "hello world"
+assert item.normalized == True
+assert item.save_count == 1
+
+# before_save returning False aborts the save
+class AbortableItem(HooksMixin, SQLerModel):
+    name: str
+    valid: bool = True
+
+    def before_save(self) -> bool:
+        return self.valid  # Abort if not valid
+
+db2 = SQLerDB.in_memory()
+AbortableItem.set_db(db2)
+
+try:
+    AbortableItem(name="test", valid=False).save()
+except RuntimeError as e:
+    assert "before_save() returned False" in str(e)
 ```
 
 ---
