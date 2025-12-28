@@ -2,6 +2,12 @@ from dataclasses import dataclass
 
 from sqler.exceptions import ReferentialIntegrityError, StaleVersionError
 
+from .async_integrity import (
+    async_cascade_delete,
+    async_find_referrers,
+    async_set_null_referrers,
+    async_validate_references,
+)
 from .async_model import AsyncSQLerModel
 from .async_queryset import AsyncSQLerQuerySet
 from .async_safe import AsyncSQLerSafeModel
@@ -62,4 +68,9 @@ __all__ = [
     "DEFAULT_REBASE_CONFIG",
     "PERMISSIVE_REBASE_CONFIG",
     "NO_REBASE_CONFIG",
+    # Async integrity helpers
+    "async_find_referrers",
+    "async_set_null_referrers",
+    "async_cascade_delete",
+    "async_validate_references",
 ]

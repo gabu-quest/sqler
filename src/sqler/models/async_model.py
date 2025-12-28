@@ -163,10 +163,16 @@ class AsyncSQLerModel(BaseModel):
 
         Args:
             on_delete: One of "restrict", "set_null", or "cascade".
-                Note: For async models, "set_null" and "cascade" are not yet
-                fully implemented and will raise NotImplementedError.
-                "restrict" performs a basic delete without checking references.
+                - "restrict": Deletes the row without checking for references.
+                - "set_null": Nullifies all references to this row before deleting.
+                - "cascade": Recursively deletes all rows that reference this row.
         """
+        from .async_integrity import (
+            async_cascade_delete,
+            async_find_referrers,
+            async_set_null_referrers,
+        )
+
         cls = self.__class__
         db, table = cls._require_binding()
         if self._id is None:
@@ -174,16 +180,15 @@ class AsyncSQLerModel(BaseModel):
         if on_delete not in {"restrict", "set_null", "cascade"}:
             raise ValueError("on_delete must be 'restrict', 'set_null', or 'cascade'")
 
-        if on_delete in {"set_null", "cascade"}:
-            raise NotImplementedError(
-                f"on_delete='{on_delete}' is not yet implemented for async models. "
-                "Use on_delete='restrict' or the sync model for full integrity support."
-            )
+        if on_delete == "set_null":
+            referrers = await async_find_referrers(db, table, self._id)
+            await async_set_null_referrers(db, table, self._id, referrers)
+        elif on_delete == "cascade":
+            referrers = await async_find_referrers(db, table, self._id)
+            await async_cascade_delete(db, referrers, set())
 
-        # For restrict mode in async, we do a simple delete
-        # TODO: Add async integrity checking when async integrity helpers are implemented
         await db.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [self._id])
-        await db.adapter.commit()
+        await db.adapter.auto_commit()
         self._id = None
 
     async def refresh(self: TAModel) -> TAModel:
