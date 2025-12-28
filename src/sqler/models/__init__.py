@@ -16,6 +16,12 @@ from .model_field import SQLerModelField
 from .queryset import SQLerQuerySet
 from .ref import SQLerRef, as_ref
 from .safe import SQLerSafeModel, StaleVersionError
+from .utils import (
+    DEFAULT_REBASE_CONFIG,
+    NO_REBASE_CONFIG,
+    PERMISSIVE_REBASE_CONFIG,
+    RebaseConfig,
+)
 
 
 class ReferentialIntegrityError(RuntimeError):
@@ -51,4 +57,9 @@ __all__ = [
     "AsyncHooksMixin",
     "FullMixin",
     "AsyncFullMixin",
+    # Rebase configuration
+    "RebaseConfig",
+    "DEFAULT_REBASE_CONFIG",
+    "PERMISSIVE_REBASE_CONFIG",
+    "NO_REBASE_CONFIG",
 ]

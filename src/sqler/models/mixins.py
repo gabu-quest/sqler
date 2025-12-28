@@ -40,8 +40,8 @@ class SoftDeleteMixin:
     """Mixin that provides soft delete functionality.
 
     Instead of actually deleting records, this marks them with a
-    deleted_at timestamp. Use query().exclude_deleted() to filter
-    out soft-deleted records.
+    deleted_at timestamp. The mixin provides convenient class methods
+    for querying active (non-deleted) and all records.
 
     Usage::
 
@@ -52,9 +52,17 @@ class SoftDeleteMixin:
         user.soft_delete()  # Sets deleted_at instead of deleting
         user.restore()      # Clears deleted_at
         user.is_deleted     # True if soft-deleted
+
+        # Query methods
+        User.active()       # Only non-deleted records
+        User.with_deleted() # All records including deleted
+        User.only_deleted() # Only deleted records
     """
 
     deleted_at: Optional[datetime] = Field(default=None)
+
+    # Class-level configuration for default query behavior
+    _soft_delete_default_exclude: ClassVar[bool] = True
 
     @property
     def is_deleted(self) -> bool:
@@ -82,6 +90,66 @@ class SoftDeleteMixin:
     def hard_delete(self) -> None:
         """Permanently delete this record from the database."""
         self.delete()  # type: ignore[attr-defined]
+
+    @classmethod
+    def active(cls):
+        """Return a queryset that excludes soft-deleted records.
+
+        This is the recommended way to query for active (non-deleted) records.
+
+        Usage::
+
+            # Get all active users
+            active_users = User.active().all()
+
+            # Filter active users
+            admins = User.active().filter(F("role") == "admin").all()
+
+        Returns:
+            SQLerQuerySet: Queryset filtered to non-deleted records.
+        """
+        from sqler.query import F
+
+        return cls.query().filter(F("deleted_at") == None)  # noqa: E711
+
+    @classmethod
+    def with_deleted(cls):
+        """Return a queryset that includes soft-deleted records.
+
+        Use this when you need to access all records regardless of deletion status.
+
+        Usage::
+
+            # Get all users including deleted
+            all_users = User.with_deleted().all()
+
+        Returns:
+            SQLerQuerySet: Queryset including all records.
+        """
+        return cls.query()  # type: ignore[attr-defined]
+
+    @classmethod
+    def only_deleted(cls):
+        """Return a queryset containing only soft-deleted records.
+
+        Use this to find and potentially restore deleted records.
+
+        Usage::
+
+            # Get all deleted users
+            deleted_users = User.only_deleted().all()
+
+            # Restore a specific deleted user
+            user = User.only_deleted().filter(F("email") == "alice@example.com").first()
+            if user:
+                user.restore()
+
+        Returns:
+            SQLerQuerySet: Queryset filtered to only deleted records.
+        """
+        from sqler.query import F
+
+        return cls.query().filter(F("deleted_at") != None)  # noqa: E711
 
 
 class HooksMixin:

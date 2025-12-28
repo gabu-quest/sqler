@@ -1,27 +1,10 @@
 import json
-import re
 import threading
 from typing import Any, Optional
 
 from sqler.adapter import SQLiteAdapter
 from sqler.query import SQLerQuery
-
-
-def _validate_table_name(table: str) -> str:
-    """Validate and sanitize table name to prevent SQL injection.
-
-    Args:
-        table: Table name to validate.
-
-    Returns:
-        str: The validated table name.
-
-    Raises:
-        ValueError: If the table name contains invalid characters.
-    """
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
-        raise ValueError(f"Invalid table name: {table!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*")
-    return table
+from sqler.utils import validate_table_name
 
 
 class SQLerDB:
@@ -76,7 +59,7 @@ class SQLerDB:
         Args:
             table: Table name to ensure.
         """
-        table = _validate_table_name(table)
+        table = validate_table_name(table)
         ddl = f"""
         CREATE TABLE IF NOT EXISTS {table} (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,

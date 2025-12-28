@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Generic, Optional, Type, TypeVar
 
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
 
 T = TypeVar("T")
+
+logger = logging.getLogger("sqler.async_queryset")
 
 
 class AsyncSQLerQuerySet(Generic[T]):
@@ -40,21 +43,35 @@ class AsyncSQLerQuerySet(Generic[T]):
         if self._resolve:
             try:
                 docs = await self._abatch_resolve(docs)
-            except Exception:
-                pass
+            except RecursionError:
+                logger.warning(
+                    f"Circular reference detected during async batch resolution for "
+                    f"{self._model_cls.__name__}. Returning partially resolved documents."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Error during async batch resolution for {self._model_cls.__name__}: "
+                    f"{type(e).__name__}: {e}. Continuing with unresolved references."
+                )
         results: list[T] = []
         for d in docs:
             if self._resolve:
                 try:
-                    aresolver = getattr(self._model_cls, "_aresolve_relations")
-                    d = await aresolver(d)  # type: ignore[assignment]
-                except Exception:
-                    pass
+                    aresolver = getattr(self._model_cls, "_aresolve_relations", None)
+                    if aresolver is not None:
+                        d = await aresolver(d)  # type: ignore[assignment]
+                except RecursionError:
+                    logger.debug(
+                        f"Circular reference during individual resolution for "
+                        f"{self._model_cls.__name__}"
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Individual resolution error for {self._model_cls.__name__}: "
+                        f"{type(e).__name__}: {e}"
+                    )
             inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
-            try:
-                inst._id = d.get("_id")  # type: ignore[attr-defined]
-            except Exception:
-                pass
+            self._attach_metadata(inst, d)
             results.append(inst)
         return results
 
@@ -65,14 +82,37 @@ class AsyncSQLerQuerySet(Generic[T]):
         if self._resolve:
             try:
                 d = (await self._abatch_resolve([d]))[0]
-            except Exception:
-                pass
+            except RecursionError:
+                logger.warning(
+                    f"Circular reference detected during async resolution for "
+                    f"{self._model_cls.__name__}. Returning partially resolved document."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Error during async resolution for {self._model_cls.__name__}: "
+                    f"{type(e).__name__}: {e}. Continuing with unresolved references."
+                )
         inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
-        try:
-            inst._id = d.get("_id")  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        self._attach_metadata(inst, d)
         return inst
+
+    def _attach_metadata(self, inst: T, doc: dict) -> None:
+        """Attach database metadata (_id, _version, _snapshot) to an instance.
+
+        Args:
+            inst: The model instance to attach metadata to.
+            doc: The document dictionary containing the metadata.
+        """
+        try:
+            inst._id = doc.get("_id")  # type: ignore[attr-defined]
+            if "_version" in doc:
+                inst._version = doc.get("_version")  # type: ignore[attr-defined]
+            snap = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
+            inst._snapshot = snap  # type: ignore[attr-defined]
+        except AttributeError as e:
+            logger.debug(
+                f"Could not attach metadata to {self._model_cls.__name__}: {e}"
+            )
 
     async def count(self) -> int:
         return await self._query.count()

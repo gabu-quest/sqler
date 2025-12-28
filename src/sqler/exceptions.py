@@ -273,3 +273,91 @@ class AfterDeleteError(HookError):
     """Raised when an after_delete hook fails."""
 
     pass
+
+
+# Relationship Resolution Errors
+
+
+class ResolutionError(SQLerError):
+    """Base class for relationship resolution errors."""
+
+    pass
+
+
+class CircularReferenceError(ResolutionError):
+    """Raised when a circular reference is detected during relationship resolution.
+
+    This error occurs when resolving relationships creates an infinite loop,
+    such as A -> B -> A.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        path: Optional[list[tuple[str, int]]] = None,
+        details: Optional[dict[str, Any]] = None,
+    ):
+        super().__init__(message, details=details)
+        self.path = path or []
+
+    def __str__(self) -> str:
+        if self.path:
+            path_str = " -> ".join(f"{table}:{id_}" for table, id_ in self.path)
+            return f"{self.message}: {path_str}"
+        return self.message
+
+
+class MaxDepthExceededError(ResolutionError):
+    """Raised when relationship resolution exceeds the maximum allowed depth."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        max_depth: Optional[int] = None,
+        current_depth: Optional[int] = None,
+        details: Optional[dict[str, Any]] = None,
+    ):
+        super().__init__(message, details=details)
+        self.max_depth = max_depth
+        self.current_depth = current_depth
+
+
+class MissingReferenceWarning(ResolutionError):
+    """Warning-level error for missing references during batch resolution.
+
+    This is used when a referenced row doesn't exist but we want to continue
+    resolving other references rather than failing completely.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        table: Optional[str] = None,
+        id_: Optional[int] = None,
+        details: Optional[dict[str, Any]] = None,
+    ):
+        super().__init__(message, details=details)
+        self.table = table
+        self.id_ = id_
+
+
+# Batch Operation Errors
+
+
+class BatchOperationError(SQLerError):
+    """Raised when a batch operation partially fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        succeeded: Optional[list[int]] = None,
+        failed: Optional[list[tuple[int, str]]] = None,
+        details: Optional[dict[str, Any]] = None,
+    ):
+        super().__init__(message, details=details)
+        self.succeeded = succeeded or []
+        self.failed = failed or []

@@ -159,11 +159,29 @@ class SQLerField:
         return SQLerExpression(expr, [val])
 
     def __eq__(self, other: Any) -> SQLerExpression:
-        """field == value"""
+        """field == value
+
+        Special handling for None: uses IS NULL instead of = NULL
+        """
+        if other is None:
+            # Use IS NULL for proper SQL NULL comparison
+            if self.alias_stack:
+                return SQLerAnyExpression(self.path, self.alias_stack, "IS", None)
+            expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NULL"
+            return SQLerExpression(expr, [])
         return self.__compare("=", other)
 
     def __ne__(self, other: Any) -> SQLerExpression:
-        """field != value"""
+        """field != value
+
+        Special handling for None: uses IS NOT NULL instead of != NULL
+        """
+        if other is None:
+            # Use IS NOT NULL for proper SQL NULL comparison
+            if self.alias_stack:
+                return SQLerAnyExpression(self.path, self.alias_stack, "IS NOT", None)
+            expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NOT NULL"
+            return SQLerExpression(expr, [])
         return self.__compare("!=", other)
 
     def __gt__(self, other: Any) -> SQLerExpression:

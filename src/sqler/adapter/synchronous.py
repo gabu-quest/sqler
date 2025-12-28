@@ -7,13 +7,36 @@ from .abstract import AdapterABC, NotConnectedError
 
 
 class SQLiteAdapter(AdapterABC):
-    """Synchronous SQLite adapter with WAL and thread-local connections."""
+    """Synchronous SQLite adapter with WAL and thread-local connections.
 
-    def __init__(self, path: str = "sqler.db", pragmas: Optional[list[str]] = None):
-        """pragmas are an optional list of sql statements to apply on connection"""
+    Features:
+        - Thread-local connections for safe concurrent access
+        - WAL mode for improved concurrency
+        - Configurable query timeout via busy_timeout pragma
+        - Optional slow query logging
 
+    Args:
+        path: Path to the database file, or ":memory:" for in-memory.
+        pragmas: Optional list of PRAGMA statements to execute on connect.
+        timeout_ms: Query timeout in milliseconds (default 5000).
+    """
+
+    def __init__(
+        self,
+        path: str = "sqler.db",
+        pragmas: Optional[list[str]] = None,
+        timeout_ms: int = 5000,
+    ):
+        """Initialize the adapter.
+
+        Args:
+            path: Path to the SQLite database file.
+            pragmas: Optional list of SQL PRAGMA statements to apply on connection.
+            timeout_ms: Busy timeout in milliseconds (how long to wait for locks).
+        """
         self.path = path
         self.pragmas = pragmas or []
+        self.timeout_ms = timeout_ms
         self._local = threading.local()
         self._conns_lock = threading.RLock()
         self._conns: set[sqlite3.Connection] = set()

@@ -1,25 +1,8 @@
 import json
-import re
 from typing import Any, Optional
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
-
-
-def _validate_table_name(table: str) -> str:
-    """Validate and sanitize table name to prevent SQL injection.
-
-    Args:
-        table: Table name to validate.
-
-    Returns:
-        str: The validated table name.
-
-    Raises:
-        ValueError: If the table name contains invalid characters.
-    """
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
-        raise ValueError(f"Invalid table name: {table!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*")
-    return table
+from sqler.utils import validate_table_name
 
 
 class AsyncSQLerDB:
@@ -47,7 +30,7 @@ class AsyncSQLerDB:
         await self.adapter.close()
 
     async def _ensure_table(self, table: str) -> None:
-        table = _validate_table_name(table)
+        table = validate_table_name(table)
         ddl = f"""
         CREATE TABLE IF NOT EXISTS {table} (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,7 +212,7 @@ class AsyncSQLerDB:
         Args:
             table: Table name.
         """
-        table = _validate_table_name(table)
+        table = validate_table_name(table)
         # Fast path: check cache first
         if table in self._versioned_tables:
             return

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Generic, Optional, Type, TypeVar
 
 from sqler.query import SQLerExpression, SQLerQuery
 
 T = TypeVar("T")
+
+logger = logging.getLogger("sqler.queryset")
 
 
 class SQLerQuerySet(Generic[T]):
@@ -53,21 +56,23 @@ class SQLerQuerySet(Generic[T]):
         if self._resolve:
             try:
                 docs = self._batch_resolve(docs)
-            except Exception:
-                pass
+            except RecursionError:
+                # Circular reference detected - log and continue with unresolved refs
+                logger.warning(
+                    f"Circular reference detected during batch resolution for "
+                    f"{self._model_cls.__name__}. Returning partially resolved documents."
+                )
+            except Exception as e:
+                # Log unexpected errors instead of silently ignoring them
+                logger.warning(
+                    f"Error during batch resolution for {self._model_cls.__name__}: "
+                    f"{type(e).__name__}: {e}. Continuing with unresolved references."
+                )
         results: list[T] = []
         for d in docs:
             inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
             # attach db id if present but excluded from schema
-            try:
-                inst._id = d.get("_id")  # type: ignore[attr-defined]
-                if "_version" in d:
-                    inst._version = d.get("_version")  # type: ignore[attr-defined]
-                # capture snapshot of loaded state (excluding private keys)
-                snap = {k: v for k, v in d.items() if k not in {"_id", "_version"}}
-                inst._snapshot = snap  # type: ignore[attr-defined]
-            except Exception:
-                pass
+            self._attach_metadata(inst, d)
             results.append(inst)
         return results
 
@@ -79,18 +84,39 @@ class SQLerQuerySet(Generic[T]):
         if self._resolve:
             try:
                 d = self._batch_resolve([d])[0]
-            except Exception:
-                pass
+            except RecursionError:
+                logger.warning(
+                    f"Circular reference detected during resolution for "
+                    f"{self._model_cls.__name__}. Returning partially resolved document."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Error during resolution for {self._model_cls.__name__}: "
+                    f"{type(e).__name__}: {e}. Continuing with unresolved references."
+                )
         inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
-        try:
-            inst._id = d.get("_id")  # type: ignore[attr-defined]
-            if "_version" in d:
-                inst._version = d.get("_version")  # type: ignore[attr-defined]
-            snap = {k: v for k, v in d.items() if k not in {"_id", "_version"}}
-            inst._snapshot = snap  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        self._attach_metadata(inst, d)
         return inst
+
+    def _attach_metadata(self, inst: T, doc: dict) -> None:
+        """Attach database metadata (_id, _version, _snapshot) to an instance.
+
+        Args:
+            inst: The model instance to attach metadata to.
+            doc: The document dictionary containing the metadata.
+        """
+        try:
+            inst._id = doc.get("_id")  # type: ignore[attr-defined]
+            if "_version" in doc:
+                inst._version = doc.get("_version")  # type: ignore[attr-defined]
+            # capture snapshot of loaded state (excluding private keys)
+            snap = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
+            inst._snapshot = snap  # type: ignore[attr-defined]
+        except AttributeError as e:
+            # This indicates a model configuration issue - worth logging
+            logger.debug(
+                f"Could not attach metadata to {self._model_cls.__name__}: {e}"
+            )
 
     def count(self) -> int:
         """Return the count of matching rows."""
