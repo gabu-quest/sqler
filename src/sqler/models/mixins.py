@@ -5,11 +5,9 @@ and lifecycle hooks.
 """
 
 from datetime import datetime, timezone
-from typing import Any, ClassVar, Optional, TypeVar
+from typing import Any, ClassVar, Optional, Self
 
 from pydantic import Field, PrivateAttr
-
-T = TypeVar("T")
 
 
 class TimestampMixin:
@@ -69,7 +67,7 @@ class SoftDeleteMixin:
         """Return True if this record has been soft-deleted."""
         return self.deleted_at is not None  # type: ignore[attr-defined]
 
-    def soft_delete(self: T) -> T:
+    def soft_delete(self) -> Self:
         """Mark this record as deleted without removing from database.
 
         Returns:
@@ -78,7 +76,7 @@ class SoftDeleteMixin:
         self.deleted_at = datetime.now(timezone.utc)  # type: ignore[attr-defined]
         return self.save()  # type: ignore[attr-defined]
 
-    def restore(self: T) -> T:
+    def restore(self) -> Self:
         """Restore a soft-deleted record.
 
         Returns:
@@ -220,7 +218,7 @@ class HooksMixin:
         """
         pass
 
-    def save(self: T) -> T:
+    def save(self) -> Self:
         """Save with before/after hooks.
 
         Calls before_save() first. If it returns False, the save is aborted.
@@ -237,7 +235,7 @@ class HooksMixin:
         result = super().save()  # type: ignore[misc]
         if self._hooks_enabled:
             self.after_save()
-        return result
+        return result  # type: ignore[return-value]
 
     def delete(self) -> None:
         """Delete with before/after hooks.
@@ -301,7 +299,7 @@ class AsyncHooksMixin:
         """Called after the model is deleted (async)."""
         pass
 
-    async def save(self: T) -> T:
+    async def save(self) -> Self:
         """Save with before/after hooks (async).
 
         Calls before_save() first. If it returns False, the save is aborted.
@@ -318,7 +316,7 @@ class AsyncHooksMixin:
         result = await super().save()  # type: ignore[misc]
         if self._hooks_enabled:
             await self.after_save()
-        return result
+        return result  # type: ignore[return-value]
 
     async def delete(self) -> None:
         """Delete with before/after hooks (async).

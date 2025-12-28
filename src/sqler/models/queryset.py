@@ -249,6 +249,7 @@ class SQLerQuerySet(Generic[T]):
         # fetch all refs per table
         resolved: dict[tuple[str, int], dict] = {}
         adapter = self._query._adapter  # type: ignore[attr-defined]
+        assert adapter is not None, "Query has no adapter bound"
         nested_docs: list[dict] = []
 
         for table, ids in refs_by_table.items():

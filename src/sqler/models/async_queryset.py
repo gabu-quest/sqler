@@ -158,6 +158,7 @@ class AsyncSQLerQuerySet(Generic[T]):
 
     async def explain(self) -> list[tuple]:
         adapter = self._query._adapter  # type: ignore[attr-defined]
+        assert adapter is not None, "Query has no adapter bound"
         cur = await adapter.execute(f"EXPLAIN {self._query.sql}", self._query.params)
         rows = await cur.fetchall()
         await cur.close()
@@ -165,6 +166,7 @@ class AsyncSQLerQuerySet(Generic[T]):
 
     async def explain_query_plan(self) -> list[tuple]:
         adapter = self._query._adapter  # type: ignore[attr-defined]
+        assert adapter is not None, "Query has no adapter bound"
         cur = await adapter.execute(f"EXPLAIN QUERY PLAN {self._query.sql}", self._query.params)
         rows = await cur.fetchall()
         await cur.close()
@@ -209,6 +211,7 @@ class AsyncSQLerQuerySet(Generic[T]):
 
         resolved: dict[tuple[str, int], dict] = {}
         adapter = self._query._adapter  # type: ignore[attr-defined]
+        assert adapter is not None, "Query has no adapter bound"
         nested_docs: list[dict] = []
 
         for table, ids in refs_by_table.items():

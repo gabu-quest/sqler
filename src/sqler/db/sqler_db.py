@@ -297,6 +297,60 @@ class SQLerDB:
         self.adapter.execute(ddl)
         self.adapter.auto_commit()
 
+    def list_indexes(self, table: Optional[str] = None) -> list[dict[str, Any]]:
+        """List indexes in the database.
+
+        Args:
+            table: Optional table name to filter by. If None, lists all indexes.
+
+        Returns:
+            List of dicts with index info: name, table, sql, unique.
+        """
+        if table:
+            query = """
+                SELECT name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'index' AND tbl_name = ? AND name NOT LIKE 'sqlite_%'
+                ORDER BY name;
+            """
+            cur = self.adapter.execute(query, [table])
+        else:
+            query = """
+                SELECT name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'index' AND name NOT LIKE 'sqlite_%'
+                ORDER BY tbl_name, name;
+            """
+            cur = self.adapter.execute(query)
+
+        indexes = []
+        for row in cur.fetchall():
+            name = row[0]
+            tbl_name = row[1]
+            sql = row[2] or ""
+            indexes.append({
+                "name": name,
+                "table": tbl_name,
+                "sql": sql,
+                "unique": "UNIQUE" in sql.upper() if sql else False,
+            })
+        return indexes
+
+    def index_exists(self, name: str) -> bool:
+        """Check if an index exists by name.
+
+        Args:
+            name: Index name to check.
+
+        Returns:
+            True if the index exists, False otherwise.
+        """
+        cur = self.adapter.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;",
+            [name]
+        )
+        return cur.fetchone() is not None
+
     def __enter__(self):
         """Enter context manager; begin transaction."""
         self.adapter.begin_transaction()

@@ -135,11 +135,36 @@ class AsyncSQLerModel(BaseModel):
         return self
 
     async def delete(self) -> None:
+        """Delete this instance by ``_id`` and unset it.
+
+        Deprecated: prefer delete_with_policy(on_delete=...) to control integrity behavior.
+        """
+        await self.delete_with_policy()
+
+    async def delete_with_policy(self, *, on_delete: str = "restrict") -> None:
+        """Delete this instance with a specified integrity policy.
+
+        Args:
+            on_delete: One of "restrict", "set_null", or "cascade".
+                Note: For async models, "set_null" and "cascade" are not yet
+                fully implemented and will raise NotImplementedError.
+                "restrict" performs a basic delete without checking references.
+        """
         cls = self.__class__
         db, table = cls._require_binding()
         if self._id is None:
             raise ValueError("Cannot delete unsaved model (missing _id)")
-        # reuse execute directly for delete to keep API small
+        if on_delete not in {"restrict", "set_null", "cascade"}:
+            raise ValueError("on_delete must be 'restrict', 'set_null', or 'cascade'")
+
+        if on_delete in {"set_null", "cascade"}:
+            raise NotImplementedError(
+                f"on_delete='{on_delete}' is not yet implemented for async models. "
+                "Use on_delete='restrict' or the sync model for full integrity support."
+            )
+
+        # For restrict mode in async, we do a simple delete
+        # TODO: Add async integrity checking when async integrity helpers are implemented
         await db.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [self._id])
         await db.adapter.commit()
         self._id = None

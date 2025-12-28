@@ -158,8 +158,8 @@ class SQLerField:
         expr = f"JSON_EXTRACT(data, '{self._json_path()}') {op} ?"
         return SQLerExpression(expr, [val])
 
-    def __eq__(self, other: Any) -> SQLerExpression:
-        """field == value
+    def __eq__(self, other: Any) -> SQLerExpression:  # type: ignore[override]
+        """field == value (returns expression for query building, not bool)
 
         Special handling for None: uses IS NULL instead of = NULL
         """
@@ -171,8 +171,8 @@ class SQLerField:
             return SQLerExpression(expr, [])
         return self.__compare("=", other)
 
-    def __ne__(self, other: Any) -> SQLerExpression:
-        """field != value
+    def __ne__(self, other: Any) -> SQLerExpression:  # type: ignore[override]
+        """field != value (returns expression for query building, not bool)
 
         Special handling for None: uses IS NOT NULL instead of != NULL
         """

@@ -29,12 +29,14 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     async def execute(self, query: str, params: Optional[List[Any]] = None) -> aiosqlite.Cursor:
         if not self.connection:
             await self.connect()
+        assert self.connection is not None  # Guaranteed by connect()
         cursor = await self.connection.execute(query, params or [])
         return cursor
 
     async def executemany(self, query: str, param_list: List[List[Any]]) -> aiosqlite.Cursor:
         if not self.connection:
             await self.connect()
+        assert self.connection is not None  # Guaranteed by connect()
         cursor = await self.connection.executemany(query, param_list)
         await self.commit()
         return cursor
@@ -42,6 +44,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     async def executescript(self, script: str) -> aiosqlite.Cursor:
         if not self.connection:
             await self.connect()
+        assert self.connection is not None  # Guaranteed by connect()
         cursor = await self.connection.executescript(script)
         await self.connection.commit()
         return cursor
