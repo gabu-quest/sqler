@@ -360,18 +360,12 @@ class AsyncSQLerDB:
 
     async def __aenter__(self):
         """Enter async context manager; begin transaction."""
-        await self.adapter.execute("BEGIN;")
+        await self.adapter.begin_transaction()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Exit async context manager; commit or rollback."""
-        if exc_type is None:
-            await self.adapter.commit()
-        else:
-            try:
-                await self.adapter.execute("ROLLBACK;")
-            except sqlite3.Error:
-                pass  # Rollback may fail if connection is broken
+        await self.adapter.end_transaction(commit=(exc_type is None))
         return False
 
 

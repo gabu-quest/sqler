@@ -31,6 +31,18 @@ class AsyncSQLerQuerySet(Generic[T]):
     def exclude(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
         return self.__class__(self._model_cls, self._query.exclude(expression))
 
+    def or_filter(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
+        """Return a new queryset with the expression OR-ed in."""
+        return self.__class__(self._model_cls, self._query.or_filter(expression))
+
+    def distinct(self) -> "AsyncSQLerQuerySet[T]":
+        """Return a new queryset with DISTINCT results."""
+        return self.__class__(self._model_cls, self._query.distinct())
+
+    def select(self, *fields: str) -> "AsyncSQLerQuerySet[T]":
+        """Return a new queryset that only retrieves specified fields."""
+        return self.__class__(self._model_cls, self._query.select(*fields))
+
     def order_by(self, field: str, desc: bool = False) -> "AsyncSQLerQuerySet[T]":
         return self.__class__(self._model_cls, self._query.order_by(field, desc))
 
@@ -140,6 +152,32 @@ class AsyncSQLerQuerySet(Generic[T]):
     async def paginate(self, page: int, per_page: int = 20):
         """Return a paginated result set."""
         return await self._query.paginate(page, per_page)
+
+    async def distinct_values(self, field: str) -> list[Any]:
+        """Return distinct values for a JSON field."""
+        return await self._query.distinct_values(field)
+
+    async def update(self, **fields) -> int:
+        """Update matching rows with the given field values.
+
+        Args:
+            **fields: Field names and values to update in the JSON data.
+
+        Returns:
+            int: Number of rows updated.
+        """
+        return await self._query.update(**fields)
+
+    async def delete_all(self) -> int:
+        """Delete all matching rows (bulk delete).
+
+        Note: This is named delete_all to avoid confusion with model.delete().
+        It does NOT trigger referential integrity checks or hooks.
+
+        Returns:
+            int: Number of rows deleted.
+        """
+        return await self._query.delete()
 
     def offset(self, n: int) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""
