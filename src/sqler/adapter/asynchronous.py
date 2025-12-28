@@ -16,6 +16,8 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         self.path = path
         self.connection: Optional[aiosqlite.Connection] = None
         self.pragmas = pragmas or []
+        # Track transaction depth for nested transaction support
+        self._txn_depth: int = 0
 
     async def connect(self) -> None:
         self.connection = await aiosqlite.connect(self.path, uri=True)
@@ -76,6 +78,53 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         if not self.connection:
             return
         await self.connection.commit()
+
+    async def auto_commit(self) -> None:
+        """Commit only if NOT inside an explicit transaction.
+
+        This allows model operations to commit individually when used standalone,
+        but respect outer transaction boundaries when wrapped in a transaction block.
+        """
+        if self._txn_depth == 0:
+            await self.commit()
+
+    @property
+    def in_transaction(self) -> bool:
+        """Return True if currently inside an explicit transaction."""
+        return self._txn_depth > 0
+
+    async def begin_transaction(self) -> None:
+        """Begin an explicit transaction (increments depth counter).
+
+        Uses BEGIN IMMEDIATE to acquire a write lock immediately,
+        preventing SQLITE_BUSY errors during the transaction.
+        """
+        if not self.connection:
+            await self.connect()
+        assert self.connection is not None
+        if self._txn_depth == 0:
+            await self.connection.execute("BEGIN IMMEDIATE")
+        self._txn_depth += 1
+
+    async def end_transaction(self, *, commit: bool = True) -> None:
+        """End an explicit transaction (decrements depth counter).
+
+        Only actually commits/rollbacks when the outermost transaction ends.
+
+        Args:
+            commit: If True, commit the transaction. If False, rollback.
+        """
+        if self._txn_depth <= 0:
+            return
+        self._txn_depth -= 1
+        if self._txn_depth == 0 and self.connection:
+            if commit:
+                await self.connection.commit()
+            else:
+                try:
+                    await self.connection.rollback()
+                except Exception:
+                    pass  # Rollback may fail if connection is broken
 
     async def __aenter__(self) -> "AsyncSQLiteAdapter":
         if not self.connection:

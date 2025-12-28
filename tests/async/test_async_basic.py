@@ -23,3 +23,40 @@ async def test_async_db_insert_find_and_query(async_db):  # use fixture
     q = AsyncSQLerQuery("users", adapter=async_db.adapter).filter(F("age") >= 30)
     rows = await q.all_dicts()
     assert rows and rows[0]["name"] == "Ada"
+
+
+@pytest.mark.asyncio
+async def test_async_transaction_rollback(async_db):
+    """Test that async transactions properly rollback on error."""
+    # Insert one document that should persist
+    await async_db.insert_document("items", {"name": "persisted"})
+
+    # Try a transaction that will fail
+    try:
+        async with async_db.transaction():
+            await async_db.insert_document("items", {"name": "should_rollback_1"})
+            await async_db.insert_document("items", {"name": "should_rollback_2"})
+            raise RuntimeError("Simulated failure")
+    except RuntimeError:
+        pass
+
+    # Verify only the first insert persisted
+    q = AsyncSQLerQuery("items", adapter=async_db.adapter)
+    rows = await q.all_dicts()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_async_transaction_commit(async_db):
+    """Test that async transactions properly commit on success."""
+    async with async_db.transaction():
+        await async_db.insert_document("items", {"name": "item1"})
+        await async_db.insert_document("items", {"name": "item2"})
+
+    # Verify both inserts committed
+    q = AsyncSQLerQuery("items", adapter=async_db.adapter)
+    rows = await q.all_dicts()
+    assert len(rows) == 2
+    names = {r["name"] for r in rows}
+    assert names == {"item1", "item2"}

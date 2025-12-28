@@ -40,13 +40,13 @@ class AsyncSQLerDB:
         );
         """
         await self.adapter.execute(ddl)
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
 
     async def insert_document(self, table: str, doc: dict[str, Any]) -> int:
         await self._ensure_table(table)
         payload = json.dumps(doc)
         cur = await self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         last_id = cur.lastrowid  # type: ignore[attr-defined]
         await cur.close()
         return last_id
@@ -59,7 +59,7 @@ class AsyncSQLerDB:
         cur = await self.adapter.execute(
             f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id]
         )
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
         return _id
 
@@ -83,7 +83,7 @@ class AsyncSQLerDB:
         """
         await self._ensure_table(table)
         cur = await self.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [_id])
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
 
     async def bulk_upsert(self, table: str, docs: list[dict[str, Any]]) -> list[int]:
@@ -123,7 +123,7 @@ class AsyncSQLerDB:
                 )
                 await cur.close()
                 assigned.append(int(doc_id))
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         return assigned
 
     async def execute_sql(
@@ -190,7 +190,7 @@ class AsyncSQLerDB:
         where_sql = f"WHERE {where}" if where else ""
         ddl = f"CREATE {unique_sql} INDEX IF NOT EXISTS {idx_name} ON {table} ({expr}) {where_sql};"
         cur = await self.adapter.execute(ddl)
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
 
     async def drop_index(self, name: str) -> None:
@@ -201,7 +201,7 @@ class AsyncSQLerDB:
         """
         ddl = f"DROP INDEX IF EXISTS {name};"
         cur = await self.adapter.execute(ddl)
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
 
     async def list_indexes(self, table: str | None = None) -> list[dict[str, Any]]:
@@ -285,7 +285,7 @@ class AsyncSQLerDB:
             cur2 = await self.adapter.execute(
                 f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
             )
-            await self.adapter.commit()
+            await self.adapter.auto_commit()
             await cur2.close()
         # Update cache
         self._versioned_tables.add(table)
@@ -300,7 +300,7 @@ class AsyncSQLerDB:
                 f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",
                 [payload],
             )
-            await self.adapter.commit()
+            await self.adapter.auto_commit()
             last_id = cur.lastrowid  # type: ignore[attr-defined]
             await cur.close()
             return last_id, 0
@@ -311,7 +311,7 @@ class AsyncSQLerDB:
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
             [payload, _id, expected_version, expected_version, expected_version],
         )
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
         # Check changes() to confirm update actually happened
         ch = await self.adapter.execute("SELECT changes();")
@@ -376,7 +376,11 @@ class AsyncSQLerDB:
 
 
 class AsyncTransaction:
-    """Async context manager for explicit database transactions."""
+    """Async context manager for explicit database transactions.
+
+    Uses the adapter's transaction tracking to ensure that nested operations
+    (like model.save()) respect the transaction boundary and don't auto-commit.
+    """
 
     def __init__(self, adapter):
         self.adapter = adapter
@@ -384,7 +388,7 @@ class AsyncTransaction:
 
     async def __aenter__(self):
         """Begin the transaction."""
-        await self.adapter.execute("BEGIN;")
+        await self.adapter.begin_transaction()
         self._active = True
         return self
 
@@ -393,26 +397,17 @@ class AsyncTransaction:
         if not self._active:
             return False
         self._active = False
-        if exc_type is None:
-            await self.adapter.commit()
-        else:
-            try:
-                await self.adapter.execute("ROLLBACK;")
-            except sqlite3.Error:
-                pass  # Rollback may fail if connection is broken
+        await self.adapter.end_transaction(commit=(exc_type is None))
         return False
 
     async def commit(self):
         """Explicitly commit the transaction."""
         if self._active:
-            await self.adapter.commit()
+            await self.adapter.end_transaction(commit=True)
             self._active = False
 
     async def rollback(self):
         """Explicitly rollback the transaction."""
         if self._active:
-            try:
-                await self.adapter.execute("ROLLBACK;")
-            except sqlite3.Error:
-                pass  # Rollback may fail if connection is broken
+            await self.adapter.end_transaction(commit=False)
             self._active = False
