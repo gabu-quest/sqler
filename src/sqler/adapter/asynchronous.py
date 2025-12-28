@@ -1,7 +1,10 @@
+import time
 import uuid
 from typing import Any, List, Optional, Self
 
 import aiosqlite
+
+from sqler.logging import query_logger
 
 from .abstract import AsyncAdapterABC
 
@@ -27,10 +30,30 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             self.connection = None
 
     async def execute(self, query: str, params: Optional[List[Any]] = None) -> aiosqlite.Cursor:
+        """Execute a SQL query with optional parameters and return cursor.
+
+        Automatically logs the query if query_logger is enabled.
+        """
         if not self.connection:
             await self.connect()
         assert self.connection is not None  # Guaranteed by connect()
-        cursor = await self.connection.execute(query, params or [])
+        start = time.perf_counter()
+        error_msg = None
+        cursor = None
+        try:
+            cursor = await self.connection.execute(query, params or [])
+        except Exception as e:
+            error_msg = str(e)
+            raise
+        finally:
+            duration_ms = (time.perf_counter() - start) * 1000
+            query_logger.log(
+                sql=query,
+                params=list(params) if params else [],
+                duration_ms=duration_ms,
+                rows_affected=cursor.rowcount if cursor and cursor.rowcount >= 0 else None,
+                error=error_msg,
+            )
         return cursor
 
     async def executemany(self, query: str, param_list: List[List[Any]]) -> aiosqlite.Cursor:

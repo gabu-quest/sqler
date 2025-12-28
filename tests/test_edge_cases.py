@@ -497,3 +497,62 @@ def test_hydration_with_wrong_table():
     loaded = Item.from_id(item._id)
     assert isinstance(loaded.ref, dict)
     assert loaded.ref["_table"] == "nonexistent"
+
+
+def test_pluralization_edge_cases():
+    """Test that table name pluralization handles common patterns."""
+    from sqler.models.model import _pluralize, _default_table_name
+
+    # Regular plurals
+    assert _pluralize("user") == "users"
+    assert _pluralize("post") == "posts"
+
+    # Already ends in 's'
+    assert _pluralize("status") == "status"
+    assert _pluralize("address") == "address"
+
+    # Consonant + y → ies
+    assert _pluralize("category") == "categories"
+    assert _pluralize("company") == "companies"
+    assert _pluralize("city") == "cities"
+
+    # Vowel + y → ys (regular)
+    assert _pluralize("key") == "keys"
+    assert _pluralize("day") == "days"
+
+    # Words ending in s, x, z, ch, sh → es
+    assert _pluralize("box") == "boxes"
+    assert _pluralize("match") == "matches"
+    assert _pluralize("wish") == "wishes"
+    # Note: "quiz" → "quizes" (not "quizzes") - use __tablename__ for irregular cases
+
+    # SQL reserved words get _tbl suffix
+    assert _default_table_name("As") == "as_tbl"
+    assert _default_table_name("By") == "by_tbl"
+    assert _default_table_name("Index") == "index_tbl"
+    assert _default_table_name("Table") == "table_tbl"
+    # Pluralized forms are generally safe as table names
+    assert _default_table_name("Order") == "orders"  # "orders" is fine
+    assert _default_table_name("Select") == "selects"  # "selects" is fine
+
+
+def test_model_uses_correct_pluralization():
+    """Test that models get correctly pluralized table names."""
+
+    class Category(SQLerModel):
+        name: str
+
+    class Company(SQLerModel):
+        name: str
+
+    class Box(SQLerModel):
+        size: int
+
+    db = SQLerDB.in_memory()
+    Category.set_db(db)
+    Company.set_db(db)
+    Box.set_db(db)
+
+    assert Category._table == "categories"
+    assert Company._table == "companies"
+    assert Box._table == "boxes"

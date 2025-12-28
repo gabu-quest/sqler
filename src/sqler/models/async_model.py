@@ -8,6 +8,7 @@ from pydantic import BaseModel, PrivateAttr
 from sqler import registry
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import NotBoundError
+from sqler.models.model import _default_table_name
 from sqler.models.async_queryset import AsyncSQLerQuerySet
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
@@ -28,12 +29,7 @@ class AsyncSQLerModel(BaseModel):
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
-        base = cls.__name__.lower()
-        if not base.endswith("s"):
-            base = base + "s"
-        if base in {"as"}:
-            base = base + "_tbl"
-        chosen = table or explicit or base
+        chosen = table or explicit or _default_table_name(cls.__name__)
         cls._table = chosen
         cls.__tablename__ = chosen
         registry.register(cls._table, cls)

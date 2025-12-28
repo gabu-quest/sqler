@@ -997,6 +997,120 @@ SQLer provides a unified exception hierarchy under `sqler.exceptions`:
 
 All exceptions inherit from `SQLerError` for unified catching. SQLite exceptions (`sqlite3.*`) bubble with context.
 
+### Error Handling Patterns
+
+```python
+from sqler import (
+    SQLerDB, SQLerModel, SQLerSafeModel,
+    StaleVersionError, ReferentialIntegrityError, NotBoundError,
+)
+from sqler.exceptions import SQLerError
+
+# Pattern 1: Catch all SQLer errors
+try:
+    user.save()
+except SQLerError as e:
+    print(f"Database error: {e}")
+
+# Pattern 2: Handle optimistic locking (HTTP 409)
+def update_with_retry(model, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            model.save()
+            return model
+        except StaleVersionError:
+            if attempt < max_retries - 1:
+                model.refresh()  # Reload from database
+            else:
+                raise
+
+# Pattern 3: Safe deletion with referential integrity
+def safe_delete(model):
+    try:
+        model.delete_with_policy(on_delete="restrict")
+    except ReferentialIntegrityError as e:
+        # Either cascade, set_null, or inform user
+        print(f"Cannot delete: still referenced by other records")
+        return False
+    return True
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+**"database is locked"**
+
+SQLite allows only one writer at a time. If you see this error:
+- Reduce concurrent write operations
+- Use transactions to batch writes: `with db.transaction(): ...`
+- Increase `busy_timeout` pragma (default is 5000ms)
+- For high write loads, consider a write queue or single-writer pattern
+
+**"Model X is not bound"**
+
+Call `Model.set_db(db)` before using the model:
+```python
+db = SQLerDB.in_memory()
+User.set_db(db)  # Must call this before save/query
+```
+
+**StaleVersionError on save**
+
+Using `SQLerSafeModel`, the row was modified by another process:
+```python
+try:
+    model.save()
+except StaleVersionError:
+    model.refresh()  # Reload and decide: retry or abort
+```
+
+**Query returns empty but data exists**
+
+Check field path syntax for nested fields:
+```python
+# Correct: use list for nested paths
+F(["address", "city"]) == "Kyoto"
+
+# Wrong: string doesn't traverse nested objects
+F("address.city") == "Kyoto"  # Only works for index creation
+```
+
+**Async adapter not connecting**
+
+Ensure you explicitly connect and close:
+```python
+db = AsyncSQLerDB.on_disk("app.db")
+await db.connect()  # Required!
+# ... operations ...
+await db.close()    # Clean up
+```
+
+### Debug Tools
+
+```python
+# See generated SQL
+q = User.query().filter(F("age") > 30)
+print(q.sql())     # SELECT _id, data FROM users WHERE ...
+print(q.params())  # [30]
+
+# Full debug tuple
+sql, params = q.debug()
+
+# Query execution plan
+plan = q.explain_query_plan(db.adapter)
+for row in plan:
+    print(row)
+
+# Enable query logging
+from sqler import query_logger
+query_logger.enable()
+# ... run queries ...
+print(query_logger.get_slow_queries(threshold_ms=10.0))
+```
+
 ---
 
 ## Examples

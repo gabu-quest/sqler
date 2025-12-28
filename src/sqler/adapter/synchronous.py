@@ -1,7 +1,10 @@
 import sqlite3
 import threading
+import time
 import uuid
 from typing import Any, Optional, Self
+
+from sqler.logging import query_logger
 
 from .abstract import AdapterABC, NotConnectedError
 
@@ -97,15 +100,33 @@ class SQLiteAdapter(AdapterABC):
             delattr(self._local, "conn")
 
     def execute(self, query: str, params: Optional[list[Any]] = None) -> sqlite3.Cursor:
-        """Execute a SQL query with optional parameters and return cursor"""
+        """Execute a SQL query with optional parameters and return cursor.
+
+        Automatically logs the query if query_logger is enabled.
+        """
         conn = self._conn()  # Raises NotConnectedError if not connected
         cursor = conn.cursor()
-        if params is not None:
-            if isinstance(params, list):
-                params = tuple(params)
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query)
+        start = time.perf_counter()
+        error_msg = None
+        try:
+            if params is not None:
+                if isinstance(params, list):
+                    params = tuple(params)
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+        except Exception as e:
+            error_msg = str(e)
+            raise
+        finally:
+            duration_ms = (time.perf_counter() - start) * 1000
+            query_logger.log(
+                sql=query,
+                params=list(params) if params else [],
+                duration_ms=duration_ms,
+                rows_affected=cursor.rowcount if cursor.rowcount >= 0 else None,
+                error=error_msg,
+            )
         return cursor
 
     def executemany(self, query: str, param_list: Optional[list[Any]]) -> sqlite3.Cursor:
