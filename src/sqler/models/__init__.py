@@ -8,6 +8,7 @@ from .async_safe import AsyncSQLerSafeModel
 from .mixins import (
     AsyncFullMixin,
     AsyncHooksMixin,
+    AsyncSoftDeleteMixin,
     FullMixin,
     HooksMixin,
     SoftDeleteMixin,
@@ -51,6 +52,7 @@ __all__ = [
     # Mixins
     "TimestampMixin",
     "SoftDeleteMixin",
+    "AsyncSoftDeleteMixin",
     "HooksMixin",
     "AsyncHooksMixin",
     "FullMixin",

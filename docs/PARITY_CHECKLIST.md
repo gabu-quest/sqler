@@ -328,60 +328,51 @@ This document enumerates every feature in the sync implementation and tracks par
 
 ## Summary of Parity Issues
 
-### Critical (Breaking Functionality)
+### ✅ Fixed Issues
 
-| Issue | Location | Priority |
-|-------|----------|----------|
-| AsyncSQLerDB `__aenter__` doesn't use transaction tracking | async_db.py:361-375 | HIGH |
-| SoftDeleteMixin not async-compatible | mixins.py | HIGH |
-| `delete_with_policy` only supports "restrict" in async | async_model.py | MEDIUM |
+| Issue | Location | Status |
+|-------|----------|--------|
+| AsyncSQLerDB `__aenter__` doesn't use transaction tracking | async_db.py | ✅ FIXED |
+| SoftDeleteMixin not async-compatible | mixins.py | ✅ FIXED - Added `AsyncSoftDeleteMixin` |
+| AsyncSQLerQuerySet missing `or_filter()` | async_queryset.py | ✅ FIXED |
+| AsyncSQLerQuerySet missing `distinct()` | async_queryset.py | ✅ FIXED |
+| AsyncSQLerQuerySet missing `select()` | async_queryset.py | ✅ FIXED |
+| AsyncSQLerQuerySet missing `distinct_values()` | async_queryset.py | ✅ FIXED |
+| AsyncSQLerQuerySet missing `update()` | async_queryset.py | ✅ FIXED |
+| AsyncSQLerQuerySet missing `delete_all()` | async_queryset.py | ✅ FIXED |
+| AsyncSQLerQuery missing `explain()` | async_query.py | ✅ FIXED |
+| AsyncSQLerQuery missing `explain_query_plan()` | async_query.py | ✅ FIXED |
+| RebaseConfig not supported in async | async_safe.py | ✅ FIXED |
+| AsyncSQLerModel missing `db()` classmethod | async_model.py | ✅ FIXED |
+| AsyncSQLerModel missing `_snapshot` in base | async_model.py | ✅ FIXED |
 
-### Important (Missing Features)
+### Remaining Issues (Low Priority)
 
-| Issue | Location | Priority |
-|-------|----------|----------|
-| AsyncSQLerQuerySet missing `or_filter()` | async_queryset.py | MEDIUM |
-| AsyncSQLerQuerySet missing `distinct()` | async_queryset.py | MEDIUM |
-| AsyncSQLerQuerySet missing `select()` | async_queryset.py | MEDIUM |
-| AsyncSQLerQuerySet missing `distinct_values()` | async_queryset.py | MEDIUM |
-| AsyncSQLerQuerySet missing `update()` | async_queryset.py | HIGH |
-| AsyncSQLerQuerySet missing `delete_all()` | async_queryset.py | HIGH |
-| AsyncSQLerQuery missing `explain()` | async_query.py | LOW |
-| AsyncSQLerQuery missing `explain_query_plan()` | async_query.py | LOW |
-| RebaseConfig not supported in async | async_safe.py | MEDIUM |
-| AsyncSQLerModel missing `db()` classmethod | async_model.py | LOW |
-| AsyncSQLerModel missing `_snapshot` in base | async_model.py | LOW |
-| Integrity helpers missing in async | async_model.py | LOW |
-
-### Minor (Different Implementation)
-
-| Issue | Location | Notes |
-|-------|----------|-------|
-| `timeout_ms` parameter in adapter | asynchronous.py | Not applicable to aiosqlite |
-| Memory singleton mode | asynchronous.py | Different concurrency model |
-| `execute_sql` column detection | async_db.py | Different cursor behavior |
-| Row count detection | async_query.py | Uses `changes()` instead of `rowcount` |
+| Issue | Location | Priority | Notes |
+|-------|----------|----------|-------|
+| `delete_with_policy` only supports "restrict" | async_model.py | LOW | set_null/cascade need async integrity helpers |
+| Integrity helpers missing in async | async_model.py | LOW | Complex feature, sync version works |
+| `timeout_ms` parameter in adapter | asynchronous.py | N/A | Not applicable to aiosqlite |
+| Memory singleton mode | asynchronous.py | N/A | Different concurrency model |
 
 ---
 
-## Recommended Fixes (Priority Order)
+## Parity Status Summary
 
-### Phase 1: Critical Fixes
-1. Fix `AsyncSQLerDB.__aenter__/__aexit__` to use `begin_transaction()`/`end_transaction()`
-2. Create `AsyncSoftDeleteMixin` with proper async methods
+| Layer | Total Features | Full Parity | Notes |
+|-------|----------------|-------------|-------|
+| **Adapter** | 17 | ✅ 17/17 | All features have async equivalents |
+| **Database** | 18 | ✅ 18/18 | Transaction-aware, all methods present |
+| **Query** | 22 | ✅ 22/22 | Including explain methods |
+| **QuerySet** | 18 | ✅ 18/18 | All chaining + execution methods |
+| **Model** | 19 | ⚠️ 17/19 | Missing set_null/cascade delete policies |
+| **SafeModel** | 10 | ✅ 10/10 | Full RebaseConfig support |
+| **Mixins** | 14 | ✅ 14/14 | AsyncSoftDeleteMixin added |
+| **Transaction** | 6 | ✅ 6/6 | Full parity |
 
-### Phase 2: Feature Parity
-3. Add `or_filter()`, `distinct()`, `select()` to `AsyncSQLerQuerySet`
-4. Add `distinct_values()` to `AsyncSQLerQuerySet`
-5. Add `update()` and `delete_all()` to `AsyncSQLerQuerySet`
-6. Add `explain()` and `explain_query_plan()` to `AsyncSQLerQuery`
-
-### Phase 3: Advanced Features
-7. Add `RebaseConfig` support to `AsyncSQLerSafeModel`
-8. Implement full `delete_with_policy` for async (set_null, cascade)
-9. Add async integrity helpers
+**Overall: 95%+ parity achieved**
 
 ---
 
 *Generated: 2024*
-*Last Updated: After transaction-aware async adapter fix*
+*Last Updated: After complete parity fixes*

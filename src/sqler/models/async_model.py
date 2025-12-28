@@ -17,13 +17,28 @@ TAModel = TypeVar("TAModel", bound="AsyncSQLerModel")
 
 
 class AsyncSQLerModel(BaseModel):
-    """Async Pydantic-based model with persistence helpers."""
+    """Async Pydantic-based model with persistence helpers.
 
+    Define subclasses to model your domain. Bind the class to a database via
+    :meth:`set_db`, optionally overriding the table name. Instances persist as
+    JSON (excluding the private ``_id`` attribute) into a table with schema
+    ``(_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)``.
+    """
+
+    # internal id stored outside the JSON blob
     _id: Optional[int] = PrivateAttr(default=None)
+    # snapshot of last-loaded document (for merge strategies in perf mode)
+    _snapshot: Optional[dict] = PrivateAttr(default=None)
+
+    # class-bound db + table metadata
     _db: ClassVar[Optional[AsyncSQLerDB]] = None
     _table: ClassVar[Optional[str]] = None
 
-    model_config = {"extra": "ignore"}
+    # ----- class config -----
+    model_config = {
+        "extra": "ignore",
+        "frozen": False,
+    }
 
     @classmethod
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
@@ -42,6 +57,12 @@ class AsyncSQLerModel(BaseModel):
                 details={"model": cls.__name__}
             )
         return cls._db, cls._table
+
+    @classmethod
+    def db(cls: Type[TAModel]) -> AsyncSQLerDB:
+        """Return the bound database for this model."""
+        db, _ = cls._require_binding()
+        return db
 
     @classmethod
     async def from_id(cls: Type[TAModel], id_: int) -> Optional[TAModel]:

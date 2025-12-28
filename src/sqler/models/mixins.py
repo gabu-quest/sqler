@@ -150,6 +150,113 @@ class SoftDeleteMixin:
         return cls.query().filter(F("deleted_at") != None)  # noqa: E711
 
 
+class AsyncSoftDeleteMixin:
+    """Async version of SoftDeleteMixin for async models.
+
+    Provides soft delete functionality with async save/delete methods.
+
+    Usage::
+
+        class User(AsyncSoftDeleteMixin, AsyncSQLerModel):
+            name: str
+
+        user = await User(name="Alice").save()
+        await user.soft_delete()  # Sets deleted_at instead of deleting
+        await user.restore()      # Clears deleted_at
+        user.is_deleted           # True if soft-deleted
+
+        # Query methods (return async querysets)
+        await User.active().all()       # Only non-deleted records
+        await User.with_deleted().all() # All records including deleted
+        await User.only_deleted().all() # Only deleted records
+    """
+
+    deleted_at: Optional[datetime] = Field(default=None)
+
+    _soft_delete_default_exclude: ClassVar[bool] = True
+
+    @property
+    def is_deleted(self) -> bool:
+        """Return True if this record has been soft-deleted."""
+        return self.deleted_at is not None  # type: ignore[attr-defined]
+
+    async def soft_delete(self) -> Self:
+        """Mark this record as deleted without removing from database (async).
+
+        Returns:
+            Self: The soft-deleted instance.
+        """
+        self.deleted_at = datetime.now(timezone.utc)  # type: ignore[attr-defined]
+        return await self.save()  # type: ignore[attr-defined]
+
+    async def restore(self) -> Self:
+        """Restore a soft-deleted record (async).
+
+        Returns:
+            Self: The restored instance.
+        """
+        self.deleted_at = None  # type: ignore[attr-defined]
+        return await self.save()  # type: ignore[attr-defined]
+
+    async def hard_delete(self) -> None:
+        """Permanently delete this record from the database (async)."""
+        await self.delete()  # type: ignore[attr-defined]
+
+    @classmethod
+    def active(cls):
+        """Return an async queryset that excludes soft-deleted records.
+
+        Usage::
+
+            # Get all active users
+            active_users = await User.active().all()
+
+            # Filter active users
+            admins = await User.active().filter(F("role") == "admin").all()
+
+        Returns:
+            AsyncSQLerQuerySet: Queryset filtered to non-deleted records.
+        """
+        from sqler.query import F
+
+        return cls.query().filter(F("deleted_at") == None)  # noqa: E711
+
+    @classmethod
+    def with_deleted(cls):
+        """Return an async queryset that includes soft-deleted records.
+
+        Usage::
+
+            # Get all users including deleted
+            all_users = await User.with_deleted().all()
+
+        Returns:
+            AsyncSQLerQuerySet: Queryset including all records.
+        """
+        return cls.query()  # type: ignore[attr-defined]
+
+    @classmethod
+    def only_deleted(cls):
+        """Return an async queryset containing only soft-deleted records.
+
+        Usage::
+
+            # Get all deleted users
+            deleted_users = await User.only_deleted().all()
+
+            # Restore a specific deleted user
+            user = await User.only_deleted().filter(F("email") == "alice@example.com").first()
+            if user:
+                await user.restore()
+
+        Returns:
+            AsyncSQLerQuerySet: Queryset filtered to only deleted records.
+        """
+        from sqler.query import F
+
+        return cls.query().filter(F("deleted_at") != None)  # noqa: E711
+
+
 class HooksMixin:
     """Mixin that provides lifecycle hooks for models.
 
@@ -346,7 +453,7 @@ class FullMixin(TimestampMixin, SoftDeleteMixin, HooksMixin):
     pass
 
 
-class AsyncFullMixin(TimestampMixin, SoftDeleteMixin, AsyncHooksMixin):
+class AsyncFullMixin(TimestampMixin, AsyncSoftDeleteMixin, AsyncHooksMixin):
     """Async version of FullMixin.
 
     Usage::

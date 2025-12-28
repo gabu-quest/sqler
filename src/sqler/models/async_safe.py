@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import sqlite3
-from typing import Optional, Type, TypeVar
+from typing import ClassVar, Optional, Type, TypeVar
 
 from pydantic import PrivateAttr
 
@@ -12,16 +12,51 @@ from sqler.query.async_query import AsyncSQLerQuery
 
 from .async_model import AsyncSQLerModel
 from .async_queryset import AsyncSQLerQuerySet
-from .utils import apply_numeric_scalar_deltas, compute_numeric_scalar_deltas
+from .utils import (
+    DEFAULT_REBASE_CONFIG,
+    RebaseConfig,
+    apply_numeric_scalar_deltas,
+    can_rebase_deltas,
+    compute_numeric_scalar_deltas,
+)
 
 TASafe = TypeVar("TASafe", bound="AsyncSQLerSafeModel")
 
 
 class AsyncSQLerSafeModel(AsyncSQLerModel):
-    """Async model with optimistic locking via ``_version`` column."""
+    """Async model with optimistic locking via ``_version`` column.
+
+    New rows start at version 0. Updates require the current ``_version`` and
+    increment it atomically. Conflicts raise :class:`StaleVersionError`.
+
+    Intent Rebasing:
+        For simple counter operations (e.g., incrementing a count field),
+        the model supports automatic conflict resolution called "intent rebasing".
+        When a save fails due to a stale version, instead of raising an error,
+        the library can rebase your intent onto the latest version.
+
+        Configure rebasing via the ``_rebase_config`` class variable::
+
+            class Counter(AsyncSQLerSafeModel):
+                count: int = 0
+
+                # Allow rebasing for 'count' and 'views' fields
+                _rebase_config = RebaseConfig(
+                    enabled=True,
+                    allowed_fields={"count", "views"},
+                    max_delta=5,  # Allow ±5 increments
+                )
+
+    Attributes:
+        _version: The current version number for optimistic locking.
+        _rebase_config: Class-level configuration for intent rebasing.
+    """
 
     _version: int = PrivateAttr(default=0)
     _snapshot: Optional[dict] = PrivateAttr(default=None)
+
+    # Configurable intent rebasing (can be overridden in subclasses)
+    _rebase_config: ClassVar[RebaseConfig] = DEFAULT_REBASE_CONFIG
 
     @classmethod
     def query(cls: Type[TASafe]) -> AsyncSQLerQuerySet[TASafe]:  # type: ignore[override]
@@ -54,27 +89,37 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         return inst  # type: ignore[return-value]
 
     async def save(self: TASafe) -> TASafe:  # type: ignore[override]
+        """Insert or update with optimistic locking and intent rebasing.
+
+        If the save fails due to a stale version (another process updated
+        the row), and the changes qualify for rebasing (based on ``_rebase_config``),
+        the library will automatically fetch the latest version and reapply
+        your changes on top of it.
+
+        Returns:
+            Self: The saved instance with updated ``_id`` and ``_version``.
+
+        Raises:
+            StaleVersionError: If the version is stale and cannot be rebased.
+        """
         cls = self.__class__
         db, table = cls._require_binding()
+
+        # Get the rebase configuration for this model class
+        rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
+
+        # Capture initial intent as numeric scalar deltas from snapshot → target
         snap = getattr(self, "_snapshot", None)
         has_snapshot = isinstance(snap, dict) and len(snap) > 0
-        base_snapshot = {k: v for k, v in snap.items() if k != "_version"} if has_snapshot else None
+        orig = {k: v for k, v in snap.items() if k != "_version"} if has_snapshot else None
         target_payload = await self._adump_with_relations()
-        delta = (
-            compute_numeric_scalar_deltas(base_snapshot or {}, target_payload)
-            if has_snapshot
-            else None
-        )
-        # Only rebase for canonical counter fields
-        _can = False
-        if has_snapshot and delta and len(delta) == 1:
-            ((k, dv),) = delta.items()
-            if k == "count" and abs(dv) == 1:
-                _can = True
-        can_rebase = _can
+        delta = compute_numeric_scalar_deltas(orig or {}, target_payload) if has_snapshot else None
 
-        max_retries = 64
-        base = 0.002
+        # Use the configurable rebase checker
+        can_rebase = has_snapshot and can_rebase_deltas(delta, rebase_config) if delta else False
+
+        max_retries = rebase_config.max_retries if rebase_config else 128
+        base = 0.002  # seconds
 
         for attempt in range(max_retries):
             try:

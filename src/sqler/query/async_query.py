@@ -148,6 +148,40 @@ class AsyncSQLerQuery:
         """Return (sql, params) for debugging."""
         return self._build_query()
 
+    async def explain(self) -> list[tuple]:
+        """Run EXPLAIN <sql> using the bound adapter; return raw rows.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Returns:
+            list[tuple]: Raw EXPLAIN output rows.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        sql, params = self._build_query()
+        cur = await self._adapter.execute(f"EXPLAIN {sql}", params)
+        rows = await cur.fetchall()
+        await cur.close()
+        return rows
+
+    async def explain_query_plan(self) -> list[tuple]:
+        """Run EXPLAIN QUERY PLAN <sql>; return raw rows.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Returns:
+            list[tuple]: Raw EXPLAIN QUERY PLAN output rows.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        sql, params = self._build_query()
+        cur = await self._adapter.execute(f"EXPLAIN QUERY PLAN {sql}", params)
+        rows = await cur.fetchall()
+        await cur.close()
+        return rows
+
     async def all(self) -> list[str]:
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
