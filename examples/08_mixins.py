@@ -3,15 +3,14 @@
 This example demonstrates how to use the built-in mixins for timestamps,
 soft delete, and lifecycle hooks.
 
-NOTE: HooksMixin provides hook method definitions but requires you to
-override save()/delete() to call them. This example shows the proper pattern.
+HooksMixin now automatically calls before_save/after_save hooks!
 """
 
 from datetime import datetime, timezone
 from typing import Self
 
 from sqler import SQLerDB, SQLerModel
-from sqler.models import SoftDeleteMixin, TimestampMixin
+from sqler.models import HooksMixin, SoftDeleteMixin, TimestampMixin, FullMixin
 from sqler.query import SQLerField as F
 
 
@@ -35,45 +34,45 @@ class Document(SoftDeleteMixin, SQLerModel):
     content: str
 
 
-# Example 3: Custom hooks pattern - Override save() to add lifecycle hooks
-class User(SQLerModel):
+# Example 3: HooksMixin - Automatic lifecycle hooks (NOW WORKS!)
+class User(HooksMixin, SQLerModel):
     name: str
     email: str
 
-    def save(self) -> Self:
-        """Save with preprocessing hooks."""
-        # Pre-save hook: normalize email
+    def before_save(self) -> bool:
+        """Normalize email before saving. Return False to abort."""
         self.email = self.email.lower().strip()
         print(f"  [before_save] Normalizing email to: {self.email}")
+        return True  # Continue with save
 
-        # Call parent save
-        result = super().save()
-
-        # Post-save hook
+    def after_save(self) -> None:
+        """Called after successful save."""
         print(f"  [after_save] User saved with id: {self._id}")
-        return result
 
-    def delete(self) -> None:
-        """Delete with hooks."""
+    def before_delete(self) -> bool:
+        """Called before delete. Return False to abort."""
         print(f"  [before_delete] About to delete user: {self.name}")
-        super().delete()
+        return True  # Continue with delete
+
+    def after_delete(self) -> None:
+        """Called after successful delete."""
         print(f"  [after_delete] User deleted")
 
 
-# Example 4: Combined mixins with auto-timestamps
-class Task(SoftDeleteMixin, TimestampMixin, SQLerModel):
+# Example 4: FullMixin - Combines TimestampMixin, SoftDeleteMixin, and HooksMixin
+class Task(FullMixin, SQLerModel):
     title: str
     description: str = ""
     priority: int = 0
 
-    def save(self) -> Self:
-        """Save with automatic timestamps."""
+    def before_save(self) -> bool:
+        """Set timestamps in before_save hook."""
         now = datetime.now(timezone.utc)
         if self._id is None:
             self.created_at = now
         self.updated_at = now
         print(f"  [before_save] Task: {self.title}")
-        return super().save()
+        return True
 
 
 def main():
@@ -119,16 +118,17 @@ def main():
     doc.hard_delete()
     print("Document hard deleted (permanent)")
 
-    print("\n=== Custom Hooks Pattern Example ===")
+    print("\n=== HooksMixin Example (Auto-Hooks!) ===")
     user = User(name="Alice", email="  ALICE@Example.COM  ")
     print("Creating user with messy email...")
+    # Hooks are called automatically!
     user.save()
     print(f"Saved user: {user.name} <{user.email}>")
 
     print("\nDeleting user...")
     user.delete()
 
-    print("\n=== Combined Mixins Example ===")
+    print("\n=== FullMixin Example (All Combined!) ===")
     task = Task(title="Learn SQLer", description="Read the docs", priority=1)
     task.save()
     print(f"Task: {task.title}")

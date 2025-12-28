@@ -7,6 +7,7 @@ from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
 from sqler.db.async_db import AsyncSQLerDB
+from sqler.exceptions import NotBoundError
 from sqler.models.async_queryset import AsyncSQLerQuerySet
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
@@ -40,7 +41,10 @@ class AsyncSQLerModel(BaseModel):
     @classmethod
     def _require_binding(cls) -> tuple[AsyncSQLerDB, str]:
         if cls._db is None or cls._table is None:
-            raise RuntimeError("Model is not bound. Call set_db(db, table?) first.")
+            raise NotBoundError(
+                f"Model {cls.__name__} is not bound. Call set_db(db, table?) first.",
+                details={"model": cls.__name__}
+            )
         return cls._db, cls._table
 
     @classmethod

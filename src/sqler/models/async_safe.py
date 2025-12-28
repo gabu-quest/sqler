@@ -7,6 +7,7 @@ from typing import Optional, Type, TypeVar
 
 from pydantic import PrivateAttr
 
+from sqler.exceptions import StaleVersionError
 from sqler.query.async_query import AsyncSQLerQuery
 
 from .async_model import AsyncSQLerModel
@@ -94,8 +95,6 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     pass
                 return self
             except RuntimeError as e:
-                from .safe import StaleVersionError
-
                 if not can_rebase:
                     raise StaleVersionError(str(e)) from e
                 if self._id is None:
@@ -124,8 +123,6 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     raise
             # backoff
             await asyncio.sleep((base * (2 ** min(attempt, 10))) + (random.random() * 0.0005))
-
-        from .safe import StaleVersionError
 
         raise StaleVersionError("save retries exhausted")
 

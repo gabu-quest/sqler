@@ -455,7 +455,10 @@ class SQLerQuery:
             try:
                 _id, data_json = row[0], row[1]
                 ver = row[2] if self._include_version and len(row) > 2 else None
-            except Exception:
+            except (IndexError, TypeError) as e:
+                # Log warning but continue - malformed row shouldn't break entire query
+                import warnings
+                warnings.warn(f"Skipping malformed row in {self._table}: {e}", RuntimeWarning)
                 continue
             if data_json is None:
                 raise InvariantViolationError(f"Row {_id} in {self._table} has NULL data JSON")

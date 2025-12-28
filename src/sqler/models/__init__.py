@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from sqler.exceptions import ReferentialIntegrityError, StaleVersionError
+
 from .async_model import AsyncSQLerModel
 from .async_queryset import AsyncSQLerQuerySet
 from .async_safe import AsyncSQLerSafeModel
@@ -15,17 +17,13 @@ from .model import SQLerModel
 from .model_field import SQLerModelField
 from .queryset import SQLerQuerySet
 from .ref import SQLerRef, as_ref
-from .safe import SQLerSafeModel, StaleVersionError
+from .safe import SQLerSafeModel
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     NO_REBASE_CONFIG,
     PERMISSIVE_REBASE_CONFIG,
     RebaseConfig,
 )
-
-
-class ReferentialIntegrityError(RuntimeError):
-    """Raised when delete(on_delete='restrict') hits referencing rows."""
 
 
 @dataclass

@@ -3,6 +3,7 @@ import threading
 from typing import Any, Optional
 
 from sqler.adapter import SQLiteAdapter
+from sqler.exceptions import StaleVersionError
 from sqler.query import SQLerQuery
 from sqler.utils import validate_table_name
 
@@ -195,8 +196,8 @@ class SQLerDB:
             mapping = None
             try:
                 mapping = row.keys()  # type: ignore[attr-defined]
-            except Exception:
-                mapping = None
+            except AttributeError:
+                mapping = None  # Row doesn't support dict-like access
             if mapping:
                 keys = list(mapping)
                 if "data" in keys:
@@ -414,7 +415,7 @@ class SQLerDB:
             _ = self.adapter.execute(
                 f"SELECT _version FROM {table} WHERE _id = ?;", [_id]
             ).fetchone()
-            raise RuntimeError("Stale version: update rejected")
+            raise StaleVersionError("Stale version: update rejected")
         return _id, expected_version + 1
 
     def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:

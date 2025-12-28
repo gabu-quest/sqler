@@ -156,7 +156,8 @@ class HooksMixin:
     """Mixin that provides lifecycle hooks for models.
 
     Override the hook methods to add custom behavior before/after
-    save and delete operations.
+    save and delete operations. The hooks are called automatically
+    when save() or delete() is called.
 
     Usage::
 
@@ -219,9 +220,46 @@ class HooksMixin:
         """
         pass
 
+    def save(self: T) -> T:
+        """Save with before/after hooks.
+
+        Calls before_save() first. If it returns False, the save is aborted.
+        After a successful save, after_save() is called.
+
+        Returns:
+            Self: The saved instance.
+
+        Raises:
+            RuntimeError: If before_save() returns False.
+        """
+        if self._hooks_enabled and not self.before_save():
+            raise RuntimeError(f"before_save() returned False, save aborted for {self.__class__.__name__}")
+        result = super().save()  # type: ignore[misc]
+        if self._hooks_enabled:
+            self.after_save()
+        return result
+
+    def delete(self) -> None:
+        """Delete with before/after hooks.
+
+        Calls before_delete() first. If it returns False, the delete is aborted.
+        After a successful delete, after_delete() is called.
+
+        Raises:
+            RuntimeError: If before_delete() returns False.
+        """
+        if self._hooks_enabled and not self.before_delete():
+            raise RuntimeError(f"before_delete() returned False, delete aborted for {self.__class__.__name__}")
+        super().delete()  # type: ignore[misc]
+        if self._hooks_enabled:
+            self.after_delete()
+
 
 class AsyncHooksMixin:
     """Async version of HooksMixin for async models.
+
+    Override the async hook methods to add custom behavior before/after
+    save and delete operations. The hooks are called automatically.
 
     Usage::
 
@@ -262,6 +300,40 @@ class AsyncHooksMixin:
     async def after_delete(self) -> None:
         """Called after the model is deleted (async)."""
         pass
+
+    async def save(self: T) -> T:
+        """Save with before/after hooks (async).
+
+        Calls before_save() first. If it returns False, the save is aborted.
+        After a successful save, after_save() is called.
+
+        Returns:
+            Self: The saved instance.
+
+        Raises:
+            RuntimeError: If before_save() returns False.
+        """
+        if self._hooks_enabled and not await self.before_save():
+            raise RuntimeError(f"before_save() returned False, save aborted for {self.__class__.__name__}")
+        result = await super().save()  # type: ignore[misc]
+        if self._hooks_enabled:
+            await self.after_save()
+        return result
+
+    async def delete(self) -> None:
+        """Delete with before/after hooks (async).
+
+        Calls before_delete() first. If it returns False, the delete is aborted.
+        After a successful delete, after_delete() is called.
+
+        Raises:
+            RuntimeError: If before_delete() returns False.
+        """
+        if self._hooks_enabled and not await self.before_delete():
+            raise RuntimeError(f"before_delete() returned False, delete aborted for {self.__class__.__name__}")
+        await super().delete()  # type: ignore[misc]
+        if self._hooks_enabled:
+            await self.after_delete()
 
 
 class FullMixin(TimestampMixin, SoftDeleteMixin, HooksMixin):

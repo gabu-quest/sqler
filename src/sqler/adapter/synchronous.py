@@ -84,14 +84,14 @@ class SQLiteAdapter(AdapterABC):
             for c in list(self._conns):
                 try:
                     c.close()
-                except Exception:
-                    pass
+                except sqlite3.Error:
+                    pass  # Connection may already be closed
             self._conns.clear()
         if self._single_conn is not None:
             try:
                 self._single_conn.close()
-            except Exception:
-                pass
+            except sqlite3.Error:
+                pass  # Connection may already be closed
             self._single_conn = None
         if hasattr(self._local, "conn"):
             delattr(self._local, "conn")
@@ -184,8 +184,8 @@ class SQLiteAdapter(AdapterABC):
         else:
             try:
                 conn.rollback()
-            except Exception:
-                pass
+            except sqlite3.Error:
+                pass  # Rollback may fail if connection is broken
 
     ### factories
 

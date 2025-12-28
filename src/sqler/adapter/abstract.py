@@ -2,15 +2,11 @@ import sqlite3
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional
 
+from sqler.exceptions import NotConnectedError
+
 
 class AdapterError(Exception):
     """Base exception for database adapter errors."""
-
-    pass
-
-
-class NotConnectedError(ConnectionError):
-    """Raised when attempting to execute operations without an active connection."""
 
     pass
 

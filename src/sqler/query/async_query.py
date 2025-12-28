@@ -1,6 +1,7 @@
 from typing import Any, Optional, Self
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
+from sqler.exceptions import NoAdapterError
 from sqler.query.expression import SQLerExpression
 from sqler.query.query import PaginatedResult
 
@@ -149,7 +150,7 @@ class AsyncSQLerQuery:
 
     async def all(self) -> list[str]:
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         sql, params = self._build_query()
         cur = await self._adapter.execute(sql, params)
         rows = await cur.fetchall()
@@ -158,14 +159,14 @@ class AsyncSQLerQuery:
 
     async def first(self) -> Optional[str]:
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         limited = self.limit(1)
         res = await limited.all()
         return res[0] if res else None
 
     async def count(self) -> int:
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         sql, params = self._build_aggregate_query("COUNT")
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
@@ -175,7 +176,7 @@ class AsyncSQLerQuery:
     async def sum(self, field: str) -> Optional[float]:
         """Return the sum of values for the specified field."""
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         sql, params = self._build_aggregate_query("SUM", field)
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
@@ -185,7 +186,7 @@ class AsyncSQLerQuery:
     async def avg(self, field: str) -> Optional[float]:
         """Return the average of values for the specified field."""
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         sql, params = self._build_aggregate_query("AVG", field)
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
@@ -195,7 +196,7 @@ class AsyncSQLerQuery:
     async def min(self, field: str) -> Optional[Any]:
         """Return the minimum value for the specified field."""
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         sql, params = self._build_aggregate_query("MIN", field)
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
@@ -205,7 +206,7 @@ class AsyncSQLerQuery:
     async def max(self, field: str) -> Optional[Any]:
         """Return the maximum value for the specified field."""
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         sql, params = self._build_aggregate_query("MAX", field)
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
@@ -215,13 +216,13 @@ class AsyncSQLerQuery:
     async def exists(self) -> bool:
         """Check if any rows match the query."""
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         return await self.limit(1).count() > 0
 
     async def distinct_values(self, field: str) -> list[Any]:
         """Return distinct values for a JSON field."""
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         sql = f"SELECT DISTINCT json_extract(data, '$.{field}') FROM {self._table} {where}".strip()
         sql = " ".join(sql.split())
@@ -242,7 +243,7 @@ class AsyncSQLerQuery:
             PaginatedResult: Object with items, pagination info, and helpers.
         """
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         if page < 1:
             raise ValueError("Page must be >= 1")
         if per_page < 1:
@@ -263,7 +264,7 @@ class AsyncSQLerQuery:
 
     async def all_dicts(self) -> list[dict[str, Any]]:
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         import json
 
         sql, params = self._build_query(include_id=True)
@@ -275,7 +276,9 @@ class AsyncSQLerQuery:
             try:
                 _id, data_json = row[0], row[1]
                 ver = row[2] if self._include_version and len(row) > 2 else None
-            except Exception:
+            except (IndexError, TypeError) as e:
+                import warnings
+                warnings.warn(f"Skipping malformed row in {self._table}: {e}", RuntimeWarning)
                 continue
             obj = json.loads(data_json)
 
@@ -303,7 +306,7 @@ class AsyncSQLerQuery:
             int: Number of rows updated.
         """
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
         if not fields:
             raise ValueError("No fields to update")
 
@@ -340,7 +343,7 @@ class AsyncSQLerQuery:
             int: Number of rows deleted.
         """
         if self._adapter is None:
-            raise ConnectionError("No adapter set for query")
+            raise NoAdapterError("No adapter set for query")
 
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         params = self._expression.params if self._expression else []

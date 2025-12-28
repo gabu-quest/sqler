@@ -1,7 +1,9 @@
 import json
+import sqlite3
 from typing import Any, Optional
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
+from sqler.exceptions import StaleVersionError
 from sqler.utils import validate_table_name
 
 
@@ -257,7 +259,7 @@ class AsyncSQLerDB:
         row = await ch.fetchone()
         await ch.close()
         if not row or int(row[0]) == 0:
-            raise RuntimeError("Stale version: update rejected")
+            raise StaleVersionError("Stale version: update rejected")
         return _id, expected_version + 1
 
     async def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
@@ -309,8 +311,8 @@ class AsyncSQLerDB:
         else:
             try:
                 await self.adapter.execute("ROLLBACK;")
-            except Exception:
-                pass
+            except sqlite3.Error:
+                pass  # Rollback may fail if connection is broken
         return False
 
 
@@ -337,8 +339,8 @@ class AsyncTransaction:
         else:
             try:
                 await self.adapter.execute("ROLLBACK;")
-            except Exception:
-                pass
+            except sqlite3.Error:
+                pass  # Rollback may fail if connection is broken
         return False
 
     async def commit(self):
@@ -352,6 +354,6 @@ class AsyncTransaction:
         if self._active:
             try:
                 await self.adapter.execute("ROLLBACK;")
-            except Exception:
-                pass
+            except sqlite3.Error:
+                pass  # Rollback may fail if connection is broken
             self._active = False

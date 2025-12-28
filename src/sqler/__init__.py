@@ -1,4 +1,4 @@
-from .adapter import AsyncSQLiteAdapter, NotConnectedError, SQLiteAdapter
+from .adapter import AsyncSQLiteAdapter, SQLiteAdapter
 from .db import SQLerDB
 from .db.async_db import AsyncSQLerDB
 from .exceptions import (
@@ -9,12 +9,16 @@ from .exceptions import (
     MaxDepthExceededError,
     MissingReferenceWarning,
     ModelError,
+    NoAdapterError,
+    NotBoundError,
+    NotConnectedError,
     NotFoundError,
     QueryError,
     QueryTimeoutError,
     ResolutionError,
     SchemaError,
     SQLerError,
+    StaleVersionError,
     UniqueConstraintError,
     ValidationError,
 )
@@ -36,7 +40,6 @@ from .models import (
     SQLerModel,
     SQLerQuerySet,
     SQLerSafeModel,
-    StaleVersionError,
     TimestampMixin,
 )
 from .query import F, SQLerExpression, SQLerField, SQLerQuery
@@ -47,7 +50,6 @@ __all__ = [
     # Adapters
     "SQLiteAdapter",
     "AsyncSQLiteAdapter",
-    "NotConnectedError",
     # Database
     "SQLerDB",
     "AsyncSQLerDB",
@@ -55,7 +57,6 @@ __all__ = [
     "SQLerModel",
     "SQLerQuerySet",
     "SQLerSafeModel",
-    "StaleVersionError",
     "AsyncSQLerModel",
     "AsyncSQLerQuerySet",
     "AsyncSQLerSafeModel",
@@ -89,15 +90,20 @@ __all__ = [
     # Errors - Base
     "SQLerError",
     "ReferentialIntegrityError",
+    # Errors - Connection
+    "NotConnectedError",
+    "NoAdapterError",
     # Errors - Query
     "QueryError",
     "QueryTimeoutError",
     # Errors - Model
     "ModelError",
     "NotFoundError",
+    "NotBoundError",
     "ValidationError",
     # Errors - Concurrency
     "ConcurrencyError",
+    "StaleVersionError",
     # Errors - Integrity
     "IntegrityError",
     "UniqueConstraintError",

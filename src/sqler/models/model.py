@@ -6,6 +6,7 @@ from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
 from sqler.db.sqler_db import SQLerDB
+from sqler.exceptions import NotBoundError
 from sqler.models.queryset import SQLerQuerySet
 from sqler.query import SQLerExpression
 
@@ -101,10 +102,13 @@ class SQLerModel(BaseModel):
         """Return the bound DB and table or raise if unbound.
 
         Raises:
-            RuntimeError: If :meth:`set_db` has not been called.
+            NotBoundError: If :meth:`set_db` has not been called.
         """
         if cls._db is None or cls._table is None:
-            raise RuntimeError("Model is not bound. Call set_db(db, table?) first.")
+            raise NotBoundError(
+                f"Model {cls.__name__} is not bound. Call set_db(db, table?) first.",
+                details={"model": cls.__name__}
+            )
         return cls._db, cls._table
 
     @classmethod

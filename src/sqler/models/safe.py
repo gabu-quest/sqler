@@ -7,6 +7,8 @@ from typing import ClassVar, Optional, Type, TypeVar
 
 from pydantic import PrivateAttr
 
+from sqler.exceptions import StaleVersionError
+
 from .model import SQLerModel
 from .queryset import SQLerQuerySet
 from .utils import (
@@ -16,10 +18,6 @@ from .utils import (
     can_rebase_deltas,
     compute_numeric_scalar_deltas,
 )
-
-
-class StaleVersionError(RuntimeError):
-    """Raised when saving a model with a stale version."""
 
 
 TSafe = TypeVar("TSafe", bound="SQLerSafeModel")
