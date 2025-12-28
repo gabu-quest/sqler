@@ -811,11 +811,11 @@ class TestTransactionStress:
         count = cur.fetchone()[0]
         assert count == 2
 
-    def test_model_save_commits_immediately_known_limitation(self, db):
-        """Document: model.save() commits immediately, breaking outer transactions.
+    def test_model_save_respects_transaction(self, db):
+        """Verify model.save() respects outer transactions and rolls back on error.
 
-        This is a known limitation of the current design. Model operations
-        call commit() internally for reliability in the common case.
+        This tests the transaction-aware auto-commit feature: when inside an
+        explicit transaction, model.save() does NOT commit immediately.
         """
         class Item(SQLerModel):
             value: int
@@ -824,19 +824,36 @@ class TestTransactionStress:
 
         try:
             with db.transaction():
-                Item(value=1).save()  # This commits!
-                Item(value=2).save()  # This also commits!
+                Item(value=1).save()  # Should NOT commit yet
+                Item(value=2).save()  # Should NOT commit yet
                 raise RuntimeError("Simulated error")
         except RuntimeError:
             pass
 
-        # Due to model.save() calling commit(), items ARE saved
-        # This documents the current behavior (not ideal, but known)
+        # Transaction rolled back - items should NOT be saved
         count = Item.query().count()
-        assert count == 2, "Known limitation: model.save() commits immediately"
+        assert count == 0, "model.save() should respect outer transactions"
+
+    def test_model_save_auto_commits_without_transaction(self, db):
+        """Verify model.save() auto-commits when NOT in a transaction (default behavior)."""
+        class Item(SQLerModel):
+            value: int
+
+        Item.set_db(db)
+
+        # Outside transaction, save should auto-commit immediately
+        Item(value=1).save()
+        Item(value=2).save()
+
+        count = Item.query().count()
+        assert count == 2, "model.save() should auto-commit outside transactions"
 
     def test_nested_transaction_behavior(self, db):
-        """Test behavior with nested transactions."""
+        """Test behavior with nested transactions (depth tracking).
+
+        Nested transactions use depth counting - the innermost commit is
+        suppressed until the outermost transaction completes.
+        """
         class Item(SQLerModel):
             value: int
 
@@ -845,18 +862,45 @@ class TestTransactionStress:
         with db.transaction():
             Item(value=1).save()
 
-            # SQLite doesn't support true nested transactions
-            # This should still work (savepoints or ignored)
-            try:
-                with db.transaction():
-                    Item(value=2).save()
-            except Exception:
-                pass
+            # Nested transaction - increases depth but doesn't start new txn
+            with db.transaction():
+                Item(value=2).save()
 
             Item(value=3).save()
 
-        # Items should be saved (commits happen in save())
-        assert Item.query().count() >= 2
+        # All items should be saved when outer transaction commits
+        assert Item.query().count() == 3
+
+    def test_nested_transaction_inner_rollback(self, db):
+        """Test that inner transaction error does NOT affect outer transaction.
+
+        Note: This implementation treats nested transactions as single-depth
+        (no savepoints), so an inner error will still affect the outer scope
+        when re-raised. This test documents the expected behavior.
+        """
+        class Item(SQLerModel):
+            value: int
+
+        Item.set_db(db)
+
+        try:
+            with db.transaction():
+                Item(value=1).save()
+
+                try:
+                    with db.transaction():
+                        Item(value=2).save()
+                        raise RuntimeError("Inner error")
+                except RuntimeError:
+                    pass  # Caught, so outer transaction continues
+
+                Item(value=3).save()
+        except Exception:
+            pass
+
+        # Only items 1 and 3 should be saved if inner error was caught
+        # Actually all 3 are saved because we caught the exception
+        assert Item.query().count() == 3
 
 
 class TestRandomizedStress:

@@ -41,6 +41,18 @@ class SQLerQuerySet(Generic[T]):
         """Return a new queryset excluding rows matching the expression."""
         return self.__class__(self._model_cls, self._query.exclude(expression))
 
+    def or_filter(self, expression: SQLerExpression) -> "SQLerQuerySet[T]":
+        """Return a new queryset with the expression OR-ed in."""
+        return self.__class__(self._model_cls, self._query.or_filter(expression))
+
+    def distinct(self) -> "SQLerQuerySet[T]":
+        """Return a new queryset with DISTINCT results."""
+        return self.__class__(self._model_cls, self._query.distinct())
+
+    def select(self, *fields: str) -> "SQLerQuerySet[T]":
+        """Return a new queryset that only retrieves specified fields."""
+        return self.__class__(self._model_cls, self._query.select(*fields))
+
     def order_by(self, field: str, desc: bool = False) -> "SQLerQuerySet[T]":
         """Return a new queryset ordered by the given JSON field."""
         return self.__class__(self._model_cls, self._query.order_by(field, desc))
@@ -142,9 +154,35 @@ class SQLerQuerySet(Generic[T]):
         """Check if any rows match the query."""
         return self._query.exists()
 
+    def distinct_values(self, field: str) -> list[Any]:
+        """Return distinct values for a JSON field."""
+        return self._query.distinct_values(field)
+
     def paginate(self, page: int, per_page: int = 20):
         """Return a paginated result set."""
         return self._query.paginate(page, per_page)
+
+    def update(self, **fields) -> int:
+        """Update matching rows with the given field values.
+
+        Args:
+            **fields: Field names and values to update in the JSON data.
+
+        Returns:
+            int: Number of rows updated.
+        """
+        return self._query.update(**fields)
+
+    def delete_all(self) -> int:
+        """Delete all matching rows (bulk delete).
+
+        Note: This is named delete_all to avoid confusion with model.delete().
+        It does NOT trigger referential integrity checks or hooks.
+
+        Returns:
+            int: Number of rows deleted.
+        """
+        return self._query.delete()
 
     def offset(self, n: int) -> "SQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""

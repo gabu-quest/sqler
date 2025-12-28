@@ -76,7 +76,7 @@ def test_count_runs_adapter(query_obj):
     adapter.count = 42
     count = q.count()
     assert count == 42
-    assert "count(*)" in adapter.executed[-1][0]
+    assert "count(*)" in adapter.executed[-1][0].lower()
 
 
 def test_all_runs_adapter(query_obj):

@@ -14,6 +14,7 @@ class SQLiteAdapter(AdapterABC):
         - WAL mode for improved concurrency
         - Configurable query timeout via busy_timeout pragma
         - Optional slow query logging
+        - Transaction-aware auto-commit (respects explicit transactions)
 
     Args:
         path: Path to the database file, or ":memory:" for in-memory.
@@ -43,6 +44,8 @@ class SQLiteAdapter(AdapterABC):
         self._connected: bool = False
         self._single_conn: Optional[sqlite3.Connection] = None
         self._memory_singleton = path == ":memory:"
+        # Track transaction depth per-thread for nested transaction support
+        self._txn_depth: int = 0
 
     def connect(self) -> None:
         # Ensure a connection for this thread
@@ -125,6 +128,45 @@ class SQLiteAdapter(AdapterABC):
         """Commit the current transaction."""
         conn = self._conn()  # Raises NotConnectedError if not connected
         conn.commit()
+
+    def auto_commit(self) -> None:
+        """Commit only if NOT inside an explicit transaction.
+
+        Use this instead of commit() in operations like insert/update/delete
+        so that explicit transactions work correctly with model.save().
+        """
+        if self._txn_depth == 0:
+            self.commit()
+
+    @property
+    def in_transaction(self) -> bool:
+        """Return True if currently inside an explicit transaction."""
+        return self._txn_depth > 0
+
+    def begin_transaction(self) -> None:
+        """Begin an explicit transaction (increments depth counter)."""
+        if self._txn_depth == 0:
+            self._conn().execute("BEGIN IMMEDIATE")
+        self._txn_depth += 1
+
+    def end_transaction(self, *, commit: bool = True) -> None:
+        """End an explicit transaction (decrements depth counter).
+
+        Args:
+            commit: If True, commit on outermost transaction. If False, rollback.
+        """
+        if self._txn_depth <= 0:
+            return  # No active transaction
+        self._txn_depth -= 1
+        if self._txn_depth == 0:
+            conn = self._conn()
+            if commit:
+                conn.commit()
+            else:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
 
     def __enter__(self):
         """Enter context manager; connect if not connected"""

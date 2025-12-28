@@ -19,6 +19,7 @@ class AsyncSQLerQuery:
         offset: Optional[int] = None,
         include_version: bool = False,
         select_fields: Optional[list[str]] = None,
+        distinct: bool = False,
     ):
         self._table = table
         self._adapter = adapter
@@ -29,6 +30,7 @@ class AsyncSQLerQuery:
         self._offset = offset
         self._include_version = include_version
         self._select_fields = select_fields
+        self._distinct = distinct
 
     def _clone(self, **kwargs) -> Self:
         """Create a clone with optional overrides."""
@@ -42,6 +44,7 @@ class AsyncSQLerQuery:
             offset=kwargs.get("offset", self._offset),
             include_version=kwargs.get("include_version", self._include_version),
             select_fields=kwargs.get("select_fields", self._select_fields),
+            distinct=kwargs.get("distinct", self._distinct),
         )
 
     def filter(self, expression: SQLerExpression) -> Self:
@@ -52,6 +55,15 @@ class AsyncSQLerQuery:
         not_expr = ~expression
         new_expression = not_expr if self._expression is None else (self._expression & not_expr)
         return self._clone(expression=new_expression)
+
+    def or_filter(self, expression: SQLerExpression) -> Self:
+        """Return a new query with the expression OR-ed in."""
+        new_expression = expression if self._expression is None else (self._expression | expression)
+        return self._clone(expression=new_expression)
+
+    def distinct(self) -> Self:
+        """Return a new query with DISTINCT keyword."""
+        return self._clone(distinct=True)
 
     def order_by(self, field: str, desc: bool = False) -> Self:
         return self._clone(order=field, desc=desc)
@@ -99,11 +111,12 @@ class AsyncSQLerQuery:
         elif self._offset is not None:
             limit_offset = f"LIMIT -1 OFFSET {self._offset}"
 
+        distinct_kw = "DISTINCT " if self._distinct else ""
         if include_id:
             select = "_id, data" + (", _version" if self._include_version else "")
         else:
             select = "data"
-        sql = f"SELECT {select} FROM {self._table} {where} {order} {limit_offset}".strip()
+        sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
         sql = " ".join(sql.split())
         params = self._expression.params if self._expression else []
         return sql, params
@@ -205,6 +218,19 @@ class AsyncSQLerQuery:
             raise ConnectionError("No adapter set for query")
         return await self.limit(1).count() > 0
 
+    async def distinct_values(self, field: str) -> list[Any]:
+        """Return distinct values for a JSON field."""
+        if self._adapter is None:
+            raise ConnectionError("No adapter set for query")
+        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        sql = f"SELECT DISTINCT json_extract(data, '$.{field}') FROM {self._table} {where}".strip()
+        sql = " ".join(sql.split())
+        params = self._expression.params if self._expression else []
+        cur = await self._adapter.execute(sql, params)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [row[0] for row in rows if row[0] is not None]
+
     async def paginate(self, page: int, per_page: int = 20) -> PaginatedResult:
         """Return a paginated result set.
 
@@ -266,3 +292,68 @@ class AsyncSQLerQuery:
     async def first_dict(self) -> Optional[dict[str, Any]]:
         res = await self.limit(1).all_dicts()
         return res[0] if res else None
+
+    async def update(self, **fields) -> int:
+        """Update matching rows with the given field values.
+
+        Args:
+            **fields: Field names and values to update in the JSON data.
+
+        Returns:
+            int: Number of rows updated.
+        """
+        if self._adapter is None:
+            raise ConnectionError("No adapter set for query")
+        if not fields:
+            raise ValueError("No fields to update")
+
+        import json
+
+        # Build SET clause using json_set
+        set_parts = []
+        set_params = []
+        for field, value in fields.items():
+            set_parts.append(f"'$.{field}', ?")
+            set_params.append(json.dumps(value) if isinstance(value, (dict, list)) else value)
+
+        set_clause = ", ".join(set_parts)
+        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        where_params = self._expression.params if self._expression else []
+
+        sql = f"UPDATE {self._table} SET data = json_set(data, {set_clause}) {where}".strip()
+        sql = " ".join(sql.split())
+
+        cur = await self._adapter.execute(sql, set_params + where_params)
+        await self._adapter.commit()
+
+        # Check changes() to get rowcount
+        ch = await self._adapter.execute("SELECT changes();")
+        row = await ch.fetchone()
+        await ch.close()
+        await cur.close()
+        return int(row[0]) if row else 0
+
+    async def delete(self) -> int:
+        """Delete all matching rows.
+
+        Returns:
+            int: Number of rows deleted.
+        """
+        if self._adapter is None:
+            raise ConnectionError("No adapter set for query")
+
+        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        params = self._expression.params if self._expression else []
+
+        sql = f"DELETE FROM {self._table} {where}".strip()
+        sql = " ".join(sql.split())
+
+        cur = await self._adapter.execute(sql, params)
+        await self._adapter.commit()
+
+        # Check changes() to get rowcount
+        ch = await self._adapter.execute("SELECT changes();")
+        row = await ch.fetchone()
+        await ch.close()
+        await cur.close()
+        return int(row[0]) if row else 0
