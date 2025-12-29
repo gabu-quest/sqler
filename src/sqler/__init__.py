@@ -23,6 +23,15 @@ from .exceptions import (
     ValidationError,
 )
 from .logging import QueryLog, QueryLogger, query_logger, timed_query
+from .metrics import MetricsCollector, metrics
+from .migrations import (
+    AsyncMigration,
+    AsyncMigrationRunner,
+    Migration,
+    MigrationRecord,
+    MigrationResult,
+    MigrationRunner,
+)
 from .models import (
     DEFAULT_REBASE_CONFIG,
     NO_REBASE_CONFIG,
@@ -41,6 +50,31 @@ from .models import (
     SQLerQuerySet,
     SQLerSafeModel,
     TimestampMixin,
+)
+from .models.mixins import (
+    AsyncAuditLogMixin,
+    AsyncAuditMixin,
+    AsyncSoftDeleteMixin,
+    AuditLogMixin,
+    AuditMixin,
+)
+from .ops import (
+    BackupResult,
+    DatabaseStats,
+    HealthStatus,
+    async_backup,
+    async_checkpoint,
+    async_get_stats,
+    async_health_check,
+    async_is_healthy,
+    async_vacuum,
+    backup,
+    checkpoint,
+    get_stats,
+    health_check,
+    is_healthy,
+    restore,
+    vacuum,
 )
 from .query import F, SQLerExpression, SQLerField, SQLerQuery
 from .query.query import PaginatedResult
@@ -63,10 +97,15 @@ __all__ = [
     # Mixins
     "TimestampMixin",
     "SoftDeleteMixin",
+    "AsyncSoftDeleteMixin",
     "HooksMixin",
     "AsyncHooksMixin",
     "FullMixin",
     "AsyncFullMixin",
+    "AuditMixin",
+    "AsyncAuditMixin",
+    "AuditLogMixin",
+    "AsyncAuditLogMixin",
     # Rebase configuration
     "RebaseConfig",
     "DEFAULT_REBASE_CONFIG",
@@ -87,6 +126,33 @@ __all__ = [
     "QueryLog",
     "query_logger",
     "timed_query",
+    # Metrics
+    "MetricsCollector",
+    "metrics",
+    # Migrations
+    "Migration",
+    "AsyncMigration",
+    "MigrationRunner",
+    "AsyncMigrationRunner",
+    "MigrationRecord",
+    "MigrationResult",
+    # Operations (backup, health, etc.)
+    "backup",
+    "restore",
+    "async_backup",
+    "health_check",
+    "is_healthy",
+    "async_health_check",
+    "async_is_healthy",
+    "get_stats",
+    "async_get_stats",
+    "vacuum",
+    "async_vacuum",
+    "checkpoint",
+    "async_checkpoint",
+    "HealthStatus",
+    "BackupResult",
+    "DatabaseStats",
     # Errors - Base
     "SQLerError",
     "ReferentialIntegrityError",

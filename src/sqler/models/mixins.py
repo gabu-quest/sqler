@@ -463,3 +463,427 @@ class AsyncFullMixin(TimestampMixin, AsyncSoftDeleteMixin, AsyncHooksMixin):
     """
 
     pass
+
+
+class AuditMixin:
+    """Mixin that provides audit logging for model changes.
+
+    Tracks who created/updated records and when. Requires a way to get
+    the current user (via class variable or override).
+
+    Usage::
+
+        class User(AuditMixin, SQLerModel):
+            name: str
+
+        # Set the current user for audit tracking
+        AuditMixin.set_current_user("admin@example.com")
+
+        user = User(name="Alice").save()
+        print(user.created_by)  # "admin@example.com"
+        print(user.updated_by)  # "admin@example.com"
+
+        user.name = "Alice Smith"
+        user.save()
+        print(user.updated_by)  # "admin@example.com"
+        print(user.updated_at)  # datetime of last save
+
+    For web applications, set current_user in middleware::
+
+        @app.middleware("http")
+        async def audit_middleware(request, call_next):
+            user = get_user_from_request(request)
+            AuditMixin.set_current_user(user.email if user else "anonymous")
+            response = await call_next(request)
+            return response
+    """
+
+    created_at: Optional[datetime] = Field(default=None)
+    updated_at: Optional[datetime] = Field(default=None)
+    created_by: Optional[str] = Field(default=None)
+    updated_by: Optional[str] = Field(default=None)
+
+    # Thread-local storage for current user
+    _current_user: ClassVar[Optional[str]] = None
+    _current_user_getter: ClassVar[Optional[Any]] = None
+
+    @classmethod
+    def set_current_user(cls, user: Optional[str]) -> None:
+        """Set the current user for audit tracking.
+
+        Args:
+            user: User identifier (email, username, ID, etc.)
+        """
+        cls._current_user = user
+
+    @classmethod
+    def set_current_user_getter(cls, getter: Any) -> None:
+        """Set a callable that returns the current user.
+
+        Args:
+            getter: Callable that returns user identifier string.
+
+        Usage::
+
+            def get_current_user():
+                return g.user.email if hasattr(g, 'user') else None
+
+            AuditMixin.set_current_user_getter(get_current_user)
+        """
+        cls._current_user_getter = getter
+
+    @classmethod
+    def get_current_user(cls) -> Optional[str]:
+        """Get the current user for audit tracking.
+
+        Returns:
+            Current user identifier or None.
+        """
+        if cls._current_user_getter is not None:
+            try:
+                return cls._current_user_getter()
+            except Exception:
+                return None
+        return cls._current_user
+
+    def _set_audit_fields(self) -> None:
+        """Set audit fields before save."""
+        now = datetime.now(timezone.utc)
+        user = self.get_current_user()
+
+        if self.created_at is None:  # type: ignore[attr-defined]
+            self.created_at = now  # type: ignore[attr-defined]
+            self.created_by = user  # type: ignore[attr-defined]
+
+        self.updated_at = now  # type: ignore[attr-defined]
+        self.updated_by = user  # type: ignore[attr-defined]
+
+
+class AsyncAuditMixin:
+    """Async version of AuditMixin for async models.
+
+    Usage::
+
+        class User(AsyncAuditMixin, AsyncSQLerModel):
+            name: str
+
+        AsyncAuditMixin.set_current_user("admin@example.com")
+        user = await User(name="Alice").save()
+    """
+
+    created_at: Optional[datetime] = Field(default=None)
+    updated_at: Optional[datetime] = Field(default=None)
+    created_by: Optional[str] = Field(default=None)
+    updated_by: Optional[str] = Field(default=None)
+
+    _current_user: ClassVar[Optional[str]] = None
+    _current_user_getter: ClassVar[Optional[Any]] = None
+
+    @classmethod
+    def set_current_user(cls, user: Optional[str]) -> None:
+        """Set the current user for audit tracking."""
+        cls._current_user = user
+
+    @classmethod
+    def set_current_user_getter(cls, getter: Any) -> None:
+        """Set a callable that returns the current user."""
+        cls._current_user_getter = getter
+
+    @classmethod
+    def get_current_user(cls) -> Optional[str]:
+        """Get the current user for audit tracking."""
+        if cls._current_user_getter is not None:
+            try:
+                return cls._current_user_getter()
+            except Exception:
+                return None
+        return cls._current_user
+
+    def _set_audit_fields(self) -> None:
+        """Set audit fields before save."""
+        now = datetime.now(timezone.utc)
+        user = self.get_current_user()
+
+        if self.created_at is None:  # type: ignore[attr-defined]
+            self.created_at = now  # type: ignore[attr-defined]
+            self.created_by = user  # type: ignore[attr-defined]
+
+        self.updated_at = now  # type: ignore[attr-defined]
+        self.updated_by = user  # type: ignore[attr-defined]
+
+
+class AuditLogMixin:
+    """Mixin that logs all changes to a separate audit log table.
+
+    This creates a full audit trail of all changes to a model, storing
+    the old and new values for each field that changed.
+
+    Usage::
+
+        class User(AuditLogMixin, SQLerModel):
+            name: str
+            email: str
+
+        user = User(name="Alice", email="alice@example.com").save()
+        user.email = "alice@newdomain.com"
+        user.save()
+
+        # Get audit log
+        logs = user.get_audit_log()
+        for log in logs:
+            print(f"{log['action']} by {log['user']} at {log['timestamp']}")
+            print(f"  Changes: {log['changes']}")
+
+    The audit log is stored in a table named `{model_table}_audit`.
+    """
+
+    # Private attribute to store the snapshot before save
+    _pre_save_snapshot: Optional[dict[str, Any]] = PrivateAttr(default=None)
+
+    def _capture_snapshot(self) -> None:
+        """Capture current state before save for change detection."""
+        # Get model data excluding private fields
+        data = {}
+        for field_name in self.model_fields:  # type: ignore[attr-defined]
+            try:
+                data[field_name] = getattr(self, field_name)
+            except AttributeError:
+                pass
+        self._pre_save_snapshot = data
+
+    def _get_changes(self) -> dict[str, dict[str, Any]]:
+        """Get dict of changed fields with old/new values."""
+        if self._pre_save_snapshot is None:
+            return {}
+
+        changes = {}
+        for field_name in self.model_fields:  # type: ignore[attr-defined]
+            try:
+                old_value = self._pre_save_snapshot.get(field_name)
+                new_value = getattr(self, field_name)
+                if old_value != new_value:
+                    changes[field_name] = {"old": old_value, "new": new_value}
+            except AttributeError:
+                pass
+
+        return changes
+
+    def _log_audit(self, action: str, changes: Optional[dict] = None) -> None:
+        """Log an audit entry.
+
+        Args:
+            action: Type of action (create, update, delete).
+            changes: Dict of field changes (for updates).
+        """
+        import json
+
+        db, table = self._require_binding()  # type: ignore[attr-defined]
+        audit_table = f"{table}_audit"
+
+        # Ensure audit table exists
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS {audit_table} (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            user TEXT,
+            timestamp TEXT NOT NULL,
+            changes TEXT,
+            snapshot TEXT
+        );
+        """
+        db.adapter.execute(ddl)
+        db.adapter.auto_commit()
+
+        # Create audit entry
+        record_id = getattr(self, "_id", None)
+        user = AuditMixin.get_current_user() if hasattr(AuditMixin, "get_current_user") else None
+
+        # Get current snapshot
+        snapshot = {}
+        for field_name in self.model_fields:  # type: ignore[attr-defined]
+            try:
+                value = getattr(self, field_name)
+                # Convert datetime to string for JSON
+                if isinstance(value, datetime):
+                    value = value.isoformat()
+                snapshot[field_name] = value
+            except AttributeError:
+                pass
+
+        db.adapter.execute(
+            f"INSERT INTO {audit_table} (record_id, action, user, timestamp, changes, snapshot) "
+            f"VALUES (?, ?, ?, ?, ?, ?);",
+            [
+                record_id,
+                action,
+                user,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(changes) if changes else None,
+                json.dumps(snapshot),
+            ],
+        )
+        db.adapter.auto_commit()
+
+    def get_audit_log(self) -> list[dict[str, Any]]:
+        """Get the audit log for this record.
+
+        Returns:
+            List of audit log entries, newest first.
+        """
+        import json
+
+        db, table = self._require_binding()  # type: ignore[attr-defined]
+        audit_table = f"{table}_audit"
+        record_id = getattr(self, "_id", None)
+
+        if record_id is None:
+            return []
+
+        try:
+            cursor = db.adapter.execute(
+                f"SELECT action, user, timestamp, changes, snapshot "
+                f"FROM {audit_table} WHERE record_id = ? ORDER BY _id DESC;",
+                [record_id],
+            )
+            rows = cursor.fetchall()
+        except Exception:
+            return []
+
+        logs = []
+        for row in rows:
+            logs.append({
+                "action": row[0],
+                "user": row[1],
+                "timestamp": row[2],
+                "changes": json.loads(row[3]) if row[3] else None,
+                "snapshot": json.loads(row[4]) if row[4] else None,
+            })
+
+        return logs
+
+
+class AsyncAuditLogMixin:
+    """Async version of AuditLogMixin.
+
+    Usage::
+
+        class User(AsyncAuditLogMixin, AsyncSQLerModel):
+            name: str
+
+        user = await User(name="Alice").save()
+        logs = await user.get_audit_log()
+    """
+
+    _pre_save_snapshot: Optional[dict[str, Any]] = PrivateAttr(default=None)
+
+    def _capture_snapshot(self) -> None:
+        """Capture current state before save."""
+        data = {}
+        for field_name in self.model_fields:  # type: ignore[attr-defined]
+            try:
+                data[field_name] = getattr(self, field_name)
+            except AttributeError:
+                pass
+        self._pre_save_snapshot = data
+
+    def _get_changes(self) -> dict[str, dict[str, Any]]:
+        """Get dict of changed fields with old/new values."""
+        if self._pre_save_snapshot is None:
+            return {}
+
+        changes = {}
+        for field_name in self.model_fields:  # type: ignore[attr-defined]
+            try:
+                old_value = self._pre_save_snapshot.get(field_name)
+                new_value = getattr(self, field_name)
+                if old_value != new_value:
+                    changes[field_name] = {"old": old_value, "new": new_value}
+            except AttributeError:
+                pass
+
+        return changes
+
+    async def _log_audit(self, action: str, changes: Optional[dict] = None) -> None:
+        """Log an audit entry (async)."""
+        import json
+
+        db, table = self._require_binding()  # type: ignore[attr-defined]
+        audit_table = f"{table}_audit"
+
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS {audit_table} (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            user TEXT,
+            timestamp TEXT NOT NULL,
+            changes TEXT,
+            snapshot TEXT
+        );
+        """
+        cursor = await db.adapter.execute(ddl)
+        await cursor.close()
+        await db.adapter.auto_commit()
+
+        record_id = getattr(self, "_id", None)
+        user = AsyncAuditMixin.get_current_user() if hasattr(AsyncAuditMixin, "get_current_user") else None
+
+        snapshot = {}
+        for field_name in self.model_fields:  # type: ignore[attr-defined]
+            try:
+                value = getattr(self, field_name)
+                if isinstance(value, datetime):
+                    value = value.isoformat()
+                snapshot[field_name] = value
+            except AttributeError:
+                pass
+
+        cursor = await db.adapter.execute(
+            f"INSERT INTO {audit_table} (record_id, action, user, timestamp, changes, snapshot) "
+            f"VALUES (?, ?, ?, ?, ?, ?);",
+            [
+                record_id,
+                action,
+                user,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(changes) if changes else None,
+                json.dumps(snapshot),
+            ],
+        )
+        await cursor.close()
+        await db.adapter.auto_commit()
+
+    async def get_audit_log(self) -> list[dict[str, Any]]:
+        """Get the audit log for this record (async)."""
+        import json
+
+        db, table = self._require_binding()  # type: ignore[attr-defined]
+        audit_table = f"{table}_audit"
+        record_id = getattr(self, "_id", None)
+
+        if record_id is None:
+            return []
+
+        try:
+            cursor = await db.adapter.execute(
+                f"SELECT action, user, timestamp, changes, snapshot "
+                f"FROM {audit_table} WHERE record_id = ? ORDER BY _id DESC;",
+                [record_id],
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        except Exception:
+            return []
+
+        logs = []
+        for row in rows:
+            logs.append({
+                "action": row[0],
+                "user": row[1],
+                "timestamp": row[2],
+                "changes": json.loads(row[3]) if row[3] else None,
+                "snapshot": json.loads(row[4]) if row[4] else None,
+            })
+
+        return logs
