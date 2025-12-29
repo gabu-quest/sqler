@@ -163,8 +163,9 @@ class SQLerModel(BaseModel):
     def from_ids(cls: Type[TModel], ids: list[int]) -> list[TModel]:
         """Hydrate multiple instances by id list (batch operation).
 
-        Fetches all documents in a single query and resolves relations
-        in batch. This is much faster than looping over `from_id()`.
+        Fetches all documents in a single query and resolves relations.
+        This is faster than looping over `from_id()` for the initial fetch,
+        though relation resolution is still done per-document for correctness.
 
         Args:
             ids: List of row ids to load.
@@ -179,11 +180,10 @@ class SQLerModel(BaseModel):
         docs = db.find_documents(table, ids)
         if not docs:
             return []
-        # Batch resolve relations using queryset's batch resolution
-        qs = cls.query()
-        docs = qs._batch_resolve(docs)
         instances = []
         for doc in docs:
+            # Resolve relations recursively like from_id does
+            doc = cls._resolve_relations(doc)
             inst = cls.model_validate(doc)
             inst._id = doc.get("_id")
             instances.append(inst)
