@@ -210,12 +210,15 @@ class AsyncSQLerQuerySet(Generic[T]):
         await cur.close()
         return rows
 
-    async def _abatch_resolve(self, docs: list[dict], max_depth: int = 5) -> list[dict]:
+    async def _abatch_resolve(
+        self, docs: list[dict], max_depth: int = 5
+    ) -> list[dict]:
         """Recursively resolve all relationship references in batch (async).
 
-        This method collects all references across all documents, fetches them
-        in batch per table (avoiding N+1 queries), then recursively resolves
-        any nested references in the fetched documents.
+        This method:
+        1. Recursively collects ALL refs at all nesting depths
+        2. Fetches them in batch (one query per table per depth level)
+        3. Replaces refs with resolved data, recursively processing nested refs
 
         Args:
             docs: List of documents to resolve.
@@ -229,57 +232,84 @@ class AsyncSQLerQuerySet(Generic[T]):
 
         import json
 
-        refs_by_table: dict[str, set[int]] = {}
-
-        def collect(value):
-            if isinstance(value, dict) and "_table" in value and "_id" in value:
-                refs_by_table.setdefault(value["_table"], set()).add(int(value["_id"]))
-            elif isinstance(value, dict):
-                for v in value.values():
-                    collect(v)
-            elif isinstance(value, list):
-                for v in value:
-                    collect(v)
-
-        for d in docs:
-            collect(d)
-
-        if not refs_by_table:
-            return docs
-
-        resolved: dict[tuple[str, int], dict] = {}
         adapter = self._query._adapter  # type: ignore[attr-defined]
         assert adapter is not None, "Query has no adapter bound"
-        nested_docs: list[dict] = []
 
-        for table, ids in refs_by_table.items():
-            if not ids:
-                continue
-            placeholders = ",".join(["?"] * len(ids))
-            sql = f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders})"
-            cur = await adapter.execute(sql, list(ids))
-            rows = await cur.fetchall()
-            await cur.close()
-            for _id, data_json in rows:
-                obj = json.loads(data_json)
-                obj["_id"] = _id
-                resolved[(table, int(_id))] = obj
-                nested_docs.append(obj)
+        # Master dict to hold ALL resolved refs across all depths
+        resolved: dict[tuple[str, int], dict] = {}
 
-        # recursively resolve nested references in fetched documents
-        if nested_docs:
-            await self._abatch_resolve(nested_docs, max_depth - 1)
+        async def collect_and_fetch(values: list, depth: int) -> None:
+            """Recursively collect refs and fetch them, building up resolved dict."""
+            if depth <= 0:
+                return
 
+            # Collect refs grouped by table
+            refs_by_table: dict[str, set[int]] = {}
+
+            def collect(value):
+                if isinstance(value, dict) and "_table" in value and "_id" in value:
+                    key = (value["_table"], int(value["_id"]))
+                    if key not in resolved:  # Don't re-fetch already resolved
+                        refs_by_table.setdefault(value["_table"], set()).add(
+                            int(value["_id"])
+                        )
+                elif isinstance(value, dict):
+                    for v in value.values():
+                        collect(v)
+                elif isinstance(value, list):
+                    for v in value:
+                        collect(v)
+
+            for v in values:
+                collect(v)
+
+            if not refs_by_table:
+                return
+
+            # Fetch all refs and recurse into fetched docs
+            nested_docs: list[dict] = []
+            for table, ids in refs_by_table.items():
+                if not ids:
+                    continue
+                placeholders = ",".join(["?"] * len(ids))
+                sql = f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders})"
+                cur = await adapter.execute(sql, list(ids))
+                rows = await cur.fetchall()
+                await cur.close()
+                for _id, data_json in rows:
+                    obj = json.loads(data_json)
+                    obj["_id"] = _id
+                    resolved[(table, int(_id))] = obj
+                    nested_docs.append(obj)
+
+            # Recursively fetch nested refs
+            if nested_docs:
+                await collect_and_fetch(nested_docs, depth - 1)
+
+        # Collect and fetch all refs at all depths into single resolved dict
+        await collect_and_fetch(docs, max_depth)
+
+        if not resolved:
+            return docs
+
+        # Replace refs with resolved data, recursively processing nested refs
         def make_replace():
-            visited: set[tuple[str, int]] = set()
+            # Track refs currently being processed (stack) to detect cycles
+            processing: set[tuple[str, int]] = set()
 
             def replace(value):
                 if isinstance(value, dict) and "_table" in value and "_id" in value:
                     key = (value["_table"], int(value["_id"]))
-                    if key in visited:
-                        return value
-                    visited.add(key)
-                    return resolved.get(key, value)
+                    if key in processing:
+                        return value  # Circular ref - we're already processing this
+                    fetched = resolved.get(key)
+                    if fetched is None:
+                        return value  # Not found, keep original ref
+                    # Mark as processing, resolve, then unmark
+                    processing.add(key)
+                    result = {k: replace(v) for k, v in fetched.items()}
+                    processing.discard(key)
+                    return result
                 if isinstance(value, dict):
                     return {k: replace(v) for k, v in value.items()}
                 if isinstance(value, list):
