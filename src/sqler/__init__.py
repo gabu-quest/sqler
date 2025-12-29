@@ -1,4 +1,14 @@
 from .adapter import AsyncSQLiteAdapter, SQLiteAdapter
+from .cache import (
+    CacheAwareModel,
+    CacheEntry,
+    CacheStats,
+    QueryCache,
+    async_cached_query,
+    cached_query,
+    configure_cache,
+    get_cache,
+)
 from .db import SQLerDB
 from .db.async_db import AsyncSQLerDB
 from .exceptions import (
@@ -23,6 +33,22 @@ from .exceptions import (
     UniqueConstraintError,
     ValidationError,
 )
+from .export import (
+    ExportResult,
+    ImportResult,
+    async_export_jsonl,
+    async_import_jsonl,
+    export_csv,
+    export_csv_string,
+    export_json,
+    export_json_string,
+    export_jsonl,
+    import_csv,
+    import_json,
+    import_jsonl,
+    stream_jsonl,
+)
+from .fts import FTSIndex, FTSStats, SearchResult, SearchableMixin
 from .logging import QueryLog, QueryLogger, query_logger, timed_query
 from .metrics import MetricsCollector, metrics
 from .migrations import (
@@ -79,6 +105,13 @@ from .ops import (
 )
 from .pool import ConnectionPool, PooledSQLerDB, PooledSQLiteAdapter, PoolStats
 from .query import F, SQLerExpression, SQLerField, SQLerQuery
+from .tracking import (
+    ChangeTracker,
+    DiffMixin,
+    FieldChange,
+    PartialUpdateMixin,
+    TrackedModel,
+)
 from .query.query import PaginatedResult
 from .registry import register, resolve, tables
 
@@ -191,4 +224,38 @@ __all__ = [
     "BatchOperationError",
     # Errors - Pool
     "ConnectionPoolExhaustedError",
+    # Export/Import
+    "export_csv",
+    "export_csv_string",
+    "export_json",
+    "export_json_string",
+    "export_jsonl",
+    "import_csv",
+    "import_json",
+    "import_jsonl",
+    "stream_jsonl",
+    "async_export_jsonl",
+    "async_import_jsonl",
+    "ExportResult",
+    "ImportResult",
+    # Cache
+    "QueryCache",
+    "CacheEntry",
+    "CacheStats",
+    "CacheAwareModel",
+    "cached_query",
+    "async_cached_query",
+    "get_cache",
+    "configure_cache",
+    # Full-Text Search
+    "FTSIndex",
+    "FTSStats",
+    "SearchResult",
+    "SearchableMixin",
+    # Change Tracking
+    "TrackedModel",
+    "ChangeTracker",
+    "FieldChange",
+    "PartialUpdateMixin",
+    "DiffMixin",
 ]
