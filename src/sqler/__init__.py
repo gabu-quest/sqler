@@ -5,6 +5,7 @@ from .exceptions import (
     BatchOperationError,
     CircularReferenceError,
     ConcurrencyError,
+    ConnectionPoolExhaustedError,
     IntegrityError,
     MaxDepthExceededError,
     MissingReferenceWarning,
@@ -76,6 +77,7 @@ from .ops import (
     restore,
     vacuum,
 )
+from .pool import ConnectionPool, PooledSQLerDB, PooledSQLiteAdapter, PoolStats
 from .query import F, SQLerExpression, SQLerField, SQLerQuery
 from .query.query import PaginatedResult
 from .registry import register, resolve, tables
@@ -153,6 +155,11 @@ __all__ = [
     "HealthStatus",
     "BackupResult",
     "DatabaseStats",
+    # Connection Pool
+    "ConnectionPool",
+    "PooledSQLiteAdapter",
+    "PooledSQLerDB",
+    "PoolStats",
     # Errors - Base
     "SQLerError",
     "ReferentialIntegrityError",
@@ -182,4 +189,6 @@ __all__ = [
     "MissingReferenceWarning",
     # Errors - Batch
     "BatchOperationError",
+    # Errors - Pool
+    "ConnectionPoolExhaustedError",
 ]
