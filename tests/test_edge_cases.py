@@ -4,7 +4,6 @@ This module tests error handling, malformed data, concurrent access,
 and other edge cases to ensure robustness.
 """
 
-
 import pytest
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel, StaleVersionError
 from sqler.models import ReferentialIntegrityError
@@ -15,8 +14,8 @@ from sqler.query import SQLerField as F
 
 def test_invalid_table_name_rejected():
     """Test that invalid table names are rejected."""
-    from sqler.utils import validate_table_name
     from sqler.exceptions import InvalidTableNameError
+    from sqler.utils import validate_table_name
 
     # Valid names should pass
     assert validate_table_name("users") == "users"
@@ -518,7 +517,7 @@ def test_hydration_with_wrong_table():
 
 def test_pluralization_edge_cases():
     """Test that table name pluralization handles common patterns."""
-    from sqler.models.model import _pluralize, _default_table_name
+    from sqler.models.model import _default_table_name, _pluralize
 
     # Regular plurals
     assert _pluralize("user") == "users"

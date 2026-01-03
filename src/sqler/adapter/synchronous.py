@@ -6,7 +6,8 @@ from typing import Any, Optional, Self
 
 from sqler.logging import query_logger
 
-from .abstract import AdapterABC, NotConnectedError
+from ..exceptions import NotConnectedError
+from .abstract import AdapterABC
 
 
 class SQLiteAdapter(AdapterABC):

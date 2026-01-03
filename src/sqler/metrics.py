@@ -33,7 +33,6 @@ For Prometheus integration::
 """
 
 import threading
-import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -54,18 +53,20 @@ class QueryMetrics:
     avg_duration_ms: float = 0
 
     # Histogram buckets (in ms)
-    histogram: dict[str, int] = field(default_factory=lambda: {
-        "le_1": 0,      # <= 1ms
-        "le_5": 0,      # <= 5ms
-        "le_10": 0,     # <= 10ms
-        "le_25": 0,     # <= 25ms
-        "le_50": 0,     # <= 50ms
-        "le_100": 0,    # <= 100ms
-        "le_250": 0,    # <= 250ms
-        "le_500": 0,    # <= 500ms
-        "le_1000": 0,   # <= 1s
-        "le_inf": 0,    # > 1s
-    })
+    histogram: dict[str, int] = field(
+        default_factory=lambda: {
+            "le_1": 0,  # <= 1ms
+            "le_5": 0,  # <= 5ms
+            "le_10": 0,  # <= 10ms
+            "le_25": 0,  # <= 25ms
+            "le_50": 0,  # <= 50ms
+            "le_100": 0,  # <= 100ms
+            "le_250": 0,  # <= 250ms
+            "le_500": 0,  # <= 500ms
+            "le_1000": 0,  # <= 1s
+            "le_inf": 0,  # > 1s
+        }
+    )
 
     def record(self, duration_ms: float, error: bool = False) -> None:
         """Record a query execution."""
@@ -231,12 +232,14 @@ class MetricsCollector:
 
             # Track slow queries
             if log.duration_ms >= self._slow_threshold_ms:
-                self._slow_queries.append({
-                    "sql": log.sql[:200],  # Truncate
-                    "duration_ms": log.duration_ms,
-                    "timestamp": log.timestamp.isoformat(),
-                    "error": log.error,
-                })
+                self._slow_queries.append(
+                    {
+                        "sql": log.sql[:200],  # Truncate
+                        "duration_ms": log.duration_ms,
+                        "timestamp": log.timestamp.isoformat(),
+                        "error": log.error,
+                    }
+                )
                 if len(self._slow_queries) > self._max_slow_queries:
                     self._slow_queries.pop(0)
 
@@ -278,7 +281,7 @@ class MetricsCollector:
             # Try to find FROM clause
             from_idx = sql_upper.find(" FROM ")
             if from_idx != -1:
-                after_from = sql[from_idx + 6:].strip()
+                after_from = sql[from_idx + 6 :].strip()
                 table = after_from.split()[0].lower() if after_from else None
 
         if table and op:
@@ -318,8 +321,7 @@ class MetricsCollector:
                 "labels": dict(self._labels),
                 "start_time": self._start_time.isoformat() if self._start_time else None,
                 "uptime_seconds": (
-                    (datetime.now() - self._start_time).total_seconds()
-                    if self._start_time else 0
+                    (datetime.now() - self._start_time).total_seconds() if self._start_time else 0
                 ),
             }
 
@@ -363,12 +365,18 @@ class MetricsCollector:
             for bound, key in bucket_bounds:
                 count = self._queries.histogram[key]
                 if labels_str:
-                    lines.append(f'sqler_query_duration_ms_bucket{{le="{bound}",{labels_str}}} {count}')
+                    lines.append(
+                        f'sqler_query_duration_ms_bucket{{le="{bound}",{labels_str}}} {count}'
+                    )
                 else:
                     lines.append(f'sqler_query_duration_ms_bucket{{le="{bound}"}} {count}')
 
-            lines.append(f"sqler_query_duration_ms_sum{label_suffix} {self._queries.total_duration_ms}")
-            lines.append(f"sqler_query_duration_ms_count{label_suffix} {self._queries.total_queries}")
+            lines.append(
+                f"sqler_query_duration_ms_sum{label_suffix} {self._queries.total_duration_ms}"
+            )
+            lines.append(
+                f"sqler_query_duration_ms_count{label_suffix} {self._queries.total_queries}"
+            )
 
             # Per-table metrics
             lines.append("# HELP sqler_table_operations_total Operations per table")

@@ -9,35 +9,35 @@ These tests cover the major enhancements added to make the library legendary:
 """
 
 import sys
-sys.path.insert(0, 'src')
+
+sys.path.insert(0, "src")
 
 import pytest
 from sqler import (
-    SQLerDB,
-    SQLerModel,
-    SQLerSafeModel,
-    SoftDeleteMixin,
-    TimestampMixin,
+    DEFAULT_REBASE_CONFIG,
+    NO_REBASE_CONFIG,
+    PERMISSIVE_REBASE_CONFIG,
+    CircularReferenceError,
     F,
     RebaseConfig,
-    DEFAULT_REBASE_CONFIG,
-    PERMISSIVE_REBASE_CONFIG,
-    NO_REBASE_CONFIG,
-    CircularReferenceError,
+    SoftDeleteMixin,
+    SQLerDB,
     SQLerError,
-)
-from sqler.utils import (
-    validate_table_name,
-    is_ref_dict,
-    collect_references,
-    ReferenceTracker,
-)
-from sqler.models.utils import (
-    compute_numeric_scalar_deltas,
-    apply_numeric_scalar_deltas,
-    can_rebase_deltas,
+    SQLerModel,
+    TimestampMixin,
 )
 from sqler.exceptions import InvalidTableNameError
+from sqler.models.utils import (
+    apply_numeric_scalar_deltas,
+    can_rebase_deltas,
+    compute_numeric_scalar_deltas,
+)
+from sqler.utils import (
+    ReferenceTracker,
+    collect_references,
+    is_ref_dict,
+    validate_table_name,
+)
 
 
 @pytest.fixture
@@ -51,6 +51,7 @@ class TestSoftDeleteMixin:
 
     def test_soft_delete_basic(self, db):
         """Test basic soft delete functionality."""
+
         class User(SoftDeleteMixin, SQLerModel):
             name: str
 
@@ -67,6 +68,7 @@ class TestSoftDeleteMixin:
 
     def test_active_query_filters_deleted(self, db):
         """Test that .active() excludes soft-deleted records."""
+
         class User(SoftDeleteMixin, SQLerModel):
             name: str
 
@@ -88,6 +90,7 @@ class TestSoftDeleteMixin:
 
     def test_with_deleted_returns_all(self, db):
         """Test that .with_deleted() returns all records."""
+
         class User(SoftDeleteMixin, SQLerModel):
             name: str
 
@@ -102,6 +105,7 @@ class TestSoftDeleteMixin:
 
     def test_only_deleted_returns_deleted_only(self, db):
         """Test that .only_deleted() returns only deleted records."""
+
         class User(SoftDeleteMixin, SQLerModel):
             name: str
 
@@ -118,6 +122,7 @@ class TestSoftDeleteMixin:
 
     def test_restore_soft_deleted(self, db):
         """Test restoring a soft-deleted record."""
+
         class User(SoftDeleteMixin, SQLerModel):
             name: str
 
@@ -317,9 +322,7 @@ class TestReferenceUtilities:
                 {"_table": "products", "_id": 10},
                 {"_table": "products", "_id": 11},
             ],
-            "nested": {
-                "supplier": {"_table": "suppliers", "_id": 5}
-            }
+            "nested": {"supplier": {"_table": "suppliers", "_id": 5}},
         }
 
         refs = collect_references(doc)
@@ -380,6 +383,7 @@ class TestTimestampMixin:
 
     def test_timestamps_set_on_save(self, db):
         """Test that timestamps are set correctly."""
+
         class User(TimestampMixin, SQLerModel):
             name: str
 

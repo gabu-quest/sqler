@@ -29,8 +29,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional, Set, Tuple, Type, TypeVar
 
-from pydantic import model_validator
-
 T = TypeVar("T", bound="TrackedModel")
 
 
@@ -379,7 +377,7 @@ class DiffMixin:
         Returns:
             Dict of field -> (self_value, other_value) for differences
         """
-        if type(self) != type(other):
+        if type(self) is not type(other):
             raise TypeError(f"Cannot compare {type(self)} with {type(other)}")
 
         differences = {}
@@ -403,7 +401,7 @@ class DiffMixin:
         Returns:
             True if all compared fields are equal
         """
-        if type(self) != type(other):
+        if type(self) is not type(other):
             return False
 
         for field_name in type(self).model_fields:

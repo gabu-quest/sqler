@@ -135,7 +135,7 @@ class SQLerModel(BaseModel):
         if cls._db is None or cls._table is None:
             raise NotBoundError(
                 f"Model {cls.__name__} is not bound. Call set_db(db, table?) first.",
-                details={"model": cls.__name__}
+                details={"model": cls.__name__},
             )
         return cls._db, cls._table
 

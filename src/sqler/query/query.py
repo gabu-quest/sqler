@@ -200,7 +200,9 @@ class SQLerQuery:
         params = self._expression.params if self._expression else []
         return sql, params
 
-    def _build_aggregate_query(self, func: str, field: Optional[str] = None) -> tuple[str, list[Any]]:
+    def _build_aggregate_query(
+        self, func: str, field: Optional[str] = None
+    ) -> tuple[str, list[Any]]:
         """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX).
 
         Args:
@@ -458,6 +460,7 @@ class SQLerQuery:
             except (IndexError, TypeError) as e:
                 # Log warning but continue - malformed row shouldn't break entire query
                 import warnings
+
                 warnings.warn(f"Skipping malformed row in {self._table}: {e}", RuntimeWarning)
                 continue
             if data_json is None:
@@ -605,4 +608,3 @@ class PaginatedResult:
             "has_next": self.has_next,
             "has_prev": self.has_prev,
         }
-

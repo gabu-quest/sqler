@@ -122,7 +122,9 @@ class AsyncSQLerQuery:
         params = self._expression.params if self._expression else []
         return sql, params
 
-    def _build_aggregate_query(self, func: str, field: Optional[str] = None) -> tuple[str, list[Any]]:
+    def _build_aggregate_query(
+        self, func: str, field: Optional[str] = None
+    ) -> tuple[str, list[Any]]:
         """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX)."""
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         if field is None:
@@ -312,6 +314,7 @@ class AsyncSQLerQuery:
                 ver = row[2] if self._include_version and len(row) > 2 else None
             except (IndexError, TypeError) as e:
                 import warnings
+
                 warnings.warn(f"Skipping malformed row in {self._table}: {e}", RuntimeWarning)
                 continue
             obj = json.loads(data_json)

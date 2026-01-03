@@ -5,7 +5,6 @@ import tempfile
 import time
 
 import pytest
-
 from sqler import (
     AuditMixin,
     Migration,
@@ -20,7 +19,6 @@ from sqler import (
     restore,
     vacuum,
 )
-
 
 # ============================================================================
 # Health Check Tests
@@ -309,9 +307,7 @@ class TestMigrations:
             Migration(
                 version=1,
                 name="create_table",
-                up=lambda db: db.adapter.execute(
-                    "CREATE TABLE test (_id INTEGER PRIMARY KEY);"
-                ),
+                up=lambda db: db.adapter.execute("CREATE TABLE test (_id INTEGER PRIMARY KEY);"),
                 down=lambda db: db.adapter.execute("DROP TABLE test;"),
             ),
         ]

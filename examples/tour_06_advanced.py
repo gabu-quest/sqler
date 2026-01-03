@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -180,7 +181,12 @@ def _(SQLerModel, db):
 
     # Create sample users
     for i in range(100):
-        User(name=f"User{i}", email=f"user{i}@example.com", age=20 + (i % 50), country=["US", "UK", "JP"][i % 3]).save()
+        User(
+            name=f"User{i}",
+            email=f"user{i}@example.com",
+            age=20 + (i % 50),
+            country=["US", "UK", "JP"][i % 3],
+        ).save()
 
     print(f"Created {User.query().count()} users")
     return User, i
@@ -296,13 +302,13 @@ def _(Author, author):
     try:
         author.delete_with_policy(on_delete="restrict")
         print("Author deleted (unexpected!)")
-    except IntegrityError as e:
-        print(f"IntegrityError: Cannot delete - {e}")
+    except IntegrityError as _e:
+        print(f"IntegrityError: Cannot delete - {_e}")
 
     # Author still exists
     still_exists = Author.from_id(author._id)
     print(f"Author still exists: {still_exists.name}")
-    return IntegrityError, e, still_exists
+    return IntegrityError, still_exists
 
 
 @app.cell
@@ -327,7 +333,7 @@ def _(Author, Book, F):
 
     # Delete with set_null policy
     bob.delete_with_policy(on_delete="set_null")
-    print(f"\nDeleted Bob with set_null policy")
+    print("\nDeleted Bob with set_null policy")
 
     # Check the book - author should be None
     book3.refresh()
@@ -390,8 +396,7 @@ def _(mo):
 def _(User, db):
     # Raw SQL query
     result = db.adapter.execute(
-        "SELECT _id, data FROM users WHERE json_extract(data, '$.age') > ? LIMIT 5",
-        [40]
+        "SELECT _id, data FROM users WHERE json_extract(data, '$.age') > ? LIMIT 5", [40]
     ).fetchall()
 
     print("Raw SQL results (users over 40):")
@@ -471,11 +476,7 @@ def _(mo):
 def _(F, User):
     # Find users in US OR UK
     results = (
-        User.query()
-        .filter(F("country") == "US")
-        .or_filter(F("country") == "UK")
-        .limit(10)
-        .all()
+        User.query().filter(F("country") == "US").or_filter(F("country") == "UK").limit(10).all()
     )
 
     print("Users in US or UK:")

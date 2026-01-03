@@ -122,9 +122,7 @@ class AsyncSQLerQuerySet(Generic[T]):
             snap = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
             inst._snapshot = snap  # type: ignore[attr-defined]
         except AttributeError as e:
-            logger.debug(
-                f"Could not attach metadata to {self._model_cls.__name__}: {e}"
-            )
+            logger.debug(f"Could not attach metadata to {self._model_cls.__name__}: {e}")
 
     async def count(self) -> int:
         return await self._query.count()
@@ -210,9 +208,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         await cur.close()
         return rows
 
-    async def _abatch_resolve(
-        self, docs: list[dict], max_depth: int = 5
-    ) -> list[dict]:
+    async def _abatch_resolve(self, docs: list[dict], max_depth: int = 5) -> list[dict]:
         """Recursively resolve all relationship references in batch (async).
 
         This method:
@@ -250,9 +246,7 @@ class AsyncSQLerQuerySet(Generic[T]):
                 if isinstance(value, dict) and "_table" in value and "_id" in value:
                     key = (value["_table"], int(value["_id"]))
                     if key not in resolved:  # Don't re-fetch already resolved
-                        refs_by_table.setdefault(value["_table"], set()).add(
-                            int(value["_id"])
-                        )
+                        refs_by_table.setdefault(value["_table"], set()).add(int(value["_id"]))
                 elif isinstance(value, dict):
                     for v in value.values():
                         collect(v)

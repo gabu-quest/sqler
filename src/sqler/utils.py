@@ -11,7 +11,7 @@ import re
 from typing import TYPE_CHECKING, Any, Optional, TypeVar
 
 if TYPE_CHECKING:
-    from sqler.exceptions import InvalidTableNameError
+    pass
 
 # Compiled regex for table name validation
 _TABLE_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -208,7 +208,9 @@ class _ReferenceContext:
         return False
 
 
-def collect_references(data: Any, refs: Optional[dict[str, set[int]]] = None) -> dict[str, set[int]]:
+def collect_references(
+    data: Any, refs: Optional[dict[str, set[int]]] = None
+) -> dict[str, set[int]]:
     """Collect all references from a document or value.
 
     Args:

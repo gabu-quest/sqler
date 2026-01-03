@@ -10,7 +10,8 @@ These tests are designed to break the library in creative ways:
 """
 
 import sys
-sys.path.insert(0, 'src')
+
+sys.path.insert(0, "src")
 
 import concurrent.futures
 import gc
@@ -18,25 +19,21 @@ import random
 import string
 import threading
 import time
-from typing import Any, List, Optional
-from unittest.mock import patch
+from typing import Optional
 
 import pytest
 from pydantic import Field
-
 from sqler import (
+    PERMISSIVE_REBASE_CONFIG,
+    F,
+    RebaseConfig,
+    SoftDeleteMixin,
     SQLerDB,
     SQLerModel,
     SQLerSafeModel,
-    SoftDeleteMixin,
-    TimestampMixin,
-    F,
-    RebaseConfig,
-    PERMISSIVE_REBASE_CONFIG,
     StaleVersionError,
 )
-from sqler.models.safe import StaleVersionError
-from sqler.utils import ReferenceTracker, collect_references
+from sqler.utils import ReferenceTracker
 
 
 @pytest.fixture
@@ -61,6 +58,7 @@ class TestConcurrencyStress:
         SQLite in-memory databases serialize writes, so we add retry logic
         to handle lock contention gracefully.
         """
+
         class Item(SQLerModel):
             name: str
             value: int
@@ -80,7 +78,7 @@ class TestConcurrencyStress:
                     return
                 except Exception as e:
                     if "locked" in str(e).lower() and attempt < 4:
-                        time.sleep(0.01 * (2 ** attempt))
+                        time.sleep(0.01 * (2**attempt))
                         continue
                     with lock:
                         errors.append((i, str(e)))
@@ -95,6 +93,7 @@ class TestConcurrencyStress:
 
     def test_100_concurrent_inserts_disk_db(self, disk_db):
         """Stress test: 100 concurrent inserts on disk-based DB with WAL mode."""
+
         class Item(SQLerModel):
             name: str
             value: int
@@ -127,6 +126,7 @@ class TestConcurrencyStress:
 
     def test_concurrent_reads_and_writes(self, db):
         """Stress test: concurrent reads while writing."""
+
         class Counter(SQLerModel):
             name: str
             value: int = 0
@@ -154,7 +154,9 @@ class TestConcurrencyStress:
         def writer():
             for i in range(20):
                 try:
-                    Counter(name=f"new_counter_{threading.current_thread().name}_{i}", value=i).save()
+                    Counter(
+                        name=f"new_counter_{threading.current_thread().name}_{i}", value=i
+                    ).save()
                     with lock:
                         write_count[0] += 1
                 except Exception:
@@ -177,6 +179,7 @@ class TestConcurrencyStress:
 
     def test_optimistic_locking_contention(self, db):
         """Stress test: many threads fighting over the same counter."""
+
         class Counter(SQLerSafeModel):
             name: str
             count: int = 0
@@ -219,7 +222,9 @@ class TestConcurrencyStress:
         assert final is not None
         # With rebasing, most should succeed
         assert final.count > 0
-        print(f"Final count: {final.count}, successes: {success_count[0]}, stale errors: {stale_errors[0]}")
+        print(
+            f"Final count: {final.count}, successes: {success_count[0]}, stale errors: {stale_errors[0]}"
+        )
 
 
 class TestDeepNestingAndCircularReferences:
@@ -227,6 +232,7 @@ class TestDeepNestingAndCircularReferences:
 
     def test_deeply_nested_document(self, db):
         """Stress test: very deeply nested JSON structure."""
+
         class DeepDoc(SQLerModel):
             data: dict
 
@@ -253,6 +259,7 @@ class TestDeepNestingAndCircularReferences:
 
     def test_wide_document_many_keys(self, db):
         """Stress test: document with thousands of keys."""
+
         class WideDoc(SQLerModel):
             data: dict
 
@@ -269,6 +276,7 @@ class TestDeepNestingAndCircularReferences:
 
     def test_large_array(self, db):
         """Stress test: document with a very large array."""
+
         class ArrayDoc(SQLerModel):
             items: list
 
@@ -285,6 +293,7 @@ class TestDeepNestingAndCircularReferences:
 
     def test_circular_reference_detection(self, db):
         """Test that circular references are handled gracefully."""
+
         class Node(SQLerModel):
             name: str
             next_node: Optional[dict] = None  # Will store ref dict
@@ -329,6 +338,7 @@ class TestLargeScaleOperations:
 
     def test_bulk_insert_10000_records(self, db):
         """Stress test: insert 10,000 records."""
+
         class Record(SQLerModel):
             index: int
             data: str
@@ -348,6 +358,7 @@ class TestLargeScaleOperations:
 
     def test_query_with_many_filters(self, db):
         """Stress test: query with many chained filters."""
+
         class Item(SQLerModel):
             a: int
             b: int
@@ -377,6 +388,7 @@ class TestLargeScaleOperations:
 
     def test_paginate_through_large_dataset(self, db):
         """Stress test: paginate through 1000 records."""
+
         class Record(SQLerModel):
             index: int
 
@@ -405,6 +417,7 @@ class TestEdgeCasesAndBoundaryConditions:
 
     def test_empty_string_fields(self, db):
         """Test handling of empty strings."""
+
         class Item(SQLerModel):
             name: str
             description: str = ""
@@ -419,6 +432,7 @@ class TestEdgeCasesAndBoundaryConditions:
 
     def test_unicode_and_special_characters(self, db):
         """Test handling of unicode and special characters."""
+
         class Item(SQLerModel):
             text: str
 
@@ -429,7 +443,7 @@ class TestEdgeCasesAndBoundaryConditions:
             "مرحبا",  # Arabic
             "🎉🚀💻",  # Emoji
             "Line1\nLine2\tTabbed",  # Control chars
-            "Quote's \"double\"",  # Quotes
+            'Quote\'s "double"',  # Quotes
             "Back\\slash",  # Backslash
             "\x00\x01\x02",  # Null bytes
             "a" * 10000,  # Very long string
@@ -446,13 +460,14 @@ class TestEdgeCasesAndBoundaryConditions:
 
     def test_very_large_integer(self, db):
         """Test handling of very large integers."""
+
         class BigNum(SQLerModel):
             value: int
 
         BigNum.set_db(db)
 
         # Python can handle arbitrary large integers
-        huge = 10 ** 100
+        huge = 10**100
         item = BigNum(value=huge).save()
         retrieved = BigNum.from_id(item._id)
 
@@ -460,6 +475,7 @@ class TestEdgeCasesAndBoundaryConditions:
 
     def test_float_precision(self, db):
         """Test float precision is maintained."""
+
         class Precise(SQLerModel):
             value: float
 
@@ -470,8 +486,8 @@ class TestEdgeCasesAndBoundaryConditions:
             0.1 + 0.2,  # Classic floating point issue
             1e-10,
             1e10,
-            float('inf'),
-            -float('inf'),
+            float("inf"),
+            -float("inf"),
             3.141592653589793,
         ]
 
@@ -486,6 +502,7 @@ class TestEdgeCasesAndBoundaryConditions:
 
     def test_none_in_list(self, db):
         """Test handling of None values in lists."""
+
         class Container(SQLerModel):
             items: list
 
@@ -498,6 +515,7 @@ class TestEdgeCasesAndBoundaryConditions:
 
     def test_empty_list_and_dict(self, db):
         """Test handling of empty collections."""
+
         class Container(SQLerModel):
             items: list = Field(default_factory=list)
             data: dict = Field(default_factory=dict)
@@ -516,6 +534,7 @@ class TestSoftDeleteStress:
 
     def test_soft_delete_many_records(self, db):
         """Stress test: soft delete thousands of records."""
+
         class User(SoftDeleteMixin, SQLerModel):
             name: str
 
@@ -537,6 +556,7 @@ class TestSoftDeleteStress:
 
     def test_restore_all_deleted(self, db):
         """Test restoring all soft-deleted records."""
+
         class Item(SoftDeleteMixin, SQLerModel):
             name: str
 
@@ -563,6 +583,7 @@ class TestOptimisticLockingStress:
 
     def test_rapid_version_increments(self, db):
         """Test rapid sequential updates with version checking."""
+
         class Counter(SQLerSafeModel):
             value: int = 0
             count: int = 0
@@ -584,6 +605,7 @@ class TestOptimisticLockingStress:
 
     def test_version_conflict_without_rebase(self, db):
         """Test that version conflicts raise errors without rebase."""
+
         class Item(SQLerSafeModel):
             name: str
             data: str = "initial"
@@ -610,6 +632,7 @@ class TestOptimisticLockingStress:
 
     def test_refresh_after_external_update(self, db):
         """Test refresh picks up external changes."""
+
         class Item(SQLerSafeModel):
             value: int = 0
 
@@ -620,8 +643,8 @@ class TestOptimisticLockingStress:
 
         # External update via raw SQL
         db.adapter.execute(
-            f"UPDATE items SET data = json_set(data, '$.value', 999), _version = _version + 1 WHERE _id = ?",
-            [item_id]
+            "UPDATE items SET data = json_set(data, '$.value', 999), _version = _version + 1 WHERE _id = ?",
+            [item_id],
         )
         db.adapter.commit()
 
@@ -635,6 +658,7 @@ class TestQueryStress:
 
     def test_complex_nested_query(self, db):
         """Test complex queries on nested JSON."""
+
         class Order(SQLerModel):
             customer: dict
             items: list
@@ -646,11 +670,8 @@ class TestQueryStress:
         for i in range(100):
             Order(
                 customer={"name": f"Customer {i}", "tier": i % 3},
-                items=[
-                    {"sku": f"SKU{j}", "qty": j + 1, "price": 10.0 * j}
-                    for j in range(5)
-                ],
-                total=100.0 + i
+                items=[{"sku": f"SKU{j}", "qty": j + 1, "price": 10.0 * j} for j in range(5)],
+                total=100.0 + i,
             ).save()
 
         # Query on nested field
@@ -659,6 +680,7 @@ class TestQueryStress:
 
     def test_query_chain_immutability(self, db):
         """Test that query chains don't mutate each other."""
+
         class Item(SQLerModel):
             value: int
 
@@ -680,6 +702,7 @@ class TestQueryStress:
 
     def test_aggregations_on_large_dataset(self, db):
         """Test aggregation functions on large dataset."""
+
         class Sale(SQLerModel):
             amount: float
             quantity: int
@@ -714,11 +737,7 @@ class TestMemoryAndResourceStress:
         classes = []
         for i in range(100):
             # Dynamically create model classes
-            cls = type(
-                f"DynamicModel{i}",
-                (SQLerModel,),
-                {"__annotations__": {"value": int}}
-            )
+            cls = type(f"DynamicModel{i}", (SQLerModel,), {"__annotations__": {"value": int}})
             cls.set_db(db, table=f"dynamic_{i}")
             cls(value=i).save()
             classes.append(cls)
@@ -745,6 +764,7 @@ class TestMemoryAndResourceStress:
 
     def test_query_without_fetching(self, db):
         """Test that unfetched queries don't leak resources."""
+
         class Item(SQLerModel):
             value: int
 
@@ -799,12 +819,8 @@ class TestTransactionStress:
         db._ensure_table("raw_items")
 
         with db.transaction():
-            db.adapter.execute(
-                "INSERT INTO raw_items (data) VALUES (json(?))", ['{"value": 1}']
-            )
-            db.adapter.execute(
-                "INSERT INTO raw_items (data) VALUES (json(?))", ['{"value": 2}']
-            )
+            db.adapter.execute("INSERT INTO raw_items (data) VALUES (json(?))", ['{"value": 1}'])
+            db.adapter.execute("INSERT INTO raw_items (data) VALUES (json(?))", ['{"value": 2}'])
 
         # Should be committed
         cur = db.adapter.execute("SELECT COUNT(*) FROM raw_items")
@@ -817,6 +833,7 @@ class TestTransactionStress:
         This tests the transaction-aware auto-commit feature: when inside an
         explicit transaction, model.save() does NOT commit immediately.
         """
+
         class Item(SQLerModel):
             value: int
 
@@ -836,6 +853,7 @@ class TestTransactionStress:
 
     def test_model_save_auto_commits_without_transaction(self, db):
         """Verify model.save() auto-commits when NOT in a transaction (default behavior)."""
+
         class Item(SQLerModel):
             value: int
 
@@ -854,6 +872,7 @@ class TestTransactionStress:
         Nested transactions use depth counting - the innermost commit is
         suppressed until the outermost transaction completes.
         """
+
         class Item(SQLerModel):
             value: int
 
@@ -878,6 +897,7 @@ class TestTransactionStress:
         (no savepoints), so an inner error will still affect the outer scope
         when re-raised. This test documents the expected behavior.
         """
+
         class Item(SQLerModel):
             value: int
 
@@ -908,6 +928,7 @@ class TestRandomizedStress:
 
     def test_random_operations_sequence(self, db):
         """Execute random sequence of operations."""
+
         class Item(SQLerModel):
             name: str
             value: int = 0
@@ -921,7 +942,7 @@ class TestRandomizedStress:
 
             try:
                 if op == "insert":
-                    name = ''.join(random.choices(string.ascii_letters, k=10))
+                    name = "".join(random.choices(string.ascii_letters, k=10))
                     Item(name=name, value=random.randint(0, 1000)).save()
 
                 elif op == "query":

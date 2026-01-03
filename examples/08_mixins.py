@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Self
 
 from sqler import SQLerDB, SQLerModel
-from sqler.models import HooksMixin, SoftDeleteMixin, TimestampMixin, FullMixin
+from sqler.models import FullMixin, HooksMixin, SoftDeleteMixin, TimestampMixin
 from sqler.query import SQLerField as F
 
 
@@ -56,7 +56,7 @@ class User(HooksMixin, SQLerModel):
 
     def after_delete(self) -> None:
         """Called after successful delete."""
-        print(f"  [after_delete] User deleted")
+        print("  [after_delete] User deleted")
 
 
 # Example 4: FullMixin - Combines TimestampMixin, SoftDeleteMixin, and HooksMixin

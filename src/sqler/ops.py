@@ -11,12 +11,11 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from sqler.db.sqler_db import SQLerDB
     from sqler.db.async_db import AsyncSQLerDB
+    from sqler.db.sqler_db import SQLerDB
 
 
 @dataclass
@@ -143,9 +142,7 @@ def health_check(db: "SQLerDB", timeout_ms: int = 5000) -> HealthStatus:
         # Get database info
         cursor = db.adapter.execute("PRAGMA database_list;")
         db_list = cursor.fetchall()
-        details["databases"] = [
-            {"name": row[1], "file": row[2]} for row in db_list
-        ]
+        details["databases"] = [{"name": row[1], "file": row[2]} for row in db_list]
 
         # Check journal mode
         cursor = db.adapter.execute("PRAGMA journal_mode;")
@@ -478,9 +475,7 @@ def checkpoint(db: "SQLerDB", mode: str = "PASSIVE") -> dict[str, int]:
 # ============================================================================
 
 
-async def async_health_check(
-    db: "AsyncSQLerDB", timeout_ms: int = 5000
-) -> HealthStatus:
+async def async_health_check(db: "AsyncSQLerDB", timeout_ms: int = 5000) -> HealthStatus:
     """Perform an async health check on the database.
 
     Args:
@@ -512,9 +507,7 @@ async def async_health_check(
         cursor = await db.adapter.execute("PRAGMA database_list;")
         db_list = await cursor.fetchall()
         await cursor.close()
-        details["databases"] = [
-            {"name": row[1], "file": row[2]} for row in db_list
-        ]
+        details["databases"] = [{"name": row[1], "file": row[2]} for row in db_list]
 
         # Check journal mode
         cursor = await db.adapter.execute("PRAGMA journal_mode;")
@@ -720,9 +713,7 @@ async def async_vacuum(db: "AsyncSQLerDB") -> float:
     return (time.perf_counter() - start) * 1000
 
 
-async def async_checkpoint(
-    db: "AsyncSQLerDB", mode: str = "PASSIVE"
-) -> dict[str, int]:
+async def async_checkpoint(db: "AsyncSQLerDB", mode: str = "PASSIVE") -> dict[str, int]:
     """Force an async WAL checkpoint."""
     cursor = await db.adapter.execute(f"PRAGMA wal_checkpoint({mode});")
     row = await cursor.fetchone()

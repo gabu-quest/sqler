@@ -79,7 +79,9 @@ def main():
     print(f"Regions: {regions}")
 
     # Get unique products in electronics
-    electronics_products = Sale.query().filter(F("category") == "electronics").distinct_values("product")
+    electronics_products = (
+        Sale.query().filter(F("category") == "electronics").distinct_values("product")
+    )
     print(f"Electronics products: {electronics_products}")
 
     print("\n=== Bulk Update ===")
@@ -112,12 +114,7 @@ def main():
     print("\n=== OR Filter ===")
 
     # Find sales in north OR west regions
-    results = (
-        Sale.query()
-        .filter(F("region") == "north")
-        .or_filter(F("region") == "west")
-        .all()
-    )
+    results = Sale.query().filter(F("region") == "north").or_filter(F("region") == "west").all()
     print(f"Sales in north or west: {len(results)}")
     for sale in results:
         print(f"  {sale.product} in {sale.region}")

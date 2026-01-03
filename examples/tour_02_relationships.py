@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -122,7 +123,7 @@ def _(Author, Book):
     book3 = Book(title="Database Design", year=2022, author=bob)
     book3.save()
 
-    print(f"\nCreated books:")
+    print("\nCreated books:")
     print(f"  - {book1.title} by {book1.author.name}")
     print(f"  - {book2.title} by {book2.author.name}")
     print(f"  - {book3.title} by {book3.author.name}")
@@ -173,6 +174,7 @@ def _(Book, db):
     # Look at the raw data in the database
     raw = db.adapter.execute("SELECT _id, data FROM books LIMIT 1").fetchone()
     import json
+
     data = json.loads(raw[1])
     print("Raw book data in database:")
     print(json.dumps(data, indent=2))
@@ -206,9 +208,7 @@ def _(mo):
 @app.cell
 def _(Book):
     # Find books by authors from a specific country
-    usa_books = Book.query().filter(
-        Book.ref("author").field("country") == "USA"
-    ).all()
+    usa_books = Book.query().filter(Book.ref("author").field("country") == "USA").all()
 
     print("Books by USA authors:")
     for _b in usa_books:
@@ -219,9 +219,7 @@ def _(Book):
 @app.cell
 def _(Book):
     # Find books by a specific author name
-    alice_books = Book.query().filter(
-        Book.ref("author").field("name") == "Alice Smith"
-    ).all()
+    alice_books = Book.query().filter(Book.ref("author").field("name") == "Alice Smith").all()
 
     print("Books by Alice Smith:")
     for _b in alice_books:

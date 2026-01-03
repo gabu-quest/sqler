@@ -139,9 +139,7 @@ class ConnectionPool:
 
         # Pool state
         self._lock = threading.RLock()
-        self._pool: queue.Queue[sqlite3.Connection] = queue.Queue(
-            maxsize=self.max_connections
-        )
+        self._pool: queue.Queue[sqlite3.Connection] = queue.Queue(maxsize=self.max_connections)
         self._all_connections: list[sqlite3.Connection] = []
         self._in_use: set[sqlite3.Connection] = set()
 
@@ -407,9 +405,7 @@ class PooledSQLiteAdapter:
             self._pool._return_connection(self._local.conn)
             self._local.conn = None
 
-    def execute(
-        self, query: str, params: Optional[list[Any]] = None
-    ) -> sqlite3.Cursor:
+    def execute(self, query: str, params: Optional[list[Any]] = None) -> sqlite3.Cursor:
         """Execute a SQL query."""
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -419,9 +415,7 @@ class PooledSQLiteAdapter:
             cursor.execute(query)
         return cursor
 
-    def executemany(
-        self, query: str, param_list: Optional[list[Any]]
-    ) -> sqlite3.Cursor:
+    def executemany(self, query: str, param_list: Optional[list[Any]]) -> sqlite3.Cursor:
         """Execute a query multiple times."""
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -570,9 +564,7 @@ class PooledSQLerDB:
 
         self._ensure_table(table)
         payload = json.dumps(doc)
-        cursor = self.adapter.execute(
-            f"INSERT INTO {table} (data) VALUES (json(?));", [payload]
-        )
+        cursor = self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
         self.adapter.auto_commit()
         return cursor.lastrowid  # type: ignore
 
@@ -581,9 +573,7 @@ class PooledSQLerDB:
         import json
 
         self._ensure_table(table)
-        cur = self.adapter.execute(
-            f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id]
-        )
+        cur = self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
         row = cur.fetchone()
         if not row:
             return None
@@ -591,9 +581,7 @@ class PooledSQLerDB:
         obj["_id"] = row[0]
         return obj
 
-    def upsert_document(
-        self, table: str, _id: Optional[int], doc: dict[str, Any]
-    ) -> int:
+    def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
         """Insert or update a document."""
         import json
 
@@ -601,9 +589,7 @@ class PooledSQLerDB:
         payload = json.dumps(doc)
         if _id is None:
             return self.insert_document(table, doc)
-        self.adapter.execute(
-            f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id]
-        )
+        self.adapter.execute(f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id])
         self.adapter.auto_commit()
         return _id
 
@@ -638,11 +624,7 @@ class PooledSQLerDB:
         self._ensure_table(table)
         idx_name = name or f"idx_{table}_{field.replace('.', '_')}"
         unique_sql = "UNIQUE" if unique else ""
-        expr = (
-            f"json_extract(data, '$.{field}')"
-            if not field.startswith("_")
-            else field
-        )
+        expr = f"json_extract(data, '$.{field}')" if not field.startswith("_") else field
         where_sql = f"WHERE {where}" if where else ""
         ddl = f"CREATE {unique_sql} INDEX IF NOT EXISTS {idx_name} ON {table} ({expr}) {where_sql};"
         self.adapter.execute(ddl)

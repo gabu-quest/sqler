@@ -126,9 +126,7 @@ class SQLerQuerySet(Generic[T]):
             inst._snapshot = snap  # type: ignore[attr-defined]
         except AttributeError as e:
             # This indicates a model configuration issue - worth logging
-            logger.debug(
-                f"Could not attach metadata to {self._model_cls.__name__}: {e}"
-            )
+            logger.debug(f"Could not attach metadata to {self._model_cls.__name__}: {e}")
 
     def count(self) -> int:
         """Return the count of matching rows."""
@@ -246,9 +244,7 @@ class SQLerQuerySet(Generic[T]):
                 if isinstance(value, dict) and "_table" in value and "_id" in value:
                     key = (value["_table"], int(value["_id"]))
                     if key not in resolved:  # Don't re-fetch already resolved
-                        refs_by_table.setdefault(value["_table"], set()).add(
-                            int(value["_id"])
-                        )
+                        refs_by_table.setdefault(value["_table"], set()).add(int(value["_id"]))
                 elif isinstance(value, dict):
                     for v in value.values():
                         collect(v)

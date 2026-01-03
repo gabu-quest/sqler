@@ -18,6 +18,7 @@ from .exceptions import (
     ConnectionPoolExhaustedError,
     IntegrityError,
     MaxDepthExceededError,
+    MissingReferenceError,
     MissingReferenceWarning,
     ModelError,
     NoAdapterError,
@@ -48,7 +49,7 @@ from .export import (
     import_jsonl,
     stream_jsonl,
 )
-from .fts import FTSIndex, FTSStats, SearchResult, SearchableMixin
+from .fts import FTSIndex, FTSStats, SearchableMixin, SearchResult
 from .logging import QueryLog, QueryLogger, query_logger, timed_query
 from .metrics import MetricsCollector, metrics
 from .migrations import (
@@ -105,6 +106,8 @@ from .ops import (
 )
 from .pool import ConnectionPool, PooledSQLerDB, PooledSQLiteAdapter, PoolStats
 from .query import F, SQLerExpression, SQLerField, SQLerQuery
+from .query.query import PaginatedResult
+from .registry import register, resolve, tables
 from .tracking import (
     ChangeTracker,
     DiffMixin,
@@ -112,8 +115,6 @@ from .tracking import (
     PartialUpdateMixin,
     TrackedModel,
 )
-from .query.query import PaginatedResult
-from .registry import register, resolve, tables
 
 __all__ = [
     # Adapters
@@ -219,6 +220,7 @@ __all__ = [
     "ResolutionError",
     "CircularReferenceError",
     "MaxDepthExceededError",
+    "MissingReferenceError",
     "MissingReferenceWarning",
     # Errors - Batch
     "BatchOperationError",

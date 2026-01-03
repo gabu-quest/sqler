@@ -898,8 +898,8 @@ def test_C35_index_management():
 
 # ---------------- [C36] RebaseConfig for safe models ----------------
 def test_C36_rebase_config():
-    from sqler.models.utils import PERMISSIVE_REBASE_CONFIG, NO_REBASE_CONFIG
     from sqler import SQLerSafeModel
+    from sqler.models.utils import NO_REBASE_CONFIG, PERMISSIVE_REBASE_CONFIG
 
     class Counter(SQLerSafeModel):
         value: int = 0

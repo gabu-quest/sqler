@@ -19,7 +19,6 @@ from .utils import (
     compute_numeric_scalar_deltas,
 )
 
-
 TSafe = TypeVar("TSafe", bound="SQLerSafeModel")
 
 

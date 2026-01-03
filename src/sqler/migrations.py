@@ -36,15 +36,14 @@ Usage::
     runner.migrate()  # Apply all pending migrations
 """
 
-import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
-    from sqler.db.sqler_db import SQLerDB
     from sqler.db.async_db import AsyncSQLerDB
+    from sqler.db.sqler_db import SQLerDB
 
 
 MIGRATIONS_TABLE = "_sqler_migrations"
@@ -206,9 +205,7 @@ class MigrationRunner:
         Returns:
             The highest applied migration version, or 0 if none applied.
         """
-        cursor = self.db.adapter.execute(
-            f"SELECT MAX(version) FROM {MIGRATIONS_TABLE};"
-        )
+        cursor = self.db.adapter.execute(f"SELECT MAX(version) FROM {MIGRATIONS_TABLE};")
         row = cursor.fetchone()
         return row[0] if row and row[0] is not None else 0
 
@@ -244,9 +241,7 @@ class MigrationRunner:
         current = self.current_version()
         return [m for m in self.migrations if m.version > current]
 
-    def migrate(
-        self, target_version: Optional[int] = None
-    ) -> MigrationResult:
+    def migrate(self, target_version: Optional[int] = None) -> MigrationResult:
         """Apply pending migrations up to target version.
 
         Args:
@@ -256,8 +251,10 @@ class MigrationRunner:
             MigrationResult with details of applied migrations.
         """
         current = self.current_version()
-        target = target_version if target_version is not None else (
-            self.migrations[-1].version if self.migrations else 0
+        target = (
+            target_version
+            if target_version is not None
+            else (self.migrations[-1].version if self.migrations else 0)
         )
 
         if target < current:
@@ -338,8 +335,7 @@ class MigrationRunner:
 
         # Get migrations to rollback in reverse order
         to_rollback = [
-            m for m in reversed(self.migrations)
-            if target_version < m.version <= current
+            m for m in reversed(self.migrations) if target_version < m.version <= current
         ]
 
         rolled_back: list[MigrationRecord] = []
@@ -471,9 +467,7 @@ class AsyncMigrationRunner:
     async def current_version(self) -> int:
         """Get the current database schema version."""
         await self._ensure_migrations_table()
-        cursor = await self.db.adapter.execute(
-            f"SELECT MAX(version) FROM {MIGRATIONS_TABLE};"
-        )
+        cursor = await self.db.adapter.execute(f"SELECT MAX(version) FROM {MIGRATIONS_TABLE};")
         row = await cursor.fetchone()
         await cursor.close()
         return row[0] if row and row[0] is not None else 0
@@ -483,14 +477,14 @@ class AsyncMigrationRunner:
         current = await self.current_version()
         return [m for m in self.migrations if m.version > current]
 
-    async def migrate(
-        self, target_version: Optional[int] = None
-    ) -> MigrationResult:
+    async def migrate(self, target_version: Optional[int] = None) -> MigrationResult:
         """Apply pending migrations up to target version."""
         await self._ensure_migrations_table()
         current = await self.current_version()
-        target = target_version if target_version is not None else (
-            self.migrations[-1].version if self.migrations else 0
+        target = (
+            target_version
+            if target_version is not None
+            else (self.migrations[-1].version if self.migrations else 0)
         )
 
         if target < current:
@@ -564,8 +558,7 @@ class AsyncMigrationRunner:
             )
 
         to_rollback = [
-            m for m in reversed(self.migrations)
-            if target_version < m.version <= current
+            m for m in reversed(self.migrations) if target_version < m.version <= current
         ]
 
         rolled_back: list[MigrationRecord] = []

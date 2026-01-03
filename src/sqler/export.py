@@ -32,7 +32,6 @@ from typing import (
     Callable,
     Iterator,
     Optional,
-    TextIO,
     Type,
     Union,
 )
@@ -214,9 +213,7 @@ def export_csv(
 
     count = 0
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=fieldnames, delimiter=delimiter, quoting=quoting
-        )
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=delimiter, quoting=quoting)
         writer.writeheader()
 
         for item in items:
@@ -317,9 +314,7 @@ def import_csv(
                 for field_name, value in list(row.items()):
                     if field_name in model_class.model_fields:
                         field_info = model_class.model_fields[field_name]
-                        row[field_name] = _deserialize_value(
-                            value, field_info.annotation
-                        )
+                        row[field_name] = _deserialize_value(value, field_info.annotation)
 
                 # Create or update
                 if update_existing and record_id:

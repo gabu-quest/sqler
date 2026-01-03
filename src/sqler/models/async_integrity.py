@@ -133,9 +133,7 @@ async def async_set_null_referrers(
     allowed_tables = registry.get_allowed_tables(target_table)
 
     for table, row_id, meta in referrers:
-        cur = await db.adapter.execute(
-            f"SELECT _id, data FROM {table} WHERE _id = ?;", [row_id]
-        )
+        cur = await db.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [row_id])
         row = await cur.fetchone()
         await cur.close()
         if not row:
@@ -244,9 +242,7 @@ async def async_validate_references(db: "AsyncSQLerDB"):
                         )
                         return
                     # check existence
-                    cur2 = await db.adapter.execute(
-                        f"SELECT 1 FROM {t} WHERE _id = ?;", [i]
-                    )
+                    cur2 = await db.adapter.execute(f"SELECT 1 FROM {t} WHERE _id = ?;", [i])
                     row = await cur2.fetchone()
                     await cur2.close()
                     if not row:

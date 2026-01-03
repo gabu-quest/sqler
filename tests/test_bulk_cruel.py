@@ -5,7 +5,6 @@ that might expose bugs in find_documents, from_ids, and count.
 """
 
 import concurrent.futures
-import threading
 
 from sqler import SQLerDB
 from sqler.models import SQLerModel

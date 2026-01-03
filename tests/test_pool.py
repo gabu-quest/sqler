@@ -6,7 +6,6 @@ import threading
 import time
 
 import pytest
-
 from sqler import (
     ConnectionPool,
     ConnectionPoolExhaustedError,

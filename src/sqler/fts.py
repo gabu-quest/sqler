@@ -30,7 +30,7 @@ Usage::
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
 
 if TYPE_CHECKING:
     from sqler import SQLerDB
@@ -212,12 +212,10 @@ class FTSIndex:
         db.adapter.execute(f"DELETE FROM {self.index_table};")
 
         # Insert from source table using JSON extraction
-        field_exprs = ", ".join(
-            [f"json_extract(data, '$.{f}')" for f in self.fields]
-        )
+        field_exprs = ", ".join([f"json_extract(data, '$.{f}')" for f in self.fields])
 
         sql = f"""
-        INSERT INTO {self.index_table}(rowid, {', '.join(self.fields)})
+        INSERT INTO {self.index_table}(rowid, {", ".join(self.fields)})
         SELECT _id, {field_exprs}
         FROM {self.table};
         """
@@ -225,9 +223,7 @@ class FTSIndex:
         db.adapter.auto_commit()
 
         # Get count
-        cursor = db.adapter.execute(
-            f"SELECT COUNT(*) FROM {self.index_table};"
-        )
+        cursor = db.adapter.execute(f"SELECT COUNT(*) FROM {self.index_table};")
         return cursor.fetchone()[0]
 
     def index(self, model: "SQLerModel") -> None:
@@ -400,7 +396,7 @@ class FTSIndex:
             )
 
         sql = f"""
-        SELECT rowid, bm25({self.index_table}) as score, {', '.join(highlight_exprs)}
+        SELECT rowid, bm25({self.index_table}) as score, {", ".join(highlight_exprs)}
         FROM {self.index_table}
         WHERE {self.index_table} MATCH ?
         ORDER BY score
@@ -604,9 +600,7 @@ class SearchableMixin:
         return cls._fts_index.search(query, limit=limit, offset=offset)
 
     @classmethod
-    def search_ranked(
-        cls, query: str, *, limit: int = 100, offset: int = 0
-    ) -> list[SearchResult]:
+    def search_ranked(cls, query: str, *, limit: int = 100, offset: int = 0) -> list[SearchResult]:
         """Search with relevance ranking."""
         if cls._fts_index is None:
             cls.create_search_index()

@@ -338,7 +338,9 @@ class HooksMixin:
             RuntimeError: If before_save() returns False.
         """
         if self._hooks_enabled and not self.before_save():
-            raise RuntimeError(f"before_save() returned False, save aborted for {self.__class__.__name__}")
+            raise RuntimeError(
+                f"before_save() returned False, save aborted for {self.__class__.__name__}"
+            )
         result = super().save()  # type: ignore[misc]
         if self._hooks_enabled:
             self.after_save()
@@ -354,7 +356,9 @@ class HooksMixin:
             RuntimeError: If before_delete() returns False.
         """
         if self._hooks_enabled and not self.before_delete():
-            raise RuntimeError(f"before_delete() returned False, delete aborted for {self.__class__.__name__}")
+            raise RuntimeError(
+                f"before_delete() returned False, delete aborted for {self.__class__.__name__}"
+            )
         super().delete()  # type: ignore[misc]
         if self._hooks_enabled:
             self.after_delete()
@@ -419,7 +423,9 @@ class AsyncHooksMixin:
             RuntimeError: If before_save() returns False.
         """
         if self._hooks_enabled and not await self.before_save():
-            raise RuntimeError(f"before_save() returned False, save aborted for {self.__class__.__name__}")
+            raise RuntimeError(
+                f"before_save() returned False, save aborted for {self.__class__.__name__}"
+            )
         result = await super().save()  # type: ignore[misc]
         if self._hooks_enabled:
             await self.after_save()
@@ -435,7 +441,9 @@ class AsyncHooksMixin:
             RuntimeError: If before_delete() returns False.
         """
         if self._hooks_enabled and not await self.before_delete():
-            raise RuntimeError(f"before_delete() returned False, delete aborted for {self.__class__.__name__}")
+            raise RuntimeError(
+                f"before_delete() returned False, delete aborted for {self.__class__.__name__}"
+            )
         await super().delete()  # type: ignore[misc]
         if self._hooks_enabled:
             await self.after_delete()
@@ -752,13 +760,15 @@ class AuditLogMixin:
 
         logs = []
         for row in rows:
-            logs.append({
-                "action": row[0],
-                "user": row[1],
-                "timestamp": row[2],
-                "changes": json.loads(row[3]) if row[3] else None,
-                "snapshot": json.loads(row[4]) if row[4] else None,
-            })
+            logs.append(
+                {
+                    "action": row[0],
+                    "user": row[1],
+                    "timestamp": row[2],
+                    "changes": json.loads(row[3]) if row[3] else None,
+                    "snapshot": json.loads(row[4]) if row[4] else None,
+                }
+            )
 
         return logs
 
@@ -827,7 +837,11 @@ class AsyncAuditLogMixin:
         await db.adapter.auto_commit()
 
         record_id = getattr(self, "_id", None)
-        user = AsyncAuditMixin.get_current_user() if hasattr(AsyncAuditMixin, "get_current_user") else None
+        user = (
+            AsyncAuditMixin.get_current_user()
+            if hasattr(AsyncAuditMixin, "get_current_user")
+            else None
+        )
 
         snapshot = {}
         for field_name in self.model_fields:  # type: ignore[attr-defined]
@@ -878,12 +892,14 @@ class AsyncAuditLogMixin:
 
         logs = []
         for row in rows:
-            logs.append({
-                "action": row[0],
-                "user": row[1],
-                "timestamp": row[2],
-                "changes": json.loads(row[3]) if row[3] else None,
-                "snapshot": json.loads(row[4]) if row[4] else None,
-            })
+            logs.append(
+                {
+                    "action": row[0],
+                    "user": row[1],
+                    "timestamp": row[2],
+                    "changes": json.loads(row[3]) if row[3] else None,
+                    "snapshot": json.loads(row[4]) if row[4] else None,
+                }
+            )
 
         return logs

@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -156,10 +157,10 @@ def _(Account, StaleVersionError):
     try:
         user_b.save()
         print("User B saved successfully (unexpected!)")
-    except StaleVersionError as e:
-        print(f"\nUser B got StaleVersionError!")
-        print(f"  Message: {e}")
-    return e, original, user_a, user_b
+    except StaleVersionError as _e:
+        print("\nUser B got StaleVersionError!")
+        print(f"  Message: {_e}")
+    return original, user_a, user_b
 
 
 @app.cell
@@ -236,7 +237,7 @@ def _(mo):
 
 @app.cell
 def _(SQLerSafeModel, db):
-    from sqler.models.utils import RebaseConfig, PERMISSIVE_REBASE_CONFIG
+    from sqler.models.utils import PERMISSIVE_REBASE_CONFIG, RebaseConfig
 
     class Counter(SQLerSafeModel):
         _table = "counters"
@@ -306,10 +307,7 @@ def _(RebaseConfig, SQLerSafeModel, StaleVersionError, db):
         overdraft_count: int = 0
 
         # Only allow rebasing 'overdraft_count' with small deltas
-        _rebase_config = RebaseConfig(
-            allowed_fields={"overdraft_count"},
-            max_delta=5
-        )
+        _rebase_config = RebaseConfig(allowed_fields={"overdraft_count"}, max_delta=5)
 
     BankAccount.set_db(db)
 

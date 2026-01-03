@@ -359,12 +359,14 @@ class SQLerDB:
             name = row[0]
             tbl_name = row[1]
             sql = row[2] or ""
-            indexes.append({
-                "name": name,
-                "table": tbl_name,
-                "sql": sql,
-                "unique": "UNIQUE" in sql.upper() if sql else False,
-            })
+            indexes.append(
+                {
+                    "name": name,
+                    "table": tbl_name,
+                    "sql": sql,
+                    "unique": "UNIQUE" in sql.upper() if sql else False,
+                }
+            )
         return indexes
 
     def index_exists(self, name: str) -> bool:
@@ -377,8 +379,7 @@ class SQLerDB:
             True if the index exists, False otherwise.
         """
         cur = self.adapter.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;",
-            [name]
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;", [name]
         )
         return cur.fetchone() is not None
 

@@ -324,7 +324,7 @@ class MaxDepthExceededError(ResolutionError):
         self.current_depth = current_depth
 
 
-class MissingReferenceWarning(ResolutionError):
+class MissingReferenceError(ResolutionError):
     """Warning-level error for missing references during batch resolution.
 
     This is used when a referenced row doesn't exist but we want to continue
@@ -342,6 +342,10 @@ class MissingReferenceWarning(ResolutionError):
         super().__init__(message, details=details)
         self.table = table
         self.id_ = id_
+
+
+# Backwards compatibility alias
+MissingReferenceWarning = MissingReferenceError
 
 
 # Batch Operation Errors

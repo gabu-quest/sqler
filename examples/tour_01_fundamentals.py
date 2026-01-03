@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -288,12 +289,7 @@ def _(mo):
 @app.cell
 def _(F, User):
     # Multiple filters (AND)
-    active_and_young = (
-        User.query()
-        .filter(F("is_active") == True)
-        .filter(F("age") < 30)
-        .all()
-    )
+    active_and_young = User.query().filter(F("is_active") == True).filter(F("age") < 30).all()
     print(f"Active AND under 30: {[u.name for u in active_and_young]}")
 
     # Exclude

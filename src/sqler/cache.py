@@ -28,7 +28,6 @@ Usage::
     cache.invalidate_table("user")
 """
 
-import asyncio
 import functools
 import hashlib
 import json
@@ -181,9 +180,7 @@ class QueryCache:
     def _cleanup_expired(self) -> None:
         """Remove expired entries."""
         with self._lock:
-            expired_keys = [
-                key for key, entry in self._cache.items() if entry.is_expired
-            ]
+            expired_keys = [key for key, entry in self._cache.items() if entry.is_expired]
             for key in expired_keys:
                 self._remove_key(key)
                 self._stats.expirations += 1
@@ -341,9 +338,7 @@ class QueryCache:
         import fnmatch
 
         with self._lock:
-            matching_keys = [
-                key for key in self._cache.keys() if fnmatch.fnmatch(key, pattern)
-            ]
+            matching_keys = [key for key in self._cache.keys() if fnmatch.fnmatch(key, pattern)]
             for key in matching_keys:
                 self._remove_key(key)
                 self._stats.invalidations += 1

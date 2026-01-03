@@ -8,7 +8,6 @@ import pytest
 from sqler import SQLerDB, SQLerModel
 from sqler.query import SQLerField as F
 
-
 # ============================================================================
 # Test Models
 # ============================================================================
@@ -62,7 +61,13 @@ def db():
 def products(db):
     """Seed with diverse product data."""
     products = [
-        Product(name="Widget A", price=10.0, category="tools", tags=["sale", "new"], email="widget@test.com"),
+        Product(
+            name="Widget A",
+            price=10.0,
+            category="tools",
+            tags=["sale", "new"],
+            email="widget@test.com",
+        ),
         Product(name="Widget B", price=20.0, category="tools", tags=["popular"]),
         Product(name="Gadget C", price=15.0, category="electronics", tags=["new", "featured"]),
         Product(name="Gadget D", price=30.0, category="electronics", in_stock=False),
@@ -205,12 +210,7 @@ class TestNullChecks:
 
     def test_is_null_combined_with_filters(self, db, events):
         """is_null() combined with other conditions."""
-        results = (
-            Event.query()
-            .filter(F("organizer").is_null())
-            .filter(F("attendees") >= 50)
-            .all()
-        )
+        results = Event.query().filter(F("organizer").is_null()).filter(F("attendees") >= 50).all()
         # Meetup C (50), Seminar D (75), Webinar E (200) - all have NULL organizer
         assert len(results) == 3
 
@@ -430,7 +430,9 @@ class TestOrFilter:
         )
         # High-priced electronics OR cheap in-stock items
         for p in results:
-            assert (p.price > 20.0 and p.category == "electronics") or (p.price < 10.0 and p.in_stock)
+            assert (p.price > 20.0 and p.category == "electronics") or (
+                p.price < 10.0 and p.in_stock
+            )
 
 
 # ============================================================================
@@ -449,11 +451,7 @@ class TestDistinct:
 
     def test_distinct_values_with_filter(self, db, products):
         """distinct_values() respects filters."""
-        categories = (
-            Product.query()
-            .filter(F("price") > 15.0)
-            .distinct_values("category")
-        )
+        categories = Product.query().filter(F("price") > 15.0).distinct_values("category")
         # Products > 15: Widget B (20, tools), Gadget D (30, electronics),
         # Thing E (25, misc), The_Underscore (99.99, special), Zzz Last (999.99, premium)
         assert set(categories) == {"tools", "electronics", "misc", "special", "premium"}
@@ -468,7 +466,9 @@ class TestDistinct:
         """distinct_values() properly deduplicates."""
         for _ in range(5):
             Product(name="Dup", price=1.0, category="dup_category").save()
-        categories = Product.query().filter(F("category") == "dup_category").distinct_values("category")
+        categories = (
+            Product.query().filter(F("category") == "dup_category").distinct_values("category")
+        )
         assert categories == ["dup_category"]
 
     def test_distinct_on_query(self, db, products):
@@ -544,12 +544,18 @@ class TestBulkUpdate:
 
     def test_update_with_dict_value(self, db, products):
         """update() handles dict values."""
-        count = Product.query().filter(F("name") == "Widget A").update(metadata={"updated": True, "version": 2})
+        count = (
+            Product.query()
+            .filter(F("name") == "Widget A")
+            .update(metadata={"updated": True, "version": 2})
+        )
         assert count == 1
 
     def test_update_with_list_value(self, db, products):
         """update() handles list values."""
-        count = Product.query().filter(F("name") == "Widget A").update(tags=["tag1", "tag2", "tag3"])
+        count = (
+            Product.query().filter(F("name") == "Widget A").update(tags=["tag1", "tag2", "tag3"])
+        )
         assert count == 1
 
     def test_update_empty_fields_raises(self, db, products):
@@ -590,10 +596,7 @@ class TestBulkDelete:
     def test_delete_all_with_complex_filter(self, db, products):
         """delete_all() with complex conditions."""
         deleted = (
-            Product.query()
-            .filter(F("in_stock") == False)
-            .filter(F("price") > 20.0)
-            .delete_all()
+            Product.query().filter(F("in_stock") == False).filter(F("price") > 20.0).delete_all()
         )
         # Only Gadget D matches (in_stock=False, price=30)
         assert deleted == 1
@@ -796,10 +799,7 @@ class TestAggregates:
     def test_aggregates_combined_with_complex_filters(self, db, users):
         """Aggregates with complex filter conditions."""
         avg_score = (
-            User.query()
-            .filter(F("active") == True)
-            .filter(F("age").between(25, 35))
-            .avg("score")
+            User.query().filter(F("active") == True).filter(F("age").between(25, 35)).avg("score")
         )
         # alice (25, 95.5), bob (30, 82.0), charlie (35, 78.5), diana (28, 88.0)
         expected = (95.5 + 82.0 + 78.5 + 88.0) / 4
@@ -831,12 +831,7 @@ class TestSelect:
 
     def test_select_with_filter(self, db, products):
         """select() works with filters - use all_dicts() for raw data."""
-        query = (
-            Product.query()
-            .filter(F("category") == "tools")
-            .select("name", "category")
-            ._query
-        )
+        query = Product.query().filter(F("category") == "tools").select("name", "category")._query
         results = query.all_dicts()
         assert len(results) == 3
         for row in results:
@@ -877,10 +872,7 @@ class TestCombinedOperations:
     def test_is_null_with_or_filter(self, db, events):
         """Combine is_null() with or_filter()."""
         results = (
-            Event.query()
-            .filter(F("organizer").is_null())
-            .or_filter(F("canceled") == True)
-            .all()
+            Event.query().filter(F("organizer").is_null()).or_filter(F("canceled") == True).all()
         )
         # No organizer: Meetup C, Seminar D, Webinar E (has location but no organizer)
         # Canceled: Meetup C
@@ -889,11 +881,7 @@ class TestCombinedOperations:
 
     def test_startswith_and_aggregate(self, db, products):
         """Combine startswith() with aggregate."""
-        total = (
-            Product.query()
-            .filter(F("name").startswith("Widget"))
-            .sum("price")
-        )
+        total = Product.query().filter(F("name").startswith("Widget")).sum("price")
         assert abs(total - 30.0) < 0.01  # Widget A (10) + Widget B (20)
 
     def test_bulk_update_then_aggregate(self, db, products):

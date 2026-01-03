@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -196,7 +197,7 @@ def _(Account, db):
             # Create new account
             _charlie = Account(name="Charlie", balance=750)
             _charlie.save()
-            print(f"  Created Charlie inside transaction")
+            print("  Created Charlie inside transaction")
 
             raise RuntimeError("Oops! Abort everything!")
 

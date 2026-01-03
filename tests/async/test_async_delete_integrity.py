@@ -4,11 +4,11 @@ import pytest
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models import (
     AsyncSQLerModel,
+    BrokenRef,
+    async_cascade_delete,
     async_find_referrers,
     async_set_null_referrers,
-    async_cascade_delete,
     async_validate_references,
-    BrokenRef,
 )
 
 

@@ -4,40 +4,31 @@ import csv
 import json
 import os
 import tempfile
-from datetime import datetime
 
 import pytest
-
 from sqler import (
-    CacheAwareModel,
-    CacheStats,
     ChangeTracker,
     DiffMixin,
     ExportResult,
     FTSIndex,
-    FieldChange,
     ImportResult,
-    PartialUpdateMixin,
     QueryCache,
-    SearchResult,
     SearchableMixin,
+    SearchResult,
     SQLerDB,
     SQLerModel,
     TrackedModel,
     cached_query,
-    configure_cache,
     export_csv,
     export_csv_string,
     export_json,
     export_json_string,
     export_jsonl,
-    get_cache,
     import_csv,
     import_json,
     import_jsonl,
     stream_jsonl,
 )
-
 
 # =============================================================================
 # Export/Import Tests
@@ -260,10 +251,13 @@ class TestImportJSON:
             path = os.path.join(tmpdir, "items.json")
 
             with open(path, "w") as f:
-                json.dump([
-                    {"name": "Apples", "quantity": 10},
-                    {"name": "Oranges", "quantity": 5},
-                ], f)
+                json.dump(
+                    [
+                        {"name": "Apples", "quantity": 10},
+                        {"name": "Oranges", "quantity": 5},
+                    ],
+                    f,
+                )
 
             result = import_json(self.Item, path)
 
@@ -331,6 +325,7 @@ class TestQueryCache:
         assert cache.has("key1")
 
         import time
+
         time.sleep(0.15)
 
         assert not cache.has("key1")
@@ -609,19 +604,17 @@ class TestFTSIndex:
 
         # Create test articles (this creates the table)
         self.Article(
-            title="Python Tutorial",
-            content="Learn Python programming from scratch",
-            author="Alice"
+            title="Python Tutorial", content="Learn Python programming from scratch", author="Alice"
         ).save()
         self.Article(
             title="JavaScript Guide",
             content="Modern JavaScript development techniques",
-            author="Bob"
+            author="Bob",
         ).save()
         self.Article(
             title="Advanced Python",
             content="Deep dive into Python internals and performance",
-            author="Alice"
+            author="Alice",
         ).save()
 
     def test_fts_index_creation(self):
@@ -689,9 +682,7 @@ class TestFTSIndex:
 
         # Add new article
         new_article = self.Article(
-            title="Rust Programming",
-            content="Systems programming with Rust",
-            author="Charlie"
+            title="Rust Programming", content="Systems programming with Rust", author="Charlie"
         )
         new_article.save()
         fts.index(new_article)

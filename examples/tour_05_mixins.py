@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -45,8 +46,9 @@ def _(mo):
 @app.cell
 def _():
     from datetime import datetime, timezone
+
     from sqler import SQLerDB, SQLerModel
-    from sqler.models import TimestampMixin, SoftDeleteMixin, HooksMixin, FullMixin
+    from sqler.models import FullMixin, HooksMixin, SoftDeleteMixin, TimestampMixin
     from sqler.query import SQLerField as F
 
     db = SQLerDB.in_memory()
@@ -122,7 +124,7 @@ def _(Post):
     post.content = "Updated content!"
     post.save()
 
-    print(f"\nAfter update:")
+    print("\nAfter update:")
     print(f"  created_at: {post.created_at} (unchanged)")
     print(f"  updated_at: {post.updated_at} (updated)")
     return post, time
@@ -167,7 +169,7 @@ def _(Document, F):
     doc2 = Document(name="notes.txt", content="Meeting notes").save()
     doc3 = Document(name="draft.doc", content="Draft proposal").save()
 
-    print(f"Created 3 documents")
+    print("Created 3 documents")
     print(f"Total in database: {Document.query().count()}")
 
     # Soft delete one document
@@ -293,7 +295,7 @@ def _(HooksMixin, SQLerModel, db):
         def before_delete(self) -> bool:
             """Prevent deletion of locked records."""
             if self.locked:
-                print(f"  [before_delete] BLOCKED: Record is locked!")
+                print("  [before_delete] BLOCKED: Record is locked!")
                 return False  # Abort the delete
             return True
 

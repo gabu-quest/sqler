@@ -1,5 +1,4 @@
 import json
-import sqlite3
 from typing import Any, Optional
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
@@ -270,12 +269,14 @@ class AsyncSQLerDB:
             name = row[0]
             tbl_name = row[1]
             sql = row[2] or ""
-            indexes.append({
-                "name": name,
-                "table": tbl_name,
-                "sql": sql,
-                "unique": "UNIQUE" in sql.upper() if sql else False,
-            })
+            indexes.append(
+                {
+                    "name": name,
+                    "table": tbl_name,
+                    "sql": sql,
+                    "unique": "UNIQUE" in sql.upper() if sql else False,
+                }
+            )
         return indexes
 
     async def index_exists(self, name: str) -> bool:
@@ -288,8 +289,7 @@ class AsyncSQLerDB:
             True if the index exists, False otherwise.
         """
         cur = await self.adapter.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;",
-            [name]
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;", [name]
         )
         row = await cur.fetchone()
         await cur.close()
