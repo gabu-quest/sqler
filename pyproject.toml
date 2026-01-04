@@ -20,6 +20,8 @@ dev = [
     "fastapi>=0.115.0",
     "asgi-lifespan>=2.1.0",
     "Jinja2>=3.1",
+    "marimo>=0.18.4",
+    "pre-commit>=4.5.1",
 ]
 
 [build-system]
@@ -40,11 +42,13 @@ select = [
 ]
 ignore = [
   "E501",  # long lines allowed in docstrings/examples
+  "E711",  # comparison to None - intentional for query DSL (F("field") == None -> IS NULL)
+  "E712",  # comparison to True/False - intentional for query DSL (F("field") == True)
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*" = ["N", "E501"]
-"examples/**/*" = ["N", "E501"]
+"tests/**/*" = ["N", "E501", "F841"]  # unused vars ok in tests
+"examples/**/*" = ["N", "E501", "F841"]
 
 [tool.ruff.format]
 quote-style = "double"

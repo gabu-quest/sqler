@@ -1,0 +1,201 @@
+name: Deploy Tour Notebooks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'examples/tour_*.py'
+      - 'examples/ja/tour_*.py'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev --frozen
+
+      - name: Export notebooks to WASM (interactive)
+        run: |
+          mkdir -p _site
+          mkdir -p _site/ja
+
+          # Export each English tour notebook as WASM for full interactivity
+          for notebook in examples/tour_*.py; do
+            name=$(basename "$notebook" .py)
+            echo "Exporting $name as WASM..."
+            uv run marimo export html-wasm "$notebook" -o "_site/${name}"
+          done
+
+          # Export each Japanese tour notebook as WASM
+          for notebook in examples/ja/tour_*.py; do
+            name=$(basename "$notebook" .py)
+            echo "Exporting ja/$name as WASM..."
+            uv run marimo export html-wasm "$notebook" -o "_site/ja/${name}"
+          done
+
+          # Create English index page
+          cat > _site/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>SQLer Tour</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+              h1 { color: #333; }
+              .lang-switch { text-align: right; margin-bottom: 1rem; }
+              .lang-switch a { color: #666; text-decoration: none; }
+              .lang-switch a:hover { text-decoration: underline; }
+              .tour-list { list-style: none; padding: 0; }
+              .tour-list li { margin: 1rem 0; }
+              .tour-list a {
+                display: block; padding: 1rem; background: #f5f5f5;
+                border-radius: 8px; text-decoration: none; color: #333;
+                transition: background 0.2s;
+              }
+              .tour-list a:hover { background: #e8e8e8; }
+              .tour-list .title { font-weight: bold; font-size: 1.1rem; }
+              .tour-list .desc { color: #666; font-size: 0.9rem; margin-top: 0.25rem; }
+            </style>
+          </head>
+          <body>
+            <div class="lang-switch"><a href="ja/">日本語版はこちら →</a></div>
+            <h1>SQLer Interactive Tour</h1>
+            <p>Learn SQLer through interactive notebooks. Each tour covers a different aspect of the library.</p>
+            <ul class="tour-list">
+              <li><a href="tour_01_fundamentals/">
+                <div class="title">01. Fundamentals</div>
+                <div class="desc">Setup, models, CRUD operations, queries, and aggregations</div>
+              </a></li>
+              <li><a href="tour_02_relationships/">
+                <div class="title">02. Relationships</div>
+                <div class="desc">Model relationships, automatic hydration, querying across models</div>
+              </a></li>
+              <li><a href="tour_03_safe_models/">
+                <div class="title">03. Safe Models</div>
+                <div class="desc">Optimistic locking, StaleVersionError, conflict resolution</div>
+              </a></li>
+              <li><a href="tour_04_transactions/">
+                <div class="title">04. Transactions</div>
+                <div class="desc">Atomic operations, rollback, nested transactions</div>
+              </a></li>
+              <li><a href="tour_05_mixins/">
+                <div class="title">05. Mixins</div>
+                <div class="desc">Timestamps, soft delete, lifecycle hooks</div>
+              </a></li>
+              <li><a href="tour_06_advanced/">
+                <div class="title">06. Advanced Features</div>
+                <div class="desc">Bulk operations, indexes, integrity policies, raw SQL</div>
+              </a></li>
+            </ul>
+            <p style="margin-top: 2rem; color: #666; font-size: 0.9rem;">
+              Built with <a href="https://marimo.io">marimo</a> •
+              <a href="https://github.com/gabu-quest/sqler">View on GitHub</a>
+            </p>
+          </body>
+          </html>
+          HTMLEOF
+
+          # Create Japanese index page
+          cat > _site/ja/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html lang="ja">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>SQLer ツアー</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+              h1 { color: #333; }
+              .lang-switch { text-align: right; margin-bottom: 1rem; }
+              .lang-switch a { color: #666; text-decoration: none; }
+              .lang-switch a:hover { text-decoration: underline; }
+              .tour-list { list-style: none; padding: 0; }
+              .tour-list li { margin: 1rem 0; }
+              .tour-list a {
+                display: block; padding: 1rem; background: #f5f5f5;
+                border-radius: 8px; text-decoration: none; color: #333;
+                transition: background 0.2s;
+              }
+              .tour-list a:hover { background: #e8e8e8; }
+              .tour-list .title { font-weight: bold; font-size: 1.1rem; }
+              .tour-list .desc { color: #666; font-size: 0.9rem; margin-top: 0.25rem; }
+            </style>
+          </head>
+          <body>
+            <div class="lang-switch"><a href="../">← English version</a></div>
+            <h1>SQLer インタラクティブツアー</h1>
+            <p>インタラクティブなノートブックで SQLer を学びましょう。各ツアーではライブラリの異なる側面をカバーします。</p>
+            <ul class="tour-list">
+              <li><a href="tour_01_fundamentals/">
+                <div class="title">01. 基礎</div>
+                <div class="desc">セットアップ、モデル、CRUD操作、クエリ、集約</div>
+              </a></li>
+              <li><a href="tour_02_relationships/">
+                <div class="title">02. リレーション</div>
+                <div class="desc">モデル参照、自動ハイドレーション、モデル間クエリ</div>
+              </a></li>
+              <li><a href="tour_03_safe_models/">
+                <div class="title">03. Safe Model</div>
+                <div class="desc">楽観的ロック、StaleVersionError、競合解決</div>
+              </a></li>
+              <li><a href="tour_04_transactions/">
+                <div class="title">04. トランザクション</div>
+                <div class="desc">アトミック操作、ロールバック、ネストされたトランザクション</div>
+              </a></li>
+              <li><a href="tour_05_mixins/">
+                <div class="title">05. Mixin</div>
+                <div class="desc">タイムスタンプ、ソフトデリート、ライフサイクルフック</div>
+              </a></li>
+              <li><a href="tour_06_advanced/">
+                <div class="title">06. 高度な機能</div>
+                <div class="desc">バルク操作、インデックス、整合性ポリシー、生SQL</div>
+              </a></li>
+            </ul>
+            <p style="margin-top: 2rem; color: #666; font-size: 0.9rem;">
+              <a href="https://marimo.io">marimo</a> で構築 •
+              <a href="https://github.com/gabu-quest/sqler">GitHub で見る</a>
+            </p>
+          </body>
+          </html>
+          HTMLEOF
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

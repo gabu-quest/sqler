@@ -730,3 +730,573 @@ def test_C29_query_logging():
 
     query_logger.disable()
     query_logger.clear()
+
+
+# ---------------- [C30] Transaction-aware model.save() ----------------
+def test_C30_transaction_aware_save():
+    class TxItem(SQLerModel):
+        name: str
+
+    db = SQLerDB.in_memory()
+    TxItem.set_db(db)
+
+    # Saves inside transaction respect rollback
+    try:
+        with db.transaction():
+            TxItem(name="A").save()
+            TxItem(name="B").save()
+            raise RuntimeError("abort!")
+    except RuntimeError:
+        pass
+
+    # Nothing was saved due to rollback
+    assert TxItem.query().count() == 0
+
+    # Without transaction, saves commit immediately
+    TxItem(name="C").save()
+    TxItem(name="D").save()
+    assert TxItem.query().count() == 2
+
+
+# ---------------- [C31] Field operations ----------------
+def test_C31_field_operations():
+    class Employee(SQLerModel):
+        name: str
+        age: int
+        email: str
+
+    db = SQLerDB.in_memory()
+    Employee.set_db(db)
+
+    Employee(name="Alice", age=25, email="alice@example.com").save()
+    Employee(name="Bob", age=35, email="bob@test.org").save()
+    Employee(name="Charlie", age=45, email="charlie@example.com").save()
+
+    # between (inclusive)
+    mid_age = Employee.query().filter(F("age").between(30, 40)).all()
+    assert [e.name for e in mid_age] == ["Bob"]
+
+    # startswith
+    alice = Employee.query().filter(F("name").startswith("Al")).all()
+    assert [e.name for e in alice] == ["Alice"]
+
+    # endswith
+    example_emails = Employee.query().filter(F("email").endswith("@example.com")).all()
+    assert len(example_emails) == 2
+
+    # is_null / is_not_null
+    Employee(name="NoEmail", age=30, email="").save()  # empty but not null
+    all_with_email = Employee.query().filter(F("email").is_not_null()).all()
+    assert len(all_with_email) == 4
+
+
+# ---------------- [C32] NULL-safe comparison ----------------
+def test_C32_null_safe_comparison():
+    from sqler import SoftDeleteMixin
+
+    class SoftUser(SoftDeleteMixin, SQLerModel):
+        name: str
+
+    db = SQLerDB.in_memory()
+    SoftUser.set_db(db)
+
+    active = SoftUser(name="Active").save()
+    deleted = SoftUser(name="Deleted").save()
+    deleted.soft_delete()
+
+    # F("field") == None generates IS NULL (correct SQL)
+    # F("field") != None generates IS NOT NULL
+    active_users = SoftUser.query().filter(F("deleted_at") == None).all()
+    deleted_users = SoftUser.query().filter(F("deleted_at") != None).all()
+
+    assert len(active_users) == 1 and active_users[0].name == "Active"
+    assert len(deleted_users) == 1 and deleted_users[0].name == "Deleted"
+
+
+# ---------------- [C33] in_list for multiple value matching ----------------
+def test_C33_in_list():
+    class Status(SQLerModel):
+        code: str
+        label: str
+
+    db = SQLerDB.in_memory()
+    Status.set_db(db)
+
+    Status(code="A", label="Active").save()
+    Status(code="P", label="Pending").save()
+    Status(code="C", label="Closed").save()
+    Status(code="D", label="Draft").save()
+
+    # in_list with values
+    open_statuses = Status.query().filter(F("code").in_list(["A", "P"])).all()
+    assert len(open_statuses) == 2
+
+    # Empty list returns nothing
+    empty = Status.query().filter(F("code").in_list([])).all()
+    assert len(empty) == 0
+
+
+# ---------------- [C34] SoftDeleteMixin class methods ----------------
+def test_C34_soft_delete_class_methods():
+    from sqler import SoftDeleteMixin
+
+    class Document(SoftDeleteMixin, SQLerModel):
+        title: str
+
+    db = SQLerDB.in_memory()
+    Document.set_db(db)
+
+    doc1 = Document(title="Active Doc").save()
+    doc2 = Document(title="Deleted Doc").save()
+    doc3 = Document(title="Another Active").save()
+    doc2.soft_delete()
+
+    # active() - only non-deleted
+    active = Document.active().all()
+    assert len(active) == 2
+    assert all(d.deleted_at is None for d in active)
+
+    # only_deleted() - only deleted
+    deleted = Document.only_deleted().all()
+    assert len(deleted) == 1
+    assert deleted[0].title == "Deleted Doc"
+
+    # with_deleted() - all records
+    all_docs = Document.with_deleted().all()
+    assert len(all_docs) == 3
+
+
+# ---------------- [C35] list_indexes and index_exists ----------------
+def test_C35_index_management():
+    class Product(SQLerModel):
+        sku: str
+        price: float
+
+    db = SQLerDB.in_memory()
+    Product.set_db(db)
+
+    # Create indexes
+    db.create_index("products", "sku", unique=True, name="idx_products_sku")
+    db.create_index("products", "price", name="idx_products_price")
+
+    # List all indexes
+    all_indexes = db.list_indexes()
+    assert len(all_indexes) >= 2
+
+    # List indexes for specific table
+    product_indexes = db.list_indexes("products")
+    assert len(product_indexes) == 2
+
+    # Check if index exists
+    assert db.index_exists("idx_products_sku") == True
+    assert db.index_exists("nonexistent_index") == False
+
+    # Index info includes uniqueness
+    sku_idx = next(i for i in product_indexes if i["name"] == "idx_products_sku")
+    assert sku_idx["unique"] == True
+
+
+# ---------------- [C36] RebaseConfig for safe models ----------------
+def test_C36_rebase_config():
+    from sqler import SQLerSafeModel
+    from sqler.models.utils import NO_REBASE_CONFIG, PERMISSIVE_REBASE_CONFIG
+
+    class Counter(SQLerSafeModel):
+        value: int = 0
+        count: int = 0
+        # Allow rebasing any numeric field with delta ±1
+        _rebase_config = PERMISSIVE_REBASE_CONFIG
+
+    class StrictCounter(SQLerSafeModel):
+        value: int = 0
+        # No rebasing - any conflict raises
+        _rebase_config = NO_REBASE_CONFIG
+
+    db = SQLerDB.in_memory()
+    Counter.set_db(db)
+    StrictCounter.set_db(db)
+
+    # Permissive: increments can be rebased
+    c = Counter(value=0, count=0).save()
+    c.value += 1
+    c.count += 1
+    c.save()  # Works even if version changed (for small deltas)
+
+    # Strict: no automatic rebasing
+    s = StrictCounter(value=0).save()
+    s.value += 1
+    s.save()
+    assert s._version == 1
+
+
+# ---------------- [C37] HooksMixin auto-calling ----------------
+def test_C37_hooks_mixin_auto_calling():
+    from sqler import HooksMixin
+
+    class AuditedItem(HooksMixin, SQLerModel):
+        name: str
+        normalized: bool = False
+        save_count: int = 0
+
+        def before_save(self) -> bool:
+            self.name = self.name.strip().lower()
+            self.normalized = True
+            return True  # Continue with save
+
+        def after_save(self) -> None:
+            self.save_count += 1
+
+    db = SQLerDB.in_memory()
+    AuditedItem.set_db(db)
+
+    # Hooks are called automatically in save()
+    item = AuditedItem(name="  HELLO WORLD  ")
+    item = item.save()
+
+    assert item.name == "hello world"
+    assert item.normalized == True
+    assert item.save_count == 1
+
+    # before_save returning False aborts the save
+    class AbortableItem(HooksMixin, SQLerModel):
+        name: str
+        valid: bool = True
+
+        def before_save(self) -> bool:
+            return self.valid  # Abort if not valid
+
+    db2 = SQLerDB.in_memory()
+    AbortableItem.set_db(db2)
+
+    try:
+        AbortableItem(name="test", valid=False).save()
+        raised = False
+    except RuntimeError as e:
+        raised = True
+        assert "before_save" in str(e).lower() or "abort" in str(e).lower()
+
+    assert raised, "Expected RuntimeError when before_save returns False"
+
+
+# =============================================================================
+# New Feature Contract Tests (C38-C46)
+# =============================================================================
+
+
+def test_C38_query_caching():
+    """C38: Query caching with TTL and invalidation."""
+    from sqler import QueryCache, cached_query
+
+    # Create cache
+    cache = QueryCache(max_size=100, default_ttl_seconds=300)
+
+    # Set and get
+    cache.set("users:active", [{"name": "Alice"}], table="users")
+    result = cache.get("users:active")
+    assert result == [{"name": "Alice"}]
+
+    # Check stats
+    stats = cache.stats
+    assert stats.hits >= 1
+
+    # Pattern invalidation
+    cache.set("users:1", "user1", table="users")
+    cache.set("users:2", "user2", table="users")
+    count = cache.invalidate_pattern("users:*")
+    assert count >= 2
+
+    # Decorator
+    call_count = 0
+
+    @cached_query(ttl_seconds=60)
+    def expensive_fn():
+        nonlocal call_count
+        call_count += 1
+        return {"data": "value"}
+
+    expensive_fn()
+    expensive_fn()
+    assert call_count == 1  # Second call cached
+
+
+def test_C39_export_csv():
+    """C39: CSV export and import."""
+    import os
+    import tempfile
+
+    from sqler import SQLerDB, SQLerModel, export_csv, import_csv
+
+    db = SQLerDB.in_memory()
+
+    class User(SQLerModel):
+        name: str
+        age: int
+
+    User.set_db(db)
+    User(name="Alice", age=30).save()
+    User(name="Bob", age=25).save()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "users.csv")
+
+        # Export
+        result = export_csv(User, path)
+        assert result.count == 2
+        assert result.format == "csv"
+        assert os.path.exists(path)
+
+        # Clear and reimport
+        for u in User.query().all():
+            u.delete()
+        assert User.query().count() == 0
+
+        result = import_csv(User, path)
+        assert result.succeeded == 2
+        assert User.query().count() == 2
+
+
+def test_C40_export_jsonl():
+    """C40: JSONL streaming export/import."""
+    import json
+    import os
+    import tempfile
+
+    from sqler import SQLerDB, SQLerModel, export_jsonl, stream_jsonl
+
+    db = SQLerDB.in_memory()
+
+    class Event(SQLerModel):
+        type: str
+        data: dict
+
+    Event.set_db(db)
+    Event(type="click", data={"x": 100}).save()
+    Event(type="scroll", data={"y": 200}).save()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "events.jsonl")
+
+        # Export
+        result = export_jsonl(Event, path)
+        assert result.count == 2
+        assert result.format == "jsonl"
+
+        # Stream
+        records = list(stream_jsonl(Event))
+        assert len(records) == 2
+        assert json.loads(records[0])["type"] == "click"
+
+
+def test_C41_full_text_search():
+    """C41: Full-text search with FTSIndex."""
+    from sqler import FTSIndex, SQLerDB, SQLerModel
+
+    db = SQLerDB.in_memory()
+
+    class Article(SQLerModel):
+        title: str
+        content: str
+
+    Article.set_db(db)
+    Article(title="Python Tutorial", content="Learn Python programming").save()
+    Article(title="JavaScript Guide", content="Modern JS development").save()
+
+    # Create FTS index
+    fts = FTSIndex(Article, fields=["title", "content"])
+    fts.create(db)
+    fts.rebuild()
+
+    # Search
+    results = fts.search("Python")
+    assert len(results) == 1
+    assert results[0].title == "Python Tutorial"
+
+    # Count
+    count = fts.count("Python")
+    assert count == 1
+
+
+def test_C42_connection_pooling():
+    """C42: Connection pooling basics."""
+    # Note: Full pool testing requires disk DB, this tests the API exists
+    from sqler import PooledSQLerDB
+
+    # Verify the class exists and has expected interface
+    assert hasattr(PooledSQLerDB, "on_disk")
+    assert hasattr(PooledSQLerDB, "pool_stats")
+
+
+def test_C43_schema_migrations():
+    """C43: Schema migrations with versioning."""
+    from sqler import Migration, MigrationRunner, SQLerDB
+
+    db = SQLerDB.in_memory()
+
+    migrations = [
+        Migration(
+            version=1,
+            name="create_items",
+            up=lambda d: d.adapter.execute("CREATE TABLE items (_id INTEGER PRIMARY KEY, data JSON)"),
+            down=lambda d: d.adapter.execute("DROP TABLE items"),
+        ),
+        Migration(
+            version=2,
+            name="create_orders",
+            up=lambda d: d.adapter.execute(
+                "CREATE TABLE orders (_id INTEGER PRIMARY KEY, data JSON)"
+            ),
+            down=lambda d: d.adapter.execute("DROP TABLE orders"),
+        ),
+    ]
+
+    runner = MigrationRunner(db, migrations)
+
+    # Check status
+    status = runner.status()
+    assert status["current_version"] == 0
+    assert status["pending_count"] == 2
+
+    # Migrate
+    result = runner.migrate()
+    assert result.success
+    assert len(result.applied) == 2
+    assert runner.current_version() == 2
+
+    # Rollback
+    result = runner.rollback(target_version=0)
+    assert result.success
+    assert runner.current_version() == 0
+
+
+def test_C44_metrics_collection():
+    """C44: Metrics collection and summary."""
+    from sqler import SQLerDB, SQLerModel, metrics
+
+    # Reset and enable
+    metrics.reset()
+    metrics.enable()
+
+    # Run some queries (metrics are collected automatically)
+    db = SQLerDB.in_memory(shared=False)
+
+    class Item(SQLerModel):
+        name: str
+
+    Item.set_db(db)
+    Item(name="test1").save()
+    Item(name="test2").save()
+    Item.query().all()
+
+    # Get metrics
+    data = metrics.get_metrics()
+    assert data["queries"]["total_queries"] >= 3
+
+    # Prometheus format export
+    prometheus = metrics.prometheus_export()
+    assert "sqler_queries_total" in prometheus
+
+    metrics.disable()
+
+
+def test_C45_database_operations():
+    """C45: Health checks, stats, backup."""
+    import os
+    import tempfile
+
+    from sqler import SQLerDB, SQLerModel, backup, get_stats, health_check, is_healthy
+
+    # Health check
+    db = SQLerDB.in_memory(shared=False)
+    assert is_healthy(db) is True
+
+    status = health_check(db)
+    assert status.healthy is True
+    assert status.latency_ms >= 0
+    assert "integrity_check" in status.details
+
+    # Stats
+    class Item(SQLerModel):
+        name: str
+
+    Item.set_db(db)
+    Item(name="test").save()
+
+    stats = get_stats(db)
+    assert stats.table_count >= 1
+
+    # Backup (requires disk DB)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test.db")
+        backup_path = os.path.join(tmpdir, "backup.db")
+
+        disk_db = SQLerDB.on_disk(db_path)
+
+        class User(SQLerModel):
+            name: str
+
+        User.set_db(disk_db)
+        User(name="Alice").save()
+
+        result = backup(disk_db, backup_path)
+        assert result.success
+        assert os.path.exists(backup_path)
+
+        disk_db.close()
+
+
+def test_C46_change_tracking():
+    """C46: Change tracking with TrackedModel and DiffMixin."""
+    from sqler import DiffMixin, SQLerDB, SQLerModel, TrackedModel
+
+    db = SQLerDB.in_memory()
+
+    # TrackedModel
+    class User(TrackedModel, SQLerModel):
+        name: str
+        age: int
+
+    User.set_db(db)
+
+    user = User(name="Alice", age=30)
+    user.save()
+    user.mark_clean()
+
+    # Modify
+    user.name = "Bob"
+    user.age = 31
+
+    assert user.is_dirty
+    assert "name" in user.changed_fields
+    assert "age" in user.changed_fields
+
+    changes = user.get_changes()
+    assert changes["name"] == ("Alice", "Bob")
+    assert changes["age"] == (30, 31)
+
+    # Revert
+    user.revert_changes()
+    assert user.name == "Alice"
+    assert not user.is_dirty
+
+    # DiffMixin
+    db2 = SQLerDB.in_memory()
+
+    class Item(DiffMixin, SQLerModel):
+        name: str
+        qty: int
+
+    Item.set_db(db2)
+
+    item1 = Item(name="Apple", qty=10)
+    item2 = Item(name="Apple", qty=15)
+
+    diff = item1.diff(item2)
+    assert diff == {"qty": (10, 15)}
+
+    assert item1.is_equal(Item(name="Apple", qty=10))
+    assert not item1.is_equal(item2)
+
+    cloned = item1.clone(qty=20)
+    assert cloned.name == "Apple"
+    assert cloned.qty == 20
+    assert cloned._id is None

@@ -39,6 +39,7 @@ class SQLerQuery:
         offset: Optional[int] = None,
         include_version: bool = False,
         select_fields: Optional[list[str]] = None,
+        distinct: bool = False,
     ):
         self._table = table
         self._adapter = adapter
@@ -49,6 +50,7 @@ class SQLerQuery:
         self._offset = offset
         self._include_version = include_version
         self._select_fields = select_fields
+        self._distinct = distinct
 
     def _clone(self, **kwargs) -> Self:
         """Create a clone with optional overrides."""
@@ -62,6 +64,7 @@ class SQLerQuery:
             offset=kwargs.get("offset", self._offset),
             include_version=kwargs.get("include_version", self._include_version),
             select_fields=kwargs.get("select_fields", self._select_fields),
+            distinct=kwargs.get("distinct", self._distinct),
         )
 
     def filter(self, expression: SQLerExpression) -> Self:
@@ -88,6 +91,26 @@ class SQLerQuery:
         not_expr = ~expression
         new_expression = not_expr if self._expression is None else (self._expression & not_expr)
         return self._clone(expression=new_expression)
+
+    def or_filter(self, expression: SQLerExpression) -> Self:
+        """Return a new query with the expression OR-ed in.
+
+        Args:
+            expression: Boolean expression to OR with existing filters.
+
+        Returns:
+            SQLerQuery: New query instance.
+        """
+        new_expression = expression if self._expression is None else (self._expression | expression)
+        return self._clone(expression=new_expression)
+
+    def distinct(self) -> Self:
+        """Return a new query with DISTINCT keyword.
+
+        Returns:
+            SQLerQuery: New query instance with distinct results.
+        """
+        return self._clone(distinct=True)
 
     def order_by(self, field: str, desc: bool = False) -> Self:
         """Return a new query ordered by the given JSON field.
@@ -165,18 +188,21 @@ class SQLerQuery:
             # SQLite requires LIMIT with OFFSET, use -1 for unlimited
             limit_offset = f"LIMIT -1 OFFSET {self._offset}"
 
+        distinct_kw = "DISTINCT " if self._distinct else ""
         if include_id:
             select = "_id, data" + (
                 ", _version" if (include_version or self._include_version) else ""
             )
         else:
             select = "data"
-        sql = f"SELECT {select} FROM {self._table} {where} {order} {limit_offset}".strip()
+        sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
         sql = " ".join(sql.split())  # collapse double spaces
         params = self._expression.params if self._expression else []
         return sql, params
 
-    def _build_aggregate_query(self, func: str, field: Optional[str] = None) -> tuple[str, list[Any]]:
+    def _build_aggregate_query(
+        self, func: str, field: Optional[str] = None
+    ) -> tuple[str, list[Any]]:
         """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX).
 
         Args:
@@ -355,6 +381,27 @@ class SQLerQuery:
             raise NoAdapterError("No adapter set for query")
         return self.limit(1).count() > 0
 
+    def distinct_values(self, field: str) -> list[Any]:
+        """Return distinct values for a JSON field.
+
+        Args:
+            field: JSON field path to extract distinct values from.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Returns:
+            list[Any]: Distinct values for the field.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        sql = f"SELECT DISTINCT json_extract(data, '$.{field}') FROM {self._table} {where}".strip()
+        sql = " ".join(sql.split())
+        params = self._expression.params if self._expression else []
+        cur = self._adapter.execute(sql, params)
+        return [row[0] for row in cur.fetchall() if row[0] is not None]
+
     def paginate(self, page: int, per_page: int = 20) -> "PaginatedResult":
         """Return a paginated result set.
 
@@ -410,7 +457,11 @@ class SQLerQuery:
             try:
                 _id, data_json = row[0], row[1]
                 ver = row[2] if self._include_version and len(row) > 2 else None
-            except Exception:
+            except (IndexError, TypeError) as e:
+                # Log warning but continue - malformed row shouldn't break entire query
+                import warnings
+
+                warnings.warn(f"Skipping malformed row in {self._table}: {e}", RuntimeWarning)
                 continue
             if data_json is None:
                 raise InvariantViolationError(f"Row {_id} in {self._table} has NULL data JSON")
@@ -439,6 +490,66 @@ class SQLerQuery:
             raise NoAdapterError("No adapter set for query")
         results = self.limit(1).all_dicts()
         return results[0] if results else None
+
+    def update(self, **fields) -> int:
+        """Update matching rows with the given field values.
+
+        Args:
+            **fields: Field names and values to update in the JSON data.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+            ValueError: If no fields provided.
+
+        Returns:
+            int: Number of rows updated.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        if not fields:
+            raise ValueError("No fields to update")
+
+        import json
+
+        # Build SET clause using json_set
+        set_parts = []
+        set_params = []
+        for field, value in fields.items():
+            set_parts.append(f"'$.{field}', ?")
+            set_params.append(json.dumps(value) if isinstance(value, (dict, list)) else value)
+
+        set_clause = ", ".join(set_parts)
+        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        where_params = self._expression.params if self._expression else []
+
+        sql = f"UPDATE {self._table} SET data = json_set(data, {set_clause}) {where}".strip()
+        sql = " ".join(sql.split())
+
+        cur = self._adapter.execute(sql, set_params + where_params)
+        self._adapter.commit()
+        return getattr(cur, "rowcount", 0)
+
+    def delete(self) -> int:
+        """Delete all matching rows.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Returns:
+            int: Number of rows deleted.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+
+        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        params = self._expression.params if self._expression else []
+
+        sql = f"DELETE FROM {self._table} {where}".strip()
+        sql = " ".join(sql.split())
+
+        cur = self._adapter.execute(sql, params)
+        self._adapter.commit()
+        return getattr(cur, "rowcount", 0)
 
 
 class PaginatedResult:
@@ -497,4 +608,3 @@ class PaginatedResult:
             "has_next": self.has_next,
             "has_prev": self.has_prev,
         }
-

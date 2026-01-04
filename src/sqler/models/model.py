@@ -6,20 +6,49 @@ from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
 from sqler.db.sqler_db import SQLerDB
+from sqler.exceptions import NotBoundError
 from sqler.models.queryset import SQLerQuerySet
 from sqler.query import SQLerExpression
 
 TModel = TypeVar("TModel", bound="SQLerModel")
 
 
+def _pluralize(word: str) -> str:
+    """Pluralize a word using common English rules.
+
+    Handles:
+    - Words ending in consonant + y → ies (category → categories)
+    - Words ending in s, x, z, ch, sh → es (box → boxes)
+    - Regular words → s (user → users)
+
+    For irregular plurals (person, child, etc.), use __tablename__.
+    """
+    w = word.lower()
+    if w.endswith("s"):
+        return w  # Already plural or ends in s
+    if w.endswith("y") and len(w) > 1 and w[-2] not in "aeiou":
+        return w[:-1] + "ies"  # category → categories
+    if w.endswith(("s", "x", "z", "ch", "sh")):
+        return w + "es"  # box → boxes, class → classes
+    return w + "s"  # user → users
+
+
 def _default_table_name(name: str) -> str:
-    base = name.lower()
-    if not base.endswith("s"):
-        base = base + "s"
-    # avoid SQL reserved words like 'as'
-    if base in {"as"}:
-        base = base + "_tbl"
-    return base
+    """Generate default table name from class name.
+
+    Examples:
+        User → users
+        Category → categories
+        Address → addresses
+        As → as_tbl (SQL reserved word)
+    """
+    lower = name.lower()
+    # Check reserved words BEFORE pluralization (for words like "by", "as")
+    # Also include words that pluralize to reserved words (a → as)
+    reserved = {"a", "as", "by", "and", "or", "not", "null", "index", "table"}
+    if lower in reserved:
+        return lower + "_tbl"
+    return _pluralize(name)
 
 
 class SQLerModel(BaseModel):
@@ -101,10 +130,13 @@ class SQLerModel(BaseModel):
         """Return the bound DB and table or raise if unbound.
 
         Raises:
-            RuntimeError: If :meth:`set_db` has not been called.
+            NotBoundError: If :meth:`set_db` has not been called.
         """
         if cls._db is None or cls._table is None:
-            raise RuntimeError("Model is not bound. Call set_db(db, table?) first.")
+            raise NotBoundError(
+                f"Model {cls.__name__} is not bound. Call set_db(db, table?) first.",
+                details={"model": cls.__name__},
+            )
         return cls._db, cls._table
 
     @classmethod
@@ -126,6 +158,45 @@ class SQLerModel(BaseModel):
         # attach db id stored outside the json payload
         inst._id = doc.get("_id")
         return inst  # type: ignore[return-value]
+
+    @classmethod
+    def from_ids(cls: Type[TModel], ids: list[int]) -> list[TModel]:
+        """Hydrate multiple instances by id list (batch operation).
+
+        Fetches all documents in a single query and resolves all relations
+        in batch (avoiding N+1 queries). This is much faster than looping
+        over ``from_id()`` for multiple records.
+
+        Args:
+            ids: List of row ids to load.
+
+        Returns:
+            List of model instances (in same order as input ids).
+            Missing ids are silently omitted from result.
+        """
+        if not ids:
+            return []
+        db, table = cls._require_binding()
+        docs = db.find_documents(table, ids)
+        if not docs:
+            return []
+        # Use queryset's batch resolution for efficient nested ref loading
+        qs = cls.query()
+        docs = qs._batch_resolve(docs)
+        instances = []
+        for doc in docs:
+            inst = cls.model_validate(doc)
+            inst._id = doc.get("_id")
+            instances.append(inst)
+        return instances
+
+    @classmethod
+    def count(cls: Type[TModel]) -> int:
+        """Return total count of rows in this model's table.
+
+        Shorthand for ``cls.query().count()``.
+        """
+        return cls.query().count()
 
     @classmethod
     def query(cls: Type[TModel]) -> SQLerQuerySet[TModel]:

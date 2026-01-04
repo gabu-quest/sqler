@@ -9,12 +9,6 @@ class AdapterError(Exception):
     pass
 
 
-class NotConnectedError(ConnectionError):
-    """Raised when attempting to execute operations without an active connection."""
-
-    pass
-
-
 class AdapterABC(ABC):
     """Abstract base for a synchronous DB adapter."""
 
@@ -36,13 +30,13 @@ class AdapterABC(ABC):
         pass
 
     @abstractmethod
-    def executemany(self, query: str, param_list: List[List[Any]]) -> None:
-        """Executes a query with many params."""
+    def executemany(self, query: str, param_list: List[List[Any]]) -> sqlite3.Cursor:
+        """Executes a query with many params and returns cursor."""
         pass
 
     @abstractmethod
-    def executescript(self, script: str) -> None:
-        """Executes the script passed to it."""
+    def executescript(self, script: str) -> sqlite3.Cursor:
+        """Executes the script passed to it and returns cursor."""
         pass
 
     @abstractmethod

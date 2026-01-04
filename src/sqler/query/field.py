@@ -158,12 +158,30 @@ class SQLerField:
         expr = f"JSON_EXTRACT(data, '{self._json_path()}') {op} ?"
         return SQLerExpression(expr, [val])
 
-    def __eq__(self, other: Any) -> SQLerExpression:
-        """field == value"""
+    def __eq__(self, other: Any) -> SQLerExpression:  # type: ignore[override]
+        """field == value (returns expression for query building, not bool)
+
+        Special handling for None: uses IS NULL instead of = NULL
+        """
+        if other is None:
+            # Use IS NULL for proper SQL NULL comparison
+            if self.alias_stack:
+                return SQLerAnyExpression(self.path, self.alias_stack, "IS", None)
+            expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NULL"
+            return SQLerExpression(expr, [])
         return self.__compare("=", other)
 
-    def __ne__(self, other: Any) -> SQLerExpression:
-        """field != value"""
+    def __ne__(self, other: Any) -> SQLerExpression:  # type: ignore[override]
+        """field != value (returns expression for query building, not bool)
+
+        Special handling for None: uses IS NOT NULL instead of != NULL
+        """
+        if other is None:
+            # Use IS NOT NULL for proper SQL NULL comparison
+            if self.alias_stack:
+                return SQLerAnyExpression(self.path, self.alias_stack, "IS NOT", None)
+            expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NOT NULL"
+            return SQLerExpression(expr, [])
         return self.__compare("!=", other)
 
     def __gt__(self, other: Any) -> SQLerExpression:
@@ -216,6 +234,75 @@ class SQLerField:
         """
         expr = f"JSON_EXTRACT(data, '{self._json_path()}') LIKE ?"
         return SQLerExpression(expr, [pattern])
+
+    def between(self, low: Any, high: Any) -> SQLerExpression:
+        """
+        Check if field value is between low and high (inclusive).
+          SQLerField('age').between(18, 65)
+          # -> JSON_EXTRACT(data, '$.age') BETWEEN ? AND ?
+        """
+        expr = f"JSON_EXTRACT(data, '{self._json_path()}') BETWEEN ? AND ?"
+        return SQLerExpression(expr, [low, high])
+
+    def is_null(self) -> SQLerExpression:
+        """
+        Check if field value is NULL.
+          SQLerField('email').is_null()
+          # -> JSON_EXTRACT(data, '$.email') IS NULL
+        """
+        expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NULL"
+        return SQLerExpression(expr, [])
+
+    def is_not_null(self) -> SQLerExpression:
+        """
+        Check if field value is NOT NULL.
+          SQLerField('email').is_not_null()
+          # -> JSON_EXTRACT(data, '$.email') IS NOT NULL
+        """
+        expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NOT NULL"
+        return SQLerExpression(expr, [])
+
+    def startswith(self, prefix: str) -> SQLerExpression:
+        """
+        Check if field value starts with prefix.
+          SQLerField('name').startswith('Al')
+          # -> JSON_EXTRACT(data, '$.name') LIKE 'Al%' ESCAPE '\\'
+        """
+        # Escape special LIKE characters in the prefix
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        expr = f"JSON_EXTRACT(data, '{self._json_path()}') LIKE ? ESCAPE '\\'"
+        return SQLerExpression(expr, [escaped + "%"])
+
+    def endswith(self, suffix: str) -> SQLerExpression:
+        """
+        Check if field value ends with suffix.
+          SQLerField('email').endswith('@example.com')
+          # -> JSON_EXTRACT(data, '$.email') LIKE '%@example.com' ESCAPE '\\'
+        """
+        escaped = suffix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        expr = f"JSON_EXTRACT(data, '{self._json_path()}') LIKE ? ESCAPE '\\'"
+        return SQLerExpression(expr, ["%" + escaped])
+
+    def glob(self, pattern: str) -> SQLerExpression:
+        """
+        Unix-style glob pattern matching.
+          SQLerField('path').glob('/home/*')
+          # -> JSON_EXTRACT(data, '$.path') GLOB ?
+        """
+        expr = f"JSON_EXTRACT(data, '{self._json_path()}') GLOB ?"
+        return SQLerExpression(expr, [pattern])
+
+    def in_list(self, values: list[Any]) -> SQLerExpression:
+        """
+        Check if field value is in a list of values.
+          SQLerField('status').in_list(['active', 'pending'])
+          # -> JSON_EXTRACT(data, '$.status') IN (?, ?)
+        """
+        if not values:
+            return SQLerExpression("0", [])
+        placeholders = ", ".join("?" for _ in values)
+        expr = f"JSON_EXTRACT(data, '{self._json_path()}') IN ({placeholders})"
+        return SQLerExpression(expr, list(values))
 
 
 class SQLerAnyExpression(SQLerExpression):

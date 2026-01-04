@@ -7,7 +7,9 @@ from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
 from sqler.db.async_db import AsyncSQLerDB
+from sqler.exceptions import NotBoundError
 from sqler.models.async_queryset import AsyncSQLerQuerySet
+from sqler.models.model import _default_table_name
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
 
@@ -15,24 +17,34 @@ TAModel = TypeVar("TAModel", bound="AsyncSQLerModel")
 
 
 class AsyncSQLerModel(BaseModel):
-    """Async Pydantic-based model with persistence helpers."""
+    """Async Pydantic-based model with persistence helpers.
 
+    Define subclasses to model your domain. Bind the class to a database via
+    :meth:`set_db`, optionally overriding the table name. Instances persist as
+    JSON (excluding the private ``_id`` attribute) into a table with schema
+    ``(_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)``.
+    """
+
+    # internal id stored outside the JSON blob
     _id: Optional[int] = PrivateAttr(default=None)
+    # snapshot of last-loaded document (for merge strategies in perf mode)
+    _snapshot: Optional[dict] = PrivateAttr(default=None)
+
+    # class-bound db + table metadata
     _db: ClassVar[Optional[AsyncSQLerDB]] = None
     _table: ClassVar[Optional[str]] = None
 
-    model_config = {"extra": "ignore"}
+    # ----- class config -----
+    model_config = {
+        "extra": "ignore",
+        "frozen": False,
+    }
 
     @classmethod
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
-        base = cls.__name__.lower()
-        if not base.endswith("s"):
-            base = base + "s"
-        if base in {"as"}:
-            base = base + "_tbl"
-        chosen = table or explicit or base
+        chosen = table or explicit or _default_table_name(cls.__name__)
         cls._table = chosen
         cls.__tablename__ = chosen
         registry.register(cls._table, cls)
@@ -40,8 +52,17 @@ class AsyncSQLerModel(BaseModel):
     @classmethod
     def _require_binding(cls) -> tuple[AsyncSQLerDB, str]:
         if cls._db is None or cls._table is None:
-            raise RuntimeError("Model is not bound. Call set_db(db, table?) first.")
+            raise NotBoundError(
+                f"Model {cls.__name__} is not bound. Call set_db(db, table?) first.",
+                details={"model": cls.__name__},
+            )
         return cls._db, cls._table
+
+    @classmethod
+    def db(cls: Type[TAModel]) -> AsyncSQLerDB:
+        """Return the bound database for this model."""
+        db, _ = cls._require_binding()
+        return db
 
     @classmethod
     async def from_id(cls: Type[TAModel], id_: int) -> Optional[TAModel]:
@@ -53,6 +74,47 @@ class AsyncSQLerModel(BaseModel):
         inst = cls.model_validate(doc)
         inst._id = doc.get("_id")
         return inst  # type: ignore[return-value]
+
+    @classmethod
+    async def from_ids(cls: Type[TAModel], ids: list[int]) -> list[TAModel]:
+        """Hydrate multiple instances by id list (batch operation).
+
+        Fetches all documents in a single query and resolves all relations
+        in batch (avoiding N+1 queries). This is much faster than looping
+        over ``from_id()`` for multiple records.
+
+        Args:
+            ids: List of row ids to load.
+
+        Returns:
+            List of model instances (in same order as input ids).
+            Missing ids are silently omitted from result.
+        """
+        if not ids:
+            return []
+        db, table = cls._require_binding()
+        docs = await db.find_documents(table, ids)
+        if not docs:
+            return []
+        # Use queryset's batch resolution for efficient nested ref loading
+        qs = cls.query()
+        docs = await qs._abatch_resolve(docs)
+        instances = []
+        for doc in docs:
+            inst = cls.model_validate(doc)
+            inst._id = doc.get("_id")
+            instances.append(inst)
+        return instances
+
+    @classmethod
+    async def count(cls: Type[TAModel]) -> int:
+        """Return total count of rows in this model's table.
+
+        Shorthand for ``await cls.query().count()``.
+        """
+        db, table = cls._require_binding()
+        await db._ensure_table(table)
+        return await cls.query().count()
 
     @classmethod
     def query(cls: Type[TAModel]) -> AsyncSQLerQuerySet[TAModel]:
@@ -131,13 +193,43 @@ class AsyncSQLerModel(BaseModel):
         return self
 
     async def delete(self) -> None:
+        """Delete this instance by ``_id`` and unset it.
+
+        Deprecated: prefer delete_with_policy(on_delete=...) to control integrity behavior.
+        """
+        await self.delete_with_policy()
+
+    async def delete_with_policy(self, *, on_delete: str = "restrict") -> None:
+        """Delete this instance with a specified integrity policy.
+
+        Args:
+            on_delete: One of "restrict", "set_null", or "cascade".
+                - "restrict": Deletes the row without checking for references.
+                - "set_null": Nullifies all references to this row before deleting.
+                - "cascade": Recursively deletes all rows that reference this row.
+        """
+        from .async_integrity import (
+            async_cascade_delete,
+            async_find_referrers,
+            async_set_null_referrers,
+        )
+
         cls = self.__class__
         db, table = cls._require_binding()
         if self._id is None:
             raise ValueError("Cannot delete unsaved model (missing _id)")
-        # reuse execute directly for delete to keep API small
+        if on_delete not in {"restrict", "set_null", "cascade"}:
+            raise ValueError("on_delete must be 'restrict', 'set_null', or 'cascade'")
+
+        if on_delete == "set_null":
+            referrers = await async_find_referrers(db, table, self._id)
+            await async_set_null_referrers(db, table, self._id, referrers)
+        elif on_delete == "cascade":
+            referrers = await async_find_referrers(db, table, self._id)
+            await async_cascade_delete(db, referrers, set())
+
         await db.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [self._id])
-        await db.adapter.commit()
+        await db.adapter.auto_commit()
         self._id = None
 
     async def refresh(self: TAModel) -> TAModel:

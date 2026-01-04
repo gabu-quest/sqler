@@ -28,6 +28,31 @@ Pydantic 風のモデルを定義し、JSON として保存。流れるような
 - **同期 & 非同期** で同等の使い勝手
 - **WAL と相性の良い並行性**：スレッドローカル接続で「多数リーダ・単一ライタ」
 - **任意参加のパフォーマンステスト**と実用的なインデックス指針
+- **クエリキャッシュ**：TTL と LRU 削除
+- **データエクスポート/インポート**：CSV、JSON、JSONL（同期+非同期）
+- **全文検索**：FTS5 と SearchableMixin
+- **コネクションプーリング**：高並行性シナリオ向け
+- **スキーママイグレーション**：バージョン追跡付き（同期+非同期）
+- **メトリクス収集**：Prometheus エクスポート対応
+- **データベース操作**：バックアップ、リストア、ヘルスチェック、バキューム
+- **変更追跡**：ダーティフィールド検出と部分更新
+
+---
+
+## インタラクティブツアー
+
+[marimo](https://marimo.io) ノートブックで SQLer を学びましょう！ブラウザ上で直接コードを実行・編集できます。
+
+**[インタラクティブツアーを見る →](https://gabu-quest.github.io/sqler/ja/)**
+
+| ツアー | トピック |
+|--------|----------|
+| [01. 基礎](https://gabu-quest.github.io/sqler/ja/tour_01_fundamentals/) | セットアップ、モデル、CRUD、クエリ、集約 |
+| [02. リレーション](https://gabu-quest.github.io/sqler/ja/tour_02_relationships/) | モデル参照、ハイドレーション、モデル間クエリ |
+| [03. Safe Model](https://gabu-quest.github.io/sqler/ja/tour_03_safe_models/) | 楽観的ロック、StaleVersionError、競合解決 |
+| [04. トランザクション](https://gabu-quest.github.io/sqler/ja/tour_04_transactions/) | アトミック操作、ロールバック、ネストされたトランザクション |
+| [05. ミックスイン](https://gabu-quest.github.io/sqler/ja/tour_05_mixins/) | タイムスタンプ、ソフトデリート、ライフサイクルフック |
+| [06. 上級者向け](https://gabu-quest.github.io/sqler/ja/tour_06_advanced/) | バルク操作、インデックス、整合性ポリシー、生 SQL |
 
 ---
 

@@ -1,25 +1,9 @@
 import json
-import re
 from typing import Any, Optional
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
-
-
-def _validate_table_name(table: str) -> str:
-    """Validate and sanitize table name to prevent SQL injection.
-
-    Args:
-        table: Table name to validate.
-
-    Returns:
-        str: The validated table name.
-
-    Raises:
-        ValueError: If the table name contains invalid characters.
-    """
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
-        raise ValueError(f"Invalid table name: {table!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*")
-    return table
+from sqler.exceptions import StaleVersionError
+from sqler.utils import validate_table_name
 
 
 class AsyncSQLerDB:
@@ -47,7 +31,7 @@ class AsyncSQLerDB:
         await self.adapter.close()
 
     async def _ensure_table(self, table: str) -> None:
-        table = _validate_table_name(table)
+        table = validate_table_name(table)
         ddl = f"""
         CREATE TABLE IF NOT EXISTS {table} (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,13 +39,13 @@ class AsyncSQLerDB:
         );
         """
         await self.adapter.execute(ddl)
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
 
     async def insert_document(self, table: str, doc: dict[str, Any]) -> int:
         await self._ensure_table(table)
         payload = json.dumps(doc)
         cur = await self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         last_id = cur.lastrowid  # type: ignore[attr-defined]
         await cur.close()
         return last_id
@@ -74,7 +58,7 @@ class AsyncSQLerDB:
         cur = await self.adapter.execute(
             f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id]
         )
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
         return _id
 
@@ -89,6 +73,38 @@ class AsyncSQLerDB:
         obj["_id"] = row[0]
         return obj
 
+    async def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
+        """Fetch multiple documents by id list (batch operation).
+
+        Documents are returned in the same order as the input ids. If an id
+        is not found, it is omitted from the result (no None placeholder).
+
+        Args:
+            table: Table name.
+            ids: List of row ids to fetch.
+
+        Returns:
+            list[dict]: Decoded documents with ``_id`` merged in.
+        """
+        if not ids:
+            return []
+        await self._ensure_table(table)
+        placeholders = ",".join("?" for _ in ids)
+        cur = await self.adapter.execute(
+            f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
+            list(ids),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        # Build lookup dict for ordering
+        by_id: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            obj = json.loads(row[1])
+            obj["_id"] = row[0]
+            by_id[row[0]] = obj
+        # Return in input order, skipping missing
+        return [by_id[i] for i in ids if i in by_id]
+
     async def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
 
@@ -98,7 +114,7 @@ class AsyncSQLerDB:
         """
         await self._ensure_table(table)
         cur = await self.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [_id])
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
 
     async def bulk_upsert(self, table: str, docs: list[dict[str, Any]]) -> list[int]:
@@ -138,7 +154,7 @@ class AsyncSQLerDB:
                 )
                 await cur.close()
                 assigned.append(int(doc_id))
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         return assigned
 
     async def execute_sql(
@@ -205,7 +221,7 @@ class AsyncSQLerDB:
         where_sql = f"WHERE {where}" if where else ""
         ddl = f"CREATE {unique_sql} INDEX IF NOT EXISTS {idx_name} ON {table} ({expr}) {where_sql};"
         cur = await self.adapter.execute(ddl)
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
 
     async def drop_index(self, name: str) -> None:
@@ -216,8 +232,68 @@ class AsyncSQLerDB:
         """
         ddl = f"DROP INDEX IF EXISTS {name};"
         cur = await self.adapter.execute(ddl)
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
+
+    async def list_indexes(self, table: str | None = None) -> list[dict[str, Any]]:
+        """List indexes in the database.
+
+        Args:
+            table: Optional table name to filter by. If None, lists all indexes.
+
+        Returns:
+            List of dicts with index info: name, table, sql, unique.
+        """
+        if table:
+            query = """
+                SELECT name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'index' AND tbl_name = ? AND name NOT LIKE 'sqlite_%'
+                ORDER BY name;
+            """
+            cur = await self.adapter.execute(query, [table])
+        else:
+            query = """
+                SELECT name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'index' AND name NOT LIKE 'sqlite_%'
+                ORDER BY tbl_name, name;
+            """
+            cur = await self.adapter.execute(query)
+
+        rows = await cur.fetchall()
+        await cur.close()
+
+        indexes = []
+        for row in rows:
+            name = row[0]
+            tbl_name = row[1]
+            sql = row[2] or ""
+            indexes.append(
+                {
+                    "name": name,
+                    "table": tbl_name,
+                    "sql": sql,
+                    "unique": "UNIQUE" in sql.upper() if sql else False,
+                }
+            )
+        return indexes
+
+    async def index_exists(self, name: str) -> bool:
+        """Check if an index exists by name.
+
+        Args:
+            name: Index name to check.
+
+        Returns:
+            True if the index exists, False otherwise.
+        """
+        cur = await self.adapter.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;", [name]
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return row is not None
 
     # ---- versioned (optimistic locking) helpers ----
     async def _ensure_versioned_table(self, table: str) -> None:
@@ -229,7 +305,7 @@ class AsyncSQLerDB:
         Args:
             table: Table name.
         """
-        table = _validate_table_name(table)
+        table = validate_table_name(table)
         # Fast path: check cache first
         if table in self._versioned_tables:
             return
@@ -241,7 +317,7 @@ class AsyncSQLerDB:
             cur2 = await self.adapter.execute(
                 f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
             )
-            await self.adapter.commit()
+            await self.adapter.auto_commit()
             await cur2.close()
         # Update cache
         self._versioned_tables.add(table)
@@ -256,7 +332,7 @@ class AsyncSQLerDB:
                 f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",
                 [payload],
             )
-            await self.adapter.commit()
+            await self.adapter.auto_commit()
             last_id = cur.lastrowid  # type: ignore[attr-defined]
             await cur.close()
             return last_id, 0
@@ -267,14 +343,14 @@ class AsyncSQLerDB:
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
             [payload, _id, expected_version, expected_version, expected_version],
         )
-        await self.adapter.commit()
+        await self.adapter.auto_commit()
         await cur.close()
         # Check changes() to confirm update actually happened
         ch = await self.adapter.execute("SELECT changes();")
         row = await ch.fetchone()
         await ch.close()
         if not row or int(row[0]) == 0:
-            raise RuntimeError("Stale version: update rejected")
+            raise StaleVersionError("Stale version: update rejected")
         return _id, expected_version + 1
 
     async def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
@@ -316,23 +392,21 @@ class AsyncSQLerDB:
 
     async def __aenter__(self):
         """Enter async context manager; begin transaction."""
-        await self.adapter.execute("BEGIN;")
+        await self.adapter.begin_transaction()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Exit async context manager; commit or rollback."""
-        if exc_type is None:
-            await self.adapter.commit()
-        else:
-            try:
-                await self.adapter.execute("ROLLBACK;")
-            except Exception:
-                pass
+        await self.adapter.end_transaction(commit=(exc_type is None))
         return False
 
 
 class AsyncTransaction:
-    """Async context manager for explicit database transactions."""
+    """Async context manager for explicit database transactions.
+
+    Uses the adapter's transaction tracking to ensure that nested operations
+    (like model.save()) respect the transaction boundary and don't auto-commit.
+    """
 
     def __init__(self, adapter):
         self.adapter = adapter
@@ -340,7 +414,7 @@ class AsyncTransaction:
 
     async def __aenter__(self):
         """Begin the transaction."""
-        await self.adapter.execute("BEGIN;")
+        await self.adapter.begin_transaction()
         self._active = True
         return self
 
@@ -349,26 +423,17 @@ class AsyncTransaction:
         if not self._active:
             return False
         self._active = False
-        if exc_type is None:
-            await self.adapter.commit()
-        else:
-            try:
-                await self.adapter.execute("ROLLBACK;")
-            except Exception:
-                pass
+        await self.adapter.end_transaction(commit=(exc_type is None))
         return False
 
     async def commit(self):
         """Explicitly commit the transaction."""
         if self._active:
-            await self.adapter.commit()
+            await self.adapter.end_transaction(commit=True)
             self._active = False
 
     async def rollback(self):
         """Explicitly rollback the transaction."""
         if self._active:
-            try:
-                await self.adapter.execute("ROLLBACK;")
-            except Exception:
-                pass
+            await self.adapter.end_transaction(commit=False)
             self._active = False

@@ -1,27 +1,11 @@
 import json
-import re
 import threading
 from typing import Any, Optional
 
 from sqler.adapter import SQLiteAdapter
+from sqler.exceptions import StaleVersionError
 from sqler.query import SQLerQuery
-
-
-def _validate_table_name(table: str) -> str:
-    """Validate and sanitize table name to prevent SQL injection.
-
-    Args:
-        table: Table name to validate.
-
-    Returns:
-        str: The validated table name.
-
-    Raises:
-        ValueError: If the table name contains invalid characters.
-    """
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
-        raise ValueError(f"Invalid table name: {table!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*")
-    return table
+from sqler.utils import validate_table_name
 
 
 class SQLerDB:
@@ -76,7 +60,7 @@ class SQLerDB:
         Args:
             table: Table name to ensure.
         """
-        table = _validate_table_name(table)
+        table = validate_table_name(table)
         ddl = f"""
         CREATE TABLE IF NOT EXISTS {table} (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +68,7 @@ class SQLerDB:
         );
         """
         self.adapter.execute(ddl)
-        self.adapter.commit()
+        self.adapter.auto_commit()
 
     def insert_document(self, table: str, doc: dict[str, Any]) -> int:
         """Insert a document.
@@ -99,7 +83,7 @@ class SQLerDB:
         self._ensure_table(table)
         payload = json.dumps(doc)
         cursor = self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
-        self.adapter.commit()
+        self.adapter.auto_commit()
         return cursor.lastrowid
 
     def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
@@ -118,7 +102,7 @@ class SQLerDB:
         if _id is None:
             return self.insert_document(table, doc)
         self.adapter.execute(f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id])
-        self.adapter.commit()
+        self.adapter.auto_commit()
         return _id
 
     def bulk_upsert(self, table: str, docs: list[dict[str, Any]]) -> list[int]:
@@ -179,6 +163,37 @@ class SQLerDB:
         obj["_id"] = row[0]
         return obj
 
+    def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
+        """Fetch multiple documents by id list (batch operation).
+
+        Documents are returned in the same order as the input ids. If an id
+        is not found, it is omitted from the result (no None placeholder).
+
+        Args:
+            table: Table name.
+            ids: List of row ids to fetch.
+
+        Returns:
+            list[dict]: Decoded documents with ``_id`` merged in.
+        """
+        if not ids:
+            return []
+        self._ensure_table(table)
+        placeholders = ",".join("?" for _ in ids)
+        cur = self.adapter.execute(
+            f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
+            list(ids),
+        )
+        rows = cur.fetchall()
+        # Build lookup dict for ordering
+        by_id: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            obj = json.loads(row[1])
+            obj["_id"] = row[0]
+            by_id[row[0]] = obj
+        # Return in input order, skipping missing
+        return [by_id[i] for i in ids if i in by_id]
+
     def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
 
@@ -188,7 +203,7 @@ class SQLerDB:
         """
         self._ensure_table(table)
         self.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [_id])
-        self.adapter.commit()
+        self.adapter.auto_commit()
 
     def execute_sql(self, query: str, params: Optional[list[Any]] = None) -> list[dict[str, Any]]:
         """Run a custom SELECT and return lightweight row mappings.
@@ -212,8 +227,8 @@ class SQLerDB:
             mapping = None
             try:
                 mapping = row.keys()  # type: ignore[attr-defined]
-            except Exception:
-                mapping = None
+            except AttributeError:
+                mapping = None  # Row doesn't support dict-like access
             if mapping:
                 keys = list(mapping)
                 if "data" in keys:
@@ -301,7 +316,7 @@ class SQLerDB:
         where_sql = f"WHERE {where}" if where else ""
         ddl = f"CREATE {unique_sql} INDEX IF NOT EXISTS {idx_name} ON {table} ({expr}) {where_sql};"
         self.adapter.execute(ddl)
-        self.adapter.commit()
+        self.adapter.auto_commit()
 
     def drop_index(self, name: str):
         """Drop an index by name.
@@ -311,22 +326,71 @@ class SQLerDB:
         """
         ddl = f"DROP INDEX IF EXISTS {name};"
         self.adapter.execute(ddl)
-        self.adapter.commit()
+        self.adapter.auto_commit()
+
+    def list_indexes(self, table: Optional[str] = None) -> list[dict[str, Any]]:
+        """List indexes in the database.
+
+        Args:
+            table: Optional table name to filter by. If None, lists all indexes.
+
+        Returns:
+            List of dicts with index info: name, table, sql, unique.
+        """
+        if table:
+            query = """
+                SELECT name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'index' AND tbl_name = ? AND name NOT LIKE 'sqlite_%'
+                ORDER BY name;
+            """
+            cur = self.adapter.execute(query, [table])
+        else:
+            query = """
+                SELECT name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'index' AND name NOT LIKE 'sqlite_%'
+                ORDER BY tbl_name, name;
+            """
+            cur = self.adapter.execute(query)
+
+        indexes = []
+        for row in cur.fetchall():
+            name = row[0]
+            tbl_name = row[1]
+            sql = row[2] or ""
+            indexes.append(
+                {
+                    "name": name,
+                    "table": tbl_name,
+                    "sql": sql,
+                    "unique": "UNIQUE" in sql.upper() if sql else False,
+                }
+            )
+        return indexes
+
+    def index_exists(self, name: str) -> bool:
+        """Check if an index exists by name.
+
+        Args:
+            name: Index name to check.
+
+        Returns:
+            True if the index exists, False otherwise.
+        """
+        cur = self.adapter.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;", [name]
+        )
+        return cur.fetchone() is not None
 
     def __enter__(self):
         """Enter context manager; begin transaction."""
-        self.adapter.execute("BEGIN;")
+        self.adapter.begin_transaction()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit context manager; commit or rollback."""
-        if exc_type is None:
-            self.adapter.commit()
-        else:
-            try:
-                self.adapter.execute("ROLLBACK;")
-            except Exception:
-                pass
+        self.adapter.end_transaction(commit=(exc_type is None))
         return False
 
     # ---- versioned (optimistic locking) helpers ----
@@ -379,7 +443,7 @@ class SQLerDB:
                 self.adapter.execute(
                     f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
                 )
-                self.adapter.commit()
+                self.adapter.auto_commit()
             # update cache regardless
             self._versioned_tables.add(table)
 
@@ -413,22 +477,23 @@ class SQLerDB:
                 f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",
                 [payload],
             )
-            self.adapter.commit()
+            self.adapter.auto_commit()
             return cur.lastrowid, 0
         if expected_version is None:
             raise ValueError("expected_version required for update")
-        # Acquire write lock early to reduce live-lock under contention
-        try:
-            self.adapter.execute("BEGIN IMMEDIATE;")
-        except (RuntimeError, ValueError):
-            # tolerate if already in a transaction
-            pass
+        # Acquire write lock early to reduce live-lock under contention (only if not in transaction)
+        if not self.adapter.in_transaction:
+            try:
+                self.adapter.execute("BEGIN IMMEDIATE;")
+            except (RuntimeError, ValueError):
+                # tolerate if already in a transaction
+                pass
         cur = self.adapter.execute(
             f"UPDATE {table} SET data = json(?), _version = _version + 1 "
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
             [payload, _id, expected_version, expected_version, expected_version],
         )
-        self.adapter.commit()
+        self.adapter.auto_commit()
         rc = getattr(cur, "rowcount", -1)
         if rc <= 0:
             # treat non-positive as conflict
@@ -436,7 +501,7 @@ class SQLerDB:
             _ = self.adapter.execute(
                 f"SELECT _version FROM {table} WHERE _id = ?;", [_id]
             ).fetchone()
-            raise RuntimeError("Stale version: update rejected")
+            raise StaleVersionError("Stale version: update rejected")
         return _id, expected_version + 1
 
     def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
@@ -468,7 +533,12 @@ class SQLerDB:
 
 
 class Transaction:
-    """Context manager for explicit database transactions."""
+    """Context manager for explicit database transactions.
+
+    When inside a Transaction context, model.save() and other document
+    operations will NOT auto-commit. The transaction commits only when
+    the context exits successfully, or rolls back on exception.
+    """
 
     def __init__(self, adapter):
         self.adapter = adapter
@@ -476,7 +546,7 @@ class Transaction:
 
     def __enter__(self):
         """Begin the transaction."""
-        self.adapter.execute("BEGIN;")
+        self.adapter.begin_transaction()
         self._active = True
         return self
 
@@ -485,26 +555,17 @@ class Transaction:
         if not self._active:
             return False
         self._active = False
-        if exc_type is None:
-            self.adapter.commit()
-        else:
-            try:
-                self.adapter.execute("ROLLBACK;")
-            except Exception:
-                pass
+        self.adapter.end_transaction(commit=(exc_type is None))
         return False
 
     def commit(self):
         """Explicitly commit the transaction."""
         if self._active:
-            self.adapter.commit()
+            self.adapter.end_transaction(commit=True)
             self._active = False
 
     def rollback(self):
         """Explicitly rollback the transaction."""
         if self._active:
-            try:
-                self.adapter.execute("ROLLBACK;")
-            except Exception:
-                pass
+            self.adapter.end_transaction(commit=False)
             self._active = False

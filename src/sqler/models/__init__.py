@@ -1,11 +1,20 @@
 from dataclasses import dataclass
 
+from sqler.exceptions import ReferentialIntegrityError, StaleVersionError
+
+from .async_integrity import (
+    async_cascade_delete,
+    async_find_referrers,
+    async_set_null_referrers,
+    async_validate_references,
+)
 from .async_model import AsyncSQLerModel
 from .async_queryset import AsyncSQLerQuerySet
 from .async_safe import AsyncSQLerSafeModel
 from .mixins import (
     AsyncFullMixin,
     AsyncHooksMixin,
+    AsyncSoftDeleteMixin,
     FullMixin,
     HooksMixin,
     SoftDeleteMixin,
@@ -15,11 +24,13 @@ from .model import SQLerModel
 from .model_field import SQLerModelField
 from .queryset import SQLerQuerySet
 from .ref import SQLerRef, as_ref
-from .safe import SQLerSafeModel, StaleVersionError
-
-
-class ReferentialIntegrityError(RuntimeError):
-    """Raised when delete(on_delete='restrict') hits referencing rows."""
+from .safe import SQLerSafeModel
+from .utils import (
+    DEFAULT_REBASE_CONFIG,
+    NO_REBASE_CONFIG,
+    PERMISSIVE_REBASE_CONFIG,
+    RebaseConfig,
+)
 
 
 @dataclass
@@ -47,8 +58,19 @@ __all__ = [
     # Mixins
     "TimestampMixin",
     "SoftDeleteMixin",
+    "AsyncSoftDeleteMixin",
     "HooksMixin",
     "AsyncHooksMixin",
     "FullMixin",
     "AsyncFullMixin",
+    # Rebase configuration
+    "RebaseConfig",
+    "DEFAULT_REBASE_CONFIG",
+    "PERMISSIVE_REBASE_CONFIG",
+    "NO_REBASE_CONFIG",
+    # Async integrity helpers
+    "async_find_referrers",
+    "async_set_null_referrers",
+    "async_cascade_delete",
+    "async_validate_references",
 ]
