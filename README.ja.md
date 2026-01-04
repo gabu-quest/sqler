@@ -39,11 +39,11 @@ Pydantic 風のモデルを定義し、JSON として保存。流れるような
 
 ---
 
-## インタラクティブツアー
+## ツアーノートブック
 
-[marimo](https://marimo.io) ノートブックで SQLer を学びましょう！ブラウザ上で直接コードを実行・編集できます。
+[marimo](https://marimo.io) ノートブックで SQLer を学びましょう！オンラインでプレレンダリング版を閲覧するか、ローカルでインタラクティブに実行できます。
 
-**[インタラクティブツアーを見る →](https://gabu-quest.github.io/sqler/ja/)**
+**[オンラインツアーを見る →](https://gabu-quest.github.io/sqler/ja/)**
 
 | ツアー | トピック |
 |--------|----------|
@@ -53,6 +53,17 @@ Pydantic 風のモデルを定義し、JSON として保存。流れるような
 | [04. トランザクション](https://gabu-quest.github.io/sqler/ja/tour_04_transactions/) | アトミック操作、ロールバック、ネストされたトランザクション |
 | [05. ミックスイン](https://gabu-quest.github.io/sqler/ja/tour_05_mixins/) | タイムスタンプ、ソフトデリート、ライフサイクルフック |
 | [06. 上級者向け](https://gabu-quest.github.io/sqler/ja/tour_06_advanced/) | バルク操作、インデックス、整合性ポリシー、生 SQL |
+
+### ローカルで実行（インタラクティブ）
+
+リポジトリをクローンして、marimo でインタラクティブに実行：
+
+```bash
+git clone https://github.com/gabu-quest/sqler.git
+cd sqler
+uv sync --dev
+uv run marimo edit examples/ja/tour_01_fundamentals.py
+```
 
 ---
 

@@ -34,23 +34,23 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev --frozen
 
-      - name: Export notebooks to WASM (interactive)
+      - name: Export notebooks to HTML (with pre-rendered outputs)
         run: |
           mkdir -p _site
           mkdir -p _site/ja
 
-          # Export each English tour notebook as WASM for full interactivity
+          # Export each English tour notebook as static HTML with outputs
           for notebook in examples/tour_*.py; do
             name=$(basename "$notebook" .py)
-            echo "Exporting $name as WASM..."
-            uv run marimo export html-wasm "$notebook" -o "_site/${name}"
+            echo "Exporting $name..."
+            uv run marimo export html "$notebook" -o "_site/${name}/index.html"
           done
 
-          # Export each Japanese tour notebook as WASM
+          # Export each Japanese tour notebook as static HTML with outputs
           for notebook in examples/ja/tour_*.py; do
             name=$(basename "$notebook" .py)
-            echo "Exporting ja/$name as WASM..."
-            uv run marimo export html-wasm "$notebook" -o "_site/ja/${name}"
+            echo "Exporting ja/$name..."
+            uv run marimo export html "$notebook" -o "_site/ja/${name}/index.html"
           done
 
           # Create English index page
@@ -81,8 +81,8 @@ jobs:
           </head>
           <body>
             <div class="lang-switch"><a href="ja/">日本語版はこちら →</a></div>
-            <h1>SQLer Interactive Tour</h1>
-            <p>Learn SQLer through interactive notebooks. Each tour covers a different aspect of the library.</p>
+            <h1>SQLer Tour</h1>
+            <p>Learn SQLer through these notebooks. Each tour covers a different aspect of the library with code examples and outputs.</p>
             <ul class="tour-list">
               <li><a href="tour_01_fundamentals/">
                 <div class="title">01. Fundamentals</div>
@@ -145,8 +145,8 @@ jobs:
           </head>
           <body>
             <div class="lang-switch"><a href="../">← English version</a></div>
-            <h1>SQLer インタラクティブツアー</h1>
-            <p>インタラクティブなノートブックで SQLer を学びましょう。各ツアーではライブラリの異なる側面をカバーします。</p>
+            <h1>SQLer ツアー</h1>
+            <p>これらのノートブックで SQLer を学びましょう。各ツアーではライブラリの異なる側面をコード例と出力結果でカバーします。</p>
             <ul class="tour-list">
               <li><a href="tour_01_fundamentals/">
                 <div class="title">01. 基礎</div>

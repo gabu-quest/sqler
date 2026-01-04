@@ -51,11 +51,11 @@ This started as a personal toolkit for **very fast prototyping**; small scripts 
 
 ---
 
-## Interactive Tour
+## Tour Notebooks
 
-Learn SQLer through interactive notebooks! These [marimo](https://marimo.io) notebooks let you run and modify code directly in your browser.
+Learn SQLer through [marimo](https://marimo.io) notebooks! View the pre-rendered versions online, or run them interactively on your own machine.
 
-**[View the Interactive Tour →](https://gabu-quest.github.io/sqler/)**
+**[View Online Tour →](https://gabu-quest.github.io/sqler/)**
 
 | Tour | Topics |
 |------|--------|
@@ -65,6 +65,17 @@ Learn SQLer through interactive notebooks! These [marimo](https://marimo.io) not
 | [04. Transactions](https://gabu-quest.github.io/sqler/tour_04_transactions/) | Atomic operations, rollback, nested transactions |
 | [05. Mixins](https://gabu-quest.github.io/sqler/tour_05_mixins/) | Timestamps, soft delete, lifecycle hooks |
 | [06. Advanced](https://gabu-quest.github.io/sqler/tour_06_advanced/) | Bulk ops, indexes, integrity policies, raw SQL |
+
+### Run Locally (Interactive)
+
+Clone the repo and run any tour interactively with marimo:
+
+```bash
+git clone https://github.com/gabu-quest/sqler.git
+cd sqler
+uv sync --dev
+uv run marimo edit examples/tour_01_fundamentals.py
+```
 
 ---
 
