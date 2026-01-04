@@ -976,3 +976,327 @@ def test_C37_hooks_mixin_auto_calling():
         assert "before_save" in str(e).lower() or "abort" in str(e).lower()
 
     assert raised, "Expected RuntimeError when before_save returns False"
+
+
+# =============================================================================
+# New Feature Contract Tests (C38-C46)
+# =============================================================================
+
+
+def test_C38_query_caching():
+    """C38: Query caching with TTL and invalidation."""
+    from sqler import QueryCache, cached_query
+
+    # Create cache
+    cache = QueryCache(max_size=100, default_ttl_seconds=300)
+
+    # Set and get
+    cache.set("users:active", [{"name": "Alice"}], table="users")
+    result = cache.get("users:active")
+    assert result == [{"name": "Alice"}]
+
+    # Check stats
+    stats = cache.stats
+    assert stats.hits >= 1
+
+    # Pattern invalidation
+    cache.set("users:1", "user1", table="users")
+    cache.set("users:2", "user2", table="users")
+    count = cache.invalidate_pattern("users:*")
+    assert count >= 2
+
+    # Decorator
+    call_count = 0
+
+    @cached_query(ttl_seconds=60)
+    def expensive_fn():
+        nonlocal call_count
+        call_count += 1
+        return {"data": "value"}
+
+    expensive_fn()
+    expensive_fn()
+    assert call_count == 1  # Second call cached
+
+
+def test_C39_export_csv():
+    """C39: CSV export and import."""
+    import os
+    import tempfile
+
+    from sqler import SQLerDB, SQLerModel, export_csv, import_csv
+
+    db = SQLerDB.in_memory()
+
+    class User(SQLerModel):
+        name: str
+        age: int
+
+    User.set_db(db)
+    User(name="Alice", age=30).save()
+    User(name="Bob", age=25).save()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "users.csv")
+
+        # Export
+        result = export_csv(User, path)
+        assert result.count == 2
+        assert result.format == "csv"
+        assert os.path.exists(path)
+
+        # Clear and reimport
+        for u in User.query().all():
+            u.delete()
+        assert User.query().count() == 0
+
+        result = import_csv(User, path)
+        assert result.succeeded == 2
+        assert User.query().count() == 2
+
+
+def test_C40_export_jsonl():
+    """C40: JSONL streaming export/import."""
+    import json
+    import os
+    import tempfile
+
+    from sqler import SQLerDB, SQLerModel, export_jsonl, stream_jsonl
+
+    db = SQLerDB.in_memory()
+
+    class Event(SQLerModel):
+        type: str
+        data: dict
+
+    Event.set_db(db)
+    Event(type="click", data={"x": 100}).save()
+    Event(type="scroll", data={"y": 200}).save()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "events.jsonl")
+
+        # Export
+        result = export_jsonl(Event, path)
+        assert result.count == 2
+        assert result.format == "jsonl"
+
+        # Stream
+        records = list(stream_jsonl(Event))
+        assert len(records) == 2
+        assert json.loads(records[0])["type"] == "click"
+
+
+def test_C41_full_text_search():
+    """C41: Full-text search with FTSIndex."""
+    from sqler import FTSIndex, SQLerDB, SQLerModel
+
+    db = SQLerDB.in_memory()
+
+    class Article(SQLerModel):
+        title: str
+        content: str
+
+    Article.set_db(db)
+    Article(title="Python Tutorial", content="Learn Python programming").save()
+    Article(title="JavaScript Guide", content="Modern JS development").save()
+
+    # Create FTS index
+    fts = FTSIndex(Article, fields=["title", "content"])
+    fts.create(db)
+    fts.rebuild()
+
+    # Search
+    results = fts.search("Python")
+    assert len(results) == 1
+    assert results[0].title == "Python Tutorial"
+
+    # Count
+    count = fts.count("Python")
+    assert count == 1
+
+
+def test_C42_connection_pooling():
+    """C42: Connection pooling basics."""
+    # Note: Full pool testing requires disk DB, this tests the API exists
+    from sqler import PooledSQLerDB
+
+    # Verify the class exists and has expected interface
+    assert hasattr(PooledSQLerDB, "on_disk")
+    assert hasattr(PooledSQLerDB, "pool_stats")
+
+
+def test_C43_schema_migrations():
+    """C43: Schema migrations with versioning."""
+    from sqler import Migration, MigrationRunner, SQLerDB
+
+    db = SQLerDB.in_memory()
+
+    migrations = [
+        Migration(
+            version=1,
+            name="create_items",
+            up=lambda d: d.adapter.execute("CREATE TABLE items (_id INTEGER PRIMARY KEY, data JSON)"),
+            down=lambda d: d.adapter.execute("DROP TABLE items"),
+        ),
+        Migration(
+            version=2,
+            name="create_orders",
+            up=lambda d: d.adapter.execute(
+                "CREATE TABLE orders (_id INTEGER PRIMARY KEY, data JSON)"
+            ),
+            down=lambda d: d.adapter.execute("DROP TABLE orders"),
+        ),
+    ]
+
+    runner = MigrationRunner(db, migrations)
+
+    # Check status
+    status = runner.status()
+    assert status["current_version"] == 0
+    assert status["pending_count"] == 2
+
+    # Migrate
+    result = runner.migrate()
+    assert result.success
+    assert len(result.applied) == 2
+    assert runner.current_version() == 2
+
+    # Rollback
+    result = runner.rollback(target_version=0)
+    assert result.success
+    assert runner.current_version() == 0
+
+
+def test_C44_metrics_collection():
+    """C44: Metrics collection and summary."""
+    from sqler import SQLerDB, SQLerModel, metrics
+
+    # Reset and enable
+    metrics.reset()
+    metrics.enable()
+
+    # Run some queries (metrics are collected automatically)
+    db = SQLerDB.in_memory(shared=False)
+
+    class Item(SQLerModel):
+        name: str
+
+    Item.set_db(db)
+    Item(name="test1").save()
+    Item(name="test2").save()
+    Item.query().all()
+
+    # Get metrics
+    data = metrics.get_metrics()
+    assert data["queries"]["total_queries"] >= 3
+
+    # Prometheus format export
+    prometheus = metrics.prometheus_export()
+    assert "sqler_queries_total" in prometheus
+
+    metrics.disable()
+
+
+def test_C45_database_operations():
+    """C45: Health checks, stats, backup."""
+    import os
+    import tempfile
+
+    from sqler import SQLerDB, SQLerModel, backup, get_stats, health_check, is_healthy
+
+    # Health check
+    db = SQLerDB.in_memory(shared=False)
+    assert is_healthy(db) is True
+
+    status = health_check(db)
+    assert status.healthy is True
+    assert status.latency_ms >= 0
+    assert "integrity_check" in status.details
+
+    # Stats
+    class Item(SQLerModel):
+        name: str
+
+    Item.set_db(db)
+    Item(name="test").save()
+
+    stats = get_stats(db)
+    assert stats.table_count >= 1
+
+    # Backup (requires disk DB)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test.db")
+        backup_path = os.path.join(tmpdir, "backup.db")
+
+        disk_db = SQLerDB.on_disk(db_path)
+
+        class User(SQLerModel):
+            name: str
+
+        User.set_db(disk_db)
+        User(name="Alice").save()
+
+        result = backup(disk_db, backup_path)
+        assert result.success
+        assert os.path.exists(backup_path)
+
+        disk_db.close()
+
+
+def test_C46_change_tracking():
+    """C46: Change tracking with TrackedModel and DiffMixin."""
+    from sqler import DiffMixin, SQLerDB, SQLerModel, TrackedModel
+
+    db = SQLerDB.in_memory()
+
+    # TrackedModel
+    class User(TrackedModel, SQLerModel):
+        name: str
+        age: int
+
+    User.set_db(db)
+
+    user = User(name="Alice", age=30)
+    user.save()
+    user.mark_clean()
+
+    # Modify
+    user.name = "Bob"
+    user.age = 31
+
+    assert user.is_dirty
+    assert "name" in user.changed_fields
+    assert "age" in user.changed_fields
+
+    changes = user.get_changes()
+    assert changes["name"] == ("Alice", "Bob")
+    assert changes["age"] == (30, 31)
+
+    # Revert
+    user.revert_changes()
+    assert user.name == "Alice"
+    assert not user.is_dirty
+
+    # DiffMixin
+    db2 = SQLerDB.in_memory()
+
+    class Item(DiffMixin, SQLerModel):
+        name: str
+        qty: int
+
+    Item.set_db(db2)
+
+    item1 = Item(name="Apple", qty=10)
+    item2 = Item(name="Apple", qty=15)
+
+    diff = item1.diff(item2)
+    assert diff == {"qty": (10, 15)}
+
+    assert item1.is_equal(Item(name="Apple", qty=10))
+    assert not item1.is_equal(item2)
+
+    cloned = item1.clone(qty=20)
+    assert cloned.name == "Apple"
+    assert cloned.qty == 20
+    assert cloned._id is None

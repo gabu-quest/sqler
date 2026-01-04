@@ -40,6 +40,31 @@ This started as a personal toolkit for **very fast prototyping**; small scripts 
 - **WAL-friendly concurrency** via thread-local connections (many readers, one writer)
 - **Smart table naming**: proper English pluralization (category→categories, box→boxes)
 - **Opt-in perf tests** and practical indexing guidance
+- **Query caching** with TTL and LRU eviction
+- **Data export/import**: CSV, JSON, JSONL (sync + async)
+- **Full-text search** via FTS5 with SearchableMixin
+- **Connection pooling** for high-concurrency scenarios
+- **Schema migrations** with version tracking (sync + async)
+- **Metrics collection** for monitoring and Prometheus export
+- **Database operations**: backup, restore, health checks, vacuum
+- **Change tracking** with dirty field detection and partial updates
+
+---
+
+## Interactive Tour
+
+Learn SQLer through interactive notebooks! These [marimo](https://marimo.io) notebooks let you run and modify code directly in your browser.
+
+**[View the Interactive Tour →](https://gabu-quest.github.io/sqler/)**
+
+| Tour | Topics |
+|------|--------|
+| [01. Fundamentals](https://gabu-quest.github.io/sqler/tour_01_fundamentals/) | Setup, models, CRUD, queries, aggregations |
+| [02. Relationships](https://gabu-quest.github.io/sqler/tour_02_relationships/) | Model references, hydration, cross-model queries |
+| [03. Safe Models](https://gabu-quest.github.io/sqler/tour_03_safe_models/) | Optimistic locking, StaleVersionError, conflict resolution |
+| [04. Transactions](https://gabu-quest.github.io/sqler/tour_04_transactions/) | Atomic operations, rollback, nested transactions |
+| [05. Mixins](https://gabu-quest.github.io/sqler/tour_05_mixins/) | Timestamps, soft delete, lifecycle hooks |
+| [06. Advanced](https://gabu-quest.github.io/sqler/tour_06_advanced/) | Bulk ops, indexes, integrity policies, raw SQL |
 
 ---
 
@@ -1510,6 +1535,472 @@ from sqler import query_logger
 query_logger.enable()
 # ... run queries ...
 print(query_logger.get_slow_queries(threshold_ms=10.0))
+```
+
+---
+
+## Query Caching
+
+<!-- contract: C38 -->
+
+Cache query results to avoid repeated database calls:
+
+```python
+from sqler import QueryCache, cached_query
+
+# Create a cache with max 1000 entries, 5 minute TTL
+cache = QueryCache(max_size=1000, default_ttl_seconds=300)
+
+# Cache query results
+cache.set("users:active", active_users, table="users")
+result = cache.get("users:active")
+
+# Check cache stats
+stats = cache.stats
+print(f"Hit rate: {stats.hit_rate:.2%}")
+
+# Invalidate by pattern or table
+cache.invalidate_pattern("users:*")
+cache.invalidate_table("users")
+
+# Use the decorator for automatic caching
+@cached_query(ttl_seconds=60)
+def get_active_users():
+    return User.query().filter(F("active") == True).all()
+```
+
+---
+
+## Data Export & Import
+
+<!-- contract: C39 -->
+
+Export and import data in various formats:
+
+### CSV Export/Import
+
+```python
+from sqler import export_csv, export_csv_string, import_csv
+
+# Export to file
+result = export_csv(User, "users.csv")
+print(f"Exported {result.count} records ({result.size_bytes} bytes)")
+
+# Export specific fields
+export_csv(User, "users.csv", fields=["name", "email"], include_id=False)
+
+# Export to string
+csv_string = export_csv_string(User)
+
+# Import from CSV
+result = import_csv(User, "users.csv")
+print(f"Imported {result.succeeded}/{result.count} records")
+
+# Import with transform
+def normalize(row):
+    row["email"] = row["email"].lower()
+    return row
+
+import_csv(User, "users.csv", transform=normalize)
+```
+
+### JSON Export/Import
+
+```python
+from sqler import export_json, export_json_string, import_json
+
+# Export to file
+export_json(User, "users.json", indent=2)
+
+# Export to string
+json_string = export_json_string(User)
+
+# Import from JSON array file
+result = import_json(User, "users.json")
+```
+
+### JSONL (JSON Lines) Export/Import
+
+<!-- contract: C40 -->
+
+```python
+from sqler import export_jsonl, import_jsonl, stream_jsonl
+
+# Export one record per line (streaming-friendly)
+export_jsonl(User, "users.jsonl")
+
+# Import JSONL
+import_jsonl(User, "users.jsonl")
+
+# Stream records without loading all into memory
+for record_json in stream_jsonl(User):
+    process(record_json)
+```
+
+### Async Export/Import
+
+```python
+from sqler import async_export_jsonl, async_import_jsonl
+
+# Async versions for high-throughput scenarios
+await async_export_jsonl(User, "users.jsonl")
+await async_import_jsonl(User, "users.jsonl")
+```
+
+---
+
+## Full-Text Search
+
+<!-- contract: C41 -->
+
+SQLer provides FTS5-based full-text search:
+
+### Using FTSIndex Directly
+
+```python
+from sqler import FTSIndex, SearchResult
+
+class Article(SQLerModel):
+    title: str
+    content: str
+    author: str
+
+Article.set_db(db)
+
+# Create FTS index on specific fields
+fts = FTSIndex(Article, fields=["title", "content"])
+fts.create(db)
+fts.rebuild()  # Index existing records
+
+# Search
+results = fts.search("Python")
+for article in results:
+    print(article.title)
+
+# Ranked search with scores
+ranked = fts.search_ranked("Python programming")
+for result in ranked:
+    print(f"{result.model.title} (score: {result.score})")
+
+# Count matches
+count = fts.count("Python")
+
+# Index a new document
+new_article = Article(title="New", content="content").save()
+fts.index(new_article)
+```
+
+### Using SearchableMixin
+
+```python
+from sqler import SearchableMixin
+
+class Post(SearchableMixin, SQLerModel):
+    title: str
+    body: str
+
+    class FTS:
+        fields = ["title", "body"]
+
+Post.set_db(db)
+
+# Create index once
+Post.create_search_index(db)
+
+# Add posts
+Post(title="Python Tips", body="Learn Python").save()
+Post.rebuild_search_index()
+
+# Search
+results = Post.search("Python")
+count = Post.search_count("Python")
+```
+
+---
+
+## Connection Pooling
+
+<!-- contract: C42 -->
+
+For high-concurrency scenarios, use connection pooling:
+
+```python
+from sqler import PooledSQLerDB, PoolStats
+
+# Create pooled database with 10 connections
+db = PooledSQLerDB.on_disk("mydb.db", pool_size=10)
+
+class User(SQLerModel):
+    name: str
+
+User.set_db(db)
+
+# Use normally - connections are managed automatically
+User(name="Alice").save()
+users = User.query().all()
+
+# Check pool stats
+stats: PoolStats = db.pool_stats()
+print(f"Active: {stats.active_connections}/{stats.pool_size}")
+print(f"Waiting: {stats.waiting_requests}")
+
+db.close()
+```
+
+---
+
+## Schema Migrations
+
+<!-- contract: C43 -->
+
+Manage database schema changes with versioned migrations:
+
+```python
+from sqler import Migration, MigrationRunner
+
+# Define migrations
+migrations = [
+    Migration(
+        version=1,
+        name="create_users",
+        up=lambda db: db.adapter.execute(
+            "CREATE TABLE users (_id INTEGER PRIMARY KEY, data JSON)"
+        ),
+        down=lambda db: db.adapter.execute("DROP TABLE users"),
+    ),
+    Migration(
+        version=2,
+        name="add_posts",
+        up=lambda db: db.adapter.execute(
+            "CREATE TABLE posts (_id INTEGER PRIMARY KEY, data JSON)"
+        ),
+        down=lambda db: db.adapter.execute("DROP TABLE posts"),
+    ),
+]
+
+# Create runner and apply
+runner = MigrationRunner(db, migrations)
+
+# Check status
+status = runner.status()
+print(f"Current: v{status['current_version']}, Pending: {status['pending_count']}")
+
+# Migrate to latest
+result = runner.migrate()
+if result.success:
+    print(f"Applied {len(result.applied)} migrations")
+
+# Migrate to specific version
+runner.migrate(target_version=1)
+
+# Rollback
+runner.rollback(target_version=0)
+```
+
+### Async Migrations
+
+```python
+from sqler import AsyncMigration, AsyncMigrationRunner
+
+migrations = [
+    AsyncMigration(
+        version=1,
+        name="create_users",
+        up=lambda db: db.adapter.execute("CREATE TABLE users ..."),
+    ),
+]
+
+runner = AsyncMigrationRunner(db, migrations)
+result = await runner.migrate()
+```
+
+---
+
+## Metrics Collection
+
+<!-- contract: C44 -->
+
+Collect performance metrics for monitoring:
+
+```python
+from sqler import metrics
+
+# Enable metrics collection
+metrics.enable()
+
+# ... run queries (metrics collected automatically) ...
+User(name="Alice").save()
+User.query().all()
+
+# Get metrics data
+data = metrics.get_metrics()
+print(f"Total queries: {data['queries']['total_queries']}")
+print(f"Histogram: {data['queries']['histogram']}")
+
+# Get Prometheus-format output
+prometheus_text = metrics.prometheus_export()
+# Returns:
+# sqler_queries_total 150
+# sqler_query_duration_ms_bucket{le="1"} 50
+# sqler_query_duration_ms_bucket{le="10"} 100
+# ...
+
+# Add custom callback for real-time monitoring
+metrics.add_callback(lambda log: print(f"Query: {log.sql[:50]}"))
+
+# Reset metrics
+metrics.reset()
+
+# Disable when done
+metrics.disable()
+```
+
+---
+
+## Database Operations
+
+<!-- contract: C45 -->
+
+Production-ready database operations:
+
+### Health Checks
+
+```python
+from sqler import health_check, is_healthy, HealthStatus
+
+# Quick boolean check
+if is_healthy(db):
+    print("Database OK")
+
+# Detailed health check
+status: HealthStatus = health_check(db)
+print(f"Healthy: {status.healthy}")
+print(f"Latency: {status.latency_ms:.2f}ms")
+print(f"Details: {status.details}")
+
+# Serialize for API response
+return status.to_dict()
+```
+
+### Database Statistics
+
+```python
+from sqler import get_stats, DatabaseStats
+
+stats: DatabaseStats = get_stats(db)
+print(f"Tables: {stats.table_count}")
+print(f"Indexes: {stats.index_count}")
+print(f"Page size: {stats.page_size}")
+print(f"Page count: {stats.page_count}")
+
+# Serialize for monitoring
+return stats.to_dict()
+```
+
+### Backup and Restore
+
+```python
+from sqler import backup, restore, BackupResult
+
+# Create backup
+result: BackupResult = backup(db, "/backups/mydb.bak")
+if result.success:
+    print(f"Backup created: {result.size_bytes} bytes in {result.duration_ms}ms")
+
+# Restore from backup
+result = restore(db, "/backups/mydb.bak")
+if result.success:
+    print("Database restored")
+```
+
+### Maintenance Operations
+
+```python
+from sqler import vacuum, checkpoint
+
+# Reclaim space and defragment
+duration_ms = vacuum(db)
+
+# Force WAL checkpoint
+checkpoint(db)
+```
+
+### Async Operations
+
+```python
+from sqler import async_health_check, async_backup, async_get_stats, async_vacuum
+
+status = await async_health_check(db)
+await async_backup(db, "/backups/mydb.bak")
+stats = await async_get_stats(db)
+await async_vacuum(db)
+```
+
+---
+
+## Change Tracking
+
+<!-- contract: C46 -->
+
+Track field changes and detect dirty models:
+
+### TrackedModel
+
+```python
+from sqler import TrackedModel
+
+class User(TrackedModel, SQLerModel):
+    name: str
+    email: str
+    age: int
+
+User.set_db(db)
+
+user = User(name="Alice", email="alice@test.com", age=30)
+user.save()
+user.mark_clean()
+
+# Modify fields
+user.name = "Bob"
+user.age = 31
+
+# Check dirty state
+print(user.is_dirty)  # True
+print(user.changed_fields)  # {'name', 'age'}
+
+# Get detailed changes (old_value, new_value)
+changes = user.get_changes()
+# {'name': ('Alice', 'Bob'), 'age': (30, 31)}
+
+# Revert unsaved changes
+user.revert_changes()
+print(user.name)  # 'Alice'
+```
+
+### DiffMixin
+
+```python
+from sqler import DiffMixin
+
+class Item(DiffMixin, SQLerModel):
+    name: str
+    quantity: int
+
+Item.set_db(db)
+
+item1 = Item(name="Apple", quantity=10)
+item2 = Item(name="Apple", quantity=15)
+
+# Compare two instances
+diff = item1.diff(item2)
+# {'quantity': (10, 15)}
+
+# Check equality
+item1.is_equal(item2)  # False
+
+# Clone with overrides
+cloned = item1.clone(quantity=20)
+# Item with same name, quantity=20, no _id
 ```
 
 ---
