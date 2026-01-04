@@ -43,16 +43,16 @@ Pydantic 風のモデルを定義し、JSON として保存。流れるような
 
 [marimo](https://marimo.io) ノートブックで SQLer を学びましょう！ブラウザ上で直接コードを実行・編集できます。
 
-**[インタラクティブツアーを見る →](https://gabu-quest.github.io/sqler/)**
+**[インタラクティブツアーを見る →](https://gabu-quest.github.io/sqler/ja/)**
 
 | ツアー | トピック |
 |--------|----------|
-| [01. 基礎](https://gabu-quest.github.io/sqler/tour_01_fundamentals/) | セットアップ、モデル、CRUD、クエリ、集約 |
-| [02. リレーション](https://gabu-quest.github.io/sqler/tour_02_relationships/) | モデル参照、ハイドレーション、モデル間クエリ |
-| [03. Safe Model](https://gabu-quest.github.io/sqler/tour_03_safe_models/) | 楽観的ロック、StaleVersionError、競合解決 |
-| [04. トランザクション](https://gabu-quest.github.io/sqler/tour_04_transactions/) | アトミック操作、ロールバック、ネストされたトランザクション |
-| [05. ミックスイン](https://gabu-quest.github.io/sqler/tour_05_mixins/) | タイムスタンプ、ソフトデリート、ライフサイクルフック |
-| [06. 上級者向け](https://gabu-quest.github.io/sqler/tour_06_advanced/) | バルク操作、インデックス、整合性ポリシー、生 SQL |
+| [01. 基礎](https://gabu-quest.github.io/sqler/ja/tour_01_fundamentals/) | セットアップ、モデル、CRUD、クエリ、集約 |
+| [02. リレーション](https://gabu-quest.github.io/sqler/ja/tour_02_relationships/) | モデル参照、ハイドレーション、モデル間クエリ |
+| [03. Safe Model](https://gabu-quest.github.io/sqler/ja/tour_03_safe_models/) | 楽観的ロック、StaleVersionError、競合解決 |
+| [04. トランザクション](https://gabu-quest.github.io/sqler/ja/tour_04_transactions/) | アトミック操作、ロールバック、ネストされたトランザクション |
+| [05. ミックスイン](https://gabu-quest.github.io/sqler/ja/tour_05_mixins/) | タイムスタンプ、ソフトデリート、ライフサイクルフック |
+| [06. 上級者向け](https://gabu-quest.github.io/sqler/ja/tour_06_advanced/) | バルク操作、インデックス、整合性ポリシー、生 SQL |
 
 ---
 
