@@ -1,0 +1,64 @@
+/*
+  Base styles for non-Naive elements (content, raw HTML).
+  Keep this file SMALL. Most UI should be Naive components themed via themeOverrides.
+*/
+
+:root {
+  --ds-font-heading: 'Space Grotesk', Inter, system-ui, sans-serif;
+}
+
+/* Consume Naive CSS vars */
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--n-body-color);
+  color: var(--n-text-color-1);
+  font-family: var(--n-font-family);
+  line-height: var(--n-line-height);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Cyberpunk content hierarchy: labeled, precise.
+   No text glow; use color + weight + spacing for hierarchy. */
+h1, h2, h3 {
+  font-family: var(--ds-font-heading);
+  color: var(--n-primary-color);
+  line-height: 1.15;
+  letter-spacing: 0.02em;
+  margin: 2rem 0 0.5rem;
+}
+h1 { font-size: 2.25rem; }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.35rem; }
+
+a {
+  color: var(--n-a-color, var(--n-primary-color));
+  text-decoration: underline;
+  text-decoration-thickness: 0.1em;
+}
+a:hover { opacity: 0.90; }
+
+pre, code { font-family: var(--n-font-family-mono); }
+pre {
+  background: var(--n-code-color);
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+/* Focus: always visible. Prefer Naive focus styles for components. */
+:focus-visible {
+  outline: 2px solid var(--n-primary-color);
+  outline-offset: 2px;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
