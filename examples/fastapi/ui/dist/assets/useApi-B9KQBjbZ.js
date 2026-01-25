@@ -1,0 +1,1 @@
+async function c(r,t={}){const a={"Content-Type":"application/json",...t.headers};t.etag&&(a["If-Match"]=t.etag);const e=await fetch(r,{method:t.method||"GET",headers:a,body:t.body?JSON.stringify(t.body):void 0});if(!e.ok){const s=await e.json().catch(()=>({detail:e.statusText}));throw new Error(s.detail||`HTTP ${e.status}`)}return e.json()}export{c as f};
