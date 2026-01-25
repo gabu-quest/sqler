@@ -1,0 +1,61 @@
+name: Perf
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/**]
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  perf-benchmarks:
+    name: Benchmarks • ubuntu-latest • py3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync deps (dev) from lock
+        run: uv sync --dev --frozen
+
+      - name: Show versions
+        run: |
+          uv run python --version
+          uv run pytest --version
+
+      - name: Run perf suite
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          mkdir -p .bench
+          # Run only tests marked 'perf'; save benchmark data as JSON
+          uv run pytest -m perf --benchmark-json=.bench/bench.json --benchmark-autosave
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: .bench/
+
+      - name: Summarize
+        if: always()
+        run: |
+          echo "### Benchmark run summary" >> $GITHUB_STEP_SUMMARY
+          if [ -f .bench/bench.json ]; then
+            echo "- Results saved in the 'benchmark-results' artifact." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- No benchmark JSON produced." >> $GITHUB_STEP_SUMMARY
+          fi
