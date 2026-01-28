@@ -13,3 +13,6 @@ build/
 
 sandbox/
 __marimo__/
+
+# Project-local Claude memory (personal, not shared)
+CLAUDE.local.md
