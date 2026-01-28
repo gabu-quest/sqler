@@ -1,6 +1,6 @@
 [project]
 name = "sqler"
-version = "1.2026.1.6"
+version = "1.2026.1.7"
 description = "Micro-ORM with optional Pydantic (Pyodide compatible with lite models)"
 readme = "README.md"
 requires-python = ">=3.12"
