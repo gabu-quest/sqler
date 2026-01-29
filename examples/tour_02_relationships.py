@@ -48,7 +48,6 @@ def _(mo):
 @app.cell
 def _():
     from sqler import SQLerDB, SQLerModel
-    from sqler.query import SQLerField as F
 
     db = SQLerDB.in_memory()
     print("Database connected!")
@@ -250,7 +249,7 @@ def _(Book):
         print("This won't print - validation fails first!")
     except Exception as e:
         print(f"❌ ValidationError (expected!):\n   {type(e).__name__}")
-        print(f"   The raw ref {{'_table': 'authors', '_id': 1}} doesn't have 'name' or 'country'")
+        print("   The raw ref {'_table': 'authors', '_id': 1} doesn't have 'name' or 'country'")
     return
 
 

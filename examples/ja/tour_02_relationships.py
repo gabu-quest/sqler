@@ -273,7 +273,7 @@ def _(Book):
         print("これは表示されません - バリデーションが先に失敗します！")
     except Exception as e:
         print(f"❌ ValidationError（予想通り！）:\n   {type(e).__name__}")
-        print(f"   生の参照 {{'_table': 'authors', '_id': 1}} には 'name' や 'country' がありません")
+        print("   生の参照 {'_table': 'authors', '_id': 1} には 'name' や 'country' がありません")
     return
 
 

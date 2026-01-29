@@ -60,25 +60,31 @@ from .migrations import (
     MigrationResult,
     MigrationRunner,
 )
-# Import compatibility helpers first (no Pydantic dependency)
-from .models._compat import PYDANTIC_AVAILABLE, PYDANTIC_VERSION, require_pydantic, get_model_backend
 
 # Always-available imports
 from .models import (
     DEFAULT_REBASE_CONFIG,
     NO_REBASE_CONFIG,
     PERMISSIVE_REBASE_CONFIG,
+    AsyncSQLerLiteModel,
+    AsyncSQLerLiteSafeModel,
     RebaseConfig,
     ReferentialIntegrityError,
     # Lite models (Pydantic-free for Pyodide)
     SQLerLiteModel,
     SQLerLiteModelBase,
     SQLerLiteSafeModel,
-    AsyncSQLerLiteModel,
-    AsyncSQLerLiteSafeModel,
+    is_lite_model,
     # Compatibility helpers
     is_pydantic_model,
-    is_lite_model,
+)
+
+# Import compatibility helpers first (no Pydantic dependency)
+from .models._compat import (
+    PYDANTIC_AVAILABLE,
+    PYDANTIC_VERSION,
+    get_model_backend,
+    require_pydantic,
 )
 
 # Conditionally import Pydantic-dependent items

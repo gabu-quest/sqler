@@ -13,8 +13,6 @@ cannot be installed.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 # Detect if Pydantic is available
 try:
     import pydantic

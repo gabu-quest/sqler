@@ -13,8 +13,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
-    Dict,
-    List,
     Optional,
     Type,
     TypeVar,
@@ -258,12 +256,12 @@ class SQLerLiteModel(SQLerLiteModelBase):
             raise ValueError("on_delete must be 'restrict','set_null', or 'cascade'")
 
         # Find referrers
+        from sqler.models import ReferentialIntegrityError
         from sqler.models.integrity import (
             cascade_delete,
             find_referrers,
             set_null_referrers,
         )
-        from sqler.models import ReferentialIntegrityError
 
         referrers = find_referrers(db, table, int(self._id))
         if on_delete == "restrict" and referrers:

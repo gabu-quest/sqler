@@ -30,12 +30,14 @@ from dataclasses import dataclass
 
 from sqler.exceptions import ReferentialIntegrityError, StaleVersionError
 
-# Always-available imports (no Pydantic dependency)
-from .utils import (
-    DEFAULT_REBASE_CONFIG,
-    NO_REBASE_CONFIG,
-    PERMISSIVE_REBASE_CONFIG,
-    RebaseConfig,
+# Compatibility layer
+from ._compat import (
+    PYDANTIC_AVAILABLE,
+    PYDANTIC_VERSION,
+    get_model_backend,
+    is_lite_model,
+    is_pydantic_model,
+    require_pydantic,
 )
 
 # Lite models (always available - no Pydantic dependency)
@@ -45,14 +47,12 @@ from .lite import (
     SQLerLiteSafeModel,
 )
 
-# Compatibility layer
-from ._compat import (
-    PYDANTIC_AVAILABLE,
-    PYDANTIC_VERSION,
-    get_model_backend,
-    is_lite_model,
-    is_pydantic_model,
-    require_pydantic,
+# Always-available imports (no Pydantic dependency)
+from .utils import (
+    DEFAULT_REBASE_CONFIG,
+    NO_REBASE_CONFIG,
+    PERMISSIVE_REBASE_CONFIG,
+    RebaseConfig,
 )
 
 

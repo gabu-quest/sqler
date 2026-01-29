@@ -48,8 +48,6 @@ def _(mo):
 def _():
     from sqler import SQLerDB, SQLerModel
     from sqler.export import (
-        ExportResult,
-        ImportResult,
         export_csv_string,
         export_json_string,
     )
@@ -260,7 +258,6 @@ def _(mo):
 
 @app.cell
 def _():
-    from sqler.export import export_csv, export_json
 
     # When exporting to files, you get an ExportResult
     # (In WASM we can't write files, so we show the concept)

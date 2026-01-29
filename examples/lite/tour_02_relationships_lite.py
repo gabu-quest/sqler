@@ -46,8 +46,8 @@ async def _():
             sqler_ready = True
         else:
             try:
-                import micropip
                 import js
+                import micropip
 
                 wheel_name = "sqler-1.2026.1.6-py3-none-any.whl"
                 wheel_url = str(
@@ -107,10 +107,9 @@ def _(pyodide_sqlite3_ready, sqler_ready):
             "sqler is required in Pyodide; failed to install sqler wheel."
         )
 
+    import importlib
     from dataclasses import dataclass
     from typing import Optional
-
-    import importlib
 
     _sqler = importlib.import_module("sqler")
     F = _sqler.F

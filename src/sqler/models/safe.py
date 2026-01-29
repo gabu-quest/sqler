@@ -140,7 +140,7 @@ class SQLerSafeModel(SQLerModel):
                 if "locked" not in str(e).lower():
                     raise
                 # fallthrough to backoff
-            except StaleVersionError as e:
+            except StaleVersionError:
                 # Stale version: only rebase intent for simple counter deltas
                 if not can_rebase:
                     raise

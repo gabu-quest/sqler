@@ -11,7 +11,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from examples.fastapi.db import init_db, close_db
+from examples.fastapi.db import close_db, init_db
 from examples.fastapi.models import Article, City, Country, Writer
 
 
@@ -289,7 +289,7 @@ def seed_database():
 
     close_db()
 
-    print(f"\nDatabase seeded successfully!")
+    print("\nDatabase seeded successfully!")
     print(f"  - {len(countries)} countries")
     print(f"  - {len(cities)} cities")
     print(f"  - {len(writers)} writers")
