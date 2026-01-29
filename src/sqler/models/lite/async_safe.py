@@ -30,7 +30,6 @@ from sqler.models.utils import (
 )
 
 if TYPE_CHECKING:
-    from sqler.db.async_db import AsyncSQLerDB
     from sqler.models.async_queryset import AsyncSQLerQuerySet
 
 TASafe = TypeVar("TASafe", bound="AsyncSQLerLiteSafeModel")

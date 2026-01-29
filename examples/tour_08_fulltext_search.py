@@ -48,7 +48,7 @@ def _(mo):
 @app.cell
 def _():
     from sqler import SQLerDB, SQLerModel
-    from sqler.fts import FTSIndex, FTSStats, SearchResult
+    from sqler.fts import FTSIndex
 
     db = SQLerDB.in_memory()
     print("Database connected!")

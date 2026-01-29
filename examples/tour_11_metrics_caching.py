@@ -46,9 +46,8 @@ def _(mo):
 @app.cell
 def _():
     from sqler import SQLerDB, SQLerModel
-    from sqler.cache import CacheAwareModel, CacheStats, QueryCache, cached_query
-    from sqler.metrics import MetricsCollector, QueryMetrics, metrics
-    from sqler.pool import ConnectionPool, PooledSQLerDB, PoolStats
+    from sqler.cache import CacheAwareModel, QueryCache, cached_query
+    from sqler.metrics import MetricsCollector, metrics
     from sqler.query import SQLerField as F
 
     db = SQLerDB.in_memory()

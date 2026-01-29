@@ -34,8 +34,8 @@ __all__ = [
 # Async models imported separately to avoid import errors
 # when aiosqlite is not installed
 try:
-    from sqler.models.lite.async_model import AsyncSQLerLiteModel
-    from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
+    from sqler.models.lite.async_model import AsyncSQLerLiteModel  # noqa: F401
+    from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel  # noqa: F401
 
     __all__.extend(["AsyncSQLerLiteModel", "AsyncSQLerLiteSafeModel"])
 except ImportError:

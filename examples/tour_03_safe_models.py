@@ -68,7 +68,6 @@ def _(mo):
 @app.cell
 def _():
     from sqler import SQLerDB, SQLerSafeModel, StaleVersionError
-    from sqler.query import SQLerField as F
 
     db = SQLerDB.in_memory()
     print("Database connected!")

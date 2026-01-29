@@ -4,12 +4,11 @@ These tests verify that lite models provide API compatibility with
 Pydantic-based models while using standard library dataclasses.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
 import pytest
-
 from sqler import (
     PYDANTIC_AVAILABLE,
     SQLerDB,
@@ -315,7 +314,7 @@ class TestSQLerLiteModel:
 
         # Modify directly in DB
         db.adapter.execute(
-            f"UPDATE refresh_items SET data = ? WHERE _id = ?",
+            "UPDATE refresh_items SET data = ? WHERE _id = ?",
             ['{"value": 999}', item._id],
         )
         db.adapter.auto_commit()

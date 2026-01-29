@@ -327,7 +327,6 @@ def _(mo):
 
 @app.cell
 def _(FullMixin, SQLerModel, datetime, db, timezone):
-    from typing import Self as SelfType
 
     class Task(FullMixin, SQLerModel):
         _table = "tasks"

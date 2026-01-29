@@ -48,9 +48,6 @@ def _(mo):
 def _():
     from sqler import SQLerDB, SQLerModel
     from sqler.ops import (
-        DatabaseStats,
-        HealthStatus,
-        checkpoint,
         get_stats,
         health_check,
         is_healthy,
@@ -157,7 +154,7 @@ def _(mo):
 
 @app.cell
 def _():
-    from sqler import register, resolve, tables
+    from sqler import resolve, tables
 
     # List all registered tables (returns dict[str, type])
     _registry = tables()

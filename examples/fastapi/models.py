@@ -10,7 +10,6 @@ from sqler.models.mixins import (
 )
 from sqler.models.ref import as_ref
 
-
 # =============================================================================
 # LOCATION MODELS (Country -> City hierarchy)
 # =============================================================================

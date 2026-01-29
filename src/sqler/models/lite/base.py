@@ -8,9 +8,9 @@ and other environments where Pydantic cannot be installed.
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import field, fields
+from dataclasses import fields
 from datetime import date, datetime
-from typing import Any, ClassVar, Dict, Optional, Type, TypeVar, get_type_hints
+from typing import Any, Optional, Type, TypeVar
 
 T = TypeVar("T", bound="SQLerLiteModelBase")
 
