@@ -6,6 +6,7 @@ on:
     paths:
       - 'examples/tour_*.py'
       - 'examples/ja/tour_*.py'
+      - 'examples/lite/tour_*_lite.py'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -38,6 +39,7 @@ jobs:
         run: |
           mkdir -p _site
           mkdir -p _site/ja
+          mkdir -p _site/lite
 
           # Export each English tour notebook as WASM for full interactivity
           for notebook in examples/tour_*.py; do
@@ -51,6 +53,13 @@ jobs:
             name=$(basename "$notebook" .py)
             echo "Exporting ja/$name as WASM..."
             uv run marimo export html-wasm "$notebook" -o "_site/ja/${name}"
+          done
+
+          # Export lite tours (dataclass-based, WASM-compatible)
+          for notebook in examples/lite/tour_*_lite.py; do
+            name=$(basename "$notebook" .py)
+            echo "Exporting lite/$name as WASM..."
+            uv run marimo export html-wasm "$notebook" -o "_site/lite/${name}"
           done
 
           # Create English index page
@@ -83,6 +92,28 @@ jobs:
             <div class="lang-switch"><a href="ja/">日本語版はこちら →</a></div>
             <h1>SQLer Interactive Tour</h1>
             <p>Learn SQLer through interactive notebooks. Run and modify code directly in your browser!</p>
+            <h2>Lite Tours (Run in Browser)</h2>
+            <p>These tours use <code>SQLerLiteModel</code> (dataclasses) and run fully in-browser via WebAssembly.</p>
+            <ul class="tour-list">
+              <li><a href="lite/tour_01_fundamentals_lite/">
+                <div class="title">01. Fundamentals</div>
+                <div class="desc">Setup, models, CRUD operations, queries, and aggregations</div>
+              </a></li>
+              <li><a href="lite/tour_02_relationships_lite/">
+                <div class="title">02. Relationships</div>
+                <div class="desc">Model relationships, automatic hydration, querying across models</div>
+              </a></li>
+              <li><a href="lite/tour_03_safe_models_lite/">
+                <div class="title">03. Safe Models</div>
+                <div class="desc">Optimistic locking, StaleVersionError, conflict resolution</div>
+              </a></li>
+              <li><a href="lite/tour_04_transactions_lite/">
+                <div class="title">04. Transactions</div>
+                <div class="desc">Atomic operations, rollback, nested transactions</div>
+              </a></li>
+            </ul>
+            <h2>Full Tours (Pydantic)</h2>
+            <p>Complete tours using <code>SQLerModel</code> (Pydantic). These require a local Python environment.</p>
             <ul class="tour-list">
               <li><a href="tour_01_fundamentals/">
                 <div class="title">01. Fundamentals</div>
@@ -167,6 +198,28 @@ jobs:
             <div class="lang-switch"><a href="../">← English version</a></div>
             <h1>SQLer インタラクティブツアー</h1>
             <p>インタラクティブなノートブックで SQLer を学びましょう。ブラウザ上で直接コードを実行・編集できます！</p>
+            <h2>Lite ツアー（ブラウザで実行）</h2>
+            <p><code>SQLerLiteModel</code>（dataclasses）を使用し、WebAssembly でブラウザ上で完全に動作します。</p>
+            <ul class="tour-list">
+              <li><a href="../lite/tour_01_fundamentals_lite/">
+                <div class="title">01. 基礎</div>
+                <div class="desc">セットアップ、モデル、CRUD操作、クエリ、集約</div>
+              </a></li>
+              <li><a href="../lite/tour_02_relationships_lite/">
+                <div class="title">02. リレーション</div>
+                <div class="desc">モデル参照、自動ハイドレーション、モデル間クエリ</div>
+              </a></li>
+              <li><a href="../lite/tour_03_safe_models_lite/">
+                <div class="title">03. Safe Model</div>
+                <div class="desc">楽観的ロック、StaleVersionError、競合解決</div>
+              </a></li>
+              <li><a href="../lite/tour_04_transactions_lite/">
+                <div class="title">04. トランザクション</div>
+                <div class="desc">アトミック操作、ロールバック、ネストされたトランザクション</div>
+              </a></li>
+            </ul>
+            <h2>フルツアー（Pydantic）</h2>
+            <p><code>SQLerModel</code>（Pydantic）を使用した完全版ツアー。ローカルPython環境が必要です。</p>
             <ul class="tour-list">
               <li><a href="tour_01_fundamentals/">
                 <div class="title">01. 基礎</div>
