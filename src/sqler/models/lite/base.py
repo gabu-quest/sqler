@@ -180,15 +180,18 @@ class SQLerLiteModelBase:
             return dataclasses.asdict(value)
         return value
 
-    @classmethod
-    @property
-    def model_fields(cls) -> dict[str, Any]:
-        """Return field info dict (Pydantic-compatible attribute).
+    class _ModelFieldsDescriptor:
+        """Descriptor that computes model_fields per-class (replaces @classmethod @property)."""
 
-        Returns:
-            Dictionary mapping field names to field metadata.
-        """
-        return {f.name: f for f in fields(cls) if not f.name.startswith("_")}  # type: ignore[arg-type]
+        def __set_name__(self, owner: type, name: str) -> None:
+            self._name = name
+
+        def __get__(self, obj: Any, cls: type | None = None) -> dict[str, Any]:
+            if cls is None:
+                cls = type(obj)
+            return {f.name: f for f in fields(cls) if not f.name.startswith("_")}  # type: ignore[arg-type]
+
+    model_fields: dict[str, Any] = _ModelFieldsDescriptor()  # type: ignore[assignment]
 
     @classmethod
     def get_field_names(cls) -> set[str]:
