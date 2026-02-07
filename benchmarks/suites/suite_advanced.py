@@ -308,8 +308,11 @@ class ConnectionPoolThroughput:
             with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
                 pool_path = f.name
 
+            # Populate via plain db first — PooledSQLerDB doesn't have bulk_upsert
+            setup_db = SQLerDB.on_disk(pool_path)
+            setup_db.bulk_upsert("bench", docs)
+            setup_db.close()
             pool_db = PooledSQLerDB.on_disk(pool_path, max_connections=n_threads)
-            pool_db.bulk_upsert("bench", docs)
 
             def pool_worker():
                 for _ in range(queries_per_thread):

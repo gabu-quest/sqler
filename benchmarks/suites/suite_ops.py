@@ -139,25 +139,25 @@ class ExportPerformance:
             BenchmarkItem.set_db(db, table="bench")
             db.bulk_upsert("bench", docs)
 
-            # Fetch all items for export
-            items = BenchmarkItem.query().all()
+            # Use queryset and model class for export APIs
+            qs = BenchmarkItem.query()
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                # CSV
-                def do_csv(items=items, tmpdir=tmpdir):
-                    export_csv(items, os.path.join(tmpdir, "out.csv"))
+                # CSV (takes queryset or model class)
+                def do_csv(qs=qs, tmpdir=tmpdir):
+                    export_csv(qs, os.path.join(tmpdir, "out.csv"))
 
                 csv_stats = timer.measure(do_csv)
 
-                # JSON
+                # JSON (takes model class)
                 def do_json(tmpdir=tmpdir):
                     export_json(BenchmarkItem, os.path.join(tmpdir, "out.json"))
 
                 json_stats = timer.measure(do_json)
 
-                # JSONL
-                def do_jsonl(items=items, tmpdir=tmpdir):
-                    export_jsonl(items, os.path.join(tmpdir, "out.jsonl"))
+                # JSONL (takes queryset or model class)
+                def do_jsonl(qs=qs, tmpdir=tmpdir):
+                    export_jsonl(qs, os.path.join(tmpdir, "out.jsonl"))
 
                 jsonl_stats = timer.measure(do_jsonl)
 
@@ -204,7 +204,7 @@ class BackupRestore:
 
                 timer = PrecisionTimer(warmup=1, iterations=config.iterations)
 
-                # Backup
+                # Backup: backup(db, destination)
                 def do_backup(db=db, bak=bak_path):
                     if os.path.exists(bak):
                         os.unlink(bak)
@@ -212,11 +212,12 @@ class BackupRestore:
 
                 backup_stats = timer.measure(do_backup)
 
-                # Restore
+                # Restore: restore(target_db, source_path)
                 def do_restore(bak=bak_path, rst=rst_path):
                     if os.path.exists(rst):
                         os.unlink(rst)
-                    restore(bak, rst)
+                    target_db = SQLerDB.on_disk(rst)
+                    restore(target_db, bak)
 
                 restore_stats = timer.measure(do_restore)
 
