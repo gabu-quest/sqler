@@ -26,7 +26,7 @@
 - plotting/report.py — markdown report generator with summary tables + chart refs
 - CLI plot command — generates 22 charts (SVG + PNG) and REPORT.md
 
-### M6: Blog Post Rewrite 🔄 ← current
+### M6: Blog Post Rewrite ✅
 - Rewrite with real data, honest gaps section
 - Replace fake graphs with generated charts
 
