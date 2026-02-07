@@ -24,9 +24,12 @@ class SystemInfo:
 
     @classmethod
     def collect(cls) -> SystemInfo:
-        import sqler
+        from importlib.metadata import version as pkg_version
 
-        version = getattr(sqler, "__version__", "unknown")
+        try:
+            version = pkg_version("sqler")
+        except Exception:
+            version = "dev"
 
         import os
 
