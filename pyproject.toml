@@ -35,6 +35,10 @@ dev = [
     "pre-commit>=4.5.1",
 ]
 
+benchmarks = [
+    "matplotlib>=3.9.0",
+]
+
 [build-system]
 requires = ["uv_build>=0.7.19,<0.8.0"]
 build-backend = "uv_build"
