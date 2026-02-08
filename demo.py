@@ -65,9 +65,13 @@ show("Average age", avg_age)
 header("2. Index Speedup")
 
 # Insert more rows so the speedup is visible
-docs = [{"name": f"user_{i}", "age": i % 60, "tags": []} for i in range(50_000)]
+N = 50_000
+docs = [{"name": f"user_{i}", "age": i % 60, "tags": []} for i in range(N)]
+t0 = time.perf_counter()
 db.bulk_upsert("users", docs)
-show("Total rows after bulk insert", User.query().count())
+bulk_time = time.perf_counter() - t0
+show("Bulk inserted", f"{N:,} rows in {bulk_time:.2f}s ({N / bulk_time:,.0f} rows/sec)")
+show("Total rows", User.query().count())
 
 # Query WITHOUT index
 t0 = time.perf_counter()

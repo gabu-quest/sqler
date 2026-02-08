@@ -7,10 +7,12 @@ Output docs/demo.gif
 Set Shell "bash"
 Set FontSize 14
 Set Width 960
-Set Height 600
+Set Height 640
 Set Theme "Catppuccin Mocha"
 Set Padding 20
+Set TypingSpeed 50ms
 
-Type "uv run python demo.py" Sleep 500ms Enter
-
-Sleep 12s
+Type "uv run python demo.py"
+Sleep 500ms
+Enter
+Sleep 10s

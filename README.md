@@ -43,6 +43,8 @@ assert young[0].name == "Bob"
 
 ## See It in Action
 
+![sqler demo](docs/demo.gif)
+
 ```bash
 git clone https://github.com/gabu-quest/sqler.git && cd sqler
 uv run python demo.py
@@ -56,26 +58,41 @@ Learn sqler hands-on with [marimo](https://marimo.io) notebooks — run and modi
 
 **[Launch Interactive Tour →](https://gabu-quest.github.io/sqler/)**
 
+**Run in browser** (Lite models — no install needed):
+
 | Tour | Topics |
 |------|--------|
-| [01. Fundamentals](https://gabu-quest.github.io/sqler/tour_01_fundamentals/) | Models, CRUD, queries, aggregations |
-| [02. Relationships](https://gabu-quest.github.io/sqler/tour_02_relationships/) | References, hydration, cross-model queries |
-| [03. Safe Models](https://gabu-quest.github.io/sqler/tour_03_safe_models/) | Optimistic locking, conflict resolution |
-| [04. Transactions](https://gabu-quest.github.io/sqler/tour_04_transactions/) | Atomic operations, rollback |
-| [05. Mixins](https://gabu-quest.github.io/sqler/tour_05_mixins/) | Timestamps, soft delete, lifecycle hooks |
-| [06. Advanced](https://gabu-quest.github.io/sqler/tour_06_advanced/) | Bulk ops, indexes, integrity, raw SQL |
-| [07. Export/Import](https://gabu-quest.github.io/sqler/tour_07_export_import/) | CSV, JSON, JSONL |
-| [08. Full-Text Search](https://gabu-quest.github.io/sqler/tour_08_fulltext_search/) | FTS5, boolean queries, ranking |
-| [09. Change Tracking](https://gabu-quest.github.io/sqler/tour_09_change_tracking/) | Dirty checking, partial updates, diff |
-| [10. Database Ops](https://gabu-quest.github.io/sqler/tour_10_db_operations/) | Health checks, stats, vacuum, logging |
-| [11. Metrics & Caching](https://gabu-quest.github.io/sqler/tour_11_metrics_caching/) | Prometheus metrics, query caching, pools |
+| [01. Fundamentals](https://gabu-quest.github.io/sqler/lite/tour_01_fundamentals_lite/) | Models, CRUD, queries, aggregations |
+| [02. Relationships](https://gabu-quest.github.io/sqler/lite/tour_02_relationships_lite/) | References, hydration, cross-model queries |
+| [03. Safe Models](https://gabu-quest.github.io/sqler/lite/tour_03_safe_models_lite/) | Optimistic locking, conflict resolution |
+| [04. Transactions](https://gabu-quest.github.io/sqler/lite/tour_04_transactions_lite/) | Atomic operations, rollback |
+
+**Run locally** (full Pydantic features — all 11 tours):
 
 ```bash
-# Or run locally
 git clone https://github.com/gabu-quest/sqler.git && cd sqler
 uv sync --dev
 uv run marimo edit examples/tour_01_fundamentals.py
 ```
+
+<details>
+<summary>All 11 tours</summary>
+
+| Tour | Topics |
+|------|--------|
+| 01. Fundamentals | Models, CRUD, queries, aggregations |
+| 02. Relationships | References, hydration, cross-model queries |
+| 03. Safe Models | Optimistic locking, conflict resolution |
+| 04. Transactions | Atomic operations, rollback |
+| 05. Mixins | Timestamps, soft delete, lifecycle hooks |
+| 06. Advanced | Bulk ops, indexes, integrity, raw SQL |
+| 07. Export/Import | CSV, JSON, JSONL |
+| 08. Full-Text Search | FTS5, boolean queries, ranking |
+| 09. Change Tracking | Dirty checking, partial updates, diff |
+| 10. Database Ops | Health checks, stats, vacuum, logging |
+| 11. Metrics & Caching | Prometheus metrics, query caching, pools |
+
+</details>
 
 ---
 
