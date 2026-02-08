@@ -1,5 +1,8 @@
 # SQLer（日本語 README）
 
+> **注意**: 英語版 README が再構成されました。日本語版は更新中です。
+> 最新情報は [English README](README.md) を参照してください。
+
 [![PyPI version](https://img.shields.io/pypi/v/sqler)](https://pypi.org/project/sqler/)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
 [![Tests](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml/badge.svg)](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml)
