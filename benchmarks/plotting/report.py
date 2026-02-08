@@ -314,6 +314,27 @@ def _write_markdown_report(path: Path, data: dict, chart_paths: dict[str, Path],
 
     lines.append("")
 
+    # Reading the charts
+    lines.extend([
+        "## Reading the Charts",
+        "",
+        "Every benchmark runs multiple iterations. The numbers you see are:",
+        "",
+        "- **Median** — the middle value across all iterations. "
+        "Half the runs were faster, half were slower. "
+        "More stable than the mean because a single slow run (GC pause, OS scheduling) doesn't skew it.",
+        "- **P95 (95th percentile)** — 95% of runs finished at or below this time. "
+        "This is your realistic worst-case: the latency your users will occasionally hit "
+        "but not often enough to show up in the median.",
+        "- **Shaded bands** (on scaling line charts) — the area between median and p95. "
+        "A narrow band means the operation is predictable. "
+        "A wide band means variance is high — expect occasional slow runs, "
+        "often from SQLite page cache misses, GC pauses, or OS-level contention.",
+        "- **Error caps** (on bar charts) — the vertical whisker above each bar extends to p95. "
+        "Same interpretation: how much slower than the median can a single run get.",
+        "",
+    ])
+
     # Charts section
     lines.extend(["## Charts", ""])
 

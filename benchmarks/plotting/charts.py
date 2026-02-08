@@ -116,6 +116,13 @@ def plot_scaling_lines(results: list[dict], title: str, system_info: str,
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
+    # p95 band footnote
+    fig.text(
+        0.99, 0.01,
+        "Solid line = median  |  Shaded band = p95 (95% of runs finish within this range)",
+        ha="right", va="bottom", fontsize=7.5, color=TEXT_MUTED, style="italic",
+    )
+
     svg_path = output.with_suffix(".svg")
     png_path = output.with_suffix(".png")
     fig.savefig(svg_path, format="svg")
