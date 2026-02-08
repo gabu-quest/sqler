@@ -14,9 +14,12 @@ build/
 sandbox/
 __marimo__/
 
-# Benchmark results (keep .gitkeep)
+# Benchmark results (keep charts and report for README)
 benchmarks/results/
 !benchmarks/results/.gitkeep
+!benchmarks/results/REPORT.md
+!benchmarks/results/charts/
+!benchmarks/results/charts/*.svg
 
 # Project-local Claude memory (personal, not shared)
 CLAUDE.local.md
