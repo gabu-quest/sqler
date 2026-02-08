@@ -1,9 +1,22 @@
 [project]
 name = "sqler"
 version = "1.2026.1.7"
-description = "Micro-ORM with optional Pydantic (Pyodide compatible with lite models)"
+description = "A lightweight, JSON-first micro-ORM for SQLite — Pydantic models as JSON documents, fluent queries, sync + async"
 readme = "README.md"
 requires-python = ">=3.12"
+license = {text = "MIT"}
+keywords = ["sqlite", "orm", "json", "pydantic", "database", "micro-orm", "document-store"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
 # Core deps only - pydantic is optional for Pyodide compatibility
 dependencies = [
     "aiosqlite>=0.21.0",
@@ -18,6 +31,13 @@ pydantic = ["pydantic>=2.7.0"]
 full = ["pydantic>=2.7.0"]
 # Default install for backwards compat: pip install sqler[default]
 default = ["pydantic>=2.7.0"]
+
+[project.urls]
+Homepage = "https://github.com/gabu-quest/sqler"
+Documentation = "https://gabu-quest.github.io/sqler/"
+Repository = "https://github.com/gabu-quest/sqler"
+Changelog = "https://github.com/gabu-quest/sqler/blob/main/CHANGELOG.md"
+"Bug Tracker" = "https://github.com/gabu-quest/sqler/issues"
 
 [dependency-groups]
 dev = [

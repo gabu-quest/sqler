@@ -41,6 +41,13 @@ young = User.query().filter(F("age") < 28).order_by("name").all()
 assert young[0].name == "Bob"
 ```
 
+## See It in Action
+
+```bash
+git clone https://github.com/gabu-quest/sqler.git && cd sqler
+uv run python demo.py
+```
+
 ---
 
 ## Interactive Tour
@@ -90,6 +97,8 @@ Real numbers from the [benchmark suite](benchmarks/results/REPORT.md) (22 scenar
 | FTS search | **0.28ms** | Sub-millisecond across all dataset sizes |
 | Bulk vs single | **5.2x** | `bulk_upsert` vs `save()` loop at 10K |
 | Lite models | **1.3x** | Dataclass variant vs Pydantic overhead |
+
+![Index speedup: 470x faster queries](benchmarks/results/charts/05_equality_filter.svg)
 
 ### Honest Limitations
 
