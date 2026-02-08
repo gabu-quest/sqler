@@ -66,6 +66,13 @@ Learn sqler hands-on with [marimo](https://marimo.io) notebooks — run and modi
 | [02. Relationships](https://gabu-quest.github.io/sqler/lite/tour_02_relationships_lite/) | References, hydration, cross-model queries |
 | [03. Safe Models](https://gabu-quest.github.io/sqler/lite/tour_03_safe_models_lite/) | Optimistic locking, conflict resolution |
 | [04. Transactions](https://gabu-quest.github.io/sqler/lite/tour_04_transactions_lite/) | Atomic operations, rollback |
+| [05. Mixins](https://gabu-quest.github.io/sqler/lite/tour_05_mixins_lite/) | Timestamps, soft delete, lifecycle hooks |
+| [06. Advanced](https://gabu-quest.github.io/sqler/lite/tour_06_advanced_lite/) | Bulk ops, indexes, integrity, raw SQL |
+| [07. Export/Import](https://gabu-quest.github.io/sqler/lite/tour_07_export_import_lite/) | CSV, JSON, JSONL |
+| [08. Full-Text Search](https://gabu-quest.github.io/sqler/lite/tour_08_fulltext_search_lite/) | FTS5, boolean queries, ranking |
+| [09. Change Tracking](https://gabu-quest.github.io/sqler/lite/tour_09_change_tracking_lite/) | Dirty checking, change detection |
+| [10. Database Ops](https://gabu-quest.github.io/sqler/lite/tour_10_db_operations_lite/) | Health checks, stats, vacuum, logging |
+| [11. Metrics & Caching](https://gabu-quest.github.io/sqler/lite/tour_11_metrics_caching_lite/) | Prometheus metrics, query caching, pools |
 
 **Run locally** (full Pydantic features — all 11 tours):
 
