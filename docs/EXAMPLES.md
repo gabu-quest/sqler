@@ -1,5 +1,7 @@
 # Examples Cookbook
 
+> See also: [API Reference](API.md) for all 46 tested contracts.
+
 All examples use in-memory SQLite for speed and no side effects. Run with `uv`:
 
 ```bash
