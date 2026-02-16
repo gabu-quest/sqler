@@ -90,7 +90,13 @@ class SQLerModel(BaseModel):
         cls._db = db
         cls._table = chosen
         cls.__tablename__ = chosen
-        cls._db._ensure_table(cls._table)
+
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            checks = getattr(cls, "__checks__", None)
+            db._ensure_table_with_promoted(cls._table, promoted, checks)
+        else:
+            cls._db._ensure_table(cls._table)
         registry.register(cls._table, cls)
 
     @classmethod
@@ -203,6 +209,9 @@ class SQLerModel(BaseModel):
         """Return a queryset for chaining and execution."""
         db, table = cls._require_binding()
         q = db.query(table)
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            q = q._clone(promoted_fields=list(promoted.keys()))
         return SQLerQuerySet[TModel](cls, q)
 
     @classmethod
@@ -252,7 +261,12 @@ class SQLerModel(BaseModel):
         cls = self.__class__
         db, table = cls._require_binding()
         payload = self._dump_with_relations()
-        new_id = db.upsert_document(table, self._id, payload)
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            promoted_fields = list(promoted.keys())
+            new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
+        else:
+            new_id = db.upsert_document(table, self._id, payload)
         self._id = new_id
         return self
 

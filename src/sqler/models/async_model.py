@@ -47,6 +47,8 @@ class AsyncSQLerModel(BaseModel):
         chosen = table or explicit or _default_table_name(cls.__name__)
         cls._table = chosen
         cls.__tablename__ = chosen
+        # Note: promoted table creation is deferred to first use since we can't await here.
+        # The _ensure_table_with_promoted call happens in the async ensure_schema() or first save/query.
         registry.register(cls._table, cls)
 
     @classmethod
@@ -120,6 +122,9 @@ class AsyncSQLerModel(BaseModel):
     def query(cls: Type[TAModel]) -> AsyncSQLerQuerySet[TAModel]:
         db, table = cls._require_binding()
         q = AsyncSQLerQuery(table=table, adapter=db.adapter)
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            q = q._clone(promoted_fields=list(promoted.keys()))
         return AsyncSQLerQuerySet[TAModel](cls, q)
 
     @classmethod
@@ -184,11 +189,31 @@ class AsyncSQLerModel(BaseModel):
         """Ensure an index on a JSON path or literal column exists (idempotent)."""
         await cls.add_index(field, unique=unique, name=name, where=where)
 
+    @classmethod
+    async def _ensure_schema(cls) -> None:
+        """Ensure the table schema is set up (including promoted columns)."""
+        db, table = cls._require_binding()
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            checks = getattr(cls, "__checks__", None)
+            await db._ensure_table_with_promoted(table, promoted, checks)
+        else:
+            await db._ensure_table(table)
+
     async def save(self: TAModel) -> TAModel:
         cls = self.__class__
         db, table = cls._require_binding()
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted and table not in db._promoted_columns:
+            await cls._ensure_schema()
+        elif not promoted:
+            await db._ensure_table(table)
         payload = await self._adump_with_relations()
-        new_id = await db.upsert_document(table, self._id, payload)
+        if promoted:
+            promoted_fields = list(promoted.keys())
+            new_id = await db.upsert_document_promoted(table, self._id, payload, promoted_fields)
+        else:
+            new_id = await db.upsert_document(table, self._id, payload)
         self._id = new_id
         return self
 

@@ -83,6 +83,9 @@ class SQLerSafeModel(SQLerModel):
     def query(cls: Type[TSafe]) -> SQLerQuerySet[TSafe]:  # type: ignore[override]
         db, table = cls._require_binding()
         q = db.query(table).with_version()
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            q = q._clone(promoted_fields=list(promoted.keys()))
         return SQLerQuerySet[TSafe](cls, q)
 
     def save(self: TSafe) -> TSafe:  # type: ignore[override]
@@ -122,9 +125,16 @@ class SQLerSafeModel(SQLerModel):
             try:
                 attempt_payload = dict(target_payload)
                 attempt_payload["_version"] = 0 if self._id is None else self._version + 1
-                new_id, new_version = db.upsert_with_version(
-                    table, self._id, attempt_payload, self._version
-                )
+                promoted = getattr(cls, "__promoted__", None)
+                if promoted:
+                    new_id, new_version = db.upsert_with_version_promoted(
+                        table, self._id, attempt_payload, self._version,
+                        list(promoted.keys()),
+                    )
+                else:
+                    new_id, new_version = db.upsert_with_version(
+                        table, self._id, attempt_payload, self._version
+                    )
                 self._id = new_id
                 self._version = new_version
                 target_payload = attempt_payload

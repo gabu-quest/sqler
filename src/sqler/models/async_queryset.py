@@ -43,8 +43,9 @@ class AsyncSQLerQuerySet(Generic[T]):
         """Return a new queryset that only retrieves specified fields."""
         return self.__class__(self._model_cls, self._query.select(*fields))
 
-    def order_by(self, field: str, desc: bool = False) -> "AsyncSQLerQuerySet[T]":
-        return self.__class__(self._model_cls, self._query.order_by(field, desc))
+    def order_by(self, *fields: str, desc: bool = False) -> "AsyncSQLerQuerySet[T]":
+        """Return a new queryset ordered by the given JSON field(s)."""
+        return self.__class__(self._model_cls, self._query.order_by(*fields, desc=desc))
 
     def limit(self, n: int) -> "AsyncSQLerQuerySet[T]":
         return self.__class__(self._model_cls, self._query.limit(n))
@@ -165,6 +166,22 @@ class AsyncSQLerQuerySet(Generic[T]):
             int: Number of rows updated.
         """
         return await self._query.update(**fields)
+
+    async def update_one(self, **fields) -> Optional[T]:
+        """Atomically update one matching row and return it as a model instance.
+
+        Args:
+            **fields: Field names and values (or F-expressions) to update.
+
+        Returns:
+            Model instance or None if no row matched.
+        """
+        doc = await self._query.update_one(**fields)
+        if doc is None:
+            return None
+        inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
+        self._attach_metadata(inst, doc)
+        return inst
 
     async def delete_all(self) -> int:
         """Delete all matching rows (bulk delete).
