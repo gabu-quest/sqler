@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sqler import SQLerLiteModel, SQLerLiteSafeModel, SQLerModel, SQLerSafeModel
+from sqler import SQLerLiteModel, SQLerModel, SQLerSafeModel
 
 
 class BenchmarkItem(SQLerModel):

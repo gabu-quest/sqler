@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from sqler import SQLerDB
+
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.timer import PrecisionTimer
 from benchmarks.generators.documents import DocumentGenerator
 from benchmarks.generators.models import BenchmarkItem, BenchmarkItemLite
-
-from sqler import SQLerDB
 
 SUITE_NAME = "insert"
 

@@ -5,13 +5,13 @@ from __future__ import annotations
 import os
 import tempfile
 
+from sqler import F, SQLerDB, backup, export_csv, export_json, export_jsonl, restore
+
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.timer import PrecisionTimer
 from benchmarks.generators.documents import DocumentGenerator
 from benchmarks.generators.models import BenchmarkItem
-
-from sqler import F, SQLerDB, backup, export_csv, export_json, export_jsonl, restore
 
 SUITE_NAME = "ops"
 
@@ -98,7 +98,6 @@ class ColdVsWarm:
             db2.close()
             os.unlink(db_path)
 
-        import statistics
 
         for label, times in [("cold", cold_times), ("warm", warm_times)]:
             sorted_t = sorted(times)

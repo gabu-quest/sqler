@@ -19,7 +19,7 @@ def generate_report(input_path: str, output_dir: str) -> None:
     data = json.loads(Path(input_path).read_text())
     results = data["results"]
     system_info = _format_system_info(data.get("system", {}))
-    config = data.get("config", {})
+    data.get("config", {})
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -258,7 +258,7 @@ def generate_report(input_path: str, output_dir: str) -> None:
     # --- Generate Markdown Report ---
     _write_markdown_report(out / "REPORT.md", data, chart_paths, charts_dir)
 
-    print(f"\n  Report generated:")
+    print("\n  Report generated:")
     print(f"    Markdown: {out / 'REPORT.md'}")
     print(f"    Charts:   {charts_dir}/ ({len(chart_paths)} charts)")
 

@@ -441,7 +441,7 @@ def _(Author, Book):
 
     _carol_id = carol._id
     _total_before = Book.query().count()
-    print(f"Created Carol with 2 books")
+    print("Created Carol with 2 books")
     print(f"Total books before: {_total_before}")
 
     # Delete with cascade

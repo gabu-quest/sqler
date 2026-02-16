@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -22,7 +21,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         verbose=args.verbose,
     )
 
-    print(f"\n  sqler benchmark suite")
+    print("\n  sqler benchmark suite")
     print(f"  Scale: {scale.name} (max {scale.max_rows:,} rows)")
     print(f"  Warmup: {config.warmup}, Iterations: {config.iterations}")
 
