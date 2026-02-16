@@ -1,7 +1,20 @@
+import re
 from typing import Any, Optional, Self
 
 from sqler.adapter.abstract import AdapterABC
 from sqler.query import SQLerExpression
+
+
+def _rewrite_promoted_refs(sql: str, promoted_fields: list[str]) -> str:
+    """Replace json_extract(data, '$.field') with direct column reference for promoted fields."""
+    for field in promoted_fields:
+        # Match both json_extract(data, '$.field') and JSON_EXTRACT(data, '$.field')
+        pattern = re.compile(
+            r"""json_extract\(data,\s*'\$\.""" + re.escape(field) + r"""'\)""",
+            re.IGNORECASE,
+        )
+        sql = pattern.sub(field, sql)
+    return sql
 
 
 class QueryError(Exception):
@@ -40,6 +53,8 @@ class SQLerQuery:
         include_version: bool = False,
         select_fields: Optional[list[str]] = None,
         distinct: bool = False,
+        order_fields: Optional[list[tuple[str, bool]]] = None,
+        promoted_fields: Optional[list[str]] = None,
     ):
         self._table = table
         self._adapter = adapter
@@ -51,6 +66,8 @@ class SQLerQuery:
         self._include_version = include_version
         self._select_fields = select_fields
         self._distinct = distinct
+        self._order_fields = order_fields
+        self._promoted_fields = promoted_fields or []
 
     def _clone(self, **kwargs) -> Self:
         """Create a clone with optional overrides."""
@@ -65,6 +82,8 @@ class SQLerQuery:
             include_version=kwargs.get("include_version", self._include_version),
             select_fields=kwargs.get("select_fields", self._select_fields),
             distinct=kwargs.get("distinct", self._distinct),
+            order_fields=kwargs.get("order_fields", self._order_fields),
+            promoted_fields=kwargs.get("promoted_fields", self._promoted_fields),
         )
 
     def filter(self, expression: SQLerExpression) -> Self:
@@ -112,17 +131,39 @@ class SQLerQuery:
         """
         return self._clone(distinct=True)
 
-    def order_by(self, field: str, desc: bool = False) -> Self:
-        """Return a new query ordered by the given JSON field.
+    def order_by(self, *fields: str, desc: bool = False) -> Self:
+        """Return a new query ordered by the given JSON field(s).
+
+        Supports Django-style ``-`` prefix for descending order on individual
+        fields.  When multiple positional arguments are given, each field can
+        optionally start with ``-`` for DESC::
+
+            order_by("-priority", "eta", "ulid")
+
+        The legacy single-field form still works::
+
+            order_by("name", desc=True)
 
         Args:
-            field: Dotted JSON path to sort by (e.g., ``"age"``).
-            desc: Sort descending when True.
+            *fields: One or more dotted JSON paths.  A leading ``-`` means DESC.
+            desc: When True **and** only one field is given without a ``-``
+                prefix, sort that field descending (backward-compat).
 
         Returns:
             SQLerQuery: New query instance.
         """
-        return self._clone(order=field, desc=desc)
+        if not fields:
+            return self._clone()
+        parsed: list[tuple[str, bool]] = []
+        for f in fields:
+            if f.startswith("-"):
+                parsed.append((f[1:], True))
+            else:
+                parsed.append((f, False))
+        # backward compat: single field + desc=True
+        if len(parsed) == 1 and desc and not fields[0].startswith("-"):
+            parsed[0] = (parsed[0][0], True)
+        return self._clone(order=None, desc=False, order_fields=parsed)
 
     def limit(self, n: int) -> Self:
         """Return a new query with a LIMIT clause.
@@ -175,7 +216,15 @@ class SQLerQuery:
         """
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         order = ""
-        if self._order:
+        if self._order_fields:
+            parts = []
+            for field_name, is_desc in self._order_fields:
+                part = f"json_extract(data, '$.{field_name}')"
+                if is_desc:
+                    part += " DESC"
+                parts.append(part)
+            order = "ORDER BY " + ", ".join(parts)
+        elif self._order:
             order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
                 " DESC" if self._desc else ""
             )
@@ -193,10 +242,15 @@ class SQLerQuery:
             select = "_id, data" + (
                 ", _version" if (include_version or self._include_version) else ""
             )
+            if self._promoted_fields:
+                select += ", " + ", ".join(self._promoted_fields)
         else:
             select = "data"
         sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
         sql = " ".join(sql.split())  # collapse double spaces
+        # Rewrite promoted field references from json_extract to direct column
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
         return sql, params
 
@@ -452,6 +506,11 @@ class SQLerQuery:
         sql, params = self._build_query(include_id=True, include_version=False)
         cur = self._adapter.execute(sql, params)
         rows = cur.fetchall()
+        # Calculate where promoted columns appear in the row tuple
+        # Layout: _id(0), data(1), [_version(2)], [promoted...]
+        ver_offset = 1 if self._include_version else 0
+        promoted_start = 2 + ver_offset  # after _id, data, optional _version
+
         docs: list[dict[str, Any]] = []
         for row in rows:
             try:
@@ -466,6 +525,13 @@ class SQLerQuery:
             if data_json is None:
                 raise InvariantViolationError(f"Row {_id} in {self._table} has NULL data JSON")
             obj = json.loads(data_json)
+
+            # Merge promoted column values from the row
+            if self._promoted_fields:
+                for i, col_name in enumerate(self._promoted_fields):
+                    idx = promoted_start + i
+                    if idx < len(row):
+                        obj[col_name] = row[idx]
 
             # Apply field selection if specified
             if self._select_fields:
@@ -494,8 +560,12 @@ class SQLerQuery:
     def update(self, **fields) -> int:
         """Update matching rows with the given field values.
 
+        Supports F-expressions for atomic operations::
+
+            query.update(count=F("count") + 1)  # atomic increment
+
         Args:
-            **fields: Field names and values to update in the JSON data.
+            **fields: Field names and values (or SQLerUpdateExpression) to update.
 
         Raises:
             NoAdapterError: If the query has no adapter.
@@ -504,6 +574,8 @@ class SQLerQuery:
         Returns:
             int: Number of rows updated.
         """
+        from sqler.query.field import SQLerUpdateExpression
+
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
         if not fields:
@@ -511,23 +583,187 @@ class SQLerQuery:
 
         import json
 
-        # Build SET clause using json_set
-        set_parts = []
-        set_params = []
-        for field, value in fields.items():
-            set_parts.append(f"'$.{field}', ?")
-            set_params.append(json.dumps(value) if isinstance(value, (dict, list)) else value)
+        # Separate promoted column updates from JSON updates
+        promoted_set: list[str] = []
+        promoted_params: list[Any] = []
+        json_set_parts: list[str] = []
+        json_set_params: list[Any] = []
 
-        set_clause = ", ".join(set_parts)
+        for field, value in fields.items():
+            is_promoted = field in self._promoted_fields
+            if isinstance(value, SQLerUpdateExpression):
+                expr_sql = value.sql_expr
+                # Rewrite json_extract refs for promoted columns
+                if self._promoted_fields:
+                    expr_sql = _rewrite_promoted_refs(expr_sql, self._promoted_fields)
+                if is_promoted:
+                    promoted_set.append(f"{field} = {expr_sql}")
+                    promoted_params.extend(value.params)
+                else:
+                    json_set_parts.append(f"'$.{field}', {expr_sql}")
+                    json_set_params.extend(value.params)
+            else:
+                serialized = json.dumps(value) if isinstance(value, (dict, list)) else value
+                if is_promoted:
+                    promoted_set.append(f"{field} = ?")
+                    promoted_params.append(serialized)
+                else:
+                    json_set_parts.append(f"'$.{field}', ?")
+                    json_set_params.append(serialized)
+
+        # Build SET clause
+        set_clauses: list[str] = []
+        all_set_params: list[Any] = []
+
+        if json_set_parts:
+            set_clauses.append(f"data = json_set(data, {', '.join(json_set_parts)})")
+            all_set_params.extend(json_set_params)
+        if promoted_set:
+            set_clauses.extend(promoted_set)
+            all_set_params.extend(promoted_params)
+
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         where_params = self._expression.params if self._expression else []
+        if self._promoted_fields and where:
+            where = _rewrite_promoted_refs(where, self._promoted_fields)
 
-        sql = f"UPDATE {self._table} SET data = json_set(data, {set_clause}) {where}".strip()
+        sql = f"UPDATE {self._table} SET {', '.join(set_clauses)} {where}".strip()
         sql = " ".join(sql.split())
 
-        cur = self._adapter.execute(sql, set_params + where_params)
+        cur = self._adapter.execute(sql, all_set_params + where_params)
         self._adapter.commit()
         return getattr(cur, "rowcount", 0)
+
+    def update_one(self, **fields) -> Optional[dict[str, Any]]:
+        """Atomically update one matching row and return it.
+
+        Uses ``UPDATE ... WHERE _id = (SELECT _id ... LIMIT 1) RETURNING ...``
+        for race-free claiming. The query's WHERE and ORDER BY determine which
+        row is selected.
+
+        When ``include_version`` is set (SafeModel querysets), ``_version`` is
+        auto-bumped.
+
+        Args:
+            **fields: Field names and values (or SQLerUpdateExpression) to update.
+
+        Returns:
+            dict | None: The updated row as a dict with ``_id`` (and ``_version``
+            if applicable), or None if no row matched.
+        """
+        from sqler.query.field import SQLerUpdateExpression
+
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        if not fields:
+            raise ValueError("No fields to update")
+
+        import json
+
+        # Build the SET clause (same logic as update())
+        promoted_set: list[str] = []
+        promoted_params: list[Any] = []
+        json_set_parts: list[str] = []
+        json_set_params: list[Any] = []
+
+        for field, value in fields.items():
+            is_promoted = field in self._promoted_fields
+            if isinstance(value, SQLerUpdateExpression):
+                expr_sql = value.sql_expr
+                if self._promoted_fields:
+                    expr_sql = _rewrite_promoted_refs(expr_sql, self._promoted_fields)
+                if is_promoted:
+                    promoted_set.append(f"{field} = {expr_sql}")
+                    promoted_params.extend(value.params)
+                else:
+                    json_set_parts.append(f"'$.{field}', {expr_sql}")
+                    json_set_params.extend(value.params)
+            else:
+                serialized = json.dumps(value) if isinstance(value, (dict, list)) else value
+                if is_promoted:
+                    promoted_set.append(f"{field} = ?")
+                    promoted_params.append(serialized)
+                else:
+                    json_set_parts.append(f"'$.{field}', ?")
+                    json_set_params.append(serialized)
+
+        set_clauses: list[str] = []
+        all_set_params: list[Any] = []
+
+        if json_set_parts:
+            set_clauses.append(f"data = json_set(data, {', '.join(json_set_parts)})")
+            all_set_params.extend(json_set_params)
+        if promoted_set:
+            set_clauses.extend(promoted_set)
+            all_set_params.extend(promoted_params)
+
+        # Auto-bump _version for SafeModel querysets
+        if self._include_version:
+            set_clauses.append("_version = _version + 1")
+
+        # Build inner SELECT for the subquery
+        inner_where = f"WHERE {self._expression.sql}" if self._expression else ""
+        inner_where_params = self._expression.params if self._expression else []
+
+        inner_order = ""
+        if self._order_fields:
+            parts = []
+            for field_name, is_desc in self._order_fields:
+                part = f"json_extract(data, '$.{field_name}')"
+                if is_desc:
+                    part += " DESC"
+                parts.append(part)
+            inner_order = "ORDER BY " + ", ".join(parts)
+        elif self._order:
+            inner_order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
+                " DESC" if self._desc else ""
+            )
+
+        # Rewrite promoted refs in inner query
+        if self._promoted_fields:
+            if inner_where:
+                inner_where = _rewrite_promoted_refs(inner_where, self._promoted_fields)
+            if inner_order:
+                inner_order = _rewrite_promoted_refs(inner_order, self._promoted_fields)
+
+        inner_select = f"SELECT _id FROM {self._table} {inner_where} {inner_order} LIMIT 1"
+        inner_select = " ".join(inner_select.split())
+
+        # Build RETURNING clause
+        returning_cols = ["_id", "data"]
+        if self._include_version:
+            returning_cols.append("_version")
+        if self._promoted_fields:
+            returning_cols.extend(self._promoted_fields)
+
+        sql = (
+            f"UPDATE {self._table} SET {', '.join(set_clauses)} "
+            f"WHERE _id = ({inner_select}) "
+            f"RETURNING {', '.join(returning_cols)}"
+        )
+        sql = " ".join(sql.split())
+
+        all_params = all_set_params + inner_where_params
+        cur = self._adapter.execute(sql, all_params)
+        row = cur.fetchone()
+        self._adapter.commit()
+
+        if row is None:
+            return None
+
+        # Parse the RETURNING row
+        obj = json.loads(row[1])  # data column
+        obj["_id"] = row[0]
+
+        col_offset = 2
+        if self._include_version:
+            obj["_version"] = row[col_offset]
+            col_offset += 1
+        if self._promoted_fields:
+            for i, col_name in enumerate(self._promoted_fields):
+                obj[col_name] = row[col_offset + i]
+
+        return obj
 
     def delete(self) -> int:
         """Delete all matching rows.

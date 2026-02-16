@@ -53,9 +53,9 @@ class SQLerQuerySet(Generic[T]):
         """Return a new queryset that only retrieves specified fields."""
         return self.__class__(self._model_cls, self._query.select(*fields))
 
-    def order_by(self, field: str, desc: bool = False) -> "SQLerQuerySet[T]":
-        """Return a new queryset ordered by the given JSON field."""
-        return self.__class__(self._model_cls, self._query.order_by(field, desc))
+    def order_by(self, *fields: str, desc: bool = False) -> "SQLerQuerySet[T]":
+        """Return a new queryset ordered by the given JSON field(s)."""
+        return self.__class__(self._model_cls, self._query.order_by(*fields, desc=desc))
 
     def limit(self, n: int) -> "SQLerQuerySet[T]":
         """Return a new queryset with a LIMIT clause."""
@@ -170,6 +170,25 @@ class SQLerQuerySet(Generic[T]):
             int: Number of rows updated.
         """
         return self._query.update(**fields)
+
+    def update_one(self, **fields) -> Optional[T]:
+        """Atomically update one matching row and return it as a model instance.
+
+        Uses the query's WHERE and ORDER BY to select the row, then updates
+        and returns it in a single atomic operation.
+
+        Args:
+            **fields: Field names and values (or F-expressions) to update.
+
+        Returns:
+            Model instance or None if no row matched.
+        """
+        doc = self._query.update_one(**fields)
+        if doc is None:
+            return None
+        inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
+        self._attach_metadata(inst, doc)
+        return inst
 
     def delete_all(self) -> int:
         """Delete all matching rows (bulk delete).

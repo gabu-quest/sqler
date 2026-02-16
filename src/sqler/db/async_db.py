@@ -23,6 +23,8 @@ class AsyncSQLerDB:
         self.adapter = adapter
         # Cache of tables already ensured to be versioned
         self._versioned_tables: set[str] = set()
+        # promoted columns per table: table -> list of column names
+        self._promoted_columns: dict[str, list[str]] = {}
 
     async def connect(self) -> None:
         await self.adapter.connect()
@@ -40,6 +42,145 @@ class AsyncSQLerDB:
         """
         await self.adapter.execute(ddl)
         await self.adapter.auto_commit()
+
+    async def _ensure_table_with_promoted(
+        self,
+        table: str,
+        promoted: dict[str, str],
+        checks: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Create or upgrade a table with promoted columns (async)."""
+        table = validate_table_name(table)
+        checks = checks or {}
+
+        # Check if table exists
+        cur = await self.adapter.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
+            [table],
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        exists = row is not None
+
+        if not exists:
+            col_defs = ["_id INTEGER PRIMARY KEY AUTOINCREMENT", "data JSON NOT NULL"]
+            for col_name, col_def in promoted.items():
+                col_defs.append(f"{col_name} {col_def}")
+            for chk_name, chk_expr in checks.items():
+                col_defs.append(f"CHECK ({chk_expr})")
+            ddl = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
+            await self.adapter.execute(ddl)
+            await self.adapter.auto_commit()
+        else:
+            cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
+            rows = await cur.fetchall()
+            await cur.close()
+            existing_cols = {r[1] for r in rows}
+            for col_name, col_def in promoted.items():
+                if col_name not in existing_cols:
+                    await self.adapter.execute(
+                        f'ALTER TABLE "{table}" ADD COLUMN {col_name} {col_def};'
+                    )
+            await self.adapter.auto_commit()
+
+        self._promoted_columns[table] = list(promoted.keys())
+
+    async def upsert_document_promoted(
+        self,
+        table: str,
+        _id: Optional[int],
+        doc: dict[str, Any],
+        promoted_fields: list[str],
+    ) -> int:
+        """Insert or update, splitting promoted fields into real columns (async)."""
+        promoted_vals = {}
+        json_doc = {}
+        for k, v in doc.items():
+            if k in promoted_fields:
+                promoted_vals[k] = v
+            else:
+                json_doc[k] = v
+
+        payload = json.dumps(json_doc)
+
+        if _id is None:
+            cols = ["data"] + list(promoted_vals.keys())
+            placeholders = ["json(?)"] + ["?" for _ in promoted_vals]
+            params = [payload] + list(promoted_vals.values())
+            sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(placeholders)});"
+            cur = await self.adapter.execute(sql, params)
+            await self.adapter.auto_commit()
+            last_id = cur.lastrowid
+            await cur.close()
+            return last_id
+        else:
+            set_parts = ["data = json(?)"]
+            params: list[Any] = [payload]
+            for col, val in promoted_vals.items():
+                set_parts.append(f"{col} = ?")
+                params.append(val)
+            params.append(_id)
+            sql = f"UPDATE {table} SET {', '.join(set_parts)} WHERE _id = ?;"
+            cur = await self.adapter.execute(sql, params)
+            await self.adapter.auto_commit()
+            await cur.close()
+            return _id
+
+    async def upsert_with_version_promoted(
+        self,
+        table: str,
+        _id: Optional[int],
+        doc: dict[str, Any],
+        expected_version: Optional[int],
+        promoted_fields: list[str],
+    ) -> tuple[int, int]:
+        """Insert or update with optimistic locking, splitting promoted columns (async)."""
+        await self._ensure_versioned_table(table)
+
+        promoted_vals = {}
+        json_doc = {}
+        for k, v in doc.items():
+            if k in promoted_fields:
+                promoted_vals[k] = v
+            else:
+                json_doc[k] = v
+
+        payload = json.dumps(json_doc)
+
+        if _id is None:
+            cols = ["data", "_version"] + list(promoted_vals.keys())
+            placeholders = ["json(?)", "0"] + ["?" for _ in promoted_vals]
+            params = [payload] + list(promoted_vals.values())
+            sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(placeholders)});"
+            cur = await self.adapter.execute(sql, params)
+            await self.adapter.auto_commit()
+            last_id = cur.lastrowid
+            await cur.close()
+            return last_id, 0
+
+        if expected_version is None:
+            raise ValueError("expected_version required for update")
+
+        set_parts = ["data = json(?)", "_version = _version + 1"]
+        params_list: list[Any] = [payload]
+        for col, val in promoted_vals.items():
+            set_parts.append(f"{col} = ?")
+            params_list.append(val)
+        params_list.extend([_id, expected_version, expected_version, expected_version])
+
+        sql = (
+            f"UPDATE {table} SET {', '.join(set_parts)} "
+            f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;"
+        )
+        cur = await self.adapter.execute(sql, params_list)
+        await self.adapter.auto_commit()
+        await cur.close()
+        ch = await self.adapter.execute("SELECT changes();")
+        row = await ch.fetchone()
+        await ch.close()
+        if not row or int(row[0]) == 0:
+            raise StaleVersionError("Stale version: update rejected")
+        return _id, expected_version + 1
 
     async def insert_document(self, table: str, doc: dict[str, Any]) -> int:
         await self._ensure_table(table)
@@ -64,13 +205,23 @@ class AsyncSQLerDB:
 
     async def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         await self._ensure_table(table)
-        cur = await self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
+        promoted = self._promoted_columns.get(table, [])
+        if promoted:
+            extra_cols = ", ".join(promoted)
+            cur = await self.adapter.execute(
+                f"SELECT _id, data, {extra_cols} FROM {table} WHERE _id = ?;", [_id]
+            )
+        else:
+            cur = await self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
         row = await cur.fetchone()
         await cur.close()
         if not row:
             return None
         obj = json.loads(row[1])
         obj["_id"] = row[0]
+        if promoted:
+            for i, col_name in enumerate(promoted):
+                obj[col_name] = row[2 + i]
         return obj
 
     async def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
@@ -355,8 +506,13 @@ class AsyncSQLerDB:
 
     async def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         await self._ensure_versioned_table(table)
+        promoted = self._promoted_columns.get(table, [])
+        if promoted:
+            extra_cols = ", " + ", ".join(promoted)
+        else:
+            extra_cols = ""
         cur = await self.adapter.execute(
-            f"SELECT _id, data, _version FROM {table} WHERE _id = ?;",
+            f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;",
             [_id],
         )
         row = await cur.fetchone()
@@ -366,6 +522,9 @@ class AsyncSQLerDB:
         obj = json.loads(row[1])
         obj["_id"] = row[0]
         obj["_version"] = row[2]
+        if promoted:
+            for i, col_name in enumerate(promoted):
+                obj[col_name] = row[3 + i]
         return obj
 
     async def query(self, table: str):

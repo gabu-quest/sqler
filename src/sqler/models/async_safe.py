@@ -62,6 +62,9 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
     def query(cls: Type[TASafe]) -> AsyncSQLerQuerySet[TASafe]:  # type: ignore[override]
         db, table = cls._require_binding()
         q = AsyncSQLerQuery(table=table, adapter=db.adapter).with_version()
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            q = q._clone(promoted_fields=list(promoted.keys()))
         return AsyncSQLerQuerySet[TASafe](cls, q)
 
     @classmethod
@@ -125,9 +128,18 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
             try:
                 attempt_payload = dict(target_payload)
                 attempt_payload["_version"] = 0 if self._id is None else self._version + 1
-                new_id, new_version = await db.upsert_with_version(
-                    table, self._id, attempt_payload, self._version
-                )
+                promoted = getattr(cls, "__promoted__", None)
+                if promoted:
+                    if table not in db._promoted_columns:
+                        await cls._ensure_schema()
+                    new_id, new_version = await db.upsert_with_version_promoted(
+                        table, self._id, attempt_payload, self._version,
+                        list(promoted.keys()),
+                    )
+                else:
+                    new_id, new_version = await db.upsert_with_version(
+                        table, self._id, attempt_payload, self._version
+                    )
                 self._id = new_id
                 self._version = new_version
                 target_payload = attempt_payload

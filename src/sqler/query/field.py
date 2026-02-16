@@ -304,6 +304,36 @@ class SQLerField:
         expr = f"JSON_EXTRACT(data, '{self._json_path()}') IN ({placeholders})"
         return SQLerExpression(expr, list(values))
 
+    # --- Arithmetic operators for F-expressions in update() ---
+
+    def _field_name(self) -> str:
+        """Return the top-level field name for update expressions."""
+        return str(self.path[0]) if self.path else ""
+
+    def __add__(self, other: Any) -> "SQLerUpdateExpression":
+        base = f"json_extract(data, '{self._json_path()}')"
+        return SQLerUpdateExpression(f"{base} + ?", [other], self._field_name())
+
+    def __radd__(self, other: Any) -> "SQLerUpdateExpression":
+        base = f"json_extract(data, '{self._json_path()}')"
+        return SQLerUpdateExpression(f"? + {base}", [other], self._field_name())
+
+    def __sub__(self, other: Any) -> "SQLerUpdateExpression":
+        base = f"json_extract(data, '{self._json_path()}')"
+        return SQLerUpdateExpression(f"{base} - ?", [other], self._field_name())
+
+    def __rsub__(self, other: Any) -> "SQLerUpdateExpression":
+        base = f"json_extract(data, '{self._json_path()}')"
+        return SQLerUpdateExpression(f"? - {base}", [other], self._field_name())
+
+    def __mul__(self, other: Any) -> "SQLerUpdateExpression":
+        base = f"json_extract(data, '{self._json_path()}')"
+        return SQLerUpdateExpression(f"{base} * ?", [other], self._field_name())
+
+    def __rmul__(self, other: Any) -> "SQLerUpdateExpression":
+        base = f"json_extract(data, '{self._json_path()}')"
+        return SQLerUpdateExpression(f"? * {base}", [other], self._field_name())
+
 
 class SQLerAnyExpression(SQLerExpression):
     """
@@ -507,3 +537,54 @@ class SQLerAnyContext:
 
     def __repr__(self) -> str:
         return f"SQLerAnyContext(field={self._field!r}, alias={self._alias!r})"
+
+
+class SQLerUpdateExpression:
+    """Represents a deferred field expression for use in update() calls.
+
+    Created by arithmetic on SQLerField::
+
+        F("count") + 1        # SQLerUpdateExpression("count", "+", 1)
+        F("delay") * 2 + 10   # chained expression
+
+    The query's update() method detects these and generates atomic SQL
+    (e.g., ``json_set(data, '$.count', json_extract(data, '$.count') + ?)``).
+    """
+
+    def __init__(self, sql_expr: str, params: list[Any], field_name: str):
+        self.sql_expr = sql_expr
+        self.params = list(params)
+        self.field_name = field_name
+
+    def __add__(self, other: Any) -> "SQLerUpdateExpression":
+        return SQLerUpdateExpression(
+            f"{self.sql_expr} + ?", self.params + [other], self.field_name
+        )
+
+    def __radd__(self, other: Any) -> "SQLerUpdateExpression":
+        return SQLerUpdateExpression(
+            f"? + {self.sql_expr}", [other] + self.params, self.field_name
+        )
+
+    def __sub__(self, other: Any) -> "SQLerUpdateExpression":
+        return SQLerUpdateExpression(
+            f"{self.sql_expr} - ?", self.params + [other], self.field_name
+        )
+
+    def __rsub__(self, other: Any) -> "SQLerUpdateExpression":
+        return SQLerUpdateExpression(
+            f"? - {self.sql_expr}", [other] + self.params, self.field_name
+        )
+
+    def __mul__(self, other: Any) -> "SQLerUpdateExpression":
+        return SQLerUpdateExpression(
+            f"{self.sql_expr} * ?", self.params + [other], self.field_name
+        )
+
+    def __rmul__(self, other: Any) -> "SQLerUpdateExpression":
+        return SQLerUpdateExpression(
+            f"? * {self.sql_expr}", [other] + self.params, self.field_name
+        )
+
+    def __repr__(self) -> str:
+        return f"SQLerUpdateExpression({self.sql_expr!r}, {self.params!r}, field={self.field_name!r})"

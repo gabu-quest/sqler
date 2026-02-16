@@ -53,6 +53,8 @@ class SQLerDB:
         self._ddl_lock = threading.RLock()
         # cache of tables already ensured to be versioned
         self._versioned_tables: set[str] = set()
+        # promoted columns per table: table -> list of column names
+        self._promoted_columns: dict[str, list[str]] = {}
 
     def _ensure_table(self, table: str) -> None:
         """Create the target table if it doesn't exist.
@@ -69,6 +71,195 @@ class SQLerDB:
         """
         self.adapter.execute(ddl)
         self.adapter.auto_commit()
+
+    def _ensure_table_with_promoted(
+        self,
+        table: str,
+        promoted: dict[str, str],
+        checks: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Create or upgrade a table with promoted columns.
+
+        Promoted columns are real SQLite columns that live alongside the JSON
+        ``data`` blob. They get CHECK constraints on fresh tables and are
+        added via ALTER TABLE on existing ones.
+
+        Args:
+            table: Table name.
+            promoted: ``{column_name: column_def}`` mapping, e.g.
+                ``{"status": "TEXT NOT NULL DEFAULT 'pending'"}``.
+            checks: Optional ``{name: expression}`` CHECK constraints.
+        """
+        import sqlite3 as _sqlite3
+
+        table = validate_table_name(table)
+        checks = checks or {}
+
+        with self._ddl_lock:
+            # Check if table exists
+            cur = self.adapter.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
+                [table],
+            )
+            exists = cur.fetchone() is not None
+
+            if not exists:
+                # Build CREATE TABLE with promoted columns + checks
+                col_defs = ["_id INTEGER PRIMARY KEY AUTOINCREMENT", "data JSON NOT NULL"]
+                for col_name, col_def in promoted.items():
+                    col_defs.append(f"{col_name} {col_def}")
+                for chk_name, chk_expr in checks.items():
+                    col_defs.append(f"CHECK ({chk_expr})")
+                ddl = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
+                self.adapter.execute(ddl)
+                self.adapter.auto_commit()
+            else:
+                # Get existing columns
+                cur = self.adapter.execute(f'PRAGMA table_info("{table}");')
+                rows = cur.fetchall()
+                existing_cols: set[str] = set()
+                for row in rows:
+                    try:
+                        if isinstance(row, _sqlite3.Row):
+                            existing_cols.add(row["name"])
+                        else:
+                            existing_cols.add(row[1])
+                    except (KeyError, IndexError, TypeError):
+                        continue
+
+                # Add missing promoted columns
+                for col_name, col_def in promoted.items():
+                    if col_name not in existing_cols:
+                        self.adapter.execute(
+                            f'ALTER TABLE "{table}" ADD COLUMN {col_name} {col_def};'
+                        )
+                self.adapter.auto_commit()
+
+            self._promoted_columns[table] = list(promoted.keys())
+
+    def upsert_document_promoted(
+        self,
+        table: str,
+        _id: Optional[int],
+        doc: dict[str, Any],
+        promoted_fields: list[str],
+    ) -> int:
+        """Insert or update a document, splitting promoted fields into real columns.
+
+        Args:
+            table: Table name.
+            _id: Existing id to update, or ``None`` to insert.
+            doc: Full document payload.
+            promoted_fields: Keys to extract from doc into real columns.
+
+        Returns:
+            int: The existing or newly assigned ``_id``.
+        """
+        # Split promoted from JSON
+        promoted_vals = {}
+        json_doc = {}
+        for k, v in doc.items():
+            if k in promoted_fields:
+                promoted_vals[k] = v
+            else:
+                json_doc[k] = v
+
+        payload = json.dumps(json_doc)
+
+        if _id is None:
+            # INSERT
+            cols = ["data"] + list(promoted_vals.keys())
+            placeholders = ["json(?)"] + ["?" for _ in promoted_vals]
+            params = [payload] + list(promoted_vals.values())
+            sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(placeholders)});"
+            cursor = self.adapter.execute(sql, params)
+            self.adapter.auto_commit()
+            return cursor.lastrowid
+        else:
+            # UPDATE
+            set_parts = ["data = json(?)"]
+            params: list[Any] = [payload]
+            for col, val in promoted_vals.items():
+                set_parts.append(f"{col} = ?")
+                params.append(val)
+            params.append(_id)
+            sql = f"UPDATE {table} SET {', '.join(set_parts)} WHERE _id = ?;"
+            self.adapter.execute(sql, params)
+            self.adapter.auto_commit()
+            return _id
+
+    def upsert_with_version_promoted(
+        self,
+        table: str,
+        _id: Optional[int],
+        doc: dict[str, Any],
+        expected_version: Optional[int],
+        promoted_fields: list[str],
+    ) -> tuple[int, int]:
+        """Insert or update with optimistic locking, splitting promoted columns.
+
+        Args:
+            table: Table name.
+            _id: Existing row id for update; ``None`` to insert.
+            doc: Document to write.
+            expected_version: Version expected by the caller.
+            promoted_fields: Keys to extract into real columns.
+
+        Returns:
+            tuple[int, int]: The row id and new version.
+        """
+        if table not in self._versioned_tables:
+            self._ensure_versioned_table(table)
+
+        promoted_vals = {}
+        json_doc = {}
+        for k, v in doc.items():
+            if k in promoted_fields:
+                promoted_vals[k] = v
+            else:
+                json_doc[k] = v
+
+        payload = json.dumps(json_doc)
+
+        if _id is None:
+            cols = ["data", "_version"] + list(promoted_vals.keys())
+            placeholders = ["json(?)", "0"] + ["?" for _ in promoted_vals]
+            params = [payload] + list(promoted_vals.values())
+            sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(placeholders)});"
+            cur = self.adapter.execute(sql, params)
+            self.adapter.auto_commit()
+            return cur.lastrowid, 0
+
+        if expected_version is None:
+            raise ValueError("expected_version required for update")
+
+        # Acquire write lock early
+        if not self.adapter.in_transaction:
+            try:
+                self.adapter.execute("BEGIN IMMEDIATE;")
+            except (RuntimeError, ValueError):
+                pass
+
+        set_parts = ["data = json(?)", "_version = _version + 1"]
+        params_list: list[Any] = [payload]
+        for col, val in promoted_vals.items():
+            set_parts.append(f"{col} = ?")
+            params_list.append(val)
+        params_list.extend([_id, expected_version, expected_version, expected_version])
+
+        sql = (
+            f"UPDATE {table} SET {', '.join(set_parts)} "
+            f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;"
+        )
+        cur = self.adapter.execute(sql, params_list)
+        self.adapter.auto_commit()
+        rc = getattr(cur, "rowcount", -1)
+        if rc <= 0:
+            self.adapter.execute(
+                f"SELECT _version FROM {table} WHERE _id = ?;", [_id]
+            ).fetchone()
+            raise StaleVersionError("Stale version: update rejected")
+        return _id, expected_version + 1
 
     def insert_document(self, table: str, doc: dict[str, Any]) -> int:
         """Insert a document.
@@ -155,12 +346,22 @@ class SQLerDB:
             if not found.
         """
         self._ensure_table(table)
-        cur = self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
+        promoted = self._promoted_columns.get(table, [])
+        if promoted:
+            extra_cols = ", ".join(promoted)
+            cur = self.adapter.execute(
+                f"SELECT _id, data, {extra_cols} FROM {table} WHERE _id = ?;", [_id]
+            )
+        else:
+            cur = self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
         row = cur.fetchone()
         if not row:
             return None
         obj = json.loads(row[1])
         obj["_id"] = row[0]
+        if promoted:
+            for i, col_name in enumerate(promoted):
+                obj[col_name] = row[2 + i]
         return obj
 
     def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
@@ -515,20 +716,31 @@ class SQLerDB:
             dict | None: Decoded document with ``_id`` and ``_version`` keys, or None.
         """
         self._ensure_versioned_table(table)
-        cur = self.adapter.execute(f"SELECT _id, data, _version FROM {table} WHERE _id = ?;", [_id])
+        promoted = self._promoted_columns.get(table, [])
+        if promoted:
+            extra_cols = ", " + ", ".join(promoted)
+        else:
+            extra_cols = ""
+        cur = self.adapter.execute(
+            f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;", [_id]
+        )
         row = cur.fetchone()
         if not row:
             return None
         try:
-            # Prefer name-based access for stability
             obj = json.loads(row["data"])  # type: ignore[index]
             obj["_id"] = row["_id"]  # type: ignore[index]
             obj["_version"] = row["_version"]  # type: ignore[index]
+            if promoted:
+                for col_name in promoted:
+                    obj[col_name] = row[col_name]  # type: ignore[index]
         except (KeyError, TypeError):
-            # Fallback to index-based access
             obj = json.loads(row[1])
             obj["_id"] = row[0]
             obj["_version"] = row[2]
+            if promoted:
+                for i, col_name in enumerate(promoted):
+                    obj[col_name] = row[3 + i]
         return obj
 
 
