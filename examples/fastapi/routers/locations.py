@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, HTTPException, status
 
 from ..models import City, Country, Writer
-from ..utils import db_call
+from ..utils import db_call, hydrate_ref
 
 router = APIRouter(prefix="/api/locations", tags=["Locations"])
 
@@ -102,6 +102,7 @@ async def delete_country(country_id: int):
 
     日本語: 国を削除（依存する都市がある場合は失敗）。
     """
+    from sqler.exceptions import ReferentialIntegrityError
     from sqler.query import SQLerField as F
 
     def _delete():
@@ -117,7 +118,10 @@ async def delete_country(country_id: int):
                 detail=f"Cannot delete: {dependent_cities} cities depend on this country",
             )
 
-        country.delete()
+        try:
+            country.delete()
+        except ReferentialIntegrityError as e:
+            raise HTTPException(status_code=409, detail=str(e))
 
     await db_call(_delete)
     return {"success": True}
@@ -175,7 +179,8 @@ async def create_city(payload: CityCreate):
         city = City(name=payload.name)
         city.set_country(country)
         city.save()
-        return city
+        # Re-fetch to hydrate RefFields
+        return City.from_id(city._id)
 
     city = await db_call(_create)
     return _city_to_out(city)
@@ -199,6 +204,7 @@ async def delete_city(city_id: int):
 
     日本語: 都市を削除（依存するライターがある場合は失敗）。
     """
+    from sqler.exceptions import ReferentialIntegrityError
     from sqler.query import SQLerField as F
 
     def _delete():
@@ -214,7 +220,10 @@ async def delete_city(city_id: int):
                 detail=f"Cannot delete: {dependent_writers} writers depend on this city",
             )
 
-        city.delete()
+        try:
+            city.delete()
+        except ReferentialIntegrityError as e:
+            raise HTTPException(status_code=409, detail=str(e))
 
     await db_call(_delete)
     return {"success": True}
@@ -236,10 +245,10 @@ def _country_to_out(country: Country) -> dict:
 
 
 def _city_to_out(city: City) -> dict:
-    """Convert City model to output dict."""
+    """Convert City model to output dict with hydrated country."""
     return {
         "_id": city._id,
         "_version": getattr(city, "_version", 0),
         "name": city.name,
-        "country": city.country,
+        "country": hydrate_ref(city.country, Country),
     }

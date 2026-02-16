@@ -20,18 +20,19 @@ import {
   NTimeline,
   NTimelineItem,
   NPopconfirm,
+  NTooltip,
   useMessage
 } from 'naive-ui'
 import { PhMagnifyingGlass, PhArrowsClockwise, PhPencil, PhTrash, PhClockCounterClockwise, PhPlus } from '@phosphor-icons/vue'
 import { fetchApi } from '@/composables/useApi'
 
 interface Writer {
-  id: number
+  _id: number
   name: string
 }
 
 interface Article {
-  id: number
+  _id: number
   version: number
   title: string
   content: string
@@ -78,7 +79,7 @@ const formData = ref({
 })
 
 const writerOptions = computed(() =>
-  writers.value.map((w) => ({ label: w.name, value: w.id }))
+  writers.value.map((w) => ({ label: w.name, value: w._id }))
 )
 
 async function loadData() {
@@ -138,15 +139,15 @@ async function saveArticle() {
     }
 
     if (editingArticle.value) {
-      await fetchApi(`/api/articles/${editingArticle.value.id}`, {
+      await fetchApi(`/api/articles/${editingArticle.value._id}`, {
         method: 'PATCH',
-        body: JSON.stringify(payload)
+        body: payload
       })
       message.success(t('articles.messages.updated'))
     } else {
       await fetchApi('/api/articles', {
         method: 'POST',
-        body: JSON.stringify(payload)
+        body: payload
       })
       message.success(t('articles.messages.created'))
     }
@@ -187,7 +188,7 @@ async function rebuildIndex() {
 async function openAuditDrawer(article: Article) {
   auditArticleTitle.value = article.title
   try {
-    const log = await fetchApi<AuditEntry[]>(`/api/articles/${article.id}/audit-log`)
+    const log = await fetchApi<AuditEntry[]>(`/api/articles/${article._id}/audit-log`)
     auditLog.value = log
     showAuditDrawer.value = true
   } catch (e) {
@@ -237,10 +238,15 @@ onBeforeUnmount(() => {
     <NCard :title="t('articles.title')" size="small">
       <template #header-extra>
         <NSpace size="small">
-          <NButton size="small" @click="rebuildIndex" :disabled="loading">
-            <template #icon><PhArrowsClockwise :size="14" /></template>
-            {{ t('articles.rebuildIndex') }}
-          </NButton>
+          <NTooltip>
+            <template #trigger>
+              <NButton size="small" @click="rebuildIndex" :disabled="loading">
+                <template #icon><PhArrowsClockwise :size="14" /></template>
+                {{ t('articles.rebuildIndex') }}
+              </NButton>
+            </template>
+            {{ t('articles.rebuildIndexTooltip') }}
+          </NTooltip>
           <NButton size="small" type="primary" @click="openCreate">
             <template #icon><PhPlus weight="bold" /></template>
             {{ t('articles.createArticle') }}
@@ -273,7 +279,7 @@ onBeforeUnmount(() => {
             <NText depth="3">{{ t('common.noData') }}</NText>
           </div>
 
-          <div v-for="result in searchResults" :key="result.article.id" class="result-card">
+          <div v-for="result in searchResults" :key="result.article._id" class="result-card">
             <NSpace justify="space-between" align="start">
               <div class="result-content">
                 <NSpace align="center" style="margin-bottom: 4px">
@@ -294,17 +300,32 @@ onBeforeUnmount(() => {
                 </NSpace>
               </div>
               <NSpace size="small">
-                <NButton size="tiny" quaternary @click="openAuditDrawer(result.article)">
-                  <template #icon><PhClockCounterClockwise weight="regular" /></template>
-                </NButton>
-                <NButton size="tiny" quaternary @click="openEdit(result.article)">
-                  <template #icon><PhPencil weight="regular" /></template>
-                </NButton>
-                <NPopconfirm @positive-click="deleteArticle(result.article.id)">
+                <NTooltip>
                   <template #trigger>
-                    <NButton size="tiny" quaternary type="error">
-                      <template #icon><PhTrash weight="regular" /></template>
+                    <NButton size="tiny" quaternary @click="openAuditDrawer(result.article)">
+                      <template #icon><PhClockCounterClockwise weight="regular" /></template>
                     </NButton>
+                  </template>
+                  {{ t('common.viewAuditLog') }}
+                </NTooltip>
+                <NTooltip>
+                  <template #trigger>
+                    <NButton size="tiny" quaternary @click="openEdit(result.article)">
+                      <template #icon><PhPencil weight="regular" /></template>
+                    </NButton>
+                  </template>
+                  {{ t('common.edit') }}
+                </NTooltip>
+                <NPopconfirm @positive-click="deleteArticle(result.article._id)">
+                  <template #trigger>
+                    <NTooltip>
+                      <template #trigger>
+                        <NButton size="tiny" quaternary type="error">
+                          <template #icon><PhTrash weight="regular" /></template>
+                        </NButton>
+                      </template>
+                      {{ t('common.delete') }}
+                    </NTooltip>
                   </template>
                   {{ t('common.confirm') }}?
                 </NPopconfirm>
@@ -319,7 +340,7 @@ onBeforeUnmount(() => {
             <NText depth="3">{{ t('common.noData') }}</NText>
           </div>
 
-          <div v-for="article in articles" :key="article.id" class="result-card">
+          <div v-for="article in articles" :key="article._id" class="result-card">
             <NSpace justify="space-between" align="start">
               <div class="result-content">
                 <NText strong style="font-size: 16px; display: block; margin-bottom: 4px">
@@ -336,17 +357,32 @@ onBeforeUnmount(() => {
                 </NSpace>
               </div>
               <NSpace size="small">
-                <NButton size="tiny" quaternary @click="openAuditDrawer(article)">
-                  <template #icon><PhClockCounterClockwise weight="regular" /></template>
-                </NButton>
-                <NButton size="tiny" quaternary @click="openEdit(article)">
-                  <template #icon><PhPencil weight="regular" /></template>
-                </NButton>
-                <NPopconfirm @positive-click="deleteArticle(article.id)">
+                <NTooltip>
                   <template #trigger>
-                    <NButton size="tiny" quaternary type="error">
-                      <template #icon><PhTrash weight="regular" /></template>
+                    <NButton size="tiny" quaternary @click="openAuditDrawer(article)">
+                      <template #icon><PhClockCounterClockwise weight="regular" /></template>
                     </NButton>
+                  </template>
+                  {{ t('common.viewAuditLog') }}
+                </NTooltip>
+                <NTooltip>
+                  <template #trigger>
+                    <NButton size="tiny" quaternary @click="openEdit(article)">
+                      <template #icon><PhPencil weight="regular" /></template>
+                    </NButton>
+                  </template>
+                  {{ t('common.edit') }}
+                </NTooltip>
+                <NPopconfirm @positive-click="deleteArticle(article._id)">
+                  <template #trigger>
+                    <NTooltip>
+                      <template #trigger>
+                        <NButton size="tiny" quaternary type="error">
+                          <template #icon><PhTrash weight="regular" /></template>
+                        </NButton>
+                      </template>
+                      {{ t('common.delete') }}
+                    </NTooltip>
                   </template>
                   {{ t('common.confirm') }}?
                 </NPopconfirm>

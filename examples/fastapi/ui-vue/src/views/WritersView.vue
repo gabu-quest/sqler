@@ -16,6 +16,7 @@ import {
   NTimeline,
   NTimelineItem,
   NPopconfirm,
+  NTooltip,
   NText,
   useMessage,
   type DataTableColumns
@@ -27,19 +28,19 @@ const { t } = useI18n()
 const message = useMessage()
 
 interface Country {
-  id: number
+  _id: number
   name: string
   code: string
 }
 
 interface City {
-  id: number
+  _id: number
   name: string
   country: { _id: number; name: string; code: string } | null
 }
 
 interface Writer {
-  id: number
+  _id: number
   version: number
   name: string
   bio: string
@@ -75,19 +76,19 @@ const auditLog = ref<AuditEntry[]>([])
 const auditWriterName = ref('')
 
 const countryOptions = computed(() =>
-  countries.value.map((c) => ({ label: `${c.name} (${c.code})`, value: c.id }))
+  countries.value.map((c) => ({ label: `${c.name} (${c.code})`, value: c._id }))
 )
 
 const cityOptions = computed(() => {
   if (!form.value.country_id) {
     return cities.value.map((c) => ({
       label: c.country ? `${c.name}, ${c.country.name}` : c.name,
-      value: c.id
+      value: c._id
     }))
   }
   return cities.value
     .filter((c) => c.country?._id === form.value.country_id)
-    .map((c) => ({ label: c.name, value: c.id }))
+    .map((c) => ({ label: c.name, value: c._id }))
 })
 
 function getLocation(writer: Writer): string {
@@ -121,32 +122,56 @@ const columns = computed<DataTableColumns<Writer>>(() => [
     render: (row) => {
       return h(NSpace, { size: 'small' }, () => [
         h(
-          NButton,
-          {
-            size: 'tiny',
-            quaternary: true,
-            onClick: () => openAuditDrawer(row)
-          },
-          { icon: () => h(PhClockCounterClockwise, { weight: 'regular' }) }
-        ),
-        h(
-          NButton,
-          {
-            size: 'tiny',
-            quaternary: true,
-            onClick: () => openEditModal(row)
-          },
-          { icon: () => h(PhPencil, { weight: 'regular' }) }
-        ),
-        h(
-          NPopconfirm,
-          { onPositiveClick: () => deleteWriter(row.id) },
+          NTooltip,
+          {},
           {
             trigger: () =>
               h(
                 NButton,
-                { size: 'tiny', quaternary: true, type: 'error' },
-                { icon: () => h(PhTrash, { weight: 'regular' }) }
+                {
+                  size: 'tiny',
+                  quaternary: true,
+                  onClick: () => openAuditDrawer(row)
+                },
+                { icon: () => h(PhClockCounterClockwise, { weight: 'regular' }) }
+              ),
+            default: () => t('common.viewAuditLog')
+          }
+        ),
+        h(
+          NTooltip,
+          {},
+          {
+            trigger: () =>
+              h(
+                NButton,
+                {
+                  size: 'tiny',
+                  quaternary: true,
+                  onClick: () => openEditModal(row)
+                },
+                { icon: () => h(PhPencil, { weight: 'regular' }) }
+              ),
+            default: () => t('common.edit')
+          }
+        ),
+        h(
+          NPopconfirm,
+          { onPositiveClick: () => deleteWriter(row._id) },
+          {
+            trigger: () =>
+              h(
+                NTooltip,
+                {},
+                {
+                  trigger: () =>
+                    h(
+                      NButton,
+                      { size: 'tiny', quaternary: true, type: 'error' },
+                      { icon: () => h(PhTrash, { weight: 'regular' }) }
+                    ),
+                  default: () => t('common.delete')
+                }
               ),
             default: () => t('writers.confirmDelete')
           }
@@ -208,24 +233,24 @@ async function saveWriter() {
   try {
     if (editingWriter.value) {
       // Update
-      await fetchApi(`/api/writers/${editingWriter.value.id}`, {
+      await fetchApi(`/api/writers/${editingWriter.value._id}`, {
         method: 'PATCH',
-        body: JSON.stringify({
+        body: {
           name: form.value.name,
           bio: form.value.bio,
           city_id: form.value.city_id
-        })
+        }
       })
       message.success(t('writers.messages.updated'))
     } else {
       // Create
       await fetchApi('/api/writers', {
         method: 'POST',
-        body: JSON.stringify({
+        body: {
           name: form.value.name,
           bio: form.value.bio,
           city_id: form.value.city_id
-        })
+        }
       })
       message.success(t('writers.messages.created'))
     }
@@ -253,7 +278,7 @@ async function deleteWriter(id: number) {
 async function openAuditDrawer(writer: Writer) {
   auditWriterName.value = writer.name
   try {
-    const log = await fetchApi<AuditEntry[]>(`/api/writers/${writer.id}/audit-log`)
+    const log = await fetchApi<AuditEntry[]>(`/api/writers/${writer._id}/audit-log`)
     auditLog.value = log
     showAuditDrawer.value = true
   } catch (e) {
@@ -290,8 +315,7 @@ onMounted(loadData)
         :data="writers"
         :loading="loading"
         :bordered="false"
-        size="small"
-        :row-key="(row: Writer) => row.id"
+        :row-key="(row: Writer) => row._id"
       />
     </NCard>
 

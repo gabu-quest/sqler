@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .db import close_db, init_db
+from .db import close_db, init_db, is_db_empty, seed_db
 from .errors import install_exception_handlers
 from .routers import (
     articles_router,
@@ -30,9 +30,19 @@ English: Lifespan startup/shutdown, ETag/If-Match, and WAL-friendly patterns.
 async def lifespan(app: FastAPI):
     """Initialize and cleanup the demo database.
 
-    日本語: デモ用 DB の初期化とクリーンアップを行います。
+    Auto-seeds with sample data if database is empty.
+
+    日本語: デモ用 DB の初期化とクリーンアップを行います。空の場合は自動シード。
     """
     init_db(os.getenv("SQLER_DB_PATH"))
+
+    # Auto-seed if database is empty
+    if is_db_empty():
+        print("Database empty, seeding with sample data...")
+        result = seed_db()
+        print(f"Seeded: {result['countries']} countries, {result['cities']} cities, "
+              f"{result['writers']} writers, {result['articles']} articles")
+
     yield
     close_db()
 

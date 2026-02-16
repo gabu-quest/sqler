@@ -26,6 +26,12 @@ const router = createRouter({
       name: 'articles',
       component: () => import('@/views/ArticlesView.vue'),
       meta: { title: 'Articles' }
+    },
+    {
+      path: '/schema',
+      name: 'schema',
+      component: () => import('@/views/SchemaView.vue'),
+      meta: { title: 'Schema' }
     }
   ]
 })

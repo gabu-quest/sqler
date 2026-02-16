@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, HTTPException, status
 
 from ..models import Article, City, Writer
-from ..utils import db_call
+from ..utils import db_call, hydrate_ref
 
 router = APIRouter(prefix="/api/writers", tags=["Writers"])
 
@@ -87,7 +87,8 @@ async def create_writer(payload: WriterCreate):
             writer.set_city(city)
 
         writer.save()
-        return writer
+        # Re-fetch to hydrate RefFields
+        return Writer.from_id(writer._id)
 
     writer = await db_call(_create)
     return _writer_to_out(writer)
@@ -134,7 +135,8 @@ async def patch_writer(writer_id: int, patch: WriterPatch):
             setattr(writer, key, value)
 
         writer.save()
-        return writer
+        # Re-fetch to hydrate RefFields
+        return Writer.from_id(writer._id)
 
     writer = await db_call(_patch)
     return _writer_to_out(writer)
@@ -146,6 +148,7 @@ async def delete_writer(writer_id: int):
 
     日本語: ライターを削除（依存する記事がある場合は失敗）。
     """
+    from sqler.exceptions import ReferentialIntegrityError
     from sqler.query import SQLerField as F
 
     def _delete():
@@ -161,7 +164,10 @@ async def delete_writer(writer_id: int):
                 detail=f"Cannot delete: {dependent_articles} articles depend on this writer",
             )
 
-        writer.delete()
+        try:
+            writer.delete()
+        except ReferentialIntegrityError as e:
+            raise HTTPException(status_code=409, detail=str(e))
 
     await db_call(_delete)
     return {"success": True}
@@ -187,9 +193,9 @@ async def get_writer_audit_log(writer_id: int):
         log = writer.get_audit_log()
         return [
             {
-                "timestamp": entry.timestamp.isoformat(),
-                "action": entry.action,
-                "changes": entry.changes,
+                "timestamp": entry["timestamp"],
+                "action": entry["action"],
+                "changes": entry.get("changes"),
             }
             for entry in log
         ]
@@ -235,13 +241,19 @@ async def get_writer_articles(writer_id: int):
 
 
 def _writer_to_out(writer: Writer) -> dict:
-    """Convert Writer model to output dict."""
+    """Convert Writer model to output dict with hydrated city."""
+    city_data = hydrate_ref(writer.city, City)
+    # Also hydrate the city's country if present
+    if city_data and city_data.get("country"):
+        from ..models import Country
+
+        city_data["country"] = hydrate_ref(city_data["country"], Country)
     return {
         "_id": writer._id,
         "_version": getattr(writer, "_version", 0),
         "name": writer.name,
         "bio": writer.bio,
-        "city": writer.city,
+        "city": city_data,
         "created_at": writer.created_at.isoformat() if writer.created_at else None,
         "updated_at": writer.updated_at.isoformat() if writer.updated_at else None,
     }

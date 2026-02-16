@@ -8,6 +8,16 @@
         </router-link>
         <n-menu mode="horizontal" :options="menuOptions" :value="activeKey" @update:value="handleMenuClick" />
         <div class="header-spacer" />
+        <!-- Reset DB Button -->
+        <n-tooltip>
+          <template #trigger>
+            <n-button size="small" type="warning" ghost @click="showResetConfirm = true" :loading="resetting">
+              <template #icon><PhArrowsClockwise weight="bold" /></template>
+              {{ t('header.resetDb') }}
+            </n-button>
+          </template>
+          {{ t('header.resetDbTooltip') }}
+        </n-tooltip>
         <!-- Language Switcher -->
         <n-button-group size="small">
           <n-button
@@ -30,26 +40,48 @@
     <n-layout-content class="app-content">
       <slot />
     </n-layout-content>
+
+    <!-- Reset Confirmation Dialog -->
+    <n-modal v-model:show="showResetConfirm" preset="dialog" type="warning" :title="t('header.resetConfirmTitle')">
+      <template #icon>
+        <PhWarning :size="24" weight="fill" />
+      </template>
+      {{ t('header.resetConfirmMessage') }}
+      <template #action>
+        <n-space>
+          <n-button @click="showResetConfirm = false">{{ t('common.cancel') }}</n-button>
+          <n-button type="error" @click="resetDatabase" :loading="resetting">
+            {{ t('header.resetConfirmButton') }}
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </n-layout>
 </template>
 
 <script setup lang="ts">
-import { computed, h } from "vue";
+import { ref, computed, h } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
-import { NLayout, NLayoutHeader, NLayoutContent, NMenu, NButton, NButtonGroup, type MenuOption } from "naive-ui";
-import { PhDatabase, PhHouse, PhMapPin, PhPen, PhArticle } from "@phosphor-icons/vue";
+import { NLayout, NLayoutHeader, NLayoutContent, NMenu, NButton, NButtonGroup, NTooltip, NModal, NSpace, useMessage, type MenuOption } from "naive-ui";
+import { PhDatabase, PhHouse, PhMapPin, PhPen, PhArticle, PhTable, PhArrowsClockwise, PhWarning } from "@phosphor-icons/vue";
 import { setLocale, type Locale } from "@/i18n";
+import { fetchApi } from "@/composables/useApi";
 
 const route = useRoute();
 const router = useRouter();
 const { t, locale } = useI18n();
+const message = useMessage();
+
+const showResetConfirm = ref(false);
+const resetting = ref(false);
 
 const activeKey = computed(() => {
   if (route.path === "/") return "dashboard";
   if (route.path.startsWith("/locations")) return "locations";
   if (route.path.startsWith("/writers")) return "writers";
   if (route.path.startsWith("/articles")) return "articles";
+  if (route.path.startsWith("/schema")) return "schema";
   return "dashboard";
 });
 
@@ -74,6 +106,11 @@ const menuOptions = computed<MenuOption[]>(() => [
     key: "articles",
     icon: () => h(PhArticle, { weight: "regular" }),
   },
+  {
+    label: t("nav.schema"),
+    key: "schema",
+    icon: () => h(PhTable, { weight: "regular" }),
+  },
 ]);
 
 function handleMenuClick(key: string) {
@@ -82,12 +119,28 @@ function handleMenuClick(key: string) {
     locations: "/locations",
     writers: "/writers",
     articles: "/articles",
+    schema: "/schema",
   };
   router.push(routes[key] || "/");
 }
 
 function switchLocale(newLocale: Locale) {
   setLocale(newLocale);
+}
+
+async function resetDatabase() {
+  resetting.value = true;
+  try {
+    await fetchApi('/api/db/seed', { method: 'POST' });
+    message.success(t('header.resetSuccess'));
+    showResetConfirm.value = false;
+    // Refresh current page to show new data
+    router.go(0);
+  } catch (e) {
+    message.error(t('common.error'));
+  } finally {
+    resetting.value = false;
+  }
 }
 </script>
 

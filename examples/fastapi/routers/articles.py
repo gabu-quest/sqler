@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, HTTPException, Query, status
 
 from ..models import Article, Writer
-from ..utils import db_call
+from ..utils import db_call, hydrate_ref
 
 router = APIRouter(prefix="/api/articles", tags=["Articles (FTS)"])
 
@@ -84,7 +84,8 @@ async def create_article(payload: ArticleCreate):
             article.set_writer(writer)
 
         article.save()
-        return article
+        # Re-fetch to hydrate RefFields
+        return Article.from_id(article._id)
 
     article = await db_call(_create)
     return _article_to_out(article)
@@ -153,7 +154,8 @@ async def patch_article(article_id: int, patch: ArticlePatch):
             setattr(article, key, value)
 
         article.save()
-        return article
+        # Re-fetch to hydrate RefFields
+        return Article.from_id(article._id)
 
     article = await db_call(_patch)
     return _article_to_out(article)
@@ -196,9 +198,9 @@ async def get_article_audit_log(article_id: int):
         log = article.get_audit_log()
         return [
             {
-                "timestamp": entry.timestamp.isoformat(),
-                "action": entry.action,
-                "changes": entry.changes,
+                "timestamp": entry["timestamp"],
+                "action": entry["action"],
+                "changes": entry.get("changes"),
             }
             for entry in log
         ]
@@ -295,14 +297,23 @@ async def fts_stats():
 
 
 def _article_to_out(article: Article) -> dict:
-    """Convert Article model to output dict."""
+    """Convert Article model to output dict with hydrated writer."""
+    from ..models import City, Country
+
+    writer_data = hydrate_ref(article.writer, Writer)
+    # Also hydrate the writer's city (and its country) if present
+    if writer_data and writer_data.get("city"):
+        city_data = hydrate_ref(writer_data["city"], City)
+        if city_data and city_data.get("country"):
+            city_data["country"] = hydrate_ref(city_data["country"], Country)
+        writer_data["city"] = city_data
     return {
         "_id": article._id,
         "_version": getattr(article, "_version", 0),
         "title": article.title,
         "content": article.content,
         "tags": article.tags,
-        "writer": article.writer,
+        "writer": writer_data,
         "created_at": article.created_at.isoformat() if article.created_at else None,
         "updated_at": article.updated_at.isoformat() if article.updated_at else None,
         "created_by": getattr(article, "created_by", None),
