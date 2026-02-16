@@ -30,6 +30,36 @@ uv run python -m examples.fastapi.app --auto-port
 
 The server starts at http://localhost:8000 (or the next available port with `--auto-port`)
 
+## Database
+
+The SQLite database file (`sqler_demo.db`) is gitignored and created locally.
+
+### Seed / Reset the Database
+
+To populate the database with sample data (or reset it to a fresh state):
+
+```bash
+uv run python -m examples.fastapi.seed
+```
+
+This will:
+- Delete the existing database (if any)
+- Create a fresh database with:
+  - 5 countries (Japan, US, UK, Germany, Brazil)
+  - 10 cities
+  - 8 writers with bios
+  - 20 articles with full-text search enabled
+
+### Data Hierarchy
+
+```
+Country → City → Writer → Article
+   ↓        ↓       ↓         ↓
+ 5 rows   10 rows  8 rows   20 rows
+```
+
+Each level references its parent via SQLer's `RefField`. The Schema page in the UI visualizes these relationships.
+
 ## Project Structure
 
 ```

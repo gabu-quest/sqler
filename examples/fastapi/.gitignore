@@ -1,0 +1,9 @@
+# WAL files (transient, not needed in repo)
+sqler_demo.db-shm
+sqler_demo.db-wal
+
+# Node modules
+ui-vue/node_modules/
+
+# To reset the database to clean seed state:
+#   uv run python -m examples.fastapi.seed
