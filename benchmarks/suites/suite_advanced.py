@@ -4,12 +4,6 @@ from __future__ import annotations
 
 import threading
 
-from benchmarks.core.base import BenchmarkResult
-from benchmarks.core.config import BenchmarkConfig
-from benchmarks.core.timer import PrecisionTimer
-from benchmarks.generators.documents import DocumentGenerator
-from benchmarks.generators.models import BenchmarkArticle, BenchmarkCounter
-
 from sqler import (
     F,
     FTSIndex,
@@ -19,6 +13,12 @@ from sqler import (
     StaleVersionError,
     cached_query,
 )
+
+from benchmarks.core.base import BenchmarkResult
+from benchmarks.core.config import BenchmarkConfig
+from benchmarks.core.timer import PrecisionTimer
+from benchmarks.generators.documents import DocumentGenerator
+from benchmarks.generators.models import BenchmarkArticle, BenchmarkCounter
 
 SUITE_NAME = "advanced"
 
@@ -197,7 +197,7 @@ class QueryCacheImpact:
         db = SQLerDB.in_memory()
         db.bulk_upsert("bench", docs)
 
-        cache = QueryCache(max_size=100, default_ttl_seconds=60)
+        QueryCache(max_size=100, default_ttl_seconds=60)
 
         # Uncached query
         def do_uncached(db=db):
@@ -223,8 +223,9 @@ class QueryCacheImpact:
             cached_fn()
             hit_times.append((time.perf_counter() - start) * 1000)
 
-        from benchmarks.core.base import TimingStats
         import statistics
+
+        from benchmarks.core.base import TimingStats
 
         hit_sorted = sorted(hit_times)
         hit_stats = TimingStats(

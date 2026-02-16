@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from .theme import (
-    ACCENT_COLORS,
-    BG_CARD,
     BG_DARK,
     BG_PANEL,
     BORDER_COLOR,
-    GRID_COLOR,
-    PALETTE,
     TEXT_MUTED,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
@@ -97,7 +92,7 @@ def plot_scaling_lines(results: list[dict], title: str, system_info: str,
         xs = [p[0] for p in paired]
         medians = [p[1] for p in paired]
         p95s = [p[2] for p in paired]
-        mins = [p[3] for p in paired]
+        [p[3] for p in paired]
 
         ax.plot(xs, medians, "o-", color=c, label=f"{label} (median)", zorder=3)
         ax.fill_between(xs, medians, p95s, alpha=0.15, color=c, zorder=2)

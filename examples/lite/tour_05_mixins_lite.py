@@ -429,7 +429,8 @@ def _(SQLerLiteModel, dataclass, db):
     try:
         record.delete()  # This will be blocked
         print("Deleted (unexpected!)")
-    except RuntimeError as e:
+    except RuntimeError as exc:
+        e = exc
         print(f"Delete blocked: {e}")
 
     # Verify it still exists

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from .suite_insert import SUITE as INSERT_SUITE
-from .suite_query import SUITE as QUERY_SUITE
-from .suite_json import SUITE as JSON_SUITE
 from .suite_advanced import SUITE as ADVANCED_SUITE
+from .suite_insert import SUITE as INSERT_SUITE
+from .suite_json import SUITE as JSON_SUITE
 from .suite_ops import SUITE as OPS_SUITE
+from .suite_query import SUITE as QUERY_SUITE
 
 ALL_SUITES: dict[str, list] = {
     "insert": INSERT_SUITE,

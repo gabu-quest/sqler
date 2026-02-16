@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from sqler import F, SQLerDB
+
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.timer import PrecisionTimer
 from benchmarks.generators.documents import DocumentGenerator
-
-from sqler import F, SQLerDB
 
 SUITE_NAME = "json"
 
