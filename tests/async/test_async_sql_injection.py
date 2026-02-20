@@ -20,12 +20,22 @@ EVIL_FIELDS = [
     "semi;colon",
 ]
 
+# Subset safe for use as **kwargs keys (empty string excluded).
+EVIL_FIELDS_KWARG = [f for f in EVIL_FIELDS if f != ""]
+
 EVIL_IDENTIFIERS = [
     "idx; DROP TABLE t",
     "idx--comment",
     "my index",
     "idx'name",
     "",
+]
+
+EVIL_UNDERSCORE_FIELDS = [
+    "_; DROP TABLE items",
+    "_ UNION SELECT",
+    "_has space",
+    "_semi;colon",
 ]
 
 
@@ -49,7 +59,7 @@ class TestAsyncOrderByRejectsInjection:
     @pytest.mark.parametrize("evil", EVIL_FIELDS)
     @pytest.mark.asyncio
     async def test_rejects(self, aquery, evil):
-        with pytest.raises(InvalidFieldNameError):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name|non-empty string"):
             aquery.order_by(evil)
 
 
@@ -57,25 +67,25 @@ class TestAsyncAggregateRejectsInjection:
     @pytest.mark.parametrize("evil", EVIL_FIELDS)
     @pytest.mark.asyncio
     async def test_sum_rejects(self, aquery, evil):
-        with pytest.raises(InvalidFieldNameError):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name|non-empty string"):
             await aquery.sum(evil)
 
     @pytest.mark.parametrize("evil", EVIL_FIELDS)
     @pytest.mark.asyncio
     async def test_avg_rejects(self, aquery, evil):
-        with pytest.raises(InvalidFieldNameError):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name|non-empty string"):
             await aquery.avg(evil)
 
     @pytest.mark.parametrize("evil", EVIL_FIELDS)
     @pytest.mark.asyncio
     async def test_min_rejects(self, aquery, evil):
-        with pytest.raises(InvalidFieldNameError):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name|non-empty string"):
             await aquery.min(evil)
 
     @pytest.mark.parametrize("evil", EVIL_FIELDS)
     @pytest.mark.asyncio
     async def test_max_rejects(self, aquery, evil):
-        with pytest.raises(InvalidFieldNameError):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name|non-empty string"):
             await aquery.max(evil)
 
 
@@ -83,25 +93,21 @@ class TestAsyncDistinctValuesRejectsInjection:
     @pytest.mark.parametrize("evil", EVIL_FIELDS)
     @pytest.mark.asyncio
     async def test_rejects(self, aquery, evil):
-        with pytest.raises(InvalidFieldNameError):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name|non-empty string"):
             await aquery.distinct_values(evil)
 
 
 class TestAsyncUpdateRejectsInjection:
-    @pytest.mark.parametrize("evil", EVIL_FIELDS)
+    @pytest.mark.parametrize("evil", EVIL_FIELDS_KWARG)
     @pytest.mark.asyncio
     async def test_update_rejects(self, aquery, evil):
-        if evil == "":
-            pytest.skip("empty string is not a valid kwarg key")
-        with pytest.raises(InvalidFieldNameError):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name"):
             await aquery.update(**{evil: "val"})
 
-    @pytest.mark.parametrize("evil", EVIL_FIELDS)
+    @pytest.mark.parametrize("evil", EVIL_FIELDS_KWARG)
     @pytest.mark.asyncio
     async def test_update_one_rejects(self, aquery, evil):
-        if evil == "":
-            pytest.skip("empty string is not a valid kwarg key")
-        with pytest.raises(InvalidFieldNameError):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name"):
             await aquery.update_one(**{evil: "val"})
 
 
@@ -152,7 +158,7 @@ class TestAsyncDropIndexRejectsInjection:
     @pytest.mark.parametrize("evil", EVIL_IDENTIFIERS)
     @pytest.mark.asyncio
     async def test_rejects(self, adb, evil):
-        with pytest.raises(InvalidIdentifierError):
+        with pytest.raises(InvalidIdentifierError, match="Invalid identifier|non-empty string"):
             await adb.drop_index(evil)
 
 
@@ -160,19 +166,29 @@ class TestAsyncCreateIndexRejectsInjection:
     @pytest.mark.parametrize("evil", EVIL_FIELDS)
     @pytest.mark.asyncio
     async def test_field_injection(self, adb, evil):
-        with pytest.raises((InvalidFieldNameError, InvalidIdentifierError)):
+        with pytest.raises(
+            (InvalidFieldNameError, InvalidIdentifierError),
+            match="Invalid field name|Invalid identifier|non-empty string",
+        ):
             await adb.create_index("items", evil)
 
     @pytest.mark.parametrize("evil", EVIL_IDENTIFIERS)
     @pytest.mark.asyncio
     async def test_name_injection(self, adb, evil):
-        with pytest.raises(InvalidIdentifierError):
+        with pytest.raises(InvalidIdentifierError, match="Invalid identifier|non-empty string"):
             await adb.create_index("items", "name", name=evil)
+
+    @pytest.mark.parametrize("evil", EVIL_UNDERSCORE_FIELDS)
+    @pytest.mark.asyncio
+    async def test_underscore_prefixed_field_injection(self, adb, evil):
+        """Underscore-prefixed fields take the validate_identifier branch."""
+        with pytest.raises(InvalidIdentifierError, match="Invalid identifier"):
+            await adb.create_index("items", evil)
 
 
 class TestAsyncPromotedColumnRejectsInjection:
     @pytest.mark.parametrize("evil", EVIL_IDENTIFIERS)
     @pytest.mark.asyncio
     async def test_rejects(self, adb, evil):
-        with pytest.raises(InvalidIdentifierError):
+        with pytest.raises(InvalidIdentifierError, match="Invalid identifier|non-empty string"):
             await adb._ensure_table_with_promoted("items", {evil: "TEXT"})
