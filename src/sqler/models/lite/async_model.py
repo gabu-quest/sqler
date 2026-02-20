@@ -8,6 +8,7 @@ with AsyncSQLerModel while being compatible with Pyodide.
 from __future__ import annotations
 
 import inspect
+import warnings
 from dataclasses import fields
 from typing import (
     TYPE_CHECKING,
@@ -62,10 +63,21 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
     def set_db(cls, db: "AsyncSQLerDB", table: Optional[str] = None) -> None:
         """Bind this model class to an async database and table.
 
+        .. deprecated::
+            Use :meth:`using` for queries and ``save(db=db)``/``delete(db=db)``
+            for writes.
+
         Args:
             db: AsyncSQLerDB instance to use for persistence.
             table: Optional table name. Defaults to lowercase plural.
         """
+        warnings.warn(
+            f"{cls.__name__}.set_db() is deprecated. "
+            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            "set_db() will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
         chosen = table or explicit or _default_table_name(cls.__name__)
@@ -77,6 +89,19 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
     def bind(cls, db: "AsyncSQLerDB", table: Optional[str] = None) -> None:
         """Alias for set_db()."""
         cls.set_db(db, table)
+
+    @classmethod
+    def using(cls: Type[TAModel], db: "AsyncSQLerDB") -> "AsyncSQLerQuerySet[TAModel]":
+        """Return a queryset bound to a specific DB (no class-level mutation)."""
+        from sqler.models.async_queryset import AsyncSQLerQuerySet
+        from sqler.query.async_query import AsyncSQLerQuery
+        from sqler.utils import validate_table_name
+
+        table = validate_table_name(
+            getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
+        )
+        q = AsyncSQLerQuery(table=table, adapter=db.adapter)
+        return AsyncSQLerQuerySet[TAModel](cls, q)
 
     @classmethod
     def _require_binding(cls) -> tuple["AsyncSQLerDB", str]:

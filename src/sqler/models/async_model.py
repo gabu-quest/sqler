@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import warnings
 from typing import Any, ClassVar, Optional, Type, TypeVar
 
 from pydantic import BaseModel, PrivateAttr
@@ -43,6 +44,13 @@ class AsyncSQLerModel(BaseModel):
 
     @classmethod
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
+        warnings.warn(
+            f"{cls.__name__}.set_db() is deprecated. "
+            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            "set_db() will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
         chosen = table or explicit or _default_table_name(cls.__name__)
