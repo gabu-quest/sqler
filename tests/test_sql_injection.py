@@ -197,7 +197,20 @@ class TestExecuteSqlRestriction:
     @pytest.mark.parametrize(
         "sql",
         [
+            "SELECT 1; DROP TABLE items",
+            "SELECT 1; DELETE FROM items",
+            "SELECT 1; INSERT INTO items (data) VALUES ('{}')",
+        ],
+    )
+    def test_rejects_multi_statement(self, db, sql):
+        with pytest.raises(ValueError, match="multi-statement"):
+            db.execute_sql(sql)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
             "SELECT 1",
+            "SELECT 1;",
             "EXPLAIN SELECT 1",
             "PRAGMA table_info('items')",
             "WITH cte AS (SELECT 1) SELECT * FROM cte",

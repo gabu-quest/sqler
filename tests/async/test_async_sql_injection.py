@@ -79,6 +79,32 @@ class TestAsyncAggregateRejectsInjection:
             await aquery.max(evil)
 
 
+class TestAsyncDistinctValuesRejectsInjection:
+    @pytest.mark.parametrize("evil", EVIL_FIELDS)
+    @pytest.mark.asyncio
+    async def test_rejects(self, aquery, evil):
+        with pytest.raises(InvalidFieldNameError):
+            await aquery.distinct_values(evil)
+
+
+class TestAsyncUpdateRejectsInjection:
+    @pytest.mark.parametrize("evil", EVIL_FIELDS)
+    @pytest.mark.asyncio
+    async def test_update_rejects(self, aquery, evil):
+        if evil == "":
+            pytest.skip("empty string is not a valid kwarg key")
+        with pytest.raises(InvalidFieldNameError):
+            await aquery.update(**{evil: "val"})
+
+    @pytest.mark.parametrize("evil", EVIL_FIELDS)
+    @pytest.mark.asyncio
+    async def test_update_one_rejects(self, aquery, evil):
+        if evil == "":
+            pytest.skip("empty string is not a valid kwarg key")
+        with pytest.raises(InvalidFieldNameError):
+            await aquery.update_one(**{evil: "val"})
+
+
 class TestAsyncExecuteSqlRestriction:
     @pytest.mark.parametrize(
         "sql",
@@ -94,6 +120,40 @@ class TestAsyncExecuteSqlRestriction:
     async def test_rejects_mutations(self, adb, sql):
         with pytest.raises(ValueError, match="read-only"):
             await adb.execute_sql(sql)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1; DROP TABLE items",
+            "SELECT 1; DELETE FROM items",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_rejects_multi_statement(self, adb, sql):
+        with pytest.raises(ValueError, match="multi-statement"):
+            await adb.execute_sql(sql)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1",
+            "SELECT 1;",
+            "EXPLAIN SELECT 1",
+            "PRAGMA table_info('items')",
+            "WITH cte AS (SELECT 1) SELECT * FROM cte",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_allows_reads(self, adb, sql):
+        await adb.execute_sql(sql)
+
+
+class TestAsyncDropIndexRejectsInjection:
+    @pytest.mark.parametrize("evil", EVIL_IDENTIFIERS)
+    @pytest.mark.asyncio
+    async def test_rejects(self, adb, evil):
+        with pytest.raises(InvalidIdentifierError):
+            await adb.drop_index(evil)
 
 
 class TestAsyncCreateIndexRejectsInjection:
