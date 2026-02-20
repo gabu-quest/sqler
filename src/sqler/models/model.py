@@ -147,6 +147,14 @@ class SQLerModel(BaseModel):
         return cls._db, cls._table
 
     @classmethod
+    def _resolve_binding(cls, db=None) -> tuple[SQLerDB, str]:
+        """Return (db, table) using the provided db or the class-level binding."""
+        if db is not None:
+            table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
+            return db, table
+        return cls._require_binding()
+
+    @classmethod
     def from_id(cls: Type[TModel], id_: int) -> Optional[TModel]:
         """Hydrate an instance by ``_id``.
 
@@ -267,14 +275,17 @@ class SQLerModel(BaseModel):
         cls.add_index(field, unique=unique, name=name, where=where)
 
     # ----- instance methods -----
-    def save(self: TModel) -> TModel:
+    def save(self: TModel, *, db=None) -> TModel:
         """Insert or update this instance and update ``_id``.
+
+        Args:
+            db: Optional database to write to (overrides class-level binding).
 
         Returns:
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = cls._resolve_binding(db)
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
@@ -285,21 +296,23 @@ class SQLerModel(BaseModel):
         self._id = new_id
         return self
 
-    def delete(self) -> None:
+    def delete(self, *, db=None) -> None:
         """Delete this instance by ``_id`` and unset it.
 
-        Deprecated: prefer delete(on_delete=...) to control integrity behavior.
+        Args:
+            db: Optional database to delete from (overrides class-level binding).
         """
-        self.delete_with_policy()
+        self.delete_with_policy(db=db)
 
-    def delete_with_policy(self, *, on_delete: str = "restrict") -> None:
+    def delete_with_policy(self, *, db=None, on_delete: str = "restrict") -> None:
         """Delete this instance with a specified integrity policy.
 
         Args:
+            db: Optional database to delete from (overrides class-level binding).
             on_delete: One of "restrict", "set_null", or "cascade".
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = cls._resolve_binding(db)
         if self._id is None:
             raise ValueError("Cannot delete unsaved model (missing _id)")
         target = (table, int(self._id))
