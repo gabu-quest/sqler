@@ -89,6 +89,14 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         return cls._db, cls._table
 
     @classmethod
+    def _resolve_binding(cls, db=None) -> tuple["AsyncSQLerDB", str]:
+        """Return (db, table) using the provided db or the class-level binding."""
+        if db is not None:
+            table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
+            return db, table
+        return cls._require_binding()
+
+    @classmethod
     def db(cls: Type[TAModel]) -> "AsyncSQLerDB":
         """Return the bound database for this model."""
         db, _ = cls._require_binding()
@@ -198,28 +206,36 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """Ensure an index exists (idempotent)."""
         await cls.add_index(field, unique=unique, name=name, where=where)
 
-    async def save(self: TAModel) -> TAModel:
+    async def save(self: TAModel, *, db=None) -> TAModel:
         """Insert or update this instance.
+
+        Args:
+            db: Optional database to write to (overrides class-level binding).
 
         Returns:
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = cls._resolve_binding(db)
         payload = await self._adump_with_relations()
         new_id = await db.upsert_document(table, self._id, payload)
         object.__setattr__(self, "_id", new_id)
         object.__setattr__(self, "_snapshot", payload.copy())
         return self
 
-    async def delete(self) -> None:
-        """Delete this instance by ``_id``."""
-        await self.delete_with_policy()
+    async def delete(self, *, db=None) -> None:
+        """Delete this instance by ``_id``.
 
-    async def delete_with_policy(self, *, on_delete: str = "restrict") -> None:
+        Args:
+            db: Optional database to delete from (overrides class-level binding).
+        """
+        await self.delete_with_policy(db=db)
+
+    async def delete_with_policy(self, *, db=None, on_delete: str = "restrict") -> None:
         """Delete this instance with a specified integrity policy.
 
         Args:
+            db: Optional database to delete from (overrides class-level binding).
             on_delete: One of "restrict", "set_null", or "cascade".
         """
         from sqler.models.async_integrity import (
@@ -229,7 +245,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         )
 
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = cls._resolve_binding(db)
         if self._id is None:
             raise ValueError("Cannot delete unsaved model (missing _id)")
         if on_delete not in {"restrict", "set_null", "cascade"}:
