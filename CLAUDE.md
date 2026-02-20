@@ -15,5 +15,5 @@ Document-oriented JSON store on SQLite.
 - [x] Validate promoted column names in `_ensure_table_with_promoted()` before building DDL
 - [ ] Wrap cursor operations in `try/finally` throughout `async_db.py` to prevent resource leaks on exception
 - [x] Restrict `execute_sql()` to SELECT/EXPLAIN/PRAGMA/WITH statements
-- [ ] Validate `FTSIndex` fields, index_name, and tokenizer in `fts.py` (CRITICAL — unvalidated strings in DDL)
-- [ ] Validate `checkpoint` mode parameter against allowlist in `ops.py`
+- [x] Validate `FTSIndex` fields, index_name, and tokenizer in `fts.py` + parameterize highlight/snippet tags
+- [x] Validate `checkpoint` mode parameter against allowlist in `ops.py`
