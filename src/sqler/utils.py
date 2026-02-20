@@ -46,6 +46,67 @@ def validate_table_name(table: str) -> str:
     return table
 
 
+def validate_field_name(name: str) -> str:
+    """Validate a dotted JSON field path (e.g. ``meta.level``).
+
+    Each segment must match ``[a-zA-Z_][a-zA-Z0-9_]*``.
+
+    Args:
+        name: Dotted field path to validate.
+
+    Returns:
+        str: The validated field name.
+
+    Raises:
+        InvalidFieldNameError: If any segment is invalid.
+    """
+    from sqler.exceptions import InvalidFieldNameError
+
+    if not isinstance(name, str) or not name:
+        raise InvalidFieldNameError(
+            f"Field name must be a non-empty string, got: {type(name).__name__}",
+            field=name,
+        )
+    segments = name.split(".")
+    for segment in segments:
+        if not _TABLE_NAME_PATTERN.match(segment):
+            raise InvalidFieldNameError(
+                f"Invalid field name: {name!r}. "
+                f"Each segment must match [a-zA-Z_][a-zA-Z0-9_]*",
+                field=name,
+            )
+    return name
+
+
+def validate_identifier(name: str) -> str:
+    """Validate a SQL identifier (index name, column name).
+
+    Must match ``[a-zA-Z_][a-zA-Z0-9_]*``.
+
+    Args:
+        name: Identifier to validate.
+
+    Returns:
+        str: The validated identifier.
+
+    Raises:
+        InvalidIdentifierError: If the identifier is invalid.
+    """
+    from sqler.exceptions import InvalidIdentifierError
+
+    if not isinstance(name, str) or not name:
+        raise InvalidIdentifierError(
+            f"Identifier must be a non-empty string, got: {type(name).__name__}",
+            identifier=name,
+        )
+    if not _TABLE_NAME_PATTERN.match(name):
+        raise InvalidIdentifierError(
+            f"Invalid identifier: {name!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*",
+            identifier=name,
+        )
+    return name
+
+
 def is_ref_dict(value: object) -> bool:
     """Check if a value is a reference dictionary.
 

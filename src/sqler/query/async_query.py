@@ -5,6 +5,7 @@ from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
 from sqler.query.expression import SQLerExpression
 from sqler.query.query import PaginatedResult, _rewrite_promoted_refs
+from sqler.utils import validate_field_name
 
 
 class AsyncSQLerQuery:
@@ -85,8 +86,11 @@ class AsyncSQLerQuery:
         parsed: list[tuple[str, bool]] = []
         for f in fields:
             if f.startswith("-"):
-                parsed.append((f[1:], True))
+                raw = f[1:]
+                validate_field_name(raw)
+                parsed.append((raw, True))
             else:
+                validate_field_name(f)
                 parsed.append((f, False))
         if len(parsed) == 1 and desc and not fields[0].startswith("-"):
             parsed[0] = (parsed[0][0], True)
@@ -161,6 +165,8 @@ class AsyncSQLerQuery:
         self, func: str, field: Optional[str] = None
     ) -> tuple[str, list[Any]]:
         """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX)."""
+        if field is not None and field != "_id":
+            validate_field_name(field)
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         if field is None:
             select = f"{func}(*)"
@@ -304,6 +310,7 @@ class AsyncSQLerQuery:
 
     async def distinct_values(self, field: str) -> list[Any]:
         """Return distinct values for a JSON field."""
+        validate_field_name(field)
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
         where = f"WHERE {self._expression.sql}" if self._expression else ""
@@ -411,6 +418,8 @@ class AsyncSQLerQuery:
             raise NoAdapterError("No adapter set for query")
         if not fields:
             raise ValueError("No fields to update")
+        for key in fields:
+            validate_field_name(key)
 
         import json
 
@@ -482,6 +491,8 @@ class AsyncSQLerQuery:
             raise NoAdapterError("No adapter set for query")
         if not fields:
             raise ValueError("No fields to update")
+        for key in fields:
+            validate_field_name(key)
 
         import json
 

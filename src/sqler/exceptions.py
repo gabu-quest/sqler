@@ -242,6 +242,34 @@ class InvalidTableNameError(SchemaError):
         self.table = table
 
 
+class InvalidFieldNameError(SchemaError):
+    """Raised when a field name / JSON path is invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        field: Optional[str] = None,
+        details: Optional[dict[str, Any]] = None,
+    ):
+        super().__init__(message, details=details)
+        self.field = field
+
+
+class InvalidIdentifierError(SchemaError):
+    """Raised when an identifier (index name, column name) is invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        identifier: Optional[str] = None,
+        details: Optional[dict[str, Any]] = None,
+    ):
+        super().__init__(message, details=details)
+        self.identifier = identifier
+
+
 # Hook Errors
 
 
