@@ -41,6 +41,7 @@ from datetime import datetime
 from typing import Any, Iterator, Optional
 
 from sqler.exceptions import ConnectionPoolExhaustedError
+from sqler.utils import validate_field_name, validate_identifier
 
 
 @dataclass
@@ -643,6 +644,9 @@ class PooledSQLerDB:
     ) -> None:
         """Create an index."""
         self._ensure_table(table)
+        validate_field_name(field) if not field.startswith("_") else validate_identifier(field)
+        if name is not None:
+            validate_identifier(name)
         idx_name = name or f"idx_{table}_{field.replace('.', '_')}"
         unique_sql = "UNIQUE" if unique else ""
         expr = f"json_extract(data, '$.{field}')" if not field.startswith("_") else field
