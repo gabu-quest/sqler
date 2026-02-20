@@ -799,6 +799,8 @@ class SQLerQuery:
 
         sql = f"DELETE FROM {self._table} {where}".strip()
         sql = " ".join(sql.split())
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
 
         cur = self._adapter.execute(sql, params)
         self._adapter.commit()
