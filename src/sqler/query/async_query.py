@@ -166,10 +166,14 @@ class AsyncSQLerQuery:
             select = f"{func}(*)"
         elif field == "_id":
             select = f"{func}(_id)"
+        elif self._promoted_fields and field in self._promoted_fields:
+            select = f"{func}({field})"
         else:
             select = f"{func}(json_extract(data, '$.{field}'))"
         sql = f"SELECT {select} FROM {self._table} {where}".strip()
         sql = " ".join(sql.split())
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
         return sql, params
 
