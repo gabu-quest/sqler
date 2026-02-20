@@ -1,5 +1,7 @@
+import asyncio
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any, List, Optional, Self
 
 import aiosqlite
@@ -10,40 +12,86 @@ from .abstract import AsyncAdapterABC
 
 
 class AsyncSQLiteAdapter(AsyncAdapterABC):
-    """Asynchronous SQLite connector using aiosqlite with built-in PRAGMAs."""
+    """Asynchronous SQLite connector using aiosqlite with connection pool.
 
-    def __init__(self, path: str = "sqler.db", pragmas: Optional[list[str]] = None):
+    Uses an ``asyncio.Queue``-based pool of connections with ``ContextVar``
+    per-task pinning so that sequential operations within one coroutine
+    (execute → auto_commit) share the same connection.
+    """
+
+    def __init__(
+        self,
+        path: str = "sqler.db",
+        pragmas: Optional[list[str]] = None,
+        pool_size: int = 1,
+    ):
         self.path = path
-        self.connection: Optional[aiosqlite.Connection] = None
         self.pragmas = pragmas or []
-        # Track transaction depth for nested transaction support
-        self._txn_depth: int = 0
+        self._pool_size = pool_size
+        self._pool: asyncio.Queue[aiosqlite.Connection] = asyncio.Queue(maxsize=pool_size)
+        self._all_conns: list[aiosqlite.Connection] = []
+        self._task_conn: ContextVar[Optional[aiosqlite.Connection]] = ContextVar(
+            "task_conn", default=None
+        )
+        self._txn_depth: ContextVar[int] = ContextVar("txn_depth", default=0)
+        self._connected = False
+        self._connect_lock = asyncio.Lock()
 
     async def connect(self) -> None:
-        self.connection = await aiosqlite.connect(self.path, uri=True)
-        # Apply configured pragmas (foreign_keys is included in factory defaults)
-        for pragma in self.pragmas:
-            await self.connection.execute(pragma)
-        await self.connection.commit()
+        for _ in range(self._pool_size):
+            conn = await aiosqlite.connect(self.path, uri=True)
+            for pragma in self.pragmas:
+                await conn.execute(pragma)
+            await conn.commit()
+            self._all_conns.append(conn)
+            self._pool.put_nowait(conn)
+        self._connected = True
+
+    async def _acquire(self) -> aiosqlite.Connection:
+        """Return the task-pinned connection, or get one from the pool and pin it."""
+        conn = self._task_conn.get(None)
+        if conn is not None:
+            return conn
+        if not self._connected:
+            async with self._connect_lock:
+                if not self._connected:
+                    await self.connect()
+        conn = await self._pool.get()
+        self._task_conn.set(conn)
+        return conn
+
+    async def _release(self) -> None:
+        """If not in a transaction, unpin the connection and return it to the pool."""
+        if self._txn_depth.get(0) > 0:
+            return
+        conn = self._task_conn.get(None)
+        if conn is not None:
+            self._task_conn.set(None)
+            self._pool.put_nowait(conn)
 
     async def close(self) -> None:
-        if self.connection:
-            await self.connection.close()
-            self.connection = None
+        for conn in self._all_conns:
+            try:
+                await conn.close()
+            except Exception:
+                pass
+        self._all_conns.clear()
+        # Drain the queue
+        while not self._pool.empty():
+            try:
+                self._pool.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self._connected = False
 
     async def execute(self, query: str, params: Optional[List[Any]] = None) -> aiosqlite.Cursor:
-        """Execute a SQL query with optional parameters and return cursor.
-
-        Automatically logs the query if query_logger is enabled.
-        """
-        if not self.connection:
-            await self.connect()
-        assert self.connection is not None  # Guaranteed by connect()
+        """Execute a SQL query with optional parameters and return cursor."""
+        conn = await self._acquire()
         start = time.perf_counter()
         error_msg = None
         cursor = None
         try:
-            cursor = await self.connection.execute(query, params or [])
+            cursor = await conn.execute(query, params or [])
         except Exception as e:
             error_msg = str(e)
             raise
@@ -59,100 +107,102 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         return cursor
 
     async def executemany(self, query: str, param_list: List[List[Any]]) -> aiosqlite.Cursor:
-        if not self.connection:
-            await self.connect()
-        assert self.connection is not None  # Guaranteed by connect()
-        cursor = await self.connection.executemany(query, param_list)
+        conn = await self._acquire()
+        cursor = await conn.executemany(query, param_list)
         await self.commit()
         return cursor
 
     async def executescript(self, script: str) -> aiosqlite.Cursor:
-        if not self.connection:
-            await self.connect()
-        assert self.connection is not None  # Guaranteed by connect()
-        cursor = await self.connection.executescript(script)
-        await self.connection.commit()
+        conn = await self._acquire()
+        cursor = await conn.executescript(script)
+        await conn.commit()
         return cursor
 
     async def commit(self) -> None:
-        if not self.connection:
+        conn = self._task_conn.get(None)
+        if conn is None:
             return
-        await self.connection.commit()
+        await conn.commit()
 
     async def auto_commit(self) -> None:
-        """Commit only if NOT inside an explicit transaction.
-
-        This allows model operations to commit individually when used standalone,
-        but respect outer transaction boundaries when wrapped in a transaction block.
-        """
-        if self._txn_depth == 0:
+        """Commit only if NOT inside an explicit transaction, then release connection."""
+        if self._txn_depth.get(0) == 0:
             await self.commit()
+            await self._release()
 
     @property
     def in_transaction(self) -> bool:
         """Return True if currently inside an explicit transaction."""
-        return self._txn_depth > 0
+        return self._txn_depth.get(0) > 0
 
     async def begin_transaction(self) -> None:
-        """Begin an explicit transaction (increments depth counter).
+        """Begin an explicit transaction (increments per-task depth counter).
 
         Uses BEGIN IMMEDIATE to acquire a write lock immediately,
         preventing SQLITE_BUSY errors during the transaction.
         Uses SAVEPOINTs for nested transactions to allow proper inner rollback.
         """
-        if not self.connection:
-            await self.connect()
-        assert self.connection is not None
-        if self._txn_depth == 0:
-            await self.connection.execute("BEGIN IMMEDIATE")
+        conn = await self._acquire()
+        depth = self._txn_depth.get(0)
+        if depth == 0:
+            await conn.execute("BEGIN IMMEDIATE")
         else:
-            # Nested: create savepoint
-            await self.connection.execute(f"SAVEPOINT sp_{self._txn_depth}")
-        self._txn_depth += 1
+            await conn.execute(f"SAVEPOINT sp_{depth}")
+        self._txn_depth.set(depth + 1)
 
     async def end_transaction(self, *, commit: bool = True) -> None:
-        """End an explicit transaction (decrements depth counter).
-
-        Args:
-            commit: If True, commit the transaction. If False, rollback.
-        """
-        if self._txn_depth <= 0:
+        """End an explicit transaction (decrements per-task depth counter)."""
+        depth = self._txn_depth.get(0)
+        if depth <= 0:
             return
-        self._txn_depth -= 1
+        depth -= 1
+        self._txn_depth.set(depth)
 
-        if self._txn_depth == 0 and self.connection:
+        conn = self._task_conn.get(None)
+        if conn is None:
+            return
+
+        if depth == 0:
             # Outermost: commit or rollback entire transaction
             if commit:
-                await self.connection.commit()
+                await conn.commit()
             else:
                 try:
-                    await self.connection.rollback()
+                    await conn.rollback()
                 except Exception:
-                    pass  # Rollback may fail if connection is broken
-        elif self.connection:
+                    pass
+            # Release connection back to pool
+            await self._release()
+        else:
             # Nested: release or rollback savepoint
-            sp = f"sp_{self._txn_depth}"
+            sp = f"sp_{depth}"
             try:
                 if commit:
-                    await self.connection.execute(f"RELEASE SAVEPOINT {sp}")
+                    await conn.execute(f"RELEASE SAVEPOINT {sp}")
                 else:
-                    await self.connection.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-                    await self.connection.execute(f"RELEASE SAVEPOINT {sp}")  # Clean up
+                    await conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                    await conn.execute(f"RELEASE SAVEPOINT {sp}")
             except Exception:
                 pass
 
     async def __aenter__(self) -> "AsyncSQLiteAdapter":
-        if not self.connection:
-            await self.connect()
+        await self._acquire()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        if not self.connection:
+        conn = self._task_conn.get(None)
+        if conn is None:
             return
         if exc_type is None:
-            await self.connection.commit()
+            await conn.commit()
         else:
-            await self.connection.rollback()
+            await conn.rollback()
+        await self._release()
+
+    @property
+    def connection(self) -> Optional[aiosqlite.Connection]:
+        """Backward-compat: returns the task-pinned connection, if any."""
+        return self._task_conn.get(None)
 
     # factories
     @classmethod
@@ -170,7 +220,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             uri = f"file:{ident}?mode=memory&cache=shared"
         else:
             uri = ":memory:"
-        return cls(uri, pragmas=pragmas)
+        return cls(uri, pragmas=pragmas, pool_size=1)
 
     @classmethod
     def on_disk(cls, path: str = "sqler.db") -> Self:
@@ -184,4 +234,4 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             "PRAGMA mmap_size = 268435456",
             "PRAGMA temp_store = MEMORY",
         ]
-        return cls(path, pragmas=pragmas)
+        return cls(path, pragmas=pragmas, pool_size=4)

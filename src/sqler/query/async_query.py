@@ -449,13 +449,10 @@ class AsyncSQLerQuery:
         sql = " ".join(sql.split())
 
         cur = await self._adapter.execute(sql, all_set_params + where_params)
-        await self._adapter.commit()
-
-        ch = await self._adapter.execute("SELECT changes();")
-        row = await ch.fetchone()
-        await ch.close()
+        rowcount = cur.rowcount
         await cur.close()
-        return int(row[0]) if row else 0
+        await self._adapter.auto_commit()
+        return rowcount if rowcount >= 0 else 0
 
     async def update_one(self, **fields) -> Optional[dict[str, Any]]:
         """Atomically update one matching row and return it (async).
@@ -560,8 +557,8 @@ class AsyncSQLerQuery:
         all_params = all_set_params + inner_where_params
         cur = await self._adapter.execute(sql, all_params)
         row = await cur.fetchone()
-        await self._adapter.commit()
         await cur.close()
+        await self._adapter.auto_commit()
 
         if row is None:
             return None
@@ -595,11 +592,7 @@ class AsyncSQLerQuery:
         sql = " ".join(sql.split())
 
         cur = await self._adapter.execute(sql, params)
-        await self._adapter.commit()
-
-        # Check changes() to get rowcount
-        ch = await self._adapter.execute("SELECT changes();")
-        row = await ch.fetchone()
-        await ch.close()
+        rowcount = cur.rowcount
         await cur.close()
-        return int(row[0]) if row else 0
+        await self._adapter.auto_commit()
+        return rowcount if rowcount >= 0 else 0
