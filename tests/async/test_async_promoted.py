@@ -191,3 +191,53 @@ class TestAsyncPromotedAggregates:
 
         avg = await AsyncJob.query().filter(F("status") == "pending").avg("priority")
         assert avg == 5.0
+
+
+@pytest.mark.asyncio
+class TestAsyncPromotedDelete:
+    """Regression tests for delete queries on promoted columns.
+
+    Previously, delete() did not call _rewrite_promoted_refs, so WHERE clauses
+    on promoted columns used json_extract(data, '$.field') instead of the direct
+    column. Since promoted fields are stripped from the JSON blob on save,
+    json_extract returned NULL and deletes silently matched nothing.
+    """
+
+    async def test_delete_with_promoted_filter(self, async_db_promoted):
+        await AsyncJob(name="a", status="pending").save()
+        await AsyncJob(name="b", status="running").save()
+        await AsyncJob(name="c", status="pending").save()
+
+        deleted = await AsyncJob.query().filter(F("status") == "pending").delete_all()
+        assert deleted == 2
+
+        remaining = await AsyncJob.query().all()
+        assert len(remaining) == 1
+        assert remaining[0].name == "b"
+
+    async def test_delete_with_in_list_promoted(self, async_db_promoted):
+        await AsyncJob(name="a", status="pending").save()
+        await AsyncJob(name="b", status="running").save()
+        await AsyncJob(name="c", status="failed").save()
+
+        deleted = await AsyncJob.query().filter(
+            F("status").in_list(["pending", "failed"])
+        ).delete_all()
+        assert deleted == 2
+
+        remaining = await AsyncJob.query().all()
+        assert len(remaining) == 1
+        assert remaining[0].status == "running"
+
+    async def test_delete_with_multiple_promoted_filters(self, async_db_promoted):
+        await AsyncJob(name="a", status="pending", priority=1).save()
+        await AsyncJob(name="b", status="pending", priority=10).save()
+        await AsyncJob(name="c", status="running", priority=10).save()
+
+        deleted = await AsyncJob.query().filter(
+            (F("status") == "pending") & (F("priority") == 10)
+        ).delete_all()
+        assert deleted == 1
+
+        remaining = await AsyncJob.query().all()
+        assert len(remaining) == 2
