@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import ClassVar, Optional, Type, TypeVar
 
 from pydantic import BaseModel, PrivateAttr
@@ -81,11 +82,22 @@ class SQLerModel(BaseModel):
     def set_db(cls: Type[TModel], db: SQLerDB, table: Optional[str] = None) -> None:
         """Bind this model class to a database and table.
 
+        .. deprecated::
+            Use :meth:`using` for queries and ``save(db=db)``/``delete(db=db)``
+            for writes.
+
         Args:
             db: Database instance to use for persistence.
             table: Optional table name. Defaults to lowercase plural of the
                 class name (e.g., ``User`` → ``users``).
         """
+        warnings.warn(
+            f"{cls.__name__}.set_db() is deprecated. "
+            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            "set_db() will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         explicit = getattr(cls, "__tablename__", None)
         chosen = table or explicit or _default_table_name(cls.__name__)
         cls._db = db
