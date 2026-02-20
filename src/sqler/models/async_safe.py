@@ -91,13 +91,16 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
             pass
         return inst  # type: ignore[return-value]
 
-    async def save(self: TASafe) -> TASafe:  # type: ignore[override]
+    async def save(self: TASafe, *, db=None) -> TASafe:  # type: ignore[override]
         """Insert or update with optimistic locking and intent rebasing.
 
         If the save fails due to a stale version (another process updated
         the row), and the changes qualify for rebasing (based on ``_rebase_config``),
         the library will automatically fetch the latest version and reapply
         your changes on top of it.
+
+        Args:
+            db: Optional database to write to (overrides class-level binding).
 
         Returns:
             Self: The saved instance with updated ``_id`` and ``_version``.
@@ -106,7 +109,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
             StaleVersionError: If the version is stale and cannot be rebased.
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = cls._resolve_binding(db)
 
         # Get the rebase configuration for this model class
         rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
@@ -156,10 +159,10 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     raise
                 if self._id is None:
                     raise
-                latest = await cls.from_id(self._id)
-                if latest is None:
+                latest_doc = await db.find_document_with_version(table, self._id)
+                if latest_doc is None:
                     raise
-                latest_payload = latest.model_dump(exclude={"_id"})
+                latest_payload = {k: v for k, v in latest_doc.items() if k not in ("_id", "_version")}
                 rebased = {**latest_payload}
                 for k, v in target_payload.items():
                     if delta is None or k not in delta:
@@ -167,12 +170,9 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                 if delta is not None:
                     rebased = apply_numeric_scalar_deltas(rebased, delta)
                 target_payload = rebased
-                self._version = getattr(latest, "_version", 0)
+                self._version = latest_doc.get("_version", 0)
                 try:
-                    snap_payload = {
-                        k: v for k, v in latest_payload.items() if k not in {"_id", "_version"}
-                    }
-                    self._snapshot = snap_payload  # type: ignore[attr-defined]
+                    self._snapshot = latest_payload.copy()  # type: ignore[attr-defined]
                 except Exception:
                     pass
             except sqlite3.OperationalError as e:
