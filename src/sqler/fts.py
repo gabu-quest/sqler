@@ -29,12 +29,20 @@ Usage::
     results = fts.search_with_highlights("python", highlight_tags=("<b>", "</b>"))
 """
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
+
+from sqler.utils import validate_field_name, validate_identifier
 
 if TYPE_CHECKING:
     from sqler import SQLerDB
     from sqler.models import SQLerModel
+
+# Tokenizer values: alphanumeric, spaces, underscores only.
+# Covers all standard FTS5 tokenizers (porter, unicode61, ascii, trigram)
+# and numeric options (e.g. "unicode61 remove_diacritics 2").
+_TOKENIZER_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_ ]*$")
 
 
 @dataclass
@@ -110,6 +118,17 @@ class FTSIndex:
             tokenizer: FTS5 tokenizer (default: porter unicode61)
             content_sync: Keep index synced with content table
         """
+        # Validate all inputs that will be interpolated into SQL
+        for f in fields:
+            validate_field_name(f)
+        if index_name is not None:
+            validate_identifier(index_name)
+        if not _TOKENIZER_PATTERN.match(tokenizer):
+            raise ValueError(
+                f"Invalid tokenizer: {tokenizer!r}. "
+                f"Must contain only alphanumeric characters, spaces, and underscores."
+            )
+
         self.model_class = model_class
         self.fields = fields
         self.tokenizer = tokenizer
@@ -388,12 +407,14 @@ class FTSIndex:
         """
         db = self._get_db()
 
-        # Build highlight expressions for each field
+        # Build highlight expressions for each field using ? placeholders
         highlight_exprs = []
+        highlight_params: list[Any] = []
         for i, field in enumerate(self.fields):
             highlight_exprs.append(
-                f"highlight({self.index_table}, {i}, '{highlight_start}', '{highlight_end}') as {field}_hl"
+                f"highlight({self.index_table}, {i}, ?, ?) as {field}_hl"
             )
+            highlight_params.extend([highlight_start, highlight_end])
 
         sql = f"""
         SELECT rowid, bm25({self.index_table}) as score, {", ".join(highlight_exprs)}
@@ -403,7 +424,7 @@ class FTSIndex:
         LIMIT ? OFFSET ?;
         """
 
-        cursor = db.adapter.execute(sql, [query, limit, offset])
+        cursor = db.adapter.execute(sql, highlight_params + [query, limit, offset])
         rows = cursor.fetchall()
 
         if not rows:
@@ -465,12 +486,12 @@ class FTSIndex:
         field_idx = 0 if field is None else self.fields.index(field)
 
         sql = f"""
-        SELECT snippet({self.index_table}, {field_idx}, '{highlight_start}', '{highlight_end}', '...', {max_tokens})
+        SELECT snippet({self.index_table}, {field_idx}, ?, ?, '...', {max_tokens})
         FROM {self.index_table}
         WHERE rowid = ? AND {self.index_table} MATCH ?;
         """
 
-        cursor = db.adapter.execute(sql, [model._id, query])
+        cursor = db.adapter.execute(sql, [highlight_start, highlight_end, model._id, query])
         row = cursor.fetchone()
         return row[0] if row else ""
 

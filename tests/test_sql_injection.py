@@ -1,11 +1,14 @@
 """Adversarial tests for SQL injection prevention via field/identifier validation."""
 
 import re
+from unittest.mock import MagicMock
 
 import pytest
 
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import InvalidFieldNameError, InvalidIdentifierError
+from sqler.fts import FTSIndex
+from sqler.ops import checkpoint
 from sqler.query.query import SQLerQuery
 from sqler.utils import validate_field_name, validate_identifier
 
@@ -247,3 +250,91 @@ class TestExecuteSqlRestriction:
     def test_allows_reads(self, db, sql):
         # Should not raise
         db.execute_sql(sql)
+
+
+# ---------------------------------------------------------------------------
+# FTSIndex injection tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeModel:
+    """Minimal fake model for FTSIndex tests (no real DB needed)."""
+
+    _table = "articles"
+    _db = None
+
+
+class TestFTSIndexRejectsInjection:
+    @pytest.mark.parametrize("evil", EVIL_FIELDS)
+    def test_field_injection(self, evil):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name|non-empty string"):
+            FTSIndex(_FakeModel, fields=[evil])
+
+    def test_mixed_fields_one_evil(self):
+        with pytest.raises(InvalidFieldNameError, match="Invalid field name"):
+            FTSIndex(_FakeModel, fields=["title", "x'; DROP TABLE t; --"])
+
+    @pytest.mark.parametrize("evil", EVIL_IDENTIFIERS)
+    def test_index_name_injection(self, evil):
+        with pytest.raises(InvalidIdentifierError, match="Invalid identifier|non-empty string"):
+            FTSIndex(_FakeModel, fields=["title"], index_name=evil)
+
+    @pytest.mark.parametrize(
+        "evil_tokenizer",
+        [
+            "porter'); DROP TABLE t; --",
+            "unicode61'; DELETE FROM t; --",
+            "x\"); DROP TABLE t",
+            "",
+        ],
+    )
+    def test_tokenizer_injection(self, evil_tokenizer):
+        with pytest.raises(ValueError, match="Invalid tokenizer"):
+            FTSIndex(_FakeModel, fields=["title"], tokenizer=evil_tokenizer)
+
+    @pytest.mark.parametrize(
+        "valid",
+        ["porter unicode61", "unicode61", "ascii", "trigram", "porter"],
+    )
+    def test_accepts_valid_tokenizer(self, valid):
+        fts = FTSIndex(_FakeModel, fields=["title"], tokenizer=valid)
+        assert fts.tokenizer == valid
+
+    def test_accepts_valid_fields(self):
+        fts = FTSIndex(_FakeModel, fields=["title", "content", "meta_tags"])
+        assert fts.fields == ["title", "content", "meta_tags"]
+
+    def test_accepts_valid_index_name(self):
+        fts = FTSIndex(_FakeModel, fields=["title"], index_name="articles_search")
+        assert fts._index_table == "articles_search"
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint mode validation tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointModeValidation:
+    @pytest.mark.parametrize(
+        "evil_mode",
+        [
+            "PASSIVE); DROP TABLE items; --",
+            "'; DELETE FROM sqlite_master; --",
+            "FULL; PRAGMA writable_schema=ON",
+            "not_a_mode",
+        ],
+    )
+    def test_rejects_evil_mode(self, db, evil_mode):
+        with pytest.raises(ValueError, match="Invalid checkpoint mode"):
+            checkpoint(db, mode=evil_mode)
+
+    @pytest.mark.parametrize("valid", ["PASSIVE", "FULL", "RESTART", "TRUNCATE"])
+    def test_accepts_valid_mode(self, db, valid):
+        # In-memory DBs use journal mode=memory, so checkpoint is a no-op
+        # but it should not raise ValueError
+        result = checkpoint(db, mode=valid)
+        assert isinstance(result, dict)
+
+    def test_case_insensitive(self, db):
+        result = checkpoint(db, mode="passive")
+        assert isinstance(result, dict)
