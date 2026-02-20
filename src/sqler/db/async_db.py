@@ -173,12 +173,10 @@ class AsyncSQLerDB:
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;"
         )
         cur = await self.adapter.execute(sql, params_list)
-        await self.adapter.auto_commit()
+        rowcount = cur.rowcount
         await cur.close()
-        ch = await self.adapter.execute("SELECT changes();")
-        row = await ch.fetchone()
-        await ch.close()
-        if not row or int(row[0]) == 0:
+        await self.adapter.auto_commit()
+        if rowcount == 0:
             raise StaleVersionError("Stale version: update rejected")
         return _id, expected_version + 1
 
@@ -494,13 +492,10 @@ class AsyncSQLerDB:
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
             [payload, _id, expected_version, expected_version, expected_version],
         )
-        await self.adapter.auto_commit()
+        rowcount = cur.rowcount
         await cur.close()
-        # Check changes() to confirm update actually happened
-        ch = await self.adapter.execute("SELECT changes();")
-        row = await ch.fetchone()
-        await ch.close()
-        if not row or int(row[0]) == 0:
+        await self.adapter.auto_commit()
+        if rowcount == 0:
             raise StaleVersionError("Stale version: update rejected")
         return _id, expected_version + 1
 
