@@ -126,3 +126,68 @@ class TestAsyncPromotedSafeModel:
         loaded = await AsyncSafeJob.from_id(j._id)
         assert loaded.status == "running"
         assert loaded._version == 1
+
+
+@pytest.mark.asyncio
+class TestAsyncPromotedAggregates:
+    """Regression tests for aggregate queries on promoted columns.
+
+    Previously, _build_aggregate_query did not call _rewrite_promoted_refs,
+    so WHERE clauses on promoted columns used json_extract(data, '$.field')
+    instead of the direct column. Since promoted fields are stripped from the
+    JSON blob on save, json_extract returned NULL and aggregates returned 0.
+    """
+
+    async def test_count_with_promoted_filter(self, async_db_promoted):
+        await AsyncJob(name="a", status="pending", priority=1).save()
+        await AsyncJob(name="b", status="running", priority=5).save()
+        await AsyncJob(name="c", status="pending", priority=3).save()
+
+        count = await AsyncJob.query().filter(F("status") == "pending").count()
+        assert count == 2
+
+    async def test_count_with_multiple_promoted_filters(self, async_db_promoted):
+        await AsyncJob(name="a", status="pending", priority=1).save()
+        await AsyncJob(name="b", status="pending", priority=10).save()
+        await AsyncJob(name="c", status="running", priority=10).save()
+
+        count = await AsyncJob.query().filter(
+            (F("status") == "pending") & (F("priority") == 10)
+        ).count()
+        assert count == 1
+
+    async def test_count_with_in_list_promoted(self, async_db_promoted):
+        await AsyncJob(name="a", status="pending").save()
+        await AsyncJob(name="b", status="running").save()
+        await AsyncJob(name="c", status="failed").save()
+
+        count = await AsyncJob.query().filter(
+            F("status").in_list(["pending", "running"])
+        ).count()
+        assert count == 2
+
+    async def test_sum_on_promoted_field(self, async_db_promoted):
+        await AsyncJob(name="a", status="pending", priority=3).save()
+        await AsyncJob(name="b", status="pending", priority=7).save()
+        await AsyncJob(name="c", status="running", priority=5).save()
+
+        total = await AsyncJob.query().filter(F("status") == "pending").sum("priority")
+        assert total == 10
+
+    async def test_min_max_on_promoted_field(self, async_db_promoted):
+        await AsyncJob(name="a", priority=1).save()
+        await AsyncJob(name="b", priority=10).save()
+        await AsyncJob(name="c", priority=5).save()
+
+        mn = await AsyncJob.query().min("priority")
+        mx = await AsyncJob.query().max("priority")
+        assert mn == 1
+        assert mx == 10
+
+    async def test_avg_on_promoted_with_filter(self, async_db_promoted):
+        await AsyncJob(name="a", status="pending", priority=2).save()
+        await AsyncJob(name="b", status="pending", priority=8).save()
+        await AsyncJob(name="c", status="running", priority=100).save()
+
+        avg = await AsyncJob.query().filter(F("status") == "pending").avg("priority")
+        assert avg == 5.0
