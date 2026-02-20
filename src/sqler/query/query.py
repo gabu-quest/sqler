@@ -200,6 +200,8 @@ class SQLerQuery:
         Returns:
             SQLerQuery: New query instance.
         """
+        for f in fields:
+            validate_field_name(f)
         return self._clone(select_fields=list(fields))
 
     def with_version(self) -> Self:

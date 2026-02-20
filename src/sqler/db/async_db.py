@@ -332,10 +332,16 @@ class AsyncSQLerDB:
         Raises:
             ValueError: If the query is not a read-only statement.
         """
-        first_word = query.strip().split()[0].upper() if query.strip() else ""
+        stripped = query.strip()
+        first_word = stripped.split()[0].upper() if stripped else ""
         if first_word not in ("SELECT", "EXPLAIN", "PRAGMA", "WITH"):
             raise ValueError(
                 "execute_sql only accepts read-only queries (SELECT/EXPLAIN/PRAGMA/WITH)"
+            )
+        # Reject multi-statement queries (semicolon before the end)
+        if ";" in stripped.rstrip(";"):
+            raise ValueError(
+                "execute_sql does not allow multi-statement queries"
             )
         cur = await self.adapter.execute(query, params or [])
         rows = await cur.fetchall()
