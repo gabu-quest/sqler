@@ -451,6 +451,9 @@ def vacuum(db: "SQLerDB") -> float:
     return (time.perf_counter() - start) * 1000
 
 
+_VALID_CHECKPOINT_MODES = frozenset({"PASSIVE", "FULL", "RESTART", "TRUNCATE"})
+
+
 def checkpoint(db: "SQLerDB", mode: str = "PASSIVE") -> dict[str, int]:
     """Force a WAL checkpoint.
 
@@ -460,8 +463,17 @@ def checkpoint(db: "SQLerDB", mode: str = "PASSIVE") -> dict[str, int]:
 
     Returns:
         Dict with 'busy', 'log', and 'checkpointed' page counts.
+
+    Raises:
+        ValueError: If mode is not a valid checkpoint mode.
     """
-    cursor = db.adapter.execute(f"PRAGMA wal_checkpoint({mode});")
+    mode_upper = mode.upper()
+    if mode_upper not in _VALID_CHECKPOINT_MODES:
+        raise ValueError(
+            f"Invalid checkpoint mode: {mode!r}. "
+            f"Must be one of: {', '.join(sorted(_VALID_CHECKPOINT_MODES))}"
+        )
+    cursor = db.adapter.execute(f"PRAGMA wal_checkpoint({mode_upper});")
     row = cursor.fetchone()
     return {
         "busy": row[0],
@@ -714,8 +726,18 @@ async def async_vacuum(db: "AsyncSQLerDB") -> float:
 
 
 async def async_checkpoint(db: "AsyncSQLerDB", mode: str = "PASSIVE") -> dict[str, int]:
-    """Force an async WAL checkpoint."""
-    cursor = await db.adapter.execute(f"PRAGMA wal_checkpoint({mode});")
+    """Force an async WAL checkpoint.
+
+    Raises:
+        ValueError: If mode is not a valid checkpoint mode.
+    """
+    mode_upper = mode.upper()
+    if mode_upper not in _VALID_CHECKPOINT_MODES:
+        raise ValueError(
+            f"Invalid checkpoint mode: {mode!r}. "
+            f"Must be one of: {', '.join(sorted(_VALID_CHECKPOINT_MODES))}"
+        )
+    cursor = await db.adapter.execute(f"PRAGMA wal_checkpoint({mode_upper});")
     row = await cursor.fetchone()
     await cursor.close()
     return {
