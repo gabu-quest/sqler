@@ -204,6 +204,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(f"EXPLAIN {sql}", params)
         rows = await cur.fetchall()
         await cur.close()
+        await self._adapter.auto_commit()
         return rows
 
     async def explain_query_plan(self) -> list[tuple]:
@@ -221,6 +222,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(f"EXPLAIN QUERY PLAN {sql}", params)
         rows = await cur.fetchall()
         await cur.close()
+        await self._adapter.auto_commit()
         return rows
 
     async def all(self) -> list[str]:
@@ -230,6 +232,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
+        await self._adapter.auto_commit()
         return [row[0] for row in rows]
 
     async def first(self) -> Optional[str]:
@@ -246,6 +249,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
         await cur.close()
+        await self._adapter.auto_commit()
         return int(row[0]) if row else 0
 
     async def sum(self, field: str) -> Optional[float]:
@@ -256,6 +260,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
         await cur.close()
+        await self._adapter.auto_commit()
         return float(row[0]) if row and row[0] is not None else None
 
     async def avg(self, field: str) -> Optional[float]:
@@ -266,6 +271,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
         await cur.close()
+        await self._adapter.auto_commit()
         return float(row[0]) if row and row[0] is not None else None
 
     async def min(self, field: str) -> Optional[Any]:
@@ -276,6 +282,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
         await cur.close()
+        await self._adapter.auto_commit()
         return row[0] if row else None
 
     async def max(self, field: str) -> Optional[Any]:
@@ -286,6 +293,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
         await cur.close()
+        await self._adapter.auto_commit()
         return row[0] if row else None
 
     async def exists(self) -> bool:
@@ -305,6 +313,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
+        await self._adapter.auto_commit()
         return [row[0] for row in rows if row[0] is not None]
 
     async def paginate(self, page: int, per_page: int = 20) -> PaginatedResult:
@@ -346,6 +355,7 @@ class AsyncSQLerQuery:
         cur = await self._adapter.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
+        await self._adapter.auto_commit()
         ver_offset = 1 if self._include_version else 0
         promoted_start = 2 + ver_offset
 
