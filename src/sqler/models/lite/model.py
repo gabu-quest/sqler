@@ -8,6 +8,7 @@ where Pydantic's native extensions cannot be installed.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import fields
 from typing import (
     TYPE_CHECKING,
@@ -82,11 +83,22 @@ class SQLerLiteModel(SQLerLiteModelBase):
     def set_db(cls: Type[T], db: "SQLerDB", table: Optional[str] = None) -> None:
         """Bind this model class to a database and table.
 
+        .. deprecated::
+            Use :meth:`using` for queries and ``save(db=db)``/``delete(db=db)``
+            for writes.
+
         Args:
             db: Database instance to use for persistence.
             table: Optional table name. Defaults to lowercase plural of the
                 class name (e.g., ``User`` → ``users``).
         """
+        warnings.warn(
+            f"{cls.__name__}.set_db() is deprecated. "
+            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            "set_db() will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         explicit = getattr(cls, "__tablename__", None)
         chosen = table or explicit or _default_table_name(cls.__name__)
         cls._db = db
@@ -99,6 +111,19 @@ class SQLerLiteModel(SQLerLiteModelBase):
     def bind(cls: Type[T], db: "SQLerDB", table: Optional[str] = None) -> None:
         """Alias for set_db()."""
         cls.set_db(db, table)
+
+    @classmethod
+    def using(cls: Type[T], db: "SQLerDB") -> "SQLerQuerySet[T]":
+        """Return a queryset bound to a specific DB (no class-level mutation)."""
+        from sqler.models.queryset import SQLerQuerySet
+        from sqler.query import SQLerQuery
+        from sqler.utils import validate_table_name
+
+        table = validate_table_name(
+            getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
+        )
+        q = SQLerQuery(table=table, adapter=db.adapter)
+        return SQLerQuerySet[T](cls, q)
 
     @classmethod
     def db(cls: Type[T]) -> "SQLerDB":

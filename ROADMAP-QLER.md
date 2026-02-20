@@ -31,7 +31,8 @@ Branch: `feat/qler-prerequisites`
 - 69 tests (37 sync + 32 async) covering all 8 model variants
 - Completes BUG-2: `using()` covers queries, this covers writes
 
-### M-5: Deprecate `set_db()` + Sync `using()` Parity ⬚
-- Add `using()` classmethod to sync `SQLerModel` (async already has it)
-- Deprecate `set_db()` with `warnings.warn()` pointing to `using()`
-- Update docstrings and any internal usage
+### M-5: Deprecate `set_db()` + Lite `using()` Parity ✅
+- Add `using()` classmethod to `SQLerLiteModel` and `AsyncSQLerLiteModel`
+- Deprecate `set_db()` with `warnings.warn()` on all 4 base model classes
+- Safe models inherit warning via `super().set_db()`
+- `bind()` aliases on lite models also trigger warning

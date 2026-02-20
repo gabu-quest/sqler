@@ -3,12 +3,12 @@
 Document-oriented JSON store on SQLite.
 
 ## Active Roadmaps
-- [qler-prerequisites](./ROADMAP-QLER.md) — current milestone: M-5
+- [qler-prerequisites](./ROADMAP-QLER.md) — all milestones complete
 
 ## Follow-up TODO
 
 ### From BUG-1/BUG-2 plan (not in scope)
-- [ ] Remove `set_db()` (backward compat concern — `using()` is the recommended path now)
+- [~] Deprecate `set_db()` — soft deprecation with `warnings.warn()` added (M-5); full removal deferred
 - [x] Add `db` param to `save()`/`delete()` instance methods (M-4 complete)
 - [ ] Sync adapter changes (already uses thread-local; no concurrency bug — but could add `using()` parity)
 
