@@ -413,3 +413,94 @@ class TestPromotedAggregates:
         total = Job.query().filter(F("status") == "pending").sum("priority")
         assert total == 10
         db.close()
+
+
+# ---- Delete queries on promoted columns ----
+
+
+class TestPromotedDelete:
+    """Regression tests for delete queries on promoted columns.
+
+    Previously, delete() did not call _rewrite_promoted_refs, so WHERE clauses
+    on promoted columns used json_extract(data, '$.field') instead of the direct
+    column. Since promoted fields are stripped from the JSON blob on save,
+    json_extract returned NULL and deletes silently matched nothing.
+    """
+
+    def test_delete_with_promoted_filter(self):
+        db = SQLerDB.in_memory(shared=False)
+
+        class Job(SQLerModel):
+            __promoted__ = {
+                "status": "TEXT DEFAULT 'pending'",
+                "priority": "INTEGER DEFAULT 0",
+            }
+            name: str = ""
+            status: str = "pending"
+            priority: int = 0
+
+        Job.set_db(db, "jobs")
+        Job(name="a", status="pending").save()
+        Job(name="b", status="running").save()
+        Job(name="c", status="pending").save()
+
+        deleted = Job.query().filter(F("status") == "pending").delete_all()
+        assert deleted == 2
+
+        remaining = Job.query().all()
+        assert len(remaining) == 1
+        assert remaining[0].name == "b"
+        db.close()
+
+    def test_delete_with_in_list_promoted(self):
+        db = SQLerDB.in_memory(shared=False)
+
+        class Job(SQLerModel):
+            __promoted__ = {
+                "status": "TEXT DEFAULT 'pending'",
+                "priority": "INTEGER DEFAULT 0",
+            }
+            name: str = ""
+            status: str = "pending"
+            priority: int = 0
+
+        Job.set_db(db, "jobs")
+        Job(name="a", status="pending").save()
+        Job(name="b", status="running").save()
+        Job(name="c", status="failed").save()
+
+        deleted = Job.query().filter(
+            F("status").in_list(["pending", "failed"])
+        ).delete_all()
+        assert deleted == 2
+
+        remaining = Job.query().all()
+        assert len(remaining) == 1
+        assert remaining[0].status == "running"
+        db.close()
+
+    def test_delete_with_multiple_promoted_filters(self):
+        db = SQLerDB.in_memory(shared=False)
+
+        class Job(SQLerModel):
+            __promoted__ = {
+                "status": "TEXT DEFAULT 'pending'",
+                "priority": "INTEGER DEFAULT 0",
+            }
+            name: str = ""
+            status: str = "pending"
+            priority: int = 0
+
+        Job.set_db(db, "jobs")
+        Job(name="a", status="pending", priority=1).save()
+        Job(name="b", status="pending", priority=10).save()
+        Job(name="c", status="running", priority=10).save()
+
+        deleted = Job.query().filter(
+            (F("status") == "pending") & (F("priority") == 10)
+        ).delete_all()
+        assert deleted == 1
+
+        remaining = Job.query().all()
+        assert len(remaining) == 2
+        db.close()
