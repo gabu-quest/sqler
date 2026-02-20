@@ -213,6 +213,7 @@ class AsyncSQLerDB:
             cur = await self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
         row = await cur.fetchone()
         await cur.close()
+        await self.adapter.auto_commit()
         if not row:
             return None
         obj = json.loads(row[1])
@@ -245,6 +246,7 @@ class AsyncSQLerDB:
         )
         rows = await cur.fetchall()
         await cur.close()
+        await self.adapter.auto_commit()
         # Build lookup dict for ordering
         by_id: dict[int, dict[str, Any]] = {}
         for row in rows:
@@ -326,6 +328,7 @@ class AsyncSQLerDB:
         cur = await self.adapter.execute(query, params or [])
         rows = await cur.fetchall()
         await cur.close()
+        await self.adapter.auto_commit()
         docs: list[dict[str, Any]] = []
         for row in rows:
             if len(row) >= 2:
@@ -412,6 +415,7 @@ class AsyncSQLerDB:
 
         rows = await cur.fetchall()
         await cur.close()
+        await self.adapter.auto_commit()
 
         indexes = []
         for row in rows:
@@ -442,6 +446,7 @@ class AsyncSQLerDB:
         )
         row = await cur.fetchone()
         await cur.close()
+        await self.adapter.auto_commit()
         return row is not None
 
     # ---- versioned (optimistic locking) helpers ----
@@ -462,6 +467,7 @@ class AsyncSQLerDB:
         cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
         cols = [row[1] for row in await cur.fetchall()]
         await cur.close()
+        await self.adapter.auto_commit()
         if "_version" not in cols:
             cur2 = await self.adapter.execute(
                 f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
@@ -512,6 +518,7 @@ class AsyncSQLerDB:
         )
         row = await cur.fetchone()
         await cur.close()
+        await self.adapter.auto_commit()
         if not row:
             return None
         obj = json.loads(row[1])
