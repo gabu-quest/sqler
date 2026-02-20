@@ -60,8 +60,10 @@ class AsyncSQLerDB:
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
             [table],
         )
-        row = await cur.fetchone()
-        await cur.close()
+        try:
+            row = await cur.fetchone()
+        finally:
+            await cur.close()
         exists = row is not None
 
         if not exists:
@@ -75,8 +77,10 @@ class AsyncSQLerDB:
             await self.adapter.auto_commit()
         else:
             cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
-            rows = await cur.fetchall()
-            await cur.close()
+            try:
+                rows = await cur.fetchall()
+            finally:
+                await cur.close()
             existing_cols = {r[1] for r in rows}
             for col_name, col_def in promoted.items():
                 if col_name not in existing_cols:
@@ -111,9 +115,11 @@ class AsyncSQLerDB:
             params = [payload] + list(promoted_vals.values())
             sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(placeholders)});"
             cur = await self.adapter.execute(sql, params)
-            await self.adapter.auto_commit()
-            last_id = cur.lastrowid
-            await cur.close()
+            try:
+                await self.adapter.auto_commit()
+                last_id = cur.lastrowid
+            finally:
+                await cur.close()
             return last_id
         else:
             set_parts = ["data = json(?)"]
@@ -124,8 +130,10 @@ class AsyncSQLerDB:
             params.append(_id)
             sql = f"UPDATE {table} SET {', '.join(set_parts)} WHERE _id = ?;"
             cur = await self.adapter.execute(sql, params)
-            await self.adapter.auto_commit()
-            await cur.close()
+            try:
+                await self.adapter.auto_commit()
+            finally:
+                await cur.close()
             return _id
 
     async def upsert_with_version_promoted(
@@ -155,9 +163,11 @@ class AsyncSQLerDB:
             params = [payload] + list(promoted_vals.values())
             sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(placeholders)});"
             cur = await self.adapter.execute(sql, params)
-            await self.adapter.auto_commit()
-            last_id = cur.lastrowid
-            await cur.close()
+            try:
+                await self.adapter.auto_commit()
+                last_id = cur.lastrowid
+            finally:
+                await cur.close()
             return last_id, 0
 
         if expected_version is None:
@@ -175,8 +185,10 @@ class AsyncSQLerDB:
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;"
         )
         cur = await self.adapter.execute(sql, params_list)
-        rowcount = cur.rowcount
-        await cur.close()
+        try:
+            rowcount = cur.rowcount
+        finally:
+            await cur.close()
         await self.adapter.auto_commit()
         if rowcount == 0:
             raise StaleVersionError("Stale version: update rejected")
@@ -186,9 +198,11 @@ class AsyncSQLerDB:
         await self._ensure_table(table)
         payload = json.dumps(doc)
         cur = await self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
-        await self.adapter.auto_commit()
-        last_id = cur.lastrowid  # type: ignore[attr-defined]
-        await cur.close()
+        try:
+            await self.adapter.auto_commit()
+            last_id = cur.lastrowid  # type: ignore[attr-defined]
+        finally:
+            await cur.close()
         return last_id
 
     async def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
@@ -199,8 +213,10 @@ class AsyncSQLerDB:
         cur = await self.adapter.execute(
             f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id]
         )
-        await self.adapter.auto_commit()
-        await cur.close()
+        try:
+            await self.adapter.auto_commit()
+        finally:
+            await cur.close()
         return _id
 
     async def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
@@ -213,8 +229,10 @@ class AsyncSQLerDB:
             )
         else:
             cur = await self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
-        row = await cur.fetchone()
-        await cur.close()
+        try:
+            row = await cur.fetchone()
+        finally:
+            await cur.close()
         await self.adapter.auto_commit()
         if not row:
             return None
@@ -246,8 +264,10 @@ class AsyncSQLerDB:
             f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
             list(ids),
         )
-        rows = await cur.fetchall()
-        await cur.close()
+        try:
+            rows = await cur.fetchall()
+        finally:
+            await cur.close()
         await self.adapter.auto_commit()
         # Build lookup dict for ordering
         by_id: dict[int, dict[str, Any]] = {}
@@ -267,8 +287,10 @@ class AsyncSQLerDB:
         """
         await self._ensure_table(table)
         cur = await self.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [_id])
-        await self.adapter.auto_commit()
-        await cur.close()
+        try:
+            await self.adapter.auto_commit()
+        finally:
+            await cur.close()
 
     async def bulk_upsert(self, table: str, docs: list[dict[str, Any]]) -> list[int]:
         """Upsert multiple documents efficiently.
@@ -295,8 +317,10 @@ class AsyncSQLerDB:
                     f"INSERT INTO {table} (data) VALUES (json(?));",
                     [payload],
                 )
-                new_id = int(cur.lastrowid)  # type: ignore[attr-defined]
-                await cur.close()
+                try:
+                    new_id = int(cur.lastrowid)  # type: ignore[attr-defined]
+                finally:
+                    await cur.close()
                 assigned.append(new_id)
                 doc["_id"] = new_id
             else:
@@ -344,8 +368,10 @@ class AsyncSQLerDB:
                 "execute_sql does not allow multi-statement queries"
             )
         cur = await self.adapter.execute(query, params or [])
-        rows = await cur.fetchall()
-        await cur.close()
+        try:
+            rows = await cur.fetchall()
+        finally:
+            await cur.close()
         await self.adapter.auto_commit()
         docs: list[dict[str, Any]] = []
         for row in rows:
@@ -394,8 +420,10 @@ class AsyncSQLerDB:
         where_sql = f"WHERE {where}" if where else ""
         ddl = f"CREATE {unique_sql} INDEX IF NOT EXISTS {idx_name} ON {table} ({expr}) {where_sql};"
         cur = await self.adapter.execute(ddl)
-        await self.adapter.auto_commit()
-        await cur.close()
+        try:
+            await self.adapter.auto_commit()
+        finally:
+            await cur.close()
 
     async def drop_index(self, name: str) -> None:
         """Drop an index by name.
@@ -406,8 +434,10 @@ class AsyncSQLerDB:
         validate_identifier(name)
         ddl = f"DROP INDEX IF EXISTS {name};"
         cur = await self.adapter.execute(ddl)
-        await self.adapter.auto_commit()
-        await cur.close()
+        try:
+            await self.adapter.auto_commit()
+        finally:
+            await cur.close()
 
     async def list_indexes(self, table: str | None = None) -> list[dict[str, Any]]:
         """List indexes in the database.
@@ -435,8 +465,10 @@ class AsyncSQLerDB:
             """
             cur = await self.adapter.execute(query)
 
-        rows = await cur.fetchall()
-        await cur.close()
+        try:
+            rows = await cur.fetchall()
+        finally:
+            await cur.close()
         await self.adapter.auto_commit()
 
         indexes = []
@@ -466,8 +498,10 @@ class AsyncSQLerDB:
         cur = await self.adapter.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;", [name]
         )
-        row = await cur.fetchone()
-        await cur.close()
+        try:
+            row = await cur.fetchone()
+        finally:
+            await cur.close()
         await self.adapter.auto_commit()
         return row is not None
 
@@ -487,15 +521,19 @@ class AsyncSQLerDB:
             return
         await self._ensure_table(table)
         cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
-        cols = [row[1] for row in await cur.fetchall()]
-        await cur.close()
+        try:
+            cols = [row[1] for row in await cur.fetchall()]
+        finally:
+            await cur.close()
         await self.adapter.auto_commit()
         if "_version" not in cols:
             cur2 = await self.adapter.execute(
                 f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
             )
-            await self.adapter.auto_commit()
-            await cur2.close()
+            try:
+                await self.adapter.auto_commit()
+            finally:
+                await cur2.close()
         # Update cache
         self._versioned_tables.add(table)
 
@@ -509,9 +547,11 @@ class AsyncSQLerDB:
                 f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",
                 [payload],
             )
-            await self.adapter.auto_commit()
-            last_id = cur.lastrowid  # type: ignore[attr-defined]
-            await cur.close()
+            try:
+                await self.adapter.auto_commit()
+                last_id = cur.lastrowid  # type: ignore[attr-defined]
+            finally:
+                await cur.close()
             return last_id, 0
         if expected_version is None:
             raise ValueError("expected_version required for update")
@@ -520,8 +560,10 @@ class AsyncSQLerDB:
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
             [payload, _id, expected_version, expected_version, expected_version],
         )
-        rowcount = cur.rowcount
-        await cur.close()
+        try:
+            rowcount = cur.rowcount
+        finally:
+            await cur.close()
         await self.adapter.auto_commit()
         if rowcount == 0:
             raise StaleVersionError("Stale version: update rejected")
@@ -538,8 +580,10 @@ class AsyncSQLerDB:
             f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;",
             [_id],
         )
-        row = await cur.fetchone()
-        await cur.close()
+        try:
+            row = await cur.fetchone()
+        finally:
+            await cur.close()
         await self.adapter.auto_commit()
         if not row:
             return None
