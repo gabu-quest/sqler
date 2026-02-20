@@ -9,6 +9,7 @@ from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import NotBoundError
 from sqler.models.queryset import SQLerQuerySet
 from sqler.query import SQLerExpression
+from sqler.utils import validate_table_name
 
 TModel = TypeVar("TModel", bound="SQLerModel")
 
@@ -209,6 +210,20 @@ class SQLerModel(BaseModel):
         """Return a queryset for chaining and execution."""
         db, table = cls._require_binding()
         q = db.query(table)
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            q = q._clone(promoted_fields=list(promoted.keys()))
+        return SQLerQuerySet[TModel](cls, q)
+
+    @classmethod
+    def using(cls: Type[TModel], db: SQLerDB) -> SQLerQuerySet[TModel]:
+        """Return a queryset bound to a specific DB (no class-level mutation)."""
+        table = validate_table_name(
+            getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
+        )
+        from sqler.query import SQLerQuery
+
+        q = SQLerQuery(table=table, adapter=db.adapter)
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))

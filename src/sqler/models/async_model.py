@@ -12,6 +12,7 @@ from sqler.models.async_queryset import AsyncSQLerQuerySet
 from sqler.models.model import _default_table_name
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
+from sqler.utils import validate_table_name
 
 TAModel = TypeVar("TAModel", bound="AsyncSQLerModel")
 
@@ -121,6 +122,18 @@ class AsyncSQLerModel(BaseModel):
     @classmethod
     def query(cls: Type[TAModel]) -> AsyncSQLerQuerySet[TAModel]:
         db, table = cls._require_binding()
+        q = AsyncSQLerQuery(table=table, adapter=db.adapter)
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            q = q._clone(promoted_fields=list(promoted.keys()))
+        return AsyncSQLerQuerySet[TAModel](cls, q)
+
+    @classmethod
+    def using(cls: Type[TAModel], db: AsyncSQLerDB) -> AsyncSQLerQuerySet[TAModel]:
+        """Return a queryset bound to a specific DB (no class-level mutation)."""
+        table = validate_table_name(
+            getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
+        )
         q = AsyncSQLerQuery(table=table, adapter=db.adapter)
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
