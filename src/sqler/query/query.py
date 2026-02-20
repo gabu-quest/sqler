@@ -3,6 +3,7 @@ from typing import Any, Optional, Self
 
 from sqler.adapter.abstract import AdapterABC
 from sqler.query import SQLerExpression
+from sqler.utils import validate_field_name
 
 
 def _rewrite_promoted_refs(sql: str, promoted_fields: list[str]) -> str:
@@ -157,8 +158,11 @@ class SQLerQuery:
         parsed: list[tuple[str, bool]] = []
         for f in fields:
             if f.startswith("-"):
-                parsed.append((f[1:], True))
+                raw = f[1:]
+                validate_field_name(raw)
+                parsed.append((raw, True))
             else:
+                validate_field_name(f)
                 parsed.append((f, False))
         # backward compat: single field + desc=True
         if len(parsed) == 1 and desc and not fields[0].startswith("-"):
@@ -266,6 +270,8 @@ class SQLerQuery:
         Returns:
             tuple[str, list[Any]]: SQL string and parameter list.
         """
+        if field is not None and field != "_id":
+            validate_field_name(field)
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         if field is None:
             select = f"{func}(*)"
@@ -451,6 +457,7 @@ class SQLerQuery:
         Returns:
             list[Any]: Distinct values for the field.
         """
+        validate_field_name(field)
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
         where = f"WHERE {self._expression.sql}" if self._expression else ""
@@ -584,6 +591,8 @@ class SQLerQuery:
             raise NoAdapterError("No adapter set for query")
         if not fields:
             raise ValueError("No fields to update")
+        for key in fields:
+            validate_field_name(key)
 
         import json
 
@@ -661,6 +670,8 @@ class SQLerQuery:
             raise NoAdapterError("No adapter set for query")
         if not fields:
             raise ValueError("No fields to update")
+        for key in fields:
+            validate_field_name(key)
 
         import json
 
