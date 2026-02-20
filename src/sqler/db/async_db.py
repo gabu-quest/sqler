@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import StaleVersionError
-from sqler.utils import validate_table_name
+from sqler.utils import validate_field_name, validate_identifier, validate_table_name
 
 
 class AsyncSQLerDB:
@@ -52,6 +52,8 @@ class AsyncSQLerDB:
         """Create or upgrade a table with promoted columns (async)."""
         table = validate_table_name(table)
         checks = checks or {}
+        for col_name in promoted:
+            validate_identifier(col_name)
 
         # Check if table exists
         cur = await self.adapter.execute(
@@ -313,6 +315,8 @@ class AsyncSQLerDB:
     ) -> list[dict[str, Any]]:
         """Run a custom SELECT and return lightweight row mappings.
 
+        Only read-only statements (SELECT, EXPLAIN, PRAGMA, WITH) are allowed.
+
         When the result set exposes a ``data`` column alongside ``_id``, the
         JSON payload is decoded and merged with ``_id``. For ad-hoc projections
         (e.g. ``SELECT _id``) the method returns simple dicts keyed by the
@@ -324,7 +328,15 @@ class AsyncSQLerDB:
 
         Returns:
             list[dict[str, Any]]: Decoded documents with ``_id`` included.
+
+        Raises:
+            ValueError: If the query is not a read-only statement.
         """
+        first_word = query.strip().split()[0].upper() if query.strip() else ""
+        if first_word not in ("SELECT", "EXPLAIN", "PRAGMA", "WITH"):
+            raise ValueError(
+                "execute_sql only accepts read-only queries (SELECT/EXPLAIN/PRAGMA/WITH)"
+            )
         cur = await self.adapter.execute(query, params or [])
         rows = await cur.fetchall()
         await cur.close()
@@ -367,6 +379,9 @@ class AsyncSQLerDB:
             where: Optional partial-index WHERE clause.
         """
         await self._ensure_table(table)
+        validate_field_name(field) if not field.startswith("_") else validate_identifier(field)
+        if name is not None:
+            validate_identifier(name)
         idx_name = name or f"idx_{table}_{field.replace('.', '_')}"
         unique_sql = "UNIQUE" if unique else ""
         expr = f"json_extract(data, '$.{field}')" if not field.startswith("_") else field
@@ -382,6 +397,7 @@ class AsyncSQLerDB:
         Args:
             name: Index name.
         """
+        validate_identifier(name)
         ddl = f"DROP INDEX IF EXISTS {name};"
         cur = await self.adapter.execute(ddl)
         await self.adapter.auto_commit()
