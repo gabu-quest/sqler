@@ -161,13 +161,16 @@ class SQLerLiteSafeModel(SQLerLiteModel):
 
         return SQLerQuerySet[TSafe](cls, q)
 
-    def save(self: TSafe) -> TSafe:
+    def save(self: TSafe, *, db=None) -> TSafe:
         """Insert or update with optimistic locking and intent rebasing.
 
         If the save fails due to a stale version (another process updated
         the row), and the changes qualify for rebasing (based on ``_rebase_config``),
         the library will automatically fetch the latest version and reapply
         your changes on top of it.
+
+        Args:
+            db: Optional database to write to (overrides class-level binding).
 
         Returns:
             Self: The saved instance with updated ``_id`` and ``_version``.
@@ -176,7 +179,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
             StaleVersionError: If the version is stale and cannot be rebased.
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = cls._resolve_binding(db)
 
         # Get the rebase configuration for this model class
         rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
@@ -219,10 +222,10 @@ class SQLerLiteSafeModel(SQLerLiteModel):
                     raise
                 if self._id is None:
                     raise
-                latest = cls.from_id(self._id)
-                if latest is None:
+                latest_doc = db.find_document_with_version(table, self._id)
+                if latest_doc is None:
                     raise
-                latest_payload = latest._dump_with_relations()
+                latest_payload = {k: v for k, v in latest_doc.items() if k not in ("_id", "_version")}
                 rebased = {**latest_payload}
                 # Apply our non-numeric desired fields from current target
                 for k, v in target_payload.items():
@@ -232,11 +235,8 @@ class SQLerLiteSafeModel(SQLerLiteModel):
                 if delta is not None:
                     rebased = apply_numeric_scalar_deltas(rebased, delta)
                 target_payload = rebased
-                object.__setattr__(self, "_version", getattr(latest, "_version", 0))
-                snap_payload = {
-                    k: v for k, v in latest_payload.items() if k not in {"_id", "_version"}
-                }
-                object.__setattr__(self, "_snapshot", snap_payload)
+                object.__setattr__(self, "_version", latest_doc.get("_version", 0))
+                object.__setattr__(self, "_snapshot", latest_payload.copy())
 
             # Exponential backoff with jitter
             sleep = (base * (2 ** min(attempt, 10))) + (random.random() * 0.0005)

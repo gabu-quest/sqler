@@ -21,11 +21,14 @@ Branch: `feat/qler-prerequisites`
 - Prevents resource leaks if exceptions fire between `execute()` and `cur.close()`
 - Mechanical change — no API changes, no behavior changes
 
-### M-4: Per-Call DB Binding for Instance Methods ⬚
+### M-4: Per-Call DB Binding for Instance Methods ✅
 - Add `db` param to `save()` and `delete()` on sync `SQLerModel`
 - Add `db` param to `save()` and `delete()` on async `AsyncSQLerModel`
 - Mirror to `SafeModel` / `AsyncSafeModel` (optimistic locking variants)
 - Mirror to `SQLerLiteModel` / `AsyncSQLerLiteModel` (dataclass variants)
+- Safe model rebase path uses direct `db.find_document_with_version()` instead of `cls.from_id()` (respects per-call db)
+- `_resolve_binding(db=None)` added to all 4 base model classes
+- 69 tests (37 sync + 32 async) covering all 8 model variants
 - Completes BUG-2: `using()` covers queries, this covers writes
 
 ### M-5: Deprecate `set_db()` + Sync `using()` Parity ⬚
