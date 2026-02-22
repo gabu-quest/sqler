@@ -20,6 +20,11 @@
 
 ## Core — Models, Save, Query
 
+> **Deprecation notice:** `set_db()` is soft-deprecated. Prefer `using()` for class-level
+> binding and `save(db=)` / `delete(db=)` for per-call DB targeting. `set_db()` still
+> works but emits a `DeprecationWarning`. Examples below use `set_db()` for brevity;
+> see [Per-Call DB Binding](#per-call-db-binding) for the recommended pattern.
+
 ### [C01] Sync quickstart: models, save, query
 
 ```python
@@ -127,6 +132,26 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### Per-Call DB Binding
+
+The recommended way to bind models is `using()` (class-level) and `save(db=)` / `delete(db=)` (instance-level):
+
+```python
+# Class-level: using() returns a bound proxy (no global mutation)
+users = User.using(db).query().filter(F("age") > 30).all()
+user = User.using(db).from_id(1)
+
+# Instance-level: target a specific DB for writes
+user = User(name="Alice", age=30)
+user.save(db=db1)       # writes to db1
+user.delete(db=db2)     # deletes from db2
+
+# Works with all model variants: SQLerModel, AsyncSQLerModel,
+# SQLerLiteModel, AsyncSQLerLiteModel, SafeModel, AsyncSafeModel
+```
+
+Both patterns avoid global `set_db()` state and are safe for multi-DB scenarios.
 
 ---
 
