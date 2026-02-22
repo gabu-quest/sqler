@@ -23,6 +23,7 @@ from sqler import registry
 from sqler.exceptions import NotBoundError
 from sqler.models.lite.base import SQLerLiteModelBase
 from sqler.models.lite.model import _default_table_name
+from sqler.utils import validate_table_name
 
 if TYPE_CHECKING:
     from sqler.db.async_db import AsyncSQLerDB
@@ -95,7 +96,6 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """Return a queryset bound to a specific DB (no class-level mutation)."""
         from sqler.models.async_queryset import AsyncSQLerQuerySet
         from sqler.query.async_query import AsyncSQLerQuery
-        from sqler.utils import validate_table_name
 
         table = validate_table_name(
             getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
@@ -118,7 +118,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """Return (db, table) using the provided db or the class-level binding."""
         if db is not None:
             table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-            return db, table
+            return db, validate_table_name(table)
         return cls._require_binding()
 
     @classmethod
@@ -283,8 +283,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             referrers = await async_find_referrers(db, table, self._id)
             await async_cascade_delete(db, referrers, set())
 
-        await db.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [self._id])
-        await db.adapter.auto_commit()
+        await db.delete_document(table, self._id)
         object.__setattr__(self, "_id", None)
 
     async def refresh(self: TAModel) -> TAModel:
