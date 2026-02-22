@@ -22,6 +22,7 @@ from typing import (
 from sqler import registry
 from sqler.exceptions import NotBoundError
 from sqler.models.lite.base import SQLerLiteModelBase
+from sqler.utils import validate_table_name
 
 if TYPE_CHECKING:
     from sqler.db.sqler_db import SQLerDB
@@ -117,7 +118,6 @@ class SQLerLiteModel(SQLerLiteModelBase):
         """Return a queryset bound to a specific DB (no class-level mutation)."""
         from sqler.models.queryset import SQLerQuerySet
         from sqler.query import SQLerQuery
-        from sqler.utils import validate_table_name
 
         table = validate_table_name(
             getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
@@ -150,7 +150,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         """Return (db, table) using the provided db or the class-level binding."""
         if db is not None:
             table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-            return db, table
+            return db, validate_table_name(table)
         return cls._require_binding()
 
     @classmethod

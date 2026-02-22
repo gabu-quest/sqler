@@ -74,7 +74,7 @@ class AsyncSQLerModel(BaseModel):
         """Return (db, table) using the provided db or the class-level binding."""
         if db is not None:
             table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-            return db, table
+            return db, validate_table_name(table)
         return cls._require_binding()
 
     @classmethod
@@ -234,7 +234,8 @@ class AsyncSQLerModel(BaseModel):
         db, table = cls._resolve_binding(db)
         promoted = getattr(cls, "__promoted__", None)
         if promoted and table not in db._promoted_columns:
-            await cls._ensure_schema()
+            checks = getattr(cls, "__checks__", None)
+            await db._ensure_table_with_promoted(table, promoted, checks)
         elif not promoted:
             await db._ensure_table(table)
         payload = await self._adump_with_relations()
@@ -284,8 +285,7 @@ class AsyncSQLerModel(BaseModel):
             referrers = await async_find_referrers(db, table, self._id)
             await async_cascade_delete(db, referrers, set())
 
-        await db.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [self._id])
-        await db.adapter.auto_commit()
+        await db.delete_document(table, self._id)
         self._id = None
 
     async def refresh(self: TAModel) -> TAModel:
