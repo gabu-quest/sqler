@@ -36,3 +36,12 @@ Branch: `feat/qler-prerequisites`
 - Deprecate `set_db()` with `warnings.warn()` on all 4 base model classes
 - Safe models inherit warning via `super().set_db()`
 - `bind()` aliases on lite models also trigger warning
+
+### M-6: Security Fixes + Test Hardening ✅
+- `_resolve_binding` validates table names via `validate_table_name()` in all 4 model files
+- Async `delete_with_policy` routes through `db.delete_document()` instead of raw adapter calls
+- Async promoted `save(db=...)` uses per-call DB for schema setup (not class-level)
+- Async test fixture conversion: `make_async_db_pair()` → `@pytest_asyncio.fixture` with try/finally cleanup
+- Removed standalone `assert _id > 0` assertion
+- Added 6 coverage tests: lite delete_with_policy, lite delete_wrong_db_is_noop (sync+async), promoted save to alternate db (async), resolve_binding fallback (async)
+- Added missing `_version` assertion to `test_safe_save_default_behavior_unchanged`

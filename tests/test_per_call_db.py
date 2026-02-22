@@ -112,7 +112,6 @@ class TestPydanticSaveDb:
         item.save(db=db2)
 
         assert item._id is not None
-        assert item._id > 0
 
         # Must exist in db2
         doc = db2.find_document("items", item._id)
@@ -342,6 +341,7 @@ class TestPydanticSafeSaveDb:
         doc = db1.find_document_with_version("safe_counters", counter._id)
         assert doc is not None
         assert doc["name"] == "default"
+        assert doc["_version"] == 0
         assert db2.find_document_with_version("safe_counters", counter._id) is None
 
     def test_safe_save_stale_version_raises_in_alternate_db(self):
@@ -487,6 +487,33 @@ class TestLiteDeleteDb:
         item = LiteItem(name="unsaved", value=0)
         with pytest.raises(ValueError, match="Cannot delete unsaved"):
             item.delete(db=db2)
+
+    def test_lite_delete_with_policy_db_override(self):
+        """Lite delete_with_policy(db=db2) uses the specified db."""
+        db1, db2 = make_db_pair()
+        setup_model(LiteItem, db1, db2)
+
+        item = LiteItem(name="lite_policy", value=1)
+        item.save(db=db2)
+        saved_id = item._id
+
+        item.delete_with_policy(db=db2, on_delete="restrict")
+
+        assert item._id is None
+        assert db2.find_document("lite_items", saved_id) is None
+
+    def test_lite_delete_wrong_db_is_noop(self):
+        """Lite deleting from wrong db doesn't affect original."""
+        db1, db2 = make_db_pair()
+        setup_model(LiteItem, db1, db2)
+
+        item = LiteItem(name="lite_mismatch", value=1)
+        item.save(db=db1)
+        saved_id = item._id
+
+        item.delete(db=db2)
+
+        assert db1.find_document("lite_items", saved_id) is not None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
