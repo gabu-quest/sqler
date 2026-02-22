@@ -163,7 +163,7 @@ class SQLerModel(BaseModel):
         """Return (db, table) using the provided db or the class-level binding."""
         if db is not None:
             table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-            return db, table
+            return db, validate_table_name(table)
         return cls._require_binding()
 
     @classmethod
