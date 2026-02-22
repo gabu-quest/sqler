@@ -2,7 +2,13 @@
 
 > See also: [API Reference](API.md) for all 46 tested contracts.
 
-All examples use in-memory SQLite for speed and no side effects. Run with `uv`:
+All examples use in-memory SQLite for speed and no side effects.
+
+> **Note:** Examples use `set_db()` for brevity. In new code, prefer `using()` for
+> class-level binding and `save(db=)` / `delete(db=)` for per-call DB targeting.
+> See the [API Reference — Per-Call DB Binding](API.md#per-call-db-binding) section.
+
+Run with `uv`:
 
 ```bash
 uv run python examples/01_quickstart_sync.py
