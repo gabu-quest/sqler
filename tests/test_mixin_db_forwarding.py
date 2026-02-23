@@ -278,7 +278,7 @@ class TestMixinDbForwarding:
 
         doc = db2.find_document("soft_items", item._id)
         assert doc is not None
-        assert doc["deleted_at"] is not None
+        assert doc["deleted_at"] == item.deleted_at.isoformat()
 
         # db1 isolation: item was never written to db1
         assert db1.find_document("soft_items", item._id) is None
