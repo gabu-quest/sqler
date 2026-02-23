@@ -10,7 +10,7 @@ from typing import Optional
 
 import pytest
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
-from sqler.exceptions import NotBoundError, StaleVersionError
+from sqler.exceptions import InvalidIdentifierError, InvalidTableNameError, NotBoundError, StaleVersionError
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
 from sqler.models.utils import RebaseConfig
@@ -824,3 +824,130 @@ class TestCrossCuttingEdgeCases:
         assert doc["status"] == "draft"
 
         assert db1.find_document("promoted_items", p._id) is None
+
+
+# ── Negative / Hardening Tests ──────────────────────────────────────────────
+
+
+class TestNegativeInputs:
+    """Tests for invalid inputs that must fail clearly, not silently."""
+
+    def test_save_with_wrong_db_type_raises(self):
+        """save(db=42) should fail with AttributeError, not silently corrupt."""
+        db = SQLerDB.in_memory(shared=False)
+        Item.set_db(db)
+        item = Item(name="test", value=1)
+        with pytest.raises(AttributeError, match="object has no attribute"):
+            item.save(db=42)
+
+    def test_delete_with_wrong_db_type_raises(self):
+        """delete(db='wrong') should fail with AttributeError."""
+        db = SQLerDB.in_memory(shared=False)
+        Item.set_db(db)
+        item = Item(name="test", value=1).save()
+        with pytest.raises(AttributeError, match="object has no attribute"):
+            item.delete(db="wrong")
+
+    def test_using_none_raises(self):
+        """using(None) should raise AttributeError (no .adapter on None)."""
+        db = SQLerDB.in_memory(shared=False)
+        Item.set_db(db)
+        with pytest.raises(AttributeError, match="object has no attribute"):
+            Item.using(None).all()
+
+    def test_using_wrong_type_raises(self):
+        """using(42) should raise AttributeError (no .adapter on int)."""
+        db = SQLerDB.in_memory(shared=False)
+        Item.set_db(db)
+        with pytest.raises(AttributeError, match="object has no attribute"):
+            Item.using(42).all()
+
+    def test_save_unbound_model_no_db_raises(self):
+        """save() on unbound model without db= raises NotBoundError."""
+
+        class Unbound(SQLerModel):
+            __tablename__ = "unbounds"
+            name: str
+
+        with pytest.raises(NotBoundError):
+            Unbound(name="test").save()
+
+    def test_save_unbound_model_with_db_succeeds(self):
+        """save(db=db) on unbound model works — no set_db needed."""
+        db = SQLerDB.in_memory(shared=False)
+
+        class Unbound(SQLerModel):
+            __tablename__ = "unbounds"
+            name: str
+
+        u = Unbound(name="works")
+        u.save(db=db)
+        assert u._id is not None
+        doc = db.find_document("unbounds", u._id)
+        assert doc is not None
+        assert doc["name"] == "works"
+
+
+class TestResolveBindingInjection:
+    """Tests that _resolve_binding validates table names against injection."""
+
+    def test_malicious_tablename_via_save_db_raises(self):
+        """Model with SQL-injection __tablename__ is rejected by _resolve_binding."""
+
+        class Evil(SQLerModel):
+            __tablename__ = "users; DROP TABLE users--"
+            name: str
+
+        db = SQLerDB.in_memory(shared=False)
+        with pytest.raises((InvalidIdentifierError, InvalidTableNameError)):
+            Evil(name="hacker").save(db=db)
+
+    def test_tablename_with_semicolon_rejected(self):
+        """Semicolons in table names are rejected."""
+
+        class Evil2(SQLerModel):
+            __tablename__ = "foo;bar"
+            name: str
+
+        db = SQLerDB.in_memory(shared=False)
+        with pytest.raises((InvalidIdentifierError, InvalidTableNameError)):
+            Evil2(name="test").save(db=db)
+
+    def test_tablename_with_quotes_rejected(self):
+        """Quotes in table names are rejected."""
+
+        class Evil3(SQLerModel):
+            __tablename__ = "foo'bar"
+            name: str
+
+        db = SQLerDB.in_memory(shared=False)
+        with pytest.raises((InvalidIdentifierError, InvalidTableNameError)):
+            Evil3(name="test").save(db=db)
+
+    def test_empty_tablename_falls_through_to_default(self):
+        """Empty __tablename__ is falsy so _resolve_binding derives from class name."""
+        db = SQLerDB.in_memory(shared=False)
+
+        class EmptyName(SQLerModel):
+            __tablename__ = ""
+            name: str
+
+        e = EmptyName(name="test")
+        e.save(db=db)
+        # Falls through to default: "emptynames"
+        doc = db.find_document("emptynames", e._id)
+        assert doc is not None
+        assert doc["name"] == "test"
+
+    def test_valid_tablename_with_underscores_works(self):
+        """Valid table names with underscores are accepted."""
+
+        class Normal(SQLerModel):
+            __tablename__ = "my_valid_table"
+            name: str
+
+        db = SQLerDB.in_memory(shared=False)
+        n = Normal(name="ok").save(db=db)
+        doc = db.find_document("my_valid_table", n._id)
+        assert doc is not None
+        assert doc["name"] == "ok"

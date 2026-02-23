@@ -1,6 +1,7 @@
 """Tests for connection pooling."""
 
 import os
+import re
 import tempfile
 import threading
 import time
@@ -106,9 +107,10 @@ class TestConnectionPool:
             stats = pool.stats()
             data = stats.to_dict()
 
-            assert "total_connections" in data
-            assert "max_connections" in data
-            assert "created_at" in data
+            assert data["total_connections"] >= 1
+            assert data["max_connections"] == 5
+            assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", data["created_at"])
+            assert data["total_checkouts"] == 0
 
             pool.close()
 
