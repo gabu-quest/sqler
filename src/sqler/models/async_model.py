@@ -341,6 +341,7 @@ class AsyncSQLerModel(BaseModel):
 
     async def _adump_with_relations(self) -> dict:
         async def aencode(value: Any):
+            from datetime import datetime
             from sqler.models.async_model import AsyncSQLerModel
             from sqler.models.model import SQLerModel
 
@@ -354,6 +355,8 @@ class AsyncSQLerModel(BaseModel):
                     raise ValueError("Related model must be saved before saving parent")
                 table = value.__class__._table
                 return {"_table": table, "_id": value._id}
+            if isinstance(value, datetime):
+                return value.isoformat()
             if isinstance(value, list):
                 return [await aencode(v) for v in value]
             if isinstance(value, dict):
