@@ -45,3 +45,30 @@ Branch: `feat/qler-prerequisites`
 - Removed standalone `assert _id > 0` assertion
 - Added 6 coverage tests: lite delete_with_policy, lite delete_wrong_db_is_noop (sync+async), promoted save to alternate db (async), resolve_binding fallback (async)
 - Added missing `_version` assertion to `test_safe_save_default_behavior_unchanged`
+
+### M-7: Mixin `db=` Forwarding ✅
+- Added `*, db=None` to all 21 mixin methods that override `save()`/`delete()`
+- `_require_binding()` → `_resolve_binding(db)` in AuditLogMixin/AsyncAuditLogMixin
+- 30 tests (15 sync + 15 async) covering all mixin variants with db= forwarding
+- Hardened assertions: `assert_recent_utc()`, exact value comparisons, veto paths, db isolation
+
+### M-8: Mixin Test Coverage Gaps ⬚
+Coverage gaps identified by test auditor — all relate to mixin behavior not exercised by the db= forwarding tests.
+
+- [ ] Persisted doc audit field round-trip: verify `doc["created_by"]`, `doc["updated_by"]`, `doc["created_at"]` match in-memory values after read-back from DB
+- [ ] AuditLogMixin log entry fields: assert `logs[0]["user"]`, `logs[0]["timestamp"]`, `logs[0]["snapshot"]` in save tests
+- [ ] SoftDeleteMixin class methods with `using()`: `active()`, `with_deleted()`, `only_deleted()` return correct filtered sets
+- [ ] AuditLogMixin silent-update branch: `save()` with no field changes writes no audit entry
+- [ ] HooksMixin `_hooks_enabled = False` bypass: veto hook skipped when hooks disabled
+- [ ] AuditMixin getter exception-swallowing: raising getter → `created_by is None`
+- [ ] FullMixin delete path with `db=`: `hard_delete(db=db2)` through full MRO
+
+### M-9: BUG-6 — `F("_id")` Silently Returns No Results ✅
+**Found:** 2026-02-23 | **Severity:** Medium
+
+`F("_id")` generates `json_extract(data, '$._id')` in WHERE clause, but `_id` is a real SQLite column (rowid), not stored in the JSON `data` blob. Query completes without error but finds zero rows.
+
+- [x] Added `_META_COLUMNS = ["_id", "_version"]` constant to `query.py`
+- [x] Applied `_rewrite_promoted_refs(sql, _META_COLUMNS)` in all SQL-building paths: `_build_query`, `_build_aggregate_query`, `distinct_values`, `update`, `update_one`, `delete` (sync + async)
+- [x] Also fixed F-expression SET values in `update()`/`update_one()` (e.g., `update(score=F("_id") + 0)`)
+- [x] 29 tests (15 sync + 14 async) covering filter, order_by, aggregate, version filter, promoted interaction, SQL-level rewrite verification
