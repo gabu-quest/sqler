@@ -48,3 +48,19 @@ def test_cascade_deletes_referrers_and_avoids_cycles():
     a.delete_with_policy(on_delete="cascade")
     assert Address.from_id(a._id) is None
     assert User.from_id(u._id) is None
+
+
+def test_delete_with_policy_invalid_mode_raises():
+    """Invalid on_delete mode raises ValueError with helpful message."""
+    db = SQLerDB.in_memory(shared=False)
+    Address.set_db(db)
+    a = Address(city="Tokyo").save()
+
+    with pytest.raises(ValueError, match="on_delete must be"):
+        a.delete_with_policy(on_delete="destroy")
+
+    with pytest.raises(ValueError, match="on_delete must be"):
+        a.delete_with_policy(on_delete="")
+
+    with pytest.raises(ValueError, match="on_delete must be"):
+        a.delete_with_policy(on_delete="CASCADE")  # case-sensitive

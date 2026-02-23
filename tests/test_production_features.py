@@ -1,6 +1,7 @@
 """Tests for production features: backup, health, migrations, metrics, audit."""
 
 import os
+import re
 import tempfile
 import time
 
@@ -49,18 +50,20 @@ class TestHealthCheck:
         db = SQLerDB.in_memory(shared=False)
         status = health_check(db)
 
-        assert "databases" in status.details
         assert isinstance(status.details["databases"], list)
+        assert len(status.details["databases"]) >= 1
+        assert any(db["name"] == "main" for db in status.details["databases"])
 
     def test_health_status_to_dict(self):
-        """HealthStatus can be serialized to dict."""
+        """HealthStatus can be serialized to dict with correct values."""
         db = SQLerDB.in_memory(shared=False)
         status = health_check(db)
         data = status.to_dict()
 
-        assert "healthy" in data
-        assert "latency_ms" in data
-        assert "timestamp" in data
+        assert data["healthy"] is True
+        assert data["latency_ms"] >= 0
+        assert data["message"] == "OK"
+        assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", data["timestamp"])
 
 
 class TestDatabaseStats:
@@ -91,14 +94,15 @@ class TestDatabaseStats:
         assert stats.index_count >= 1
 
     def test_stats_to_dict(self):
-        """DatabaseStats can be serialized."""
+        """DatabaseStats can be serialized with correct values."""
         db = SQLerDB.in_memory(shared=False)
         stats = get_stats(db)
         data = stats.to_dict()
 
-        assert "table_count" in data
-        assert "page_size" in data
-        assert "timestamp" in data
+        assert data["table_count"] == 0
+        assert data["page_size"] == 4096
+        assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", data["timestamp"])
+        assert data["page_count"] >= 0
 
 
 # ============================================================================
@@ -134,7 +138,7 @@ class TestBackupRestore:
             db.close()
 
     def test_backup_result_to_dict(self):
-        """BackupResult can be serialized."""
+        """BackupResult can be serialized with correct values."""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "source.db")
             backup_path = os.path.join(tmpdir, "backup.db")
@@ -143,9 +147,10 @@ class TestBackupRestore:
             result = backup(db, backup_path)
             data = result.to_dict()
 
-            assert "success" in data
-            assert "size_bytes" in data
-            assert "timestamp" in data
+            assert data["success"] is True
+            assert data["size_bytes"] > 0
+            assert data["duration_ms"] >= 0
+            assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", data["timestamp"])
 
             db.close()
 
