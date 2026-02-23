@@ -24,9 +24,10 @@
 ## P1 - High Priority
 
 - [x] **4. Async Implementation Incomplete** ✅ FIXED
-  - Added `delete_with_policy()` to AsyncSQLerModel
-  - `set_null` and `cascade` raise `NotImplementedError` with helpful message
-  - `restrict` mode works (full integrity checking pending async helpers)
+  - Added `delete_with_policy()` to AsyncSQLerModel with all three modes
+  - Full async integrity helpers in `async_integrity.py` (find_referrers, set_null, cascade)
+  - `restrict`, `set_null`, and `cascade` all fully supported
+  - Async delete routes through `db.delete_document()` for validated, resource-safe execution
 
 - [x] **5. Error Messages Lack Context** ✅ FIXED
   - `NotBoundError` now includes model name in message and details dict
