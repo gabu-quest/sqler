@@ -125,14 +125,14 @@ class TestConcurrencyStress:
         # Disk-based DB with WAL should handle this better
         assert success_count[0] >= 90, f"Only {success_count[0]} succeeded, errors: {errors[:5]}"
 
-    def test_concurrent_reads_and_writes(self, db):
-        """Stress test: concurrent reads while writing."""
+    def test_concurrent_reads_and_writes(self, disk_db):
+        """Stress test: concurrent reads while writing on WAL-mode disk DB."""
 
         class Counter(SQLerModel):
             name: str
             value: int = 0
 
-        Counter.set_db(db)
+        Counter.set_db(disk_db)
 
         # Create initial counters
         for i in range(10):
@@ -142,6 +142,7 @@ class TestConcurrencyStress:
         write_count = [0]
         unexpected_errors = []
         lock = threading.Lock()
+        max_retries = 5
 
         def reader():
             for _ in range(50):
@@ -158,17 +159,22 @@ class TestConcurrencyStress:
 
         def writer():
             for i in range(20):
-                try:
-                    Counter(
-                        name=f"new_counter_{threading.current_thread().name}_{i}", value=i
-                    ).save()
-                    with lock:
-                        write_count[0] += 1
-                except sqlite3.OperationalError as e:
-                    msg = str(e).lower()
-                    if "locked" not in msg and "transaction" not in msg:
+                for attempt in range(max_retries):
+                    try:
+                        Counter(
+                            name=f"new_counter_{threading.current_thread().name}_{i}", value=i
+                        ).save()
                         with lock:
-                            unexpected_errors.append(("write", str(e)))
+                            write_count[0] += 1
+                        break
+                    except sqlite3.OperationalError as e:
+                        msg = str(e).lower()
+                        if "locked" not in msg and "transaction" not in msg:
+                            with lock:
+                                unexpected_errors.append(("write", str(e)))
+                            break
+                        if attempt < max_retries - 1:
+                            time.sleep(0.01 * (attempt + 1))
                 time.sleep(0.001)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -181,10 +187,16 @@ class TestConcurrencyStress:
                 f.result()
 
         assert len(unexpected_errors) == 0, f"Unexpected errors: {unexpected_errors}"
-        assert write_count[0] >= 1, f"Expected >= 1 write, got {write_count[0]}"
-        assert len(read_results) >= 1, f"Expected >= 1 read, got {len(read_results)}"
+        # WAL mode + retries: most writes should succeed (5 writers × 20 = 100 total)
+        assert write_count[0] >= 80, f"Expected >= 80 writes, got {write_count[0]}"
+        assert len(read_results) >= 100, f"Expected >= 100 reads, got {len(read_results)}"
         # All reads should see at least the initial 10 counters
         assert all(r >= 10 for r in read_results), f"All reads should see >= 10 counters: {read_results}"
+        # Final count must be consistent: 10 initial + successful writes
+        final_count = Counter.query().count()
+        assert final_count == 10 + write_count[0], (
+            f"Final count {final_count} != 10 + {write_count[0]} writes"
+        )
 
     def test_optimistic_locking_contention(self, db):
         """Stress test: many threads fighting over the same counter."""
