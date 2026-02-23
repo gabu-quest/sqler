@@ -3,7 +3,7 @@
 Document-oriented JSON store on SQLite.
 
 ## Active Roadmaps
-- [qler-prerequisites](./ROADMAP-QLER.md) — all milestones complete (M-1 through M-6)
+- [qler-prerequisites](./ROADMAP-QLER.md) — M-1 through M-7 and M-9 complete, M-8 (mixin test coverage) open
 
 ## Follow-up TODO
 
