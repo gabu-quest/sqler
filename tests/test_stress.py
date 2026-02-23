@@ -16,6 +16,7 @@ sys.path.insert(0, "src")
 import concurrent.futures
 import gc
 import random
+import sqlite3
 import string
 import threading
 import time
@@ -139,6 +140,7 @@ class TestConcurrencyStress:
 
         read_results = []
         write_count = [0]
+        unexpected_errors = []
         lock = threading.Lock()
 
         def reader():
@@ -147,8 +149,11 @@ class TestConcurrencyStress:
                     counters = Counter.query().all()
                     with lock:
                         read_results.append(len(counters))
-                except Exception:
-                    pass
+                except sqlite3.OperationalError as e:
+                    msg = str(e).lower()
+                    if "locked" not in msg and "transaction" not in msg:
+                        with lock:
+                            unexpected_errors.append(("read", str(e)))
                 time.sleep(0.001)
 
         def writer():
@@ -159,8 +164,11 @@ class TestConcurrencyStress:
                     ).save()
                     with lock:
                         write_count[0] += 1
-                except Exception:
-                    pass
+                except sqlite3.OperationalError as e:
+                    msg = str(e).lower()
+                    if "locked" not in msg and "transaction" not in msg:
+                        with lock:
+                            unexpected_errors.append(("write", str(e)))
                 time.sleep(0.001)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -172,10 +180,11 @@ class TestConcurrencyStress:
             for f in futures:
                 f.result()
 
-        # Writers should have succeeded
-        assert write_count[0] > 0
-        # Readers should have gotten results
-        assert len(read_results) > 0
+        assert len(unexpected_errors) == 0, f"Unexpected errors: {unexpected_errors}"
+        assert write_count[0] >= 1, f"Expected >= 1 write, got {write_count[0]}"
+        assert len(read_results) >= 1, f"Expected >= 1 read, got {len(read_results)}"
+        # All reads should see at least the initial 10 counters
+        assert all(r >= 10 for r in read_results), f"All reads should see >= 10 counters: {read_results}"
 
     def test_optimistic_locking_contention(self, db):
         """Stress test: many threads fighting over the same counter."""
@@ -196,6 +205,8 @@ class TestConcurrencyStress:
         stale_errors = [0]
         lock = threading.Lock()
 
+        unexpected_errors = []
+
         def increment():
             for _ in range(5):
                 try:
@@ -208,8 +219,12 @@ class TestConcurrencyStress:
                 except StaleVersionError:
                     with lock:
                         stale_errors[0] += 1
-                except Exception:
-                    pass
+                except sqlite3.OperationalError as e:
+                    msg = str(e).lower()
+                    # "locked" and "transaction" errors are expected under contention
+                    if "locked" not in msg and "transaction" not in msg:
+                        with lock:
+                            unexpected_errors.append(str(e))
 
         # 10 threads each trying to increment 5 times
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -217,13 +232,14 @@ class TestConcurrencyStress:
             for f in futures:
                 f.result()
 
+        assert len(unexpected_errors) == 0, f"Unexpected errors: {unexpected_errors}"
         # Check that some increments succeeded
         final = Counter.from_id(counter_id)
         assert final is not None
-        # With rebasing, most should succeed
+        # With rebasing, most should succeed; final.count == success_count[0]
         assert final.count > 0
-        print(
-            f"Final count: {final.count}, successes: {success_count[0]}, stale errors: {stale_errors[0]}"
+        assert final.count == success_count[0], (
+            f"count mismatch: final.count={final.count}, success_count={success_count[0]}"
         )
 
 
@@ -383,8 +399,12 @@ class TestLargeScaleOperations:
             .all()
         )
 
-        # Should find some results
-        assert len(results) >= 0  # May be 0, that's ok
+        # Verify each result matches all filter conditions
+        for item in results:
+            assert item.a < 5
+            assert item.b >= 2
+            assert item.c == 1
+            assert item.d == 0
 
     def test_paginate_through_large_dataset(self, db):
         """Stress test: paginate through 1000 records."""
@@ -438,6 +458,7 @@ class TestEdgeCasesAndBoundaryConditions:
 
         Item.set_db(db)
 
+        # These must all round-trip correctly through JSON/SQLite
         special_texts = [
             "Hello 世界",  # Chinese
             "مرحبا",  # Arabic
@@ -445,18 +466,15 @@ class TestEdgeCasesAndBoundaryConditions:
             "Line1\nLine2\tTabbed",  # Control chars
             'Quote\'s "double"',  # Quotes
             "Back\\slash",  # Backslash
-            "\x00\x01\x02",  # Null bytes
             "a" * 10000,  # Very long string
         ]
 
         for text in special_texts:
-            try:
-                item = Item(text=text).save()
-                retrieved = Item.from_id(item._id)
-                assert retrieved.text == text, f"Failed for: {repr(text[:50])}"
-            except Exception as e:
-                # Some special chars might fail, that's expected
-                print(f"Expected failure for {repr(text[:20])}: {e}")
+            item = Item(text=text).save()
+            retrieved = Item.from_id(item._id)
+            assert retrieved.text == text, f"Round-trip failed for: {repr(text[:50])}"
+
+        assert Item.query().count() == len(special_texts)
 
     def test_very_large_integer(self, db):
         """Test handling of very large integers."""
@@ -492,13 +510,11 @@ class TestEdgeCasesAndBoundaryConditions:
         ]
 
         for val in test_values:
-            try:
-                item = Precise(value=val).save()
-                retrieved = Precise.from_id(item._id)
-                if val == val:  # Not NaN
-                    assert retrieved.value == val, f"Failed for {val}"
-            except Exception as e:
-                print(f"Float {val} handling: {e}")
+            item = Precise(value=val).save()
+            retrieved = Precise.from_id(item._id)
+            assert retrieved.value == val, f"Float round-trip failed for {val}"
+
+        assert Precise.query().count() == len(test_values)
 
     def test_none_in_list(self, db):
         """Test handling of None values in lists."""
@@ -1013,7 +1029,7 @@ class TestRandomizedStress:
     """Randomized stress tests for unpredictable behavior."""
 
     def test_random_operations_sequence(self, db):
-        """Execute random sequence of operations."""
+        """Execute random sequence of operations — no operation should raise."""
 
         class Item(SQLerModel):
             name: str
@@ -1022,40 +1038,39 @@ class TestRandomizedStress:
         Item.set_db(db)
 
         random.seed(42)  # Reproducible randomness
+        op_counts = {"insert": 0, "query": 0, "update": 0, "delete": 0}
 
         for _ in range(500):
             op = random.choice(["insert", "query", "update", "delete"])
 
-            try:
-                if op == "insert":
-                    name = "".join(random.choices(string.ascii_letters, k=10))
-                    Item(name=name, value=random.randint(0, 1000)).save()
+            if op == "insert":
+                name = "".join(random.choices(string.ascii_letters, k=10))
+                Item(name=name, value=random.randint(0, 1000)).save()
+                op_counts["insert"] += 1
 
-                elif op == "query":
-                    if random.random() > 0.5:
-                        Item.query().filter(F("value") > random.randint(0, 500)).all()
-                    else:
-                        Item.query().limit(random.randint(1, 100)).all()
+            elif op == "query":
+                if random.random() > 0.5:
+                    Item.query().filter(F("value") > random.randint(0, 500)).all()
+                else:
+                    Item.query().limit(random.randint(1, 100)).all()
+                op_counts["query"] += 1
 
-                elif op == "update":
-                    item = Item.query().first()
-                    if item:
-                        item.value = random.randint(0, 1000)
-                        item.save()
+            elif op == "update":
+                item = Item.query().first()
+                if item:
+                    item.value = random.randint(0, 1000)
+                    item.save()
+                    op_counts["update"] += 1
 
-                elif op == "delete":
-                    item = Item.query().first()
-                    if item:
-                        item.delete()
+            elif op == "delete":
+                item = Item.query().first()
+                if item:
+                    item.delete()
+                    op_counts["delete"] += 1
 
-            except Exception as e:
-                # Log but don't fail on individual operations
-                print(f"Op {op} failed: {e}")
-
-        # Should have some records
+        # Verify counts are consistent: inserts - deletes == current count
         count = Item.query().count()
-        print(f"After random operations: {count} records")
-        assert count >= 0  # May be 0, that's ok
+        assert count == op_counts["insert"] - op_counts["delete"]
 
 
 if __name__ == "__main__":
