@@ -4,7 +4,7 @@ from typing import Any, Optional, Self
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
 from sqler.query.expression import SQLerExpression
-from sqler.query.query import PaginatedResult, _rewrite_promoted_refs
+from sqler.query.query import PaginatedResult, _META_COLUMNS, _rewrite_promoted_refs
 from sqler.utils import validate_field_name
 
 
@@ -158,6 +158,7 @@ class AsyncSQLerQuery:
             select = "data"
         sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
         sql = " ".join(sql.split())
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
@@ -180,6 +181,7 @@ class AsyncSQLerQuery:
             select = f"{func}(json_extract(data, '$.{field}'))"
         sql = f"SELECT {select} FROM {self._table} {where}".strip()
         sql = " ".join(sql.split())
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
@@ -318,6 +320,9 @@ class AsyncSQLerQuery:
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         sql = f"SELECT DISTINCT json_extract(data, '$.{field}') FROM {self._table} {where}".strip()
         sql = " ".join(sql.split())
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
         cur = await self._adapter.execute(sql, params)
         rows = await cur.fetchall()
@@ -434,6 +439,7 @@ class AsyncSQLerQuery:
             is_promoted = field in self._promoted_fields
             if isinstance(value, SQLerUpdateExpression):
                 expr_sql = value.sql_expr
+                expr_sql = _rewrite_promoted_refs(expr_sql, _META_COLUMNS)
                 if self._promoted_fields:
                     expr_sql = _rewrite_promoted_refs(expr_sql, self._promoted_fields)
                 if is_promoted:
@@ -463,6 +469,8 @@ class AsyncSQLerQuery:
 
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         where_params = self._expression.params if self._expression else []
+        if where:
+            where = _rewrite_promoted_refs(where, _META_COLUMNS)
         if self._promoted_fields and where:
             where = _rewrite_promoted_refs(where, self._promoted_fields)
 
@@ -507,6 +515,7 @@ class AsyncSQLerQuery:
             is_promoted = field in self._promoted_fields
             if isinstance(value, SQLerUpdateExpression):
                 expr_sql = value.sql_expr
+                expr_sql = _rewrite_promoted_refs(expr_sql, _META_COLUMNS)
                 if self._promoted_fields:
                     expr_sql = _rewrite_promoted_refs(expr_sql, self._promoted_fields)
                 if is_promoted:
@@ -555,6 +564,10 @@ class AsyncSQLerQuery:
                 " DESC" if self._desc else ""
             )
 
+        if inner_where:
+            inner_where = _rewrite_promoted_refs(inner_where, _META_COLUMNS)
+        if inner_order:
+            inner_order = _rewrite_promoted_refs(inner_order, _META_COLUMNS)
         if self._promoted_fields:
             if inner_where:
                 inner_where = _rewrite_promoted_refs(inner_where, self._promoted_fields)
@@ -613,6 +626,7 @@ class AsyncSQLerQuery:
 
         sql = f"DELETE FROM {self._table} {where}".strip()
         sql = " ".join(sql.split())
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
 

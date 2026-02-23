@@ -18,6 +18,12 @@ def _rewrite_promoted_refs(sql: str, promoted_fields: list[str]) -> str:
     return sql
 
 
+# Built-in columns that live on the SQLite row, not inside the JSON blob.
+# Queries using F("_id") or F("_version") must hit the real column, not
+# json_extract(data, '$._id') which always returns NULL.
+_META_COLUMNS = ["_id", "_version"]
+
+
 class QueryError(Exception):
     """Base exception for query errors."""
 
@@ -254,7 +260,8 @@ class SQLerQuery:
             select = "data"
         sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
         sql = " ".join(sql.split())  # collapse double spaces
-        # Rewrite promoted field references from json_extract to direct column
+        # Rewrite meta columns (_id, _version) from json_extract to direct column
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
@@ -285,6 +292,7 @@ class SQLerQuery:
             select = f"{func}(json_extract(data, '$.{field}'))"
         sql = f"SELECT {select} FROM {self._table} {where}".strip()
         sql = " ".join(sql.split())
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
@@ -465,6 +473,9 @@ class SQLerQuery:
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         sql = f"SELECT DISTINCT json_extract(data, '$.{field}') FROM {self._table} {where}".strip()
         sql = " ".join(sql.split())
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
         cur = self._adapter.execute(sql, params)
         return [row[0] for row in cur.fetchall() if row[0] is not None]
@@ -608,7 +619,7 @@ class SQLerQuery:
             is_promoted = field in self._promoted_fields
             if isinstance(value, SQLerUpdateExpression):
                 expr_sql = value.sql_expr
-                # Rewrite json_extract refs for promoted columns
+                expr_sql = _rewrite_promoted_refs(expr_sql, _META_COLUMNS)
                 if self._promoted_fields:
                     expr_sql = _rewrite_promoted_refs(expr_sql, self._promoted_fields)
                 if is_promoted:
@@ -639,6 +650,8 @@ class SQLerQuery:
 
         where = f"WHERE {self._expression.sql}" if self._expression else ""
         where_params = self._expression.params if self._expression else []
+        if where:
+            where = _rewrite_promoted_refs(where, _META_COLUMNS)
         if self._promoted_fields and where:
             where = _rewrite_promoted_refs(where, self._promoted_fields)
 
@@ -687,6 +700,7 @@ class SQLerQuery:
             is_promoted = field in self._promoted_fields
             if isinstance(value, SQLerUpdateExpression):
                 expr_sql = value.sql_expr
+                expr_sql = _rewrite_promoted_refs(expr_sql, _META_COLUMNS)
                 if self._promoted_fields:
                     expr_sql = _rewrite_promoted_refs(expr_sql, self._promoted_fields)
                 if is_promoted:
@@ -736,7 +750,11 @@ class SQLerQuery:
                 " DESC" if self._desc else ""
             )
 
-        # Rewrite promoted refs in inner query
+        # Rewrite meta columns and promoted refs in inner query
+        if inner_where:
+            inner_where = _rewrite_promoted_refs(inner_where, _META_COLUMNS)
+        if inner_order:
+            inner_order = _rewrite_promoted_refs(inner_order, _META_COLUMNS)
         if self._promoted_fields:
             if inner_where:
                 inner_where = _rewrite_promoted_refs(inner_where, self._promoted_fields)
@@ -799,6 +817,7 @@ class SQLerQuery:
 
         sql = f"DELETE FROM {self._table} {where}".strip()
         sql = " ".join(sql.split())
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
 
