@@ -1,11 +1,8 @@
+import os
 from sqlite3 import OperationalError, ProgrammingError
 
 import pytest
 from sqler.adapter import AdapterABC, NotConnectedError, SQLiteAdapter
-
-
-def tests_run_at_all():
-    assert True
 
 
 @pytest.fixture(params=[("memory", "in_memory"), ("disk", "on_disk")])
@@ -29,15 +26,20 @@ def test_db_implements_abc():
     assert issubclass(SQLiteAdapter, AdapterABC)
 
 
-def test_factories():
+def test_factories(tmp_path):
     """makes sure the factory funcs work"""
     mem_adapter = SQLiteAdapter.in_memory()
     mem_adapter.connect()
-    disk_adapter = SQLiteAdapter.in_memory()
+
+    disk_path = str(tmp_path / "factory_test.db")
+    disk_adapter = SQLiteAdapter.on_disk(disk_path)
     disk_adapter.connect()
+
     for adapter in [mem_adapter, disk_adapter]:
         cursor = adapter.execute("PRAGMA user_version;")
         assert isinstance(cursor.fetchone()[0], int)
+
+    assert os.path.exists(disk_path)
 
 
 def test_execute_and_commit(oligo_adapter):

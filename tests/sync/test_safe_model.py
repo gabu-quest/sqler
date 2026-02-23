@@ -1,3 +1,4 @@
+import pytest
 from sqler import SQLerDB
 from sqler.models import SQLerSafeModel, StaleVersionError
 from sqler.query import SQLerField as F
@@ -19,7 +20,7 @@ def test_safe_model_insert_sets_version_zero():
     try:
         c = Customer(name="Alice", tier=1)
         c.save()
-        assert c._id is not None
+        assert c._id == 1
         assert c._version == 0
 
         # bump via update
@@ -41,11 +42,8 @@ def test_safe_model_stale_update_raises():
         db.adapter.commit()
 
         c.tier = 3
-        try:
+        with pytest.raises(StaleVersionError):
             c.save()
-            assert False, "Expected StaleVersionError"
-        except StaleVersionError:
-            pass
     finally:
         db.close()
 
@@ -90,6 +88,6 @@ def test_safe_model_complex_filters():
         # version present only after refresh/from_id
         assert getattr(first, "_version", None) == 0  # default until refresh
         first.refresh()
-        assert first._version >= 0
+        assert first._version == 0
     finally:
         db.close()
