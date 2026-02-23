@@ -10,7 +10,7 @@ Document-oriented JSON store on SQLite.
 ### From BUG-1/BUG-2 plan (not in scope)
 - [~] Deprecate `set_db()` — soft deprecation with `warnings.warn()` added (M-5); full removal deferred
 - [x] Add `db` param to `save()`/`delete()` instance methods (M-4 complete)
-- [ ] Sync adapter changes (already uses thread-local; no concurrency bug — but could add `using()` parity)
+- [x] Sync adapter changes (using() parity already added in M-4/M-5)
 
 ### From security audit (pre-existing)
 - [x] Add field-name validation (`validate_field_name`) to `order_by()`, `distinct_values()`, aggregate methods, `update()`, `update_one()` — prevents SQL injection via unvalidated JSON paths
