@@ -191,6 +191,12 @@ class TestAsyncMixinDbForwarding:
         with pytest.raises(RuntimeError, match="before_save\\(\\) returned False"):
             await item.save(db=db2)
 
+        # Nothing written to either db
+        all_db1 = await AVetoSaveItem.using(db1).all()
+        all_db2 = await AVetoSaveItem.using(db2).all()
+        assert len(all_db1) == 0
+        assert len(all_db2) == 0
+
     @pytest.mark.asyncio
     async def test_hooks_delete_veto_with_db(self, db_pair):
         """before_delete() returning False raises RuntimeError with db=."""
@@ -289,7 +295,7 @@ class TestAsyncMixinDbForwarding:
 
         doc = await db2.find_document("asoft_items", item._id)
         assert doc is not None
-        assert doc["deleted_at"] is not None
+        assert doc["deleted_at"] == item.deleted_at.isoformat()
 
         # db1 isolation
         assert (await db1.find_document("asoft_items", item._id)) is None
