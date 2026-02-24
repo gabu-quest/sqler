@@ -85,15 +85,27 @@ class AFullItem(AsyncFullMixin, AsyncSQLerModel):
     name: str
 
 
-class ADisabledHooksVetoItem(AsyncHooksMixin, AsyncSQLerModel):
-    """AsyncHooksMixin with hooks disabled and a vetoing before_save."""
+class ADisabledHooksItem(AsyncHooksMixin, AsyncSQLerModel):
+    """AsyncHooksMixin with hooks disabled and tracking + vetoing hooks."""
 
     __tablename__ = "ahooked_items"
     _hooks_enabled = False
     name: str
+    hook_log: list[str] = []
 
     async def before_save(self) -> bool:
+        self.hook_log = [*self.hook_log, "before_save"]
+        return False  # Would veto if hooks were enabled
+
+    async def after_save(self) -> None:
+        self.hook_log = [*self.hook_log, "after_save"]
+
+    async def before_delete(self) -> bool:
+        self.hook_log = [*self.hook_log, "before_delete"]
         return False
+
+    async def after_delete(self) -> None:
+        self.hook_log = [*self.hook_log, "after_delete"]
 
 
 class ATrackedFullItem(AsyncFullMixin, AsyncSQLerModel):
@@ -481,11 +493,18 @@ class TestAsyncMixinDbForwarding:
             item = AAuditItem(name="persist_test")
             await item.save(db=db2)
 
+            # Reload via ORM to prove fields survive full round-trip
+            reloaded = await AAuditItem.using(db2).filter(F("_id") == item._id).first()
+            assert reloaded is not None
+            assert reloaded.created_by == "persist_user"
+            assert reloaded.updated_by == "persist_user"
+            assert_recent_utc(reloaded.created_at, "reloaded.created_at")
+            assert_recent_utc(reloaded.updated_at, "reloaded.updated_at")
+
+            # Also verify raw doc for serialization correctness
             doc = await db2.find_document("aaudit_items", item._id)
             assert doc["created_by"] == "persist_user"
             assert doc["updated_by"] == "persist_user"
-            assert doc["created_at"] == item.created_at.isoformat()
-            assert doc["updated_at"] == item.updated_at.isoformat()
         finally:
             AsyncAuditMixin.set_current_user(None)
 
@@ -503,9 +522,8 @@ class TestAsyncMixinDbForwarding:
             logs = await item.get_audit_log(db=db2)
             assert len(logs) == 1
             assert logs[0]["user"] == "log_user"
-            assert isinstance(logs[0]["timestamp"], str)
-            # Verify ISO format by parsing
-            datetime.fromisoformat(logs[0]["timestamp"])
+            ts = datetime.fromisoformat(logs[0]["timestamp"])
+            assert abs((datetime.now(timezone.utc) - ts).total_seconds()) < MAX_DELTA.total_seconds()
             assert logs[0]["snapshot"]["name"] == "log_fields_test"
         finally:
             AsyncAuditMixin.set_current_user(None)
@@ -515,6 +533,9 @@ class TestAsyncMixinDbForwarding:
         """active(), with_deleted(), only_deleted() return correct filtered sets."""
         db1, db2 = db_pair
         await setup(ASoftItem, db1, db2)
+
+        # Verify clean slate before inserting
+        assert len(await ASoftItem.with_deleted().all()) == 0
 
         # Save to class-bound db (db1) for class method queries
         await ASoftItem(name="alpha").save()
@@ -560,18 +581,23 @@ class TestAsyncMixinDbForwarding:
         assert logs[0]["action"] == "create"
 
     @pytest.mark.asyncio
-    async def test_hooks_disabled_bypasses_veto(self, db_pair):
-        """_hooks_enabled = False skips veto hook entirely."""
+    async def test_hooks_disabled_bypasses_all_hooks(self, db_pair):
+        """_hooks_enabled = False skips all hooks on save and delete."""
         db1, db2 = db_pair
-        await setup(ADisabledHooksVetoItem, db1, db2)
+        await setup(ADisabledHooksItem, db1, db2)
 
-        item = ADisabledHooksVetoItem(name="no_veto")
+        item = ADisabledHooksItem(name="no_hooks")
         await item.save(db=db2)  # Should succeed despite before_save returning False
 
         assert item._id > 0
-        doc = await db2.find_document("ahooked_items", item._id)
-        assert doc is not None
-        assert doc["name"] == "no_veto"
+        assert item.hook_log == []  # No hooks fired on save
+
+        saved_id = item._id
+        await item.delete(db=db2)
+
+        assert item._id is None
+        assert item.hook_log == []  # No hooks fired on delete either
+        assert (await db2.find_document("ahooked_items", saved_id)) is None
 
     @pytest.mark.asyncio
     async def test_audit_mixin_raising_getter_produces_none(self, db_pair):
