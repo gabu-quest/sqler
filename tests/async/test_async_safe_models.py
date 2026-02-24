@@ -48,7 +48,9 @@ async def test_async_safe_query_and_refresh(async_db):
         first = await ACustomer.query().order_by("tier", desc=True).first()
         assert first is not None
         await first.refresh()
-        assert first._version >= 0
+        assert first._version == 0
+        assert first.name == "B"
+        assert first.tier == 2
     finally:
         ACustomer.set_db(None)
 
@@ -67,6 +69,7 @@ async def test_async_safe_rebase_retry_exhaustion(async_db):
         )
 
     ACounter.set_db(async_db)
+    original_commit = async_db.adapter.commit
     try:
         counter = await ACounter(count=0).save()
         stale = await ACounter.from_id(counter._id)
@@ -79,7 +82,6 @@ async def test_async_safe_rebase_retry_exhaustion(async_db):
 
         # Monkey-patch adapter.commit to bump version on every retry,
         # ensuring the stale copy can never catch up.
-        original_commit = async_db.adapter.commit
         call_count = 0
 
         async def sabotaging_commit():
