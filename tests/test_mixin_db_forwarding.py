@@ -83,15 +83,27 @@ class FullItem(FullMixin, SQLerModel):
     name: str
 
 
-class DisabledHooksVetoItem(HooksMixin, SQLerModel):
-    """HooksMixin with hooks disabled and a vetoing before_save."""
+class DisabledHooksItem(HooksMixin, SQLerModel):
+    """HooksMixin with hooks disabled and tracking + vetoing before_save."""
 
     __tablename__ = "hooked_items"
     _hooks_enabled = False
     name: str
+    hook_log: list[str] = []
 
     def before_save(self) -> bool:
+        self.hook_log = [*self.hook_log, "before_save"]
+        return False  # Would veto if hooks were enabled
+
+    def after_save(self) -> None:
+        self.hook_log = [*self.hook_log, "after_save"]
+
+    def before_delete(self) -> bool:
+        self.hook_log = [*self.hook_log, "before_delete"]
         return False
+
+    def after_delete(self) -> None:
+        self.hook_log = [*self.hook_log, "after_delete"]
 
 
 class TrackedFullItem(FullMixin, SQLerModel):
@@ -456,11 +468,18 @@ class TestMixinDbForwarding:
             item = AuditItem(name="persist_test")
             item.save(db=db2)
 
+            # Reload via ORM to prove fields survive full round-trip
+            reloaded = AuditItem.using(db2).filter(F("_id") == item._id).first()
+            assert reloaded is not None
+            assert reloaded.created_by == "persist_user"
+            assert reloaded.updated_by == "persist_user"
+            assert_recent_utc(reloaded.created_at, "reloaded.created_at")
+            assert_recent_utc(reloaded.updated_at, "reloaded.updated_at")
+
+            # Also verify raw doc for serialization correctness
             doc = db2.find_document("audit_items", item._id)
             assert doc["created_by"] == "persist_user"
             assert doc["updated_by"] == "persist_user"
-            assert doc["created_at"] == item.created_at.isoformat()
-            assert doc["updated_at"] == item.updated_at.isoformat()
         finally:
             AuditMixin.set_current_user(None)
 
@@ -477,9 +496,8 @@ class TestMixinDbForwarding:
             logs = item.get_audit_log(db=db2)
             assert len(logs) == 1
             assert logs[0]["user"] == "log_user"
-            assert isinstance(logs[0]["timestamp"], str)
-            # Verify ISO format by parsing
-            datetime.fromisoformat(logs[0]["timestamp"])
+            ts = datetime.fromisoformat(logs[0]["timestamp"])
+            assert abs((datetime.now(timezone.utc) - ts).total_seconds()) < MAX_DELTA.total_seconds()
             assert logs[0]["snapshot"]["name"] == "log_fields_test"
         finally:
             AuditMixin.set_current_user(None)
@@ -488,6 +506,9 @@ class TestMixinDbForwarding:
         """active(), with_deleted(), only_deleted() return correct filtered sets."""
         db1, db2 = make_db_pair()
         setup(SoftItem, db1, db2)
+
+        # Verify clean slate before inserting
+        assert len(SoftItem.with_deleted().all()) == 0
 
         # Save to class-bound db (db1) for class method queries
         SoftItem(name="alpha").save()
@@ -532,18 +553,23 @@ class TestMixinDbForwarding:
         assert len(logs) == 1  # Still only the "create" entry
         assert logs[0]["action"] == "create"
 
-    def test_hooks_disabled_bypasses_veto(self):
-        """_hooks_enabled = False skips veto hook entirely."""
+    def test_hooks_disabled_bypasses_all_hooks(self):
+        """_hooks_enabled = False skips all hooks on save and delete."""
         db1, db2 = make_db_pair()
-        setup(DisabledHooksVetoItem, db1, db2)
+        setup(DisabledHooksItem, db1, db2)
 
-        item = DisabledHooksVetoItem(name="no_veto")
+        item = DisabledHooksItem(name="no_hooks")
         item.save(db=db2)  # Should succeed despite before_save returning False
 
         assert item._id > 0
-        doc = db2.find_document("hooked_items", item._id)
-        assert doc is not None
-        assert doc["name"] == "no_veto"
+        assert item.hook_log == []  # No hooks fired on save
+
+        saved_id = item._id
+        item.delete(db=db2)
+
+        assert item._id is None
+        assert item.hook_log == []  # No hooks fired on delete either
+        assert db2.find_document("hooked_items", saved_id) is None
 
     def test_audit_mixin_raising_getter_produces_none(self):
         """Getter that raises exception results in created_by/updated_by = None."""
