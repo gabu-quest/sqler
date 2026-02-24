@@ -108,6 +108,7 @@ def test_safe_model_rebase_retry_exhaustion():
 
     db = SQLerDB.in_memory(shared=False)
     Counter.set_db(db)
+    original_commit = db.adapter.commit
     try:
         counter = Counter(count=0).save()
         stale = Counter.from_id(counter._id)
@@ -120,7 +121,6 @@ def test_safe_model_rebase_retry_exhaustion():
 
         # Monkey-patch adapter.commit to bump version on every retry,
         # ensuring the stale copy can never catch up.
-        original_commit = db.adapter.commit
         call_count = 0
 
         def sabotaging_commit():
