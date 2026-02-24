@@ -664,31 +664,23 @@ async def async_backup(
     timestamp = datetime.now()
 
     try:
-        # Get the underlying connection from the async adapter
-        # aiosqlite wraps a sqlite3.Connection
-        conn = db.adapter._conn
-        if conn is None:
-            raise RuntimeError("Database not connected")
-
-        # Get the actual sqlite3 connection
-        source_conn = conn._conn  # type: ignore[attr-defined]
-
-        # Create destination connection
-        dest_conn = sqlite3.connect(destination)
-
+        # Acquire a connection from the pool-based async adapter
+        aio_conn = await db.adapter._acquire()
         try:
-            # Run backup in executor to not block event loop
-            def do_backup():
-                with dest_conn:
-                    source_conn.backup(
-                        dest_conn,
-                        pages=pages_per_step,
-                        sleep=sleep_ms / 1000.0 if sleep_ms > 0 else 0,
-                    )
+            # Create destination connection
+            dest_conn = sqlite3.connect(destination)
 
-            await asyncio.get_event_loop().run_in_executor(None, do_backup)
+            try:
+                # Use aiosqlite's backup() which runs on the correct thread
+                await aio_conn.backup(
+                    dest_conn,
+                    pages=pages_per_step,
+                    sleep=sleep_ms / 1000.0 if sleep_ms > 0 else 0,
+                )
+            finally:
+                dest_conn.close()
         finally:
-            dest_conn.close()
+            await db.adapter._release()
 
         # Get backup file size
         size_bytes = os.path.getsize(destination)
