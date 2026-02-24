@@ -72,3 +72,14 @@ Coverage gaps identified by test auditor — all relate to mixin behavior not ex
 - [x] Applied `_rewrite_promoted_refs(sql, _META_COLUMNS)` in all SQL-building paths: `_build_query`, `_build_aggregate_query`, `distinct_values`, `update`, `update_one`, `delete` (sync + async)
 - [x] Also fixed F-expression SET values in `update()`/`update_one()` (e.g., `update(score=F("_id") + 0)`)
 - [x] 29 tests (15 sync + 14 async) covering filter, order_by, aggregate, version filter, promoted interaction, SQL-level rewrite verification
+
+### M-10: Test Suite Hardening ✅
+Audit-driven pass to eliminate lying tests, softball assertions, and coverage gaps across 8 test files. No production code changes.
+
+- [x] 4 critical test rewrites: `test_C09` (bare except → `pytest.raises`), `test_C10` (zero assertions → index property checks), `test_C29` (manual log injection → adapter auto-capture), `test_C42` (hasattr-only → behavioral pool test)
+- [x] ~30 loose assertions tightened: `hasattr` guards removed, `>= N` → exact values, `any()` existence checks → exact count + value, `isinstance` standalone → content proof, guard-without-proof → field-value assertions
+- [x] 2 new retry exhaustion tests (sync + async): monkey-patch commit to force rebase loop exhaustion at `max_retries=2`
+- [x] 1 missing async SQL injection parametrize value added (multi-statement INSERT)
+- [x] Timestamp assertions hardened with recency bounds (within 5 seconds)
+- [x] Explain plan assertions check `r["detail"]` for SCAN/SEARCH content
+- [x] All 1141 tests pass, 0 failures
