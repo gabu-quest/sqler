@@ -175,7 +175,6 @@ def test_C07_bulk_upsert_contract():
     db = SQLerDB.in_memory()
     BU.set_db(db)
     rows = [{"name": "A"}, {"name": "B"}, {"_id": 42, "name": "C"}]
-    assert hasattr(db, "bulk_upsert"), "bulk_upsert must exist"
     ids = db.bulk_upsert("bus", rows)
     assert isinstance(ids, list) and len(ids) == len(rows)
     assert 42 in ids
@@ -190,7 +189,6 @@ def test_C08_execute_sql_and_hydrate_with_from_id():
     BU(name="A", age=1).save()
     BU(name="A", age=2).save()
 
-    assert hasattr(db, "execute_sql"), "execute_sql must exist"
     rows = db.execute_sql("SELECT _id FROM bus WHERE json_extract(data,'$.name') = ?", ["A"])
     ids = []
     for r in rows:
@@ -218,12 +216,8 @@ def test_C09_delete_policy_restrict():
     u = U(name="Writer").save()
     _ = Post(title="Post A", author={"_table": "u", "_id": u._id}).save()
 
-    assert hasattr(u, "delete_with_policy"), "delete_with_policy must exist"
-    # The contract: deleting with restrict must not remove the row if referenced.
-    try:
+    with pytest.raises(ReferentialIntegrityError):
         u.delete_with_policy(on_delete="restrict")
-    except Exception:
-        pass
     assert U.from_id(u._id) is not None
 
 
@@ -236,9 +230,14 @@ class X(SQLerModel):
 def test_C10_index_variants_unique_partial():
     db = SQLerDB.in_memory()
     X.set_db(db)
-    assert hasattr(db, "create_index"), "create_index must exist"
     db.create_index("xs", "email", unique=True)
     db.create_index("xs", "name", where="json_extract(data,'$.name') IS NOT NULL")
+
+    indexes = db.list_indexes("xs")
+    assert len(indexes) == 2
+
+    unique_idx = next(i for i in indexes if i["unique"])
+    assert "email" in unique_idx["name"]
 
 
 # ---------------- [C11] README sync quickstart ----------------
@@ -254,7 +253,7 @@ def test_C11_quickstart_sync_readme(tmp_path, monkeypatch):
 
     u = QSUser(name="Alice", age=30)
     u.save()
-    assert u._id is not None
+    assert u._id == 1
 
     adults = QSUser.query().filter(F("age") >= 18).order_by("age").all()
     assert [a.name for a in adults] == ["Alice"]
@@ -524,13 +523,6 @@ def test_C22_transaction_context_manager():
     db = SQLerDB.in_memory()
     TxUser.set_db(db)
 
-    # Verify transaction API exists and works
-    tx = db.transaction()
-    assert hasattr(tx, "__enter__")
-    assert hasattr(tx, "__exit__")
-    assert hasattr(tx, "commit")
-    assert hasattr(tx, "rollback")
-
     # Transaction context manager usage
     with db.transaction():
         db.insert_document("txusers", {"name": "Alice", "balance": 100})
@@ -630,8 +622,9 @@ def test_C26_timestamp_mixin():
     post._set_timestamps()  # Call before save for auto-timestamps
     post = post.save()
 
-    assert post.created_at is not None
-    assert post.updated_at is not None
+    from datetime import datetime
+    assert isinstance(post.created_at, datetime)
+    assert isinstance(post.updated_at, datetime)
 
 
 # ---------------- [C27] Soft delete mixin ----------------
@@ -649,7 +642,8 @@ def test_C27_soft_delete_mixin():
 
     c.soft_delete()
     assert c.is_deleted == True
-    assert c.deleted_at is not None
+    from datetime import datetime
+    assert isinstance(c.deleted_at, datetime)
 
     c.restore()
     assert c.is_deleted == False
@@ -710,23 +704,17 @@ def test_C29_query_logging():
     LoggedUser(name="Ada", age=36).save()
     LoggedUser(name="Bob", age=25).save()
 
-    # Note: query_logger captures queries when integrated with adapter
-    # Here we demonstrate the logger API
-    query_logger.log("SELECT * FROM loggedusers", [], 0.5)
-    query_logger.log("SELECT * FROM loggedusers WHERE age > ?", [30], 1.2)
-
-    # Get logged queries
+    # Adapter auto-logs queries — verify INSERT was captured
     logs = query_logger.logs
-    assert len(logs) >= 2
+    assert any("INSERT" in log.sql.upper() for log in logs)
 
-    # Get slow queries
-    slow = query_logger.get_slow_queries(threshold_ms=1.0)
-    assert len(slow) >= 1
+    # Slow query threshold so high nothing qualifies
+    slow = query_logger.get_slow_queries(threshold_ms=99999.0)
+    assert len(slow) == 0
 
-    # Get stats
+    # Stats reflect exact auto-captured count
     stats = query_logger.get_stats()
-    assert "count" in stats
-    assert "avg_time_ms" in stats
+    assert stats["count"] == len(logs)
 
     query_logger.disable()
     query_logger.clear()
@@ -881,7 +869,7 @@ def test_C35_index_management():
 
     # List all indexes
     all_indexes = db.list_indexes()
-    assert len(all_indexes) >= 2
+    assert len(all_indexes) == 2
 
     # List indexes for specific table
     product_indexes = db.list_indexes("products")
@@ -1027,13 +1015,13 @@ def test_C38_query_caching():
 
     # Check stats
     stats = cache.stats
-    assert stats.hits >= 1
+    assert stats.hits == 1
 
     # Pattern invalidation
     cache.set("users:1", "user1", table="users")
     cache.set("users:2", "user2", table="users")
     count = cache.invalidate_pattern("users:*")
-    assert count >= 2
+    assert count == 3
 
     # Decorator
     call_count = 0
@@ -1146,14 +1134,24 @@ def test_C41_full_text_search():
     assert count == 1
 
 
-def test_C42_connection_pooling():
+def test_C42_connection_pooling(tmp_path):
     """C42: Connection pooling basics."""
-    # Note: Full pool testing requires disk DB, this tests the API exists
     from sqler import PooledSQLerDB
 
-    # Verify the class exists and has expected interface
-    assert hasattr(PooledSQLerDB, "on_disk")
-    assert hasattr(PooledSQLerDB, "pool_stats")
+    db = PooledSQLerDB.on_disk(str(tmp_path / "pool_test.db"), max_connections=5)
+
+    class PoolUser(SQLerModel):
+        name: str
+
+    PoolUser.set_db(db)
+    PoolUser(name="Alice").save()
+    assert PoolUser.query().count() == 1
+
+    stats = db.pool_stats()
+    assert stats.max_connections == 5
+    assert stats.total_connections >= 1
+
+    db.close()
 
 
 def test_C43_schema_migrations():
@@ -1252,7 +1250,7 @@ def test_C45_database_operations():
     Item(name="test").save()
 
     stats = get_stats(db)
-    assert stats.table_count >= 1
+    assert stats.table_count == 1
 
     # Backup (requires disk DB)
     with tempfile.TemporaryDirectory() as tmpdir:

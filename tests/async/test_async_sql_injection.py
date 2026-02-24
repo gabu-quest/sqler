@@ -132,6 +132,7 @@ class TestAsyncExecuteSqlRestriction:
         [
             "SELECT 1; DROP TABLE items",
             "SELECT 1; DELETE FROM items",
+            "SELECT 1; INSERT INTO items (data) VALUES ('{}')",
         ],
     )
     @pytest.mark.asyncio
