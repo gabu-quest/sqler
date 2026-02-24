@@ -411,6 +411,7 @@ class TestLargeScaleOperations:
             .all()
         )
 
+        assert len(results) == 7
         # Verify each result matches all filter conditions
         for item in results:
             assert item.a < 5
