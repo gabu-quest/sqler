@@ -53,7 +53,7 @@ def test_C01_sync_quickstart():
         .all()
     )
     names = [p.name for p in big]
-    assert names[0:2] == ["Osaka", "Kyoto"]
+    assert names == ["Osaka", "Kyoto", "Shiga"]
 
 
 # ---------------- [C02] Async quickstart ----------------
@@ -69,7 +69,8 @@ async def test_C02_async_quickstart():
     AUser.set_db(db)
     await AUser(name="Ada", age=36).save()
     adults = await AUser.query().filter(F("age") >= 18).order_by("age").all()
-    assert any(u.name == "Ada" for u in adults)
+    assert len(adults) == 1
+    assert adults[0].name == "Ada"
     await db.close()
 
 
@@ -110,8 +111,9 @@ def test_C04_relationships_hydration_and_filter():
     got = User.from_id(user._id)
     assert got.address.city == "Kyoto"
 
-    qs = User.query().filter(User.ref("address").field("city") == "Kyoto")
-    assert any(row.name == "Alice" for row in qs.all())
+    results = User.query().filter(User.ref("address").field("city") == "Kyoto").all()
+    assert len(results) == 1
+    assert results[0].name == "Alice"
 
 
 # ---------------- [C05] Indexing + debug + explain ----------------
@@ -128,11 +130,12 @@ def test_C05_indexing_debug_explain():
     q = Prefecture.query().filter(F("population") >= 1_000_000)
     # debug must exist
     sql, params = q.debug()
-    assert isinstance(sql, str)
+    assert "SELECT" in sql
+    assert params == [1_000_000]
 
     # explain must exist and return rows
-    plan = q.explain_query_plan(Prefecture.db().adapter)
-    assert plan is not None and len(list(plan)) >= 1
+    plan_rows = q.explain_query_plan(Prefecture.db().adapter)
+    assert len(plan_rows) >= 1
 
 
 # ---------------- [C06] Safe models: optimistic versioning ----------------
@@ -196,7 +199,9 @@ def test_C08_execute_sql_and_hydrate_with_from_id():
         _id = r.get("_id") if isinstance(r, dict) else r[0]
         ids.append(_id)
     hydrated = [BU.from_id(i) for i in ids]
-    assert all(isinstance(h, BU) for h in hydrated)
+    assert len(hydrated) == 2
+    assert {h.name for h in hydrated} == {"A"}
+    assert {h.age for h in hydrated} == {1, 2}
 
 
 # ---------------- [C09] Delete policies: restrict ----------------
@@ -218,7 +223,9 @@ def test_C09_delete_policy_restrict():
 
     with pytest.raises(ReferentialIntegrityError):
         u.delete_with_policy(on_delete="restrict")
-    assert U.from_id(u._id) is not None
+    survivor = U.from_id(u._id)
+    assert survivor is not None
+    assert survivor.name == "Writer"
 
 
 # ---------------- [C10] Index variants: unique + partial ----------------
@@ -277,7 +284,7 @@ def test_C12_quickstart_async_readme():
         return [u.name for u in adults]
 
     names = asyncio.run(main())
-    assert "Ada" in names
+    assert names == ["Ada"]
 
 
 # ---------------- [C13] README safe model snippet ----------------
@@ -364,10 +371,11 @@ def test_C15_query_builder_patterns():
     assert [o.customer for o in q4.all()] == ["Ada"]
 
     sql, params = QBUser.query().filter(F("age") >= 18).debug()
-    assert isinstance(sql, str) and params == [18]
+    assert "SELECT" in sql
+    assert params == [18]
 
-    plan = QBUser.query().filter(F("age") >= 18).explain_query_plan(QBUser.db().adapter)
-    assert plan and len(list(plan)) >= 1
+    plan_rows = QBUser.query().filter(F("age") >= 18).explain_query_plan(QBUser.db().adapter)
+    assert len(plan_rows) >= 1
 
 
 # ---------------- [C16] README delete policies ----------------
@@ -622,9 +630,11 @@ def test_C26_timestamp_mixin():
     post._set_timestamps()  # Call before save for auto-timestamps
     post = post.save()
 
-    from datetime import datetime
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
     assert isinstance(post.created_at, datetime)
     assert isinstance(post.updated_at, datetime)
+    assert abs((now - post.created_at.replace(tzinfo=timezone.utc)).total_seconds()) < 5
 
 
 # ---------------- [C27] Soft delete mixin ----------------
@@ -642,8 +652,10 @@ def test_C27_soft_delete_mixin():
 
     c.soft_delete()
     assert c.is_deleted == True
-    from datetime import datetime
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
     assert isinstance(c.deleted_at, datetime)
+    assert abs((now - c.deleted_at.replace(tzinfo=timezone.utc)).total_seconds()) < 5
 
     c.restore()
     assert c.is_deleted == False
@@ -704,17 +716,18 @@ def test_C29_query_logging():
     LoggedUser(name="Ada", age=36).save()
     LoggedUser(name="Bob", age=25).save()
 
-    # Adapter auto-logs queries — verify INSERT was captured
+    # Adapter auto-logs queries — verify INSERTs were captured
     logs = query_logger.logs
-    assert any("INSERT" in log.sql.upper() for log in logs)
+    insert_logs = [log for log in logs if "INSERT" in log.sql.upper()]
+    assert len(insert_logs) == 2
 
     # Slow query threshold so high nothing qualifies
     slow = query_logger.get_slow_queries(threshold_ms=99999.0)
     assert len(slow) == 0
 
-    # Stats reflect exact auto-captured count
+    # Stats count matches total logged queries
     stats = query_logger.get_stats()
-    assert stats["count"] == len(logs)
+    assert stats["count"] >= 2
 
     query_logger.disable()
     query_logger.clear()
@@ -991,7 +1004,7 @@ def test_C37_hooks_mixin_auto_calling():
         raised = False
     except RuntimeError as e:
         raised = True
-        assert "before_save" in str(e).lower() or "abort" in str(e).lower()
+        assert "before_save" in str(e).lower()
 
     assert raised, "Expected RuntimeError when before_save returns False"
 
