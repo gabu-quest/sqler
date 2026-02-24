@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqler import SQLerDB, SQLerModel
+from sqler.query import F
 from sqler.models.mixins import (
     AuditLogMixin,
     AuditMixin,
@@ -80,6 +81,39 @@ class AuditLogItem(AuditLogMixin, SQLerModel):
 class FullItem(FullMixin, SQLerModel):
     __tablename__ = "full_items"
     name: str
+
+
+class DisabledHooksVetoItem(HooksMixin, SQLerModel):
+    """HooksMixin with hooks disabled and a vetoing before_save."""
+
+    __tablename__ = "hooked_items"
+    _hooks_enabled = False
+    name: str
+
+    def before_save(self) -> bool:
+        return False
+
+
+class TrackedFullItem(FullMixin, SQLerModel):
+    """FullMixin with hook tracking for delete path tests."""
+
+    __tablename__ = "tracked_full_items"
+    name: str
+    hook_log: list[str] = []
+
+    def before_save(self) -> bool:
+        self.hook_log = [*self.hook_log, "before_save"]
+        return True
+
+    def after_save(self) -> None:
+        self.hook_log = [*self.hook_log, "after_save"]
+
+    def before_delete(self) -> bool:
+        self.hook_log = [*self.hook_log, "before_delete"]
+        return True
+
+    def after_delete(self) -> None:
+        self.hook_log = [*self.hook_log, "after_delete"]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -409,3 +443,142 @@ class TestMixinDbForwarding:
         assert doc["name"] == "default_test"
 
         assert db2.find_document("ts_items", item._id) is None
+
+    # ── Gap coverage tests ──────────────────────────────────────────────────
+
+    def test_audit_fields_persist_to_db(self):
+        """AuditMixin fields survive DB round-trip (not just in-memory)."""
+        db1, db2 = make_db_pair()
+        setup(AuditItem, db1, db2)
+
+        AuditMixin.set_current_user("persist_user")
+        try:
+            item = AuditItem(name="persist_test")
+            item.save(db=db2)
+
+            doc = db2.find_document("audit_items", item._id)
+            assert doc["created_by"] == "persist_user"
+            assert doc["updated_by"] == "persist_user"
+            assert doc["created_at"] == item.created_at.isoformat()
+            assert doc["updated_at"] == item.updated_at.isoformat()
+        finally:
+            AuditMixin.set_current_user(None)
+
+    def test_audit_log_entry_fields(self):
+        """AuditLogMixin log entries contain user, timestamp, and snapshot."""
+        db1, db2 = make_db_pair()
+        setup(AuditLogItem, db1, db2)
+
+        AuditMixin.set_current_user("log_user")
+        try:
+            item = AuditLogItem(name="log_fields_test")
+            item.save(db=db2)
+
+            logs = item.get_audit_log(db=db2)
+            assert len(logs) == 1
+            assert logs[0]["user"] == "log_user"
+            assert isinstance(logs[0]["timestamp"], str)
+            # Verify ISO format by parsing
+            datetime.fromisoformat(logs[0]["timestamp"])
+            assert logs[0]["snapshot"]["name"] == "log_fields_test"
+        finally:
+            AuditMixin.set_current_user(None)
+
+    def test_soft_delete_class_methods_filter_correctly(self):
+        """active(), with_deleted(), only_deleted() return correct filtered sets."""
+        db1, db2 = make_db_pair()
+        setup(SoftItem, db1, db2)
+
+        # Save to class-bound db (db1) for class method queries
+        SoftItem(name="alpha").save()
+        SoftItem(name="beta").save()
+        c = SoftItem(name="gamma")
+        c.save()
+
+        # Soft-delete beta via queryset lookup
+        beta = SoftItem.query().filter(F("name") == "beta").first()
+        beta.soft_delete()
+
+        active = SoftItem.active().all()
+        assert len(active) == 2
+        active_names = sorted(i.name for i in active)
+        assert active_names == ["alpha", "gamma"]
+
+        with_del = SoftItem.with_deleted().all()
+        assert len(with_del) == 3
+        all_names = sorted(i.name for i in with_del)
+        assert all_names == ["alpha", "beta", "gamma"]
+
+        only_del = SoftItem.only_deleted().all()
+        assert len(only_del) == 1
+        assert only_del[0].name == "beta"
+
+    def test_audit_log_no_entry_on_unchanged_save(self):
+        """Re-saving without changes produces no new audit entry."""
+        db1, db2 = make_db_pair()
+        setup(AuditLogItem, db1, db2)
+
+        item = AuditLogItem(name="unchanged_test")
+        item.save(db=db2)
+
+        logs = item.get_audit_log(db=db2)
+        assert len(logs) == 1
+        assert logs[0]["action"] == "create"
+
+        # Re-save without changes
+        item.save(db=db2)
+
+        logs = item.get_audit_log(db=db2)
+        assert len(logs) == 1  # Still only the "create" entry
+        assert logs[0]["action"] == "create"
+
+    def test_hooks_disabled_bypasses_veto(self):
+        """_hooks_enabled = False skips veto hook entirely."""
+        db1, db2 = make_db_pair()
+        setup(DisabledHooksVetoItem, db1, db2)
+
+        item = DisabledHooksVetoItem(name="no_veto")
+        item.save(db=db2)  # Should succeed despite before_save returning False
+
+        assert item._id > 0
+        doc = db2.find_document("hooked_items", item._id)
+        assert doc is not None
+        assert doc["name"] == "no_veto"
+
+    def test_audit_mixin_raising_getter_produces_none(self):
+        """Getter that raises exception results in created_by/updated_by = None."""
+        db1, db2 = make_db_pair()
+        setup(AuditItem, db1, db2)
+
+        def raising_getter():
+            raise ValueError("simulated failure")
+
+        AuditMixin.set_current_user_getter(raising_getter)
+        try:
+            item = AuditItem(name="raise_test")
+            item.save(db=db2)
+
+            assert item.created_by is None
+            assert item.updated_by is None
+
+            doc = db2.find_document("audit_items", item._id)
+            assert doc["created_by"] is None
+            assert doc["updated_by"] is None
+        finally:
+            AuditMixin.set_current_user_getter(None)
+
+    def test_full_mixin_hard_delete_with_db(self):
+        """FullMixin hard_delete(db=db2) fires hooks and removes from db2."""
+        db1, db2 = make_db_pair()
+        setup(TrackedFullItem, db1, db2)
+
+        item = TrackedFullItem(name="full_del")
+        item.save(db=db2)
+        saved_id = item._id
+        assert saved_id > 0
+
+        item.hard_delete(db=db2)
+
+        assert item._id is None
+        assert item.hook_log == ["before_save", "after_save", "before_delete", "after_delete"]
+        assert db2.find_document("tracked_full_items", saved_id) is None
