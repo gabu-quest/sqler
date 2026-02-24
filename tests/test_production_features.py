@@ -51,7 +51,7 @@ class TestHealthCheck:
         status = health_check(db)
 
         assert isinstance(status.details["databases"], list)
-        assert len(status.details["databases"]) >= 1
+        assert len(status.details["databases"]) == 1
         assert any(db["name"] == "main" for db in status.details["databases"])
 
     def test_health_status_to_dict(self):
@@ -90,8 +90,8 @@ class TestDatabaseStats:
         db.create_index("user", "name")
 
         stats = get_stats(db)
-        assert stats.table_count >= 1
-        assert stats.index_count >= 1
+        assert stats.table_count == 2
+        assert stats.index_count == 1
 
     def test_stats_to_dict(self):
         """DatabaseStats can be serialized with correct values."""
@@ -471,7 +471,7 @@ class TestMetrics:
         db = SQLerDB.in_memory(shared=False)
         db.adapter.execute("SELECT 42;")
 
-        assert len(captured) >= 1
+        assert len(captured) == 1
         assert "SELECT 42" in captured[-1].sql
 
         metrics.disable()

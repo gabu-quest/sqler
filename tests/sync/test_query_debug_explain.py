@@ -21,4 +21,5 @@ def test_explain_query_plan_runs_and_returns_rows(oligo_db: SQLerDB):
 
     q = SQLerQuery(table="oligos", adapter=db.adapter).filter(F("length") >= 10)
     rows = q.explain_query_plan(db.adapter)
-    assert isinstance(rows, list) and rows
+    assert isinstance(rows, list)
+    assert len(rows) >= 1

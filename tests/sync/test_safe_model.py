@@ -1,6 +1,7 @@
 import pytest
 from sqler import SQLerDB
 from sqler.models import SQLerSafeModel, StaleVersionError
+from sqler.models.utils import RebaseConfig
 from sqler.query import SQLerField as F
 
 
@@ -90,4 +91,54 @@ def test_safe_model_complex_filters():
         first.refresh()
         assert first._version == 0
     finally:
+        db.close()
+
+
+def test_safe_model_rebase_retry_exhaustion():
+    """Rebase retries exhaust after max_retries, raising StaleVersionError."""
+
+    class Counter(SQLerSafeModel):
+        count: int = 0
+        _rebase_config = RebaseConfig(
+            enabled=True,
+            allowed_fields={"count"},
+            max_delta=1,
+            max_retries=2,
+        )
+
+    db = SQLerDB.in_memory(shared=False)
+    Counter.set_db(db)
+    try:
+        counter = Counter(count=0).save()
+        stale = Counter.from_id(counter._id)
+
+        # Bump version behind stale's back so rebase kicks in
+        counter.count += 1
+        counter.save()
+
+        stale.count += 1
+
+        # Monkey-patch adapter.commit to bump version on every retry,
+        # ensuring the stale copy can never catch up.
+        original_commit = db.adapter.commit
+        call_count = 0
+
+        def sabotaging_commit():
+            nonlocal call_count
+            original_commit()
+            call_count += 1
+            # After each rebase attempt commits, bump version again
+            if call_count <= 3:
+                db.adapter.execute(
+                    "UPDATE counters SET _version = _version + 1 WHERE _id = ?;",
+                    [stale._id],
+                )
+                original_commit()
+
+        db.adapter.commit = sabotaging_commit
+
+        with pytest.raises(StaleVersionError, match="retries exhausted"):
+            stale.save()
+    finally:
+        db.adapter.commit = original_commit
         db.close()
