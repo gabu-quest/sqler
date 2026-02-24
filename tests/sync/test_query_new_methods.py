@@ -223,7 +223,7 @@ class TestNullChecks:
             .all()
         )
         # NULL organizers + alice
-        assert len(results) >= 3
+        assert len(results) == 4
 
 
 # ============================================================================
@@ -877,7 +877,7 @@ class TestCombinedOperations:
         # No organizer: Meetup C, Seminar D, Webinar E (has location but no organizer)
         # Canceled: Meetup C
         # Unique: Meetup C, Seminar D, Webinar E (3 events)
-        assert len(results) >= 2
+        assert len(results) == 3
 
     def test_startswith_and_aggregate(self, db, products):
         """Combine startswith() with aggregate."""
