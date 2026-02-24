@@ -52,16 +52,16 @@ Branch: `feat/qler-prerequisites`
 - 30 tests (15 sync + 15 async) covering all mixin variants with db= forwarding
 - Hardened assertions: `assert_recent_utc()`, exact value comparisons, veto paths, db isolation
 
-### M-8: Mixin Test Coverage Gaps ⬚
-Coverage gaps identified by test auditor — all relate to mixin behavior not exercised by the db= forwarding tests.
+### M-8: Mixin Test Coverage Gaps ✅
+Coverage gaps identified by test auditor — all relate to mixin behavior not exercised by the db= forwarding tests. 14 tests added (7 sync + 7 async), hardened by second audit pass.
 
-- [ ] Persisted doc audit field round-trip: verify `doc["created_by"]`, `doc["updated_by"]`, `doc["created_at"]` match in-memory values after read-back from DB
-- [ ] AuditLogMixin log entry fields: assert `logs[0]["user"]`, `logs[0]["timestamp"]`, `logs[0]["snapshot"]` in save tests
-- [ ] SoftDeleteMixin class methods with `using()`: `active()`, `with_deleted()`, `only_deleted()` return correct filtered sets
-- [ ] AuditLogMixin silent-update branch: `save()` with no field changes writes no audit entry
-- [ ] HooksMixin `_hooks_enabled = False` bypass: veto hook skipped when hooks disabled
-- [ ] AuditMixin getter exception-swallowing: raising getter → `created_by is None`
-- [ ] FullMixin delete path with `db=`: `hard_delete(db=db2)` through full MRO
+- [x] Persisted doc audit field round-trip: ORM reload + raw doc verification
+- [x] AuditLogMixin log entry fields: user, recency-checked timestamp, snapshot
+- [x] SoftDeleteMixin class methods: `active()`, `with_deleted()`, `only_deleted()` with exact name assertions + clean-slate guard
+- [x] AuditLogMixin silent-update branch: re-save without changes produces no audit entry
+- [x] HooksMixin `_hooks_enabled = False`: all 4 hooks skipped on both save and delete paths
+- [x] AuditMixin getter exception-swallowing: raising getter → `created_by is None`
+- [x] FullMixin delete path with `db=`: `hard_delete(db=db2)` through full MRO with hook tracking
 
 ### M-9: BUG-6 — `F("_id")` Silently Returns No Results ✅
 **Found:** 2026-02-23 | **Severity:** Medium
