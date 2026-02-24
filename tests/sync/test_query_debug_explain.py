@@ -23,3 +23,4 @@ def test_explain_query_plan_runs_and_returns_rows(oligo_db: SQLerDB):
     rows = q.explain_query_plan(db.adapter)
     assert isinstance(rows, list)
     assert len(rows) >= 1
+    assert any("SCAN" in r["detail"] or "SEARCH" in r["detail"] for r in rows)
