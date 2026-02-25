@@ -229,6 +229,48 @@ class AsyncSQLerModel(BaseModel):
         else:
             await db._ensure_table(table)
 
+    @classmethod
+    async def asave_many(cls: Type[TAModel], instances: list[TAModel], *, db=None) -> list[TAModel]:
+        """Insert multiple new instances in a single batch operation.
+
+        Uses multi-row INSERT for significantly better throughput than
+        calling ``save()`` in a loop. Only supports new (unsaved) instances.
+
+        Args:
+            instances: List of model instances with ``_id is None``.
+            db: Optional database (overrides class-level binding).
+
+        Returns:
+            list: The same instances with ``_id`` populated.
+
+        Raises:
+            ValueError: If any instance already has an ``_id``.
+        """
+        if not instances:
+            return instances
+        for inst in instances:
+            if inst._id is not None:
+                raise ValueError("asave_many() only accepts new instances (_id must be None)")
+
+        db, table = cls._resolve_binding(db)
+        promoted = getattr(cls, "__promoted__", None)
+
+        if promoted and table not in db._promoted_columns:
+            checks = getattr(cls, "__checks__", None)
+            await db._ensure_table_with_promoted(table, promoted, checks)
+
+        payloads = [await inst._adump_with_relations() for inst in instances]
+
+        if promoted:
+            promoted_fields = list(promoted.keys())
+            ids = await db.insert_many_promoted(table, payloads, promoted_fields)
+        else:
+            ids = await db.insert_many(table, payloads)
+
+        for inst, id_ in zip(instances, ids):
+            inst._id = id_
+        return instances
+
     async def save(self: TAModel, *, db=None) -> TAModel:
         cls = self.__class__
         db, table = cls._resolve_binding(db)
