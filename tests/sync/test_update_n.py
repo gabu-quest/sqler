@@ -11,6 +11,17 @@ class SyncItem(SQLerModel):
     attempts: int = 0
 
 
+class SyncPromotedItem(SQLerModel):
+    __promoted__ = {
+        "status": "TEXT DEFAULT 'pending'",
+        "priority": "INTEGER DEFAULT 0",
+    }
+    name: str = ""
+    status: str = "pending"
+    priority: int = 0
+    attempts: int = 0
+
+
 class SyncVersionedItem(SQLerSafeModel):
     name: str = ""
     status: str = "pending"
@@ -31,6 +42,18 @@ def db_with_items():
 
 
 @pytest.fixture
+def db_promoted_items():
+    db = SQLerDB.in_memory(shared=False)
+    SyncPromotedItem.set_db(db, "pitems")  # auto-creates promoted schema
+    SyncPromotedItem(name="a", status="pending", priority=1, attempts=0).save()
+    SyncPromotedItem(name="b", status="pending", priority=5, attempts=0).save()
+    SyncPromotedItem(name="c", status="pending", priority=10, attempts=0).save()
+    SyncPromotedItem(name="d", status="completed", priority=3, attempts=1).save()
+    yield db
+    db.close()
+
+
+@pytest.fixture
 def db_versioned_items():
     db = SQLerDB.in_memory(shared=False)
     SyncVersionedItem.set_db(db, "vitems")
@@ -44,16 +67,6 @@ def db_versioned_items():
 
 
 class TestSyncUpdateNBasic:
-    def test_returns_list(self, db_with_items):
-        results = (
-            SyncItem.query()
-            .filter(F("status") == "pending")
-            .order_by("-priority")
-            .update_n(2, status="running")
-        )
-        assert isinstance(results, list)
-        assert len(results) == 2
-
     def test_respects_limit(self, db_with_items):
         results = (
             SyncItem.query()
@@ -104,6 +117,56 @@ class TestSyncUpdateNBasic:
             assert r.status == "running"
             assert r.attempts == 1
 
+    def test_returns_model_instances(self, db_with_items):
+        results = (
+            SyncItem.query()
+            .filter(F("status") == "pending")
+            .order_by("-priority")
+            .update_n(1, status="running")
+        )
+        assert len(results) == 1
+        inst = results[0]
+        assert inst.name == "c"  # highest priority pending
+        assert inst.status == "running"
+        assert inst.priority == 10
+
+    def test_n_equals_one(self, db_with_items):
+        results = (
+            SyncItem.query()
+            .filter(F("status") == "pending")
+            .order_by("-priority")
+            .update_n(1, status="running")
+        )
+        assert len(results) == 1
+        assert results[0].name == "c"
+        assert results[0].status == "running"
+
+
+class TestSyncUpdateNPromoted:
+    def test_updates_promoted_column(self, db_promoted_items):
+        results = (
+            SyncPromotedItem.query()
+            .filter(F("status") == "pending")
+            .order_by("-priority")
+            .update_n(2, status="running")
+        )
+        assert len(results) == 2
+        names = {r.name for r in results}
+        assert names == {"b", "c"}
+        for r in results:
+            assert r.status == "running"
+
+    def test_updates_promoted_with_f_expression(self, db_promoted_items):
+        results = (
+            SyncPromotedItem.query()
+            .filter(F("status") == "pending")
+            .order_by("-priority")
+            .update_n(2, priority=F("priority") + 100)
+        )
+        assert len(results) == 2
+        for r in results:
+            assert r.priority >= 105
+
 
 class TestSyncUpdateNVersioned:
     def test_bumps_version(self, db_versioned_items):
@@ -114,8 +177,10 @@ class TestSyncUpdateNVersioned:
             .update_n(2, status="running")
         )
         assert len(results) == 2
+        assert {r.name for r in results} == {"x", "y"}
         for r in results:
             assert r._version == 1  # initial save = 0, update_n bumps to 1
+            assert r.status == "running"
 
 
 class TestSyncUpdateNValidation:
