@@ -1,5 +1,7 @@
 """Tests for SQLerModel.save_many() and SQLerSafeModel.save_many()."""
 
+import sqlite3
+
 import pytest
 
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
@@ -104,9 +106,8 @@ def test_save_many_with_promoted(db):
         ]
         SPromotedItem.save_many(items)
 
-        assert all(item._id is not None for item in items)
         ids = [item._id for item in items]
-        assert len(set(ids)) == 3
+        assert ids == list(range(ids[0], ids[0] + 3))
 
         found = SPromotedItem.query().order_by("priority").all()
         assert len(found) == 3
@@ -140,6 +141,20 @@ def test_save_many_roundtrip(db):
         SItem._table = None
 
 
+def test_save_many_with_db_param(db):
+    """Verify save_many works with explicit db= parameter instead of class binding."""
+    table = SItem.__tablename__
+    items = [SItem(name=f"db-{i}", value=i) for i in range(3)]
+    SItem._table = table
+    try:
+        SItem.save_many(items, db=db)
+        assert all(item._id is not None for item in items)
+        ids = [item._id for item in items]
+        assert ids == list(range(ids[0], ids[0] + 3))
+    finally:
+        SItem._table = None
+
+
 def test_save_many_atomicity(db):
     """If one row violates a CHECK constraint, no rows should be saved."""
     SPromotedItem.set_db(db)
@@ -148,7 +163,7 @@ def test_save_many_atomicity(db):
             SPromotedItem(name="good", status="active", priority=1),
             SPromotedItem(name="bad", status="INVALID_STATUS", priority=2),
         ]
-        with pytest.raises(Exception):
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
             SPromotedItem.save_many(items)
 
         count = SPromotedItem.query().count()
@@ -186,7 +201,11 @@ def test_save_many_safe_model(db):
         assert len(result) == 5
         assert all(item._id is not None for item in items)
         assert all(item._version == 0 for item in items)
-        assert all(item._snapshot is not None for item in items)
+        for item in items:
+            assert item._snapshot is not None
+            assert set(item._snapshot.keys()) == {"name", "value"}
+            assert item._snapshot["name"] == item.name
+            assert item._snapshot["value"] == item.value
 
         ids = [item._id for item in items]
         assert len(set(ids)) == 5
@@ -205,9 +224,18 @@ def test_save_many_safe_model_with_promoted(db):
         ]
         SSafePromotedItem.save_many(items)
 
-        assert all(item._id is not None for item in items)
+        ids = [item._id for item in items]
+        assert ids == list(range(ids[0], ids[0] + 2))
         assert all(item._version == 0 for item in items)
-        assert len(set(item._id for item in items)) == 2
+
+        found = SSafePromotedItem.query().order_by("_id").all()
+        assert len(found) == 2
+        assert found[0].name == "x"
+        assert found[0].status == "pending"
+        assert found[0]._version == 0
+        assert found[1].name == "y"
+        assert found[1].status == "pending"
+        assert found[1]._version == 0
     finally:
         SSafePromotedItem._db = None
         SSafePromotedItem._table = None

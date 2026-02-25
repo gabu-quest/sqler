@@ -327,6 +327,8 @@ class AsyncSQLerDB:
         """
         if not docs:
             return []
+        for field in promoted_fields:
+            validate_identifier(field)
         cols = ["data"] + promoted_fields
         return await self._insert_many_chunked(table, docs, cols=cols, versioned=False, promoted_fields=promoted_fields)
 
@@ -363,6 +365,8 @@ class AsyncSQLerDB:
         """
         if not docs:
             return []
+        for field in promoted_fields:
+            validate_identifier(field)
         await self._ensure_versioned_table(table)
         cols = ["data"] + promoted_fields
         ids = await self._insert_many_chunked(table, docs, cols=cols, versioned=True, promoted_fields=promoted_fields)
@@ -439,6 +443,9 @@ class AsyncSQLerDB:
                 finally:
                     await cur.close()
 
+                # ID range is contiguous because BEGIN IMMEDIATE (from
+                # self.transaction()) holds an exclusive write lock, preventing
+                # concurrent inserts from interleaving AUTOINCREMENT IDs.
                 chunk_size = len(chunk)
                 first_id = last_id - chunk_size + 1
                 all_ids.extend(range(first_id, last_id + 1))
