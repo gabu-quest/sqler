@@ -143,6 +143,8 @@ def test_pragma_report_in_memory():
         assert set(report.keys()) == expected_keys
         assert report["foreign_keys"] == 1
         assert report["journal_mode"] == "memory"
+        assert report["synchronous"] == 0  # OFF for in-memory
+        assert report["cache_size"] == -32000
         assert report["temp_store"] == 2  # MEMORY = 2
     finally:
         adapter.close()
