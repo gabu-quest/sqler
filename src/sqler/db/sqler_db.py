@@ -333,6 +333,8 @@ class SQLerDB:
         """
         if not docs:
             return []
+        for field in promoted_fields:
+            validate_identifier(field)
         cols = ["data"] + promoted_fields
         return self._insert_many_chunked(table, docs, cols=cols, versioned=False, promoted_fields=promoted_fields)
 
@@ -369,6 +371,8 @@ class SQLerDB:
         """
         if not docs:
             return []
+        for field in promoted_fields:
+            validate_identifier(field)
         self._ensure_versioned_table(table)
         cols = ["data"] + promoted_fields
         ids = self._insert_many_chunked(table, docs, cols=cols, versioned=True, promoted_fields=promoted_fields)
@@ -429,7 +433,14 @@ class SQLerDB:
                 sql = f"INSERT INTO {table} ({col_list}) VALUES {values_sql};"
 
                 cursor = self.adapter.execute(sql, params)
-                last_id = cursor.lastrowid
+                try:
+                    last_id = cursor.lastrowid
+                finally:
+                    cursor.close()
+
+                # ID range is contiguous because BEGIN IMMEDIATE (from
+                # self.transaction()) holds an exclusive write lock, preventing
+                # concurrent inserts from interleaving AUTOINCREMENT IDs.
                 chunk_size = len(chunk)
                 first_id = last_id - chunk_size + 1
                 all_ids.extend(range(first_id, last_id + 1))

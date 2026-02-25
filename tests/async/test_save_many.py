@@ -1,5 +1,7 @@
 """Tests for AsyncSQLerModel.asave_many() and AsyncSQLerSafeModel.asave_many()."""
 
+import sqlite3
+
 import pytest
 import pytest_asyncio
 
@@ -112,9 +114,8 @@ async def test_asave_many_with_promoted(db):
         ]
         await APromotedItem.asave_many(items)
 
-        assert all(item._id is not None for item in items)
         ids = [item._id for item in items]
-        assert len(set(ids)) == 3
+        assert ids == list(range(ids[0], ids[0] + 3))
 
         # Verify promoted columns persisted correctly via query
         found = await APromotedItem.query().order_by("priority").all()
@@ -173,7 +174,7 @@ async def test_asave_many_atomicity(db):
             APromotedItem(name="good", status="active", priority=1),
             APromotedItem(name="bad", status="INVALID_STATUS", priority=2),
         ]
-        with pytest.raises(Exception):
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
             await APromotedItem.asave_many(items)
 
         # Verify no rows were saved (transaction rolled back)
@@ -215,7 +216,11 @@ async def test_asave_many_safe_model(db):
         assert all(item._id is not None for item in items)
         assert all(item._version == 0 for item in items)
         # Snapshots should be set
-        assert all(item._snapshot is not None for item in items)
+        for item in items:
+            assert item._snapshot is not None
+            assert set(item._snapshot.keys()) == {"name", "value"}
+            assert item._snapshot["name"] == item.name
+            assert item._snapshot["value"] == item.value
 
         ids = [item._id for item in items]
         assert len(set(ids)) == 5
@@ -234,9 +239,18 @@ async def test_asave_many_safe_model_with_promoted(db):
         ]
         await ASafePromotedItem.asave_many(items)
 
-        assert all(item._id is not None for item in items)
+        ids = [item._id for item in items]
+        assert ids == list(range(ids[0], ids[0] + 2))
         assert all(item._version == 0 for item in items)
-        assert len(set(item._id for item in items)) == 2
+
+        found = await ASafePromotedItem.query().order_by("_id").all()
+        assert len(found) == 2
+        assert found[0].name == "x"
+        assert found[0].status == "pending"
+        assert found[0]._version == 0
+        assert found[1].name == "y"
+        assert found[1].status == "pending"
+        assert found[1]._version == 0
     finally:
         ASafePromotedItem.set_db(None)
 

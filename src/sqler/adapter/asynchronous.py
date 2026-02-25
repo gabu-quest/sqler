@@ -226,8 +226,8 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
                 row = await cur.fetchone()
             finally:
                 await cur.close()
-            await self.auto_commit()
             report[key] = row[0] if row else None
+        await self.auto_commit()
         return report
 
     # factories
