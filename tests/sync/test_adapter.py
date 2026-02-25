@@ -129,6 +129,43 @@ def test_multiple_connects_and_closes(tmp_path):
         adapter.execute("SELECT 1;")
 
 
+def test_pragma_report_in_memory():
+    """pragma_report returns expected keys with in-memory values."""
+    adapter = SQLiteAdapter.in_memory(shared=False)
+    adapter.connect()
+    try:
+        report = adapter.pragma_report()
+        assert isinstance(report, dict)
+        expected_keys = {
+            "foreign_keys", "busy_timeout", "journal_mode", "synchronous",
+            "cache_size", "wal_autocheckpoint", "mmap_size", "temp_store",
+        }
+        assert set(report.keys()) == expected_keys
+        assert report["foreign_keys"] == 1
+        assert report["journal_mode"] == "memory"
+        assert report["temp_store"] == 2  # MEMORY = 2
+    finally:
+        adapter.close()
+
+
+def test_pragma_report_on_disk(tmp_path):
+    """pragma_report returns on_disk PRAGMA values."""
+    path = str(tmp_path / "pragma_test.db")
+    adapter = SQLiteAdapter.on_disk(path)
+    adapter.connect()
+    try:
+        report = adapter.pragma_report()
+        assert report["foreign_keys"] == 1
+        assert report["journal_mode"] == "wal"
+        assert report["synchronous"] == 1  # NORMAL = 1
+        assert report["busy_timeout"] == 5000
+        assert report["cache_size"] == -64000
+        assert report["mmap_size"] == 268435456
+        assert report["temp_store"] == 2  # MEMORY = 2
+    finally:
+        adapter.close()
+
+
 def test_context_manager_rollback_on_exception(tmp_path):
     """rollback on exception: should not commit inserts"""
     path = str(tmp_path / "cm_rollback.db")
