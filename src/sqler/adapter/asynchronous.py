@@ -204,6 +204,32 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         """Backward-compat: returns the task-pinned connection, if any."""
         return self._task_conn.get(None)
 
+    _PRAGMA_KEYS = [
+        "foreign_keys", "busy_timeout", "journal_mode", "synchronous",
+        "cache_size", "wal_autocheckpoint", "mmap_size", "temp_store",
+    ]
+
+    async def pragma_report(self) -> dict[str, Any]:
+        """Return current PRAGMA values for key settings.
+
+        Queries the active connection for each tracked PRAGMA and returns
+        a dict of ``{pragma_name: value}``. Useful for downstream libraries
+        to verify that expected PRAGMAs are in effect.
+
+        Returns:
+            dict[str, Any]: Mapping of PRAGMA names to their current values.
+        """
+        report: dict[str, Any] = {}
+        for key in self._PRAGMA_KEYS:
+            cur = await self.execute(f"PRAGMA {key};")
+            try:
+                row = await cur.fetchone()
+            finally:
+                await cur.close()
+            await self.auto_commit()
+            report[key] = row[0] if row else None
+        return report
+
     # factories
     @classmethod
     def in_memory(cls, shared: bool = True, name: Optional[str] = None) -> Self:

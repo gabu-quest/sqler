@@ -248,6 +248,28 @@ class SQLiteAdapter(AdapterABC):
             uri = ":memory:"
         return cls(uri, pragmas=pragmas)
 
+    _PRAGMA_KEYS = [
+        "foreign_keys", "busy_timeout", "journal_mode", "synchronous",
+        "cache_size", "wal_autocheckpoint", "mmap_size", "temp_store",
+    ]
+
+    def pragma_report(self) -> dict[str, Any]:
+        """Return current PRAGMA values for key settings.
+
+        Queries the active connection for each tracked PRAGMA and returns
+        a dict of ``{pragma_name: value}``. Useful for downstream libraries
+        to verify that expected PRAGMAs are in effect.
+
+        Returns:
+            dict[str, Any]: Mapping of PRAGMA names to their current values.
+        """
+        report: dict[str, Any] = {}
+        for key in self._PRAGMA_KEYS:
+            cursor = self.execute(f"PRAGMA {key};")
+            row = cursor.fetchone()
+            report[key] = row[0] if row else None
+        return report
+
     @classmethod
     def on_disk(cls, path: str = "sqler.db") -> Self:
         """Connects (creates if not exist) a db on disk with some pragmas applied"""
