@@ -190,6 +190,24 @@ class SQLerQuerySet(Generic[T]):
         self._attach_metadata(inst, doc)
         return inst
 
+    def update_n(self, n: int, **fields) -> list[T]:
+        """Atomically update up to *n* matching rows and return them as model instances.
+
+        Args:
+            n: Maximum number of rows to update.
+            **fields: Field names and values (or F-expressions) to update.
+
+        Returns:
+            list: Model instances, or empty list if no rows matched.
+        """
+        docs = self._query.update_n(n, **fields)
+        results: list[T] = []
+        for doc in docs:
+            inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
+            self._attach_metadata(inst, doc)
+            results.append(inst)
+        return results
+
     def delete_all(self) -> int:
         """Delete all matching rows (bulk delete).
 
