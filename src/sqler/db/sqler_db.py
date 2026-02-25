@@ -298,6 +298,144 @@ class SQLerDB:
         self.adapter.auto_commit()
         return _id
 
+    # ---- batch insert helpers ----
+
+    def insert_many(self, table: str, docs: list[dict[str, Any]]) -> list[int]:
+        """Multi-row INSERT for plain JSON documents.
+
+        All documents must be new (no ``_id``). Uses chunked multi-row INSERT
+        statements to stay within SQLite's 999-parameter limit.
+
+        Args:
+            table: Table name.
+            docs: List of JSON-serializable dicts to insert.
+
+        Returns:
+            list[int]: Assigned ``_id`` for each document, preserving order.
+        """
+        if not docs:
+            return []
+        self._ensure_table(table)
+        return self._insert_many_chunked(table, docs, cols=["data"], versioned=False)
+
+    def insert_many_promoted(
+        self, table: str, docs: list[dict[str, Any]], promoted_fields: list[str]
+    ) -> list[int]:
+        """Multi-row INSERT splitting promoted fields into real columns.
+
+        Args:
+            table: Table name.
+            docs: List of full document payloads.
+            promoted_fields: Keys to extract from each doc into real columns.
+
+        Returns:
+            list[int]: Assigned ``_id`` for each document, preserving order.
+        """
+        if not docs:
+            return []
+        cols = ["data"] + promoted_fields
+        return self._insert_many_chunked(table, docs, cols=cols, versioned=False, promoted_fields=promoted_fields)
+
+    def insert_many_with_version(
+        self, table: str, docs: list[dict[str, Any]]
+    ) -> list[tuple[int, int]]:
+        """Multi-row INSERT with ``_version=0`` for versioned tables.
+
+        Args:
+            table: Table name.
+            docs: List of JSON-serializable dicts.
+
+        Returns:
+            list[tuple[int, int]]: ``(id, 0)`` pairs for each document.
+        """
+        if not docs:
+            return []
+        self._ensure_versioned_table(table)
+        ids = self._insert_many_chunked(table, docs, cols=["data"], versioned=True)
+        return [(id_, 0) for id_ in ids]
+
+    def insert_many_with_version_promoted(
+        self, table: str, docs: list[dict[str, Any]], promoted_fields: list[str]
+    ) -> list[tuple[int, int]]:
+        """Multi-row INSERT with ``_version=0`` splitting promoted fields.
+
+        Args:
+            table: Table name.
+            docs: List of full document payloads.
+            promoted_fields: Keys to extract into real columns.
+
+        Returns:
+            list[tuple[int, int]]: ``(id, 0)`` pairs for each document.
+        """
+        if not docs:
+            return []
+        self._ensure_versioned_table(table)
+        cols = ["data"] + promoted_fields
+        ids = self._insert_many_chunked(table, docs, cols=cols, versioned=True, promoted_fields=promoted_fields)
+        return [(id_, 0) for id_ in ids]
+
+    def _insert_many_chunked(
+        self,
+        table: str,
+        docs: list[dict[str, Any]],
+        *,
+        cols: list[str],
+        versioned: bool,
+        promoted_fields: list[str] | None = None,
+    ) -> list[int]:
+        """Internal: chunked multi-row INSERT with transaction wrapping.
+
+        Builds ``INSERT INTO t (col1, ...) VALUES (...), (...), ...`` statements,
+        chunking to stay within SQLite's 999-parameter limit.
+        """
+        promoted_fields = promoted_fields or []
+        params_per_row = 1 + len(promoted_fields)
+        max_rows_per_chunk = max(1, 999 // params_per_row)
+
+        all_ids: list[int] = []
+        all_col_names = list(cols)
+        if versioned:
+            all_col_names = ["data", "_version"] + promoted_fields
+
+        with self.transaction():
+            for offset in range(0, len(docs), max_rows_per_chunk):
+                chunk = docs[offset : offset + max_rows_per_chunk]
+                params: list[Any] = []
+                value_groups: list[str] = []
+
+                for doc in chunk:
+                    if promoted_fields:
+                        promoted_vals = {k: doc[k] for k in promoted_fields if k in doc}
+                        json_doc = {k: v for k, v in doc.items() if k not in promoted_fields}
+                    else:
+                        json_doc = doc
+                        promoted_vals = {}
+
+                    payload = json.dumps(json_doc)
+                    row_placeholders = ["json(?)"]
+                    params.append(payload)
+
+                    if versioned:
+                        row_placeholders.append("0")
+
+                    for pf in promoted_fields:
+                        row_placeholders.append("?")
+                        params.append(promoted_vals.get(pf))
+
+                    value_groups.append(f"({', '.join(row_placeholders)})")
+
+                col_list = ", ".join(all_col_names)
+                values_sql = ", ".join(value_groups)
+                sql = f"INSERT INTO {table} ({col_list}) VALUES {values_sql};"
+
+                cursor = self.adapter.execute(sql, params)
+                last_id = cursor.lastrowid
+                chunk_size = len(chunk)
+                first_id = last_id - chunk_size + 1
+                all_ids.extend(range(first_id, last_id + 1))
+
+        return all_ids
+
     def bulk_upsert(self, table: str, docs: list[dict[str, Any]]) -> list[int]:
         """Upsert multiple documents efficiently.
 
