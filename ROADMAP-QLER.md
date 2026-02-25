@@ -83,3 +83,14 @@ Audit-driven pass to eliminate lying tests, softball assertions, and coverage ga
 - [x] Timestamp assertions hardened with recency bounds (within 5 seconds)
 - [x] Explain plan assertions check `r["detail"]` for SCAN/SEARCH content
 - [x] All 1141 tests pass, 0 failures
+
+### M-11: Performance Upgrades (lerproof-driven) ✅
+Batch INSERT API and PRAGMA consistency tooling — identified by lerproof stress tests.
+
+- [x] `save_many()` / `asave_many()` classmethods on `SQLerModel`, `AsyncSQLerModel`, `SQLerSafeModel`, `AsyncSQLerSafeModel`
+- [x] DB-layer: `insert_many`, `insert_many_promoted`, `insert_many_with_version`, `insert_many_with_version_promoted` (sync + async)
+- [x] Multi-row INSERT with 999-param chunking, transaction-wrapped atomicity
+- [x] `validate_identifier()` on all promoted field names in batch path (security audit)
+- [x] `pragma_report()` on both `SQLiteAdapter` and `AsyncSQLiteAdapter` — returns dict of 8 key PRAGMA values
+- [x] 23 tests (11 sync + 12 async) covering basic, promoted, safe, chunking, atomicity, roundtrip, db= param
+- [x] All 1205 tests pass, 0 failures
