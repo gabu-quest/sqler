@@ -126,7 +126,7 @@ Real numbers from the [benchmark suite](benchmarks/results/REPORT.md) (22 scenar
 
 ### Honest Limitations
 
-- **Single writer** — SQLite's architecture. Use `bulk_upsert` and transactions to batch writes.
+- **Single writer** — SQLite's architecture. Use `save_many()` / `bulk_upsert` and transactions to batch writes.
 - **JSON overhead** — Fields are extracted via `json_extract()`, not native columns. Indexes close the gap.
 - **No JOINs** — Relationships use reference hydration, not SQL JOINs. Fine for typical document patterns.
 - **Memory-bound** — Large result sets materialize in Python. Use `paginate()` and `count()` to limit.
@@ -147,6 +147,7 @@ Full report with 22 charts: [benchmarks/results/REPORT.md](benchmarks/results/RE
 - `SQLerSafeModel` with optimistic locking (`_version` + `StaleVersionError`)
 - Referential integrity: `cascade`, `restrict`, `set_null` delete policies
 - Transaction-aware saves — `model.save()` inside `with db.transaction():` rolls back properly
+- `save_many()` / `asave_many()` for fast bulk creation (multi-row INSERT with auto-chunking)
 - `bulk_upsert` for efficient batch writes
 
 **Developer Experience**
