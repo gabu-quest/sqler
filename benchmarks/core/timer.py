@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import gc
+import math
 import statistics
 import time
+import warnings
 from typing import Callable
 
 from .base import TimingStats
@@ -16,47 +19,56 @@ class PrecisionTimer:
     Computes min/max/median/mean/p95/p99/stddev from measured timings.
     """
 
-    def __init__(self, warmup: int = 2, iterations: int = 5):
+    def __init__(self, warmup: int = 3, iterations: int = 20):
         self.warmup = warmup
         self.iterations = iterations
 
-    def measure(self, fn: Callable[[], object]) -> TimingStats:
-        """Run fn with warmup + measured iterations, return stats."""
+    def measure(
+        self, fn: Callable[[], object], *, gc_isolate: bool = True
+    ) -> TimingStats:
+        """Run fn with warmup + measured iterations, return stats.
+
+        Args:
+            fn: The callable to benchmark.
+            gc_isolate: If True, run gc.collect() before and disable GC during
+                        the measured loop to reduce noise.
+        """
         # Warmup — discard results
         for _ in range(self.warmup):
             fn()
 
         # Measured runs
         timings_ms: list[float] = []
-        for _ in range(self.iterations):
-            start = time.perf_counter()
-            fn()
-            elapsed = (time.perf_counter() - start) * 1000
-            timings_ms.append(elapsed)
+
+        if gc_isolate:
+            gc.collect()
+            gc.disable()
+
+        try:
+            for _ in range(self.iterations):
+                start = time.perf_counter()
+                fn()
+                elapsed = (time.perf_counter() - start) * 1000
+                timings_ms.append(elapsed)
+        finally:
+            if gc_isolate:
+                gc.enable()
 
         return self._compute_stats(timings_ms)
 
     def measure_once(self, fn: Callable[[], object]) -> TimingStats:
-        """Single measured run (for expensive operations like bulk inserts)."""
-        # One warmup
-        for _ in range(self.warmup):
-            fn()
-
-        start = time.perf_counter()
-        fn()
-        elapsed = (time.perf_counter() - start) * 1000
-
-        return TimingStats(
-            iterations=1,
-            min_ms=elapsed,
-            max_ms=elapsed,
-            mean_ms=elapsed,
-            median_ms=elapsed,
-            p95_ms=elapsed,
-            p99_ms=elapsed,
-            stddev_ms=0.0,
-            total_ms=elapsed,
+        """Deprecated: delegates to measure() with min 3 iterations."""
+        warnings.warn(
+            "measure_once() is deprecated — use measure() with sufficient iterations",
+            DeprecationWarning,
+            stacklevel=2,
         )
+        saved = self.iterations
+        self.iterations = max(3, saved)
+        try:
+            return self.measure(fn)
+        finally:
+            self.iterations = saved
 
     def _compute_stats(self, timings_ms: list[float]) -> TimingStats:
         n = len(timings_ms)
@@ -65,6 +77,7 @@ class PrecisionTimer:
                 iterations=0,
                 min_ms=0, max_ms=0, mean_ms=0, median_ms=0,
                 p95_ms=0, p99_ms=0, stddev_ms=0, total_ms=0,
+                reliable_p95=False,
             )
 
         sorted_t = sorted(timings_ms)
@@ -72,9 +85,14 @@ class PrecisionTimer:
         median = statistics.median(sorted_t)
         stddev = statistics.stdev(sorted_t) if n > 1 else 0.0
 
-        # Percentiles via sorted position
-        p95 = self._percentile(sorted_t, 0.95)
-        p99 = self._percentile(sorted_t, 0.99)
+        # Percentiles: NaN when sample too small for meaningful estimate
+        reliable = n >= 20
+        if reliable:
+            p95 = self._percentile(sorted_t, 0.95)
+            p99 = self._percentile(sorted_t, 0.99)
+        else:
+            p95 = float("nan")
+            p99 = float("nan")
 
         return TimingStats(
             iterations=n,
@@ -82,10 +100,11 @@ class PrecisionTimer:
             max_ms=sorted_t[-1],
             mean_ms=round(mean, 4),
             median_ms=round(median, 4),
-            p95_ms=round(p95, 4),
-            p99_ms=round(p99, 4),
+            p95_ms=round(p95, 4) if not math.isnan(p95) else p95,
+            p99_ms=round(p99, 4) if not math.isnan(p99) else p99,
             stddev_ms=round(stddev, 4),
             total_ms=round(sum(sorted_t), 4),
+            reliable_p95=reliable,
         )
 
     @staticmethod

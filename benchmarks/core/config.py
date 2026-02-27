@@ -59,8 +59,8 @@ class BenchmarkConfig:
     """Full benchmark configuration."""
 
     scale: ScaleConfig = field(default_factory=ScaleConfig.small)
-    warmup: int = 2
-    iterations: int = 5
+    warmup: int = 3
+    iterations: int = 20
     output_dir: str = "benchmarks/results"
     suites: list[str] | None = None  # None = all suites
     verbose: bool = False
