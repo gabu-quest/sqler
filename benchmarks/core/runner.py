@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .base import BenchmarkResult, Scenario
 from .config import BenchmarkConfig
+from .hygiene import validate_result
 from .system import SystemInfo
 
 
@@ -31,6 +34,9 @@ class BenchmarkRunner:
             print(f"  {scenario.description}")
             print(f"{'='*60}")
 
+            # GC between scenarios for clean baseline
+            gc.collect()
+
             try:
                 scenario.setup(self.config)
                 start = time.perf_counter()
@@ -38,18 +44,30 @@ class BenchmarkRunner:
                 elapsed = time.perf_counter() - start
                 scenario.teardown()
 
+                # Validate each result for hygiene violations
+                for r in results:
+                    issues = validate_result(r)
+                    for issue in issues:
+                        print(f"  [hygiene] {issue}")
+
                 all_results.extend(results)
                 print(f"  -> {len(results)} results in {elapsed:.1f}s")
 
                 if self.config.verbose:
                     for r in results:
+                        p95_str = (
+                            f"{r.timing.p95_ms:.2f}"
+                            if r.timing.reliable_p95
+                            else "n/a"
+                        )
                         print(
                             f"     {r.parameter}={r.value}: "
                             f"median={r.timing.median_ms:.2f}ms "
-                            f"p95={r.timing.p95_ms:.2f}ms"
+                            f"p95={p95_str}ms"
                         )
             except Exception as e:
                 print(f"  !! FAILED: {e}")
+                traceback.print_exc()
                 scenario.teardown()
 
         return all_results

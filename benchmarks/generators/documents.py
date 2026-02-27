@@ -168,7 +168,7 @@ class DocumentGenerator:
             doc = {"name": f"nested-{i}", "value": self.rng.randint(0, 10000)}
             # Build nested structure: level_0.level_1.level_2...target = value
             current = doc
-            for d in range(depth - 1):
+            for d in range(depth):
                 child = {}
                 current[f"level_{d}"] = child
                 current = child

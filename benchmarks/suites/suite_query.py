@@ -2,14 +2,36 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
+
 from sqler import F, SQLerDB
 
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
+from benchmarks.core.sqlite_baseline import (
+    count_filter,
+    create_index,
+    create_table,
+    exists_filter,
+    insert_many,
+    query_filter,
+    query_paginate,
+    query_range,
+    query_top_n,
+)
 from benchmarks.core.timer import PrecisionTimer
 from benchmarks.generators.documents import DocumentGenerator
 
 SUITE_NAME = "query"
+
+
+def _setup_sqlite_mirror(docs: list[dict]) -> sqlite3.Connection:
+    """Create an in-memory sqlite3 conn with same data for baseline."""
+    conn = sqlite3.connect(":memory:")
+    create_table(conn, "bench")
+    insert_many(conn, "bench", docs)
+    return conn
 
 
 class EqualityFilter:
@@ -28,9 +50,9 @@ class EqualityFilter:
 
         for size in config.scale.table_sizes:
             docs = self.gen.generate("small", size)
-            target_value = docs[size // 2]["value"]  # Pick a value we know exists
+            target_value = docs[size // 2]["value"]
 
-            # Without index
+            # sqler — without index
             db_no_idx = SQLerDB.in_memory()
             db_no_idx.bulk_upsert("bench", docs)
 
@@ -39,7 +61,7 @@ class EqualityFilter:
 
             no_idx_stats = timer.measure(query_no_idx)
 
-            # With index
+            # sqler — with index
             db_idx = SQLerDB.in_memory()
             db_idx.bulk_upsert("bench", docs)
             db_idx.create_index("bench", "value")
@@ -49,16 +71,38 @@ class EqualityFilter:
 
             idx_stats = timer.measure(query_idx)
 
-            results.append(BenchmarkResult(
-                scenario=self.name, suite=self.suite,
-                parameter="rows", value=f"no_index_{size}",
-                timing=no_idx_stats, rows=size,
-            ))
-            results.append(BenchmarkResult(
-                scenario=self.name, suite=self.suite,
-                parameter="rows", value=f"indexed_{size}",
-                timing=idx_stats, rows=size,
-            ))
+            # SQLite baseline — without index
+            conn_no_idx = _setup_sqlite_mirror(docs)
+
+            def sqlite_no_idx(conn=conn_no_idx, v=target_value):
+                return query_filter(conn, "bench", "value", "=", v)
+
+            sqlite_no_idx_stats = timer.measure(sqlite_no_idx)
+
+            # SQLite baseline — with index
+            conn_idx = _setup_sqlite_mirror(docs)
+            create_index(conn_idx, "bench", "value")
+
+            def sqlite_idx(conn=conn_idx, v=target_value):
+                return query_filter(conn, "bench", "value", "=", v)
+
+            sqlite_idx_stats = timer.measure(sqlite_idx)
+
+            for label, stats, baseline in [
+                (f"sqler_no_index_{size}", no_idx_stats, "sqler"),
+                (f"sqler_indexed_{size}", idx_stats, "sqler"),
+                (f"sqlite_no_index_{size}", sqlite_no_idx_stats, "sqlite"),
+                (f"sqlite_indexed_{size}", sqlite_idx_stats, "sqlite"),
+            ]:
+                results.append(BenchmarkResult(
+                    scenario=self.name, suite=self.suite,
+                    parameter="rows", value=label,
+                    timing=stats, rows=size,
+                    metadata={"storage_mode": "memory", "baseline": baseline},
+                ))
+
+            conn_no_idx.close()
+            conn_idx.close()
 
         return results
 
@@ -79,18 +123,24 @@ class RangeQueries:
     def run(self, config: BenchmarkConfig) -> list[BenchmarkResult]:
         results = []
         timer = PrecisionTimer(warmup=config.warmup, iterations=config.iterations)
-        size = config.scale.table_sizes[-1]  # Largest table size
+        size = config.scale.table_sizes[-1]
         docs = self.gen.generate("small", size)
+
+        # Derive max_val from actual data
+        max_val = max(d["value"] for d in docs)
 
         db = SQLerDB.in_memory()
         db.bulk_upsert("bench", docs)
 
-        max_val = 10000
+        conn = _setup_sqlite_mirror(docs)
+
         for selectivity, label in [(0.01, "1%"), (0.10, "10%"), (0.50, "50%")]:
             range_size = int(max_val * selectivity)
-            lo = 5000 - range_size // 2
-            hi = 5000 + range_size // 2
+            mid = max_val // 2
+            lo = mid - range_size // 2
+            hi = mid + range_size // 2
 
+            # sqler
             def do_query(db=db, lo=lo, hi=hi):
                 return db.query("bench").filter(
                     (F("value") > lo) & (F("value") < hi)
@@ -99,10 +149,24 @@ class RangeQueries:
             stats = timer.measure(do_query)
             results.append(BenchmarkResult(
                 scenario=self.name, suite=self.suite,
-                parameter="selectivity", value=label,
+                parameter="selectivity", value=f"sqler_{label}",
                 timing=stats, rows=size,
+                metadata={"storage_mode": "memory", "baseline": "sqler"},
             ))
 
+            # SQLite baseline
+            def do_sqlite(conn=conn, lo=lo, hi=hi):
+                return query_range(conn, "bench", "value", lo, hi)
+
+            sqlite_stats = timer.measure(do_sqlite)
+            results.append(BenchmarkResult(
+                scenario=self.name, suite=self.suite,
+                parameter="selectivity", value=f"sqlite_{label}",
+                timing=sqlite_stats, rows=size,
+                metadata={"storage_mode": "memory", "baseline": "sqlite"},
+            ))
+
+        conn.close()
         return results
 
     def teardown(self) -> None:
@@ -128,19 +192,21 @@ class ComplexFilterChains:
         db = SQLerDB.in_memory()
         db.bulk_upsert("bench", docs)
 
-        # 2 predicates
+        conn = _setup_sqlite_mirror(docs)
+
+        # sqler: 2 predicates
         def q2(db=db):
             return db.query("bench").filter(
                 (F("value") > 5000) & (F("category") == "tech")
             ).all()
 
-        # 3 predicates
+        # sqler: 3 predicates
         def q3(db=db):
             return db.query("bench").filter(
                 (F("value") > 3000) & (F("category") == "tech") & (F("score") > 50)
             ).all()
 
-        # 5 predicates
+        # sqler: 5 predicates
         def q5(db=db):
             return db.query("bench").filter(
                 (F("value") > 3000)
@@ -149,14 +215,54 @@ class ComplexFilterChains:
                 & (F("status") == "active")
             ).filter(F("name").like("alpha%")).all()
 
-        for label, fn in [("2_predicates", q2), ("3_predicates", q3), ("5_predicates", q5)]:
+        # SQLite: 2 predicates
+        def sq2(conn=conn):
+            return conn.execute(
+                "SELECT data FROM [bench] WHERE "
+                "json_extract(data, '$.value') > ? AND "
+                "json_extract(data, '$.category') = ?",
+                (5000, "tech"),
+            ).fetchall()
+
+        # SQLite: 3 predicates
+        def sq3(conn=conn):
+            return conn.execute(
+                "SELECT data FROM [bench] WHERE "
+                "json_extract(data, '$.value') > ? AND "
+                "json_extract(data, '$.category') = ? AND "
+                "json_extract(data, '$.score') > ?",
+                (3000, "tech", 50),
+            ).fetchall()
+
+        # SQLite: 5 predicates
+        def sq5(conn=conn):
+            return conn.execute(
+                "SELECT data FROM [bench] WHERE "
+                "json_extract(data, '$.value') > ? AND "
+                "json_extract(data, '$.category') = ? AND "
+                "json_extract(data, '$.score') > ? AND "
+                "json_extract(data, '$.status') = ? AND "
+                "json_extract(data, '$.name') LIKE ?",
+                (3000, "tech", 50, "active", "alpha%"),
+            ).fetchall()
+
+        for label, fn, baseline in [
+            ("sqler_2_predicates", q2, "sqler"),
+            ("sqler_3_predicates", q3, "sqler"),
+            ("sqler_5_predicates", q5, "sqler"),
+            ("sqlite_2_predicates", sq2, "sqlite"),
+            ("sqlite_3_predicates", sq3, "sqlite"),
+            ("sqlite_5_predicates", sq5, "sqlite"),
+        ]:
             stats = timer.measure(fn)
             results.append(BenchmarkResult(
                 scenario=self.name, suite=self.suite,
                 parameter="predicates", value=label,
                 timing=stats, rows=size,
+                metadata={"storage_mode": "memory", "baseline": baseline},
             ))
 
+        conn.close()
         return results
 
     def teardown(self) -> None:
@@ -182,17 +288,34 @@ class TopN:
         db = SQLerDB.in_memory()
         db.bulk_upsert("bench", docs)
 
+        conn = _setup_sqlite_mirror(docs)
+
         for n in (10, 100, 1000):
+            # sqler
             def do_query(db=db, n=n):
                 return db.query("bench").order_by("value").limit(n).all()
 
             stats = timer.measure(do_query)
             results.append(BenchmarkResult(
                 scenario=self.name, suite=self.suite,
-                parameter="limit", value=n,
+                parameter="limit", value=f"sqler_{n}",
                 timing=stats, rows=size,
+                metadata={"storage_mode": "memory", "baseline": "sqler"},
             ))
 
+            # SQLite baseline
+            def do_sqlite(conn=conn, n=n):
+                return query_top_n(conn, "bench", "value", n)
+
+            sqlite_stats = timer.measure(do_sqlite)
+            results.append(BenchmarkResult(
+                scenario=self.name, suite=self.suite,
+                parameter="limit", value=f"sqlite_{n}",
+                timing=sqlite_stats, rows=size,
+                metadata={"storage_mode": "memory", "baseline": "sqlite"},
+            ))
+
+        conn.close()
         return results
 
     def teardown(self) -> None:
@@ -218,21 +341,38 @@ class PaginationDepth:
         db = SQLerDB.in_memory()
         db.bulk_upsert("bench", docs)
 
+        conn = _setup_sqlite_mirror(docs)
+
         max_page = size // 20  # per_page=20
         for page in (1, 10, 50, 100, 500):
             if page > max_page:
                 continue
 
+            # sqler
             def do_query(db=db, page=page):
                 return db.query("bench").order_by("value").paginate(page=page, per_page=20)
 
             stats = timer.measure(do_query)
             results.append(BenchmarkResult(
                 scenario=self.name, suite=self.suite,
-                parameter="page", value=page,
+                parameter="page", value=f"sqler_{page}",
                 timing=stats, rows=size,
+                metadata={"storage_mode": "memory", "baseline": "sqler"},
             ))
 
+            # SQLite baseline
+            def do_sqlite(conn=conn, page=page):
+                return query_paginate(conn, "bench", "value", page, 20)
+
+            sqlite_stats = timer.measure(do_sqlite)
+            results.append(BenchmarkResult(
+                scenario=self.name, suite=self.suite,
+                parameter="page", value=f"sqlite_{page}",
+                timing=sqlite_stats, rows=size,
+                metadata={"storage_mode": "memory", "baseline": "sqlite"},
+            ))
+
+        conn.close()
         return results
 
     def teardown(self) -> None:
@@ -258,7 +398,9 @@ class CountVsMaterialize:
         db = SQLerDB.in_memory()
         db.bulk_upsert("bench", docs)
 
-        # count() vs len(all())
+        conn = _setup_sqlite_mirror(docs)
+
+        # sqler: count() vs len(all())
         def do_count(db=db):
             return db.query("bench").filter(F("value") > 5000).count()
 
@@ -268,7 +410,7 @@ class CountVsMaterialize:
         count_stats = timer.measure(do_count)
         len_all_stats = timer.measure(do_len_all)
 
-        # exists() vs bool(first())
+        # sqler: exists() vs bool(first())
         def do_exists(db=db):
             return db.query("bench").filter(F("value") > 5000).exists()
 
@@ -278,18 +420,49 @@ class CountVsMaterialize:
         exists_stats = timer.measure(do_exists)
         first_stats = timer.measure(do_bool_first)
 
-        for label, stats in [
-            ("count()", count_stats),
-            ("len(all())", len_all_stats),
-            ("exists()", exists_stats),
-            ("bool(first())", first_stats),
+        # SQLite baselines
+        def do_sqlite_count(conn=conn):
+            return count_filter(conn, "bench", "value", ">", 5000)
+
+        def do_sqlite_fetchall(conn=conn):
+            rows = conn.execute(
+                "SELECT data FROM [bench] WHERE json_extract(data, '$.value') > ?",
+                (5000,),
+            ).fetchall()
+            return len(rows)
+
+        def do_sqlite_exists(conn=conn):
+            return exists_filter(conn, "bench", "value", ">", 5000)
+
+        def do_sqlite_limit1(conn=conn):
+            return bool(conn.execute(
+                "SELECT 1 FROM [bench] WHERE json_extract(data, '$.value') > ? LIMIT 1",
+                (5000,),
+            ).fetchone())
+
+        sqlite_count_stats = timer.measure(do_sqlite_count)
+        sqlite_fetchall_stats = timer.measure(do_sqlite_fetchall)
+        sqlite_exists_stats = timer.measure(do_sqlite_exists)
+        sqlite_limit1_stats = timer.measure(do_sqlite_limit1)
+
+        for label, stats, baseline in [
+            ("sqler_count()", count_stats, "sqler"),
+            ("sqler_len(all())", len_all_stats, "sqler"),
+            ("sqler_exists()", exists_stats, "sqler"),
+            ("sqler_bool(first())", first_stats, "sqler"),
+            ("sqlite_COUNT(*)", sqlite_count_stats, "sqlite"),
+            ("sqlite_fetchall+len", sqlite_fetchall_stats, "sqlite"),
+            ("sqlite_EXISTS", sqlite_exists_stats, "sqlite"),
+            ("sqlite_LIMIT1", sqlite_limit1_stats, "sqlite"),
         ]:
             results.append(BenchmarkResult(
                 scenario=self.name, suite=self.suite,
                 parameter="method", value=label,
                 timing=stats, rows=size,
+                metadata={"storage_mode": "memory", "baseline": baseline},
             ))
 
+        conn.close()
         return results
 
     def teardown(self) -> None:

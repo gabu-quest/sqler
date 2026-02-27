@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from .theme import (
@@ -14,6 +15,10 @@ from .theme import (
     apply_dark_theme,
     color,
 )
+
+# Fixed colors for sqler vs sqlite grouped bars
+SQLER_COLOR = "#E69F00"   # Orange (Okabe-Ito)
+SQLITE_COLOR = "#56B4E9"  # Sky blue (Okabe-Ito)
 
 
 def _ensure_theme():
@@ -40,6 +45,19 @@ def _add_value_labels(ax, bars, fmt="{:.1f}", fontsize=8):
                 ha="center", va="bottom",
                 fontsize=fontsize, color=TEXT_PRIMARY, fontweight="bold",
             )
+
+
+def _detect_paired_results(results: list[dict]) -> bool:
+    """Detect if results contain sqler_/sqlite_ prefix pairs."""
+    values = {str(r.get("value", "")) for r in results}
+    sqler_keys = {v for v in values if v.startswith("sqler_")}
+    sqlite_keys = {v for v in values if v.startswith("sqlite_")}
+    if not sqler_keys or not sqlite_keys:
+        return False
+    # Check there's at least one matching suffix
+    sqler_suffixes = {v.removeprefix("sqler_") for v in sqler_keys}
+    sqlite_suffixes = {v.removeprefix("sqlite_") for v in sqlite_keys}
+    return bool(sqler_suffixes & sqlite_suffixes)
 
 
 def plot_scaling_lines(results: list[dict], title: str, system_info: str,
@@ -82,17 +100,28 @@ def plot_scaling_lines(results: list[dict], title: str, system_info: str,
         s = series[series_label]
         s["x"].append(x_val)
         s["median"].append(r["timing"]["median_ms"])
-        s["p95"].append(r["timing"]["p95_ms"])
+        p95 = r["timing"]["p95_ms"]
+        # Handle NaN p95
+        if isinstance(p95, float) and math.isnan(p95):
+            s["p95"].append(r["timing"]["median_ms"])  # fallback to median
+        else:
+            s["p95"].append(p95)
         s["min"].append(r["timing"]["min_ms"])
 
     for i, (label, data) in enumerate(sorted(series.items())):
-        c = color(i)
+        # Use fixed colors for sqler/sqlite if detected
+        if label.startswith("sqler"):
+            c = SQLER_COLOR
+        elif label.startswith("sqlite"):
+            c = SQLITE_COLOR
+        else:
+            c = color(i)
+
         # Sort by x value
         paired = sorted(zip(data["x"], data["median"], data["p95"], data["min"]))
         xs = [p[0] for p in paired]
         medians = [p[1] for p in paired]
         p95s = [p[2] for p in paired]
-        [p[3] for p in paired]
 
         ax.plot(xs, medians, "o-", color=c, label=f"{label} (median)", zorder=3)
         ax.fill_between(xs, medians, p95s, alpha=0.15, color=c, zorder=2)
@@ -132,7 +161,8 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
                          show_throughput: bool = False) -> Path:
     """Grouped bar chart comparing different methods/approaches.
 
-    Each result becomes one bar. Colors cycle through the palette.
+    Detects sqler_/sqlite_ prefix pairs and renders grouped bars when found.
+    Falls back to single-bar layout when no pairs are detected.
     """
     import matplotlib.pyplot as plt
     import numpy as np
@@ -140,52 +170,140 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
     _ensure_theme()
     fig, ax = plt.subplots(figsize=(12, 7))
 
-    labels = []
-    medians = []
-    p95s = []
-    colors = []
-    throughputs = []
+    paired = _detect_paired_results(results)
 
-    for i, r in enumerate(results):
-        val = str(r.get("value", f"item_{i}"))
-        labels.append(val.replace("_", "\n"))
-        medians.append(r["timing"]["median_ms"])
-        p95s.append(r["timing"]["p95_ms"])
-        colors.append(color(i))
-        throughputs.append(r.get("throughput", 0))
+    if paired:
+        # Grouped bar layout: two bars per parameter suffix
+        result_map: dict[str, dict[str, dict]] = {}  # suffix -> {sqler: r, sqlite: r}
+        for r in results:
+            val = str(r.get("value", ""))
+            if val.startswith("sqler_"):
+                suffix = val.removeprefix("sqler_")
+                result_map.setdefault(suffix, {})["sqler"] = r
+            elif val.startswith("sqlite_"):
+                suffix = val.removeprefix("sqlite_")
+                result_map.setdefault(suffix, {})["sqlite"] = r
 
-    x = np.arange(len(labels))
-    width = 0.55
+        suffixes = list(result_map.keys())
+        x = np.arange(len(suffixes))
+        width = 0.35
 
-    # Main bars
-    bars = ax.bar(x, medians, width, color=colors, edgecolor=[c + "88" for c in colors],
-                  linewidth=1.5, zorder=3)
+        sqler_medians = []
+        sqler_p95s = []
+        sqlite_medians = []
+        sqlite_p95s = []
+        sqler_tps = []
+        sqlite_tps = []
 
-    # p95 error caps
-    errors = [p - m for p, m in zip(p95s, medians)]
-    ax.errorbar(x, medians, yerr=[([0] * len(errors)), errors], fmt="none",
-                ecolor=TEXT_SECONDARY, capsize=6, capthick=1.5, zorder=4)
+        for suffix in suffixes:
+            pair = result_map[suffix]
+            sq = pair.get("sqler", {})
+            sl = pair.get("sqlite", {})
 
-    _add_value_labels(ax, bars, fmt="{:.1f}ms")
+            sq_t = sq.get("timing", {})
+            sl_t = sl.get("timing", {})
 
-    # Throughput annotations if requested
-    if show_throughput and any(t > 0 for t in throughputs):
-        for i, (bar, tp) in enumerate(zip(bars, throughputs)):
-            if tp > 0:
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() * 0.5,
-                    f"{tp:,.0f}/s",
-                    ha="center", va="center",
-                    fontsize=8, color=BG_DARK, fontweight="bold",
-                )
+            sq_med = sq_t.get("median_ms", 0)
+            sl_med = sl_t.get("median_ms", 0)
+            sq_p95 = sq_t.get("p95_ms", sq_med)
+            sl_p95 = sl_t.get("p95_ms", sl_med)
+
+            # Handle NaN
+            if isinstance(sq_p95, float) and math.isnan(sq_p95):
+                sq_p95 = sq_med
+            if isinstance(sl_p95, float) and math.isnan(sl_p95):
+                sl_p95 = sl_med
+
+            sqler_medians.append(sq_med)
+            sqler_p95s.append(sq_p95)
+            sqlite_medians.append(sl_med)
+            sqlite_p95s.append(sl_p95)
+            sqler_tps.append(sq.get("throughput", 0))
+            sqlite_tps.append(sl.get("throughput", 0))
+
+        bars1 = ax.bar(x - width / 2, sqler_medians, width, color=SQLER_COLOR,
+                        edgecolor=SQLER_COLOR + "88", linewidth=1.5, zorder=3, label="sqler")
+        bars2 = ax.bar(x + width / 2, sqlite_medians, width, color=SQLITE_COLOR,
+                        edgecolor=SQLITE_COLOR + "88", linewidth=1.5, zorder=3, label="sqlite")
+
+        # p95 error caps
+        sq_errors = [max(0, p - m) for p, m in zip(sqler_p95s, sqler_medians)]
+        sl_errors = [max(0, p - m) for p, m in zip(sqlite_p95s, sqlite_medians)]
+
+        ax.errorbar(x - width / 2, sqler_medians,
+                     yerr=[[0] * len(sq_errors), sq_errors], fmt="none",
+                     ecolor=TEXT_SECONDARY, capsize=4, capthick=1.5, zorder=4)
+        ax.errorbar(x + width / 2, sqlite_medians,
+                     yerr=[[0] * len(sl_errors), sl_errors], fmt="none",
+                     ecolor=TEXT_SECONDARY, capsize=4, capthick=1.5, zorder=4)
+
+        _add_value_labels(ax, bars1, fmt="{:.1f}ms")
+        _add_value_labels(ax, bars2, fmt="{:.1f}ms")
+
+        if show_throughput:
+            for bar, tp in zip(bars1, sqler_tps):
+                if tp > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 0.5,
+                            f"{tp:,.0f}/s", ha="center", va="center",
+                            fontsize=7, color=BG_DARK, fontweight="bold")
+            for bar, tp in zip(bars2, sqlite_tps):
+                if tp > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 0.5,
+                            f"{tp:,.0f}/s", ha="center", va="center",
+                            fontsize=7, color=BG_DARK, fontweight="bold")
+
+        labels = [s.replace("_", "\n") for s in suffixes]
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.legend(loc="upper right", framealpha=0.9)
+
+    else:
+        # Fallback: single-bar layout
+        labels = []
+        medians = []
+        p95s = []
+        colors = []
+        throughputs = []
+
+        for i, r in enumerate(results):
+            val = str(r.get("value", f"item_{i}"))
+            labels.append(val.replace("_", "\n"))
+            medians.append(r["timing"]["median_ms"])
+            p95 = r["timing"]["p95_ms"]
+            if isinstance(p95, float) and math.isnan(p95):
+                p95s.append(r["timing"]["median_ms"])
+            else:
+                p95s.append(p95)
+            colors.append(color(i))
+            throughputs.append(r.get("throughput", 0))
+
+        x = np.arange(len(labels))
+        width = 0.55
+
+        bars = ax.bar(x, medians, width, color=colors,
+                       edgecolor=[c + "88" for c in colors],
+                       linewidth=1.5, zorder=3)
+
+        errors = [max(0, p - m) for p, m in zip(p95s, medians)]
+        ax.errorbar(x, medians, yerr=[([0] * len(errors)), errors], fmt="none",
+                     ecolor=TEXT_SECONDARY, capsize=6, capthick=1.5, zorder=4)
+
+        _add_value_labels(ax, bars, fmt="{:.1f}ms")
+
+        if show_throughput and any(t > 0 for t in throughputs):
+            for bar, tp in zip(bars, throughputs):
+                if tp > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 0.5,
+                            f"{tp:,.0f}/s", ha="center", va="center",
+                            fontsize=8, color=BG_DARK, fontweight="bold")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=9)
 
     ax.set_xlabel("")
     ax.set_ylabel(ylabel)
     ax.set_title(title, pad=20)
     _subtitle(ax, system_info)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
@@ -211,7 +329,7 @@ def plot_heatmap(data: list[list[float]], row_labels: list[str], col_labels: lis
 
     arr = np.array(data)
 
-    # Custom colormap: dark blue → orange → gold
+    # Custom colormap: dark blue -> orange -> gold
     from matplotlib.colors import LinearSegmentedColormap
     cmap = LinearSegmentedColormap.from_list(
         "sqler_heat",
@@ -269,7 +387,13 @@ def plot_throughput_comparison(results: list[dict], title: str, system_info: str
         val = str(r.get("value", f"item_{i}"))
         labels.append(val.replace("_", " "))
         throughputs.append(r.get("throughput", 0))
-        colors_list.append(color(i))
+        # Use fixed colors for sqler/sqlite
+        if val.startswith("sqler"):
+            colors_list.append(SQLER_COLOR)
+        elif val.startswith("sqlite"):
+            colors_list.append(SQLITE_COLOR)
+        else:
+            colors_list.append(color(i))
 
     y = np.arange(len(labels))
     bars = ax.barh(y, throughputs, height=0.6, color=colors_list,

@@ -20,6 +20,7 @@ class TimingStats:
     p99_ms: float
     stddev_ms: float
     total_ms: float
+    reliable_p95: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
