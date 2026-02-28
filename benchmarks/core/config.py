@@ -46,8 +46,31 @@ class ScaleConfig:
         )
 
     @classmethod
+    def xlarge(cls) -> ScaleConfig:
+        return cls(
+            name="xlarge",
+            max_rows=500_000,
+            bulk_sizes=(10_000, 50_000, 100_000, 250_000, 500_000),
+            table_sizes=(100_000, 250_000, 500_000),
+            thread_counts=(2, 4, 8, 16, 32),
+        )
+
+    @classmethod
+    def xxlarge(cls) -> ScaleConfig:
+        return cls(
+            name="xxlarge",
+            max_rows=1_000_000,
+            bulk_sizes=(10_000, 100_000, 250_000, 500_000, 1_000_000),
+            table_sizes=(250_000, 500_000, 1_000_000),
+            thread_counts=(2, 4, 8, 16, 32),
+        )
+
+    @classmethod
     def from_name(cls, name: str) -> ScaleConfig:
-        configs = {"small": cls.small, "medium": cls.medium, "large": cls.large}
+        configs = {
+            "small": cls.small, "medium": cls.medium, "large": cls.large,
+            "xlarge": cls.xlarge, "xxlarge": cls.xxlarge,
+        }
         factory = configs.get(name)
         if factory is None:
             raise ValueError(f"Unknown scale: {name!r} (choose from {list(configs)})")
