@@ -66,7 +66,7 @@ def main() -> None:
 
     # run
     run_p = sub.add_parser("run", help="Run benchmark scenarios")
-    run_p.add_argument("--scale", choices=["small", "medium", "large"], default="small")
+    run_p.add_argument("--scale", choices=["small", "medium", "large", "xlarge", "xxlarge"], default="small")
     run_p.add_argument("--suite", action="append", help="Run specific suite(s)")
     run_p.add_argument("--warmup", type=int, default=3)
     run_p.add_argument("--iterations", type=int, default=20)
