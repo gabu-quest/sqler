@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import gc
+import glob
 import json
+import os
 import time
 import traceback
 from datetime import datetime, timezone
@@ -70,7 +72,25 @@ class BenchmarkRunner:
                 traceback.print_exc()
                 scenario.teardown()
 
+        # Post-run leak check: look for stray temp DB files
+        self._check_temp_leaks()
+
         return all_results
+
+    def _check_temp_leaks(self) -> None:
+        """Scan /tmp for leftover .db files from benchmark runs."""
+        import tempfile
+
+        tmpdir = tempfile.gettempdir()
+        leaked = []
+        for pattern in ("tmp*.db", "tmp*.db-wal", "tmp*.db-shm"):
+            leaked.extend(glob.glob(os.path.join(tmpdir, pattern)))
+        if leaked:
+            print(f"\n  [leak-check] WARNING: {len(leaked)} stray temp DB file(s) found:")
+            for f in leaked[:10]:
+                print(f"    {f}")
+            if len(leaked) > 10:
+                print(f"    ... and {len(leaked) - 10} more")
 
     def save_results(self, results: list[BenchmarkResult], tag: str | None = None) -> Path:
         """Save results to JSON file, return the path."""
@@ -86,6 +106,7 @@ class BenchmarkRunner:
             "system": self.system_info.to_dict(),
             "config": {
                 "scale": self.config.scale.name,
+                "storage": self.config.storage,
                 "warmup": self.config.warmup,
                 "iterations": self.config.iterations,
             },
