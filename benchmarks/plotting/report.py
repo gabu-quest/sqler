@@ -391,13 +391,37 @@ def _write_markdown_report(path: Path, data: dict, chart_paths: dict[str, Path],
             "",
         ])
 
+    # Methodology caveat
+    lines.extend([
+        "## Methodology Caveats (v1.1)",
+        "",
+        "> **These results are not apples-to-apples for measuring ORM overhead.**",
+        ">",
+        "> Two known biases favour sqler in v1.1 data:",
+        ">",
+        "> 1. **PRAGMA mismatch** \u2014 sqler's `in_memory()` applies tuned PRAGMAs "
+        "(32 MB cache, `synchronous=OFF`, `journal_mode=MEMORY`, `locking_mode=EXCLUSIVE`) "
+        "while the sqlite3 baseline uses SQLite defaults (2 MB cache, `synchronous=FULL`). "
+        "This alone explains most of sqler's apparent query speed advantage.",
+        "> 2. **Array SQL difference** \u2014 sqler's `contains()`/`isin()` generate "
+        "`json_each(data, '$.path')` (direct path, faster) while the baseline uses "
+        "`json_each(json_extract(data, '$.path'))` (extract then iterate, slower).",
+        ">",
+        "> The v1.1 data is still useful for showing sqler-with-tuning vs naive-sqlite, "
+        "but it does NOT isolate ORM overhead. A fair re-run with matched PRAGMAs and "
+        "matched SQL is planned (see `TODO-SCRUTINY.md`).",
+        "",
+    ])
+
     # Future work
     lines.extend([
         "## Known Gaps / Future Work",
         "",
-        "1. **Deep nested JSON path equality** \u2014 `$.level_0.level_1.field` direct equality untested",
-        "2. **Auxiliary inverted index tables** \u2014 No public API for array membership tables",
-        "3. **Custom PRAGMA tuning** \u2014 Adapter handles PRAGMAs internally",
+        "1. **Fair baseline comparison** \u2014 sqlite3 baseline needs matched PRAGMAs and matched SQL (see caveats above)",
+        "2. **On-disk benchmarks** \u2014 all 22 scenarios currently run in-memory only (except 4 ops scenarios)",
+        "3. **Result count verification** \u2014 no assertion that sqler and sqlite return same row counts",
+        "4. **Deep nested JSON path equality** \u2014 `$.level_0.level_1.field` direct equality untested",
+        "5. **Auxiliary inverted index tables** \u2014 No public API for array membership tables",
         "",
         "---",
         "",
