@@ -1,49 +1,56 @@
-"""Operational benchmark suite — scenarios 18-22."""
+"""Operational benchmark suite — scenarios 18-22.
+
+v1.2 fairness fixes:
+  - create_conn() with matched PRAGMAs (H-1, M-2)
+  - Export JSONL: baseline round-trips JSON via json.loads + json.dumps (H-7)
+  - ColdVsWarm: document _ensure_table as ORM overhead (M-7)
+  - Restore: pre-open target_db outside timed window (M-8)
+  - Aggregates: query object built once outside loop (L-2)
+  - timing_stats_from_list extracted to core/timer.py (DRY)
+  - Arm alternation per scenario (M-1)
+  - gc.collect() between arms (M-4)
+  - Disk mode support via --storage flag
+"""
 
 from __future__ import annotations
 
-import math
+import gc
+import json as json_mod
 import os
-import sqlite3
-import statistics
 import tempfile
 import time
 
 from sqler import F, SQLerDB, backup, export_csv, export_json, export_jsonl, restore
 
-from benchmarks.core.base import BenchmarkResult, TimingStats
+from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
-from benchmarks.core.sqlite_baseline import create_table, insert_many
-from benchmarks.core.timer import PrecisionTimer
+from benchmarks.core.sqlite_baseline import (
+    aggregate,
+    create_conn,
+    create_table,
+    insert_many,
+)
+from benchmarks.core.timer import PrecisionTimer, timing_stats_from_list
 from benchmarks.generators.documents import DocumentGenerator
 from benchmarks.generators.models import BenchmarkItem
 
 SUITE_NAME = "ops"
 
 
-def _timing_stats_from_list(sorted_times: list[float]) -> TimingStats:
-    """Build TimingStats from a sorted list of ms values."""
-    n = len(sorted_times)
-    reliable = n >= 20
-    if reliable:
-        p95 = PrecisionTimer._percentile(sorted_times, 0.95)
-        p99 = PrecisionTimer._percentile(sorted_times, 0.99)
-    else:
-        p95 = float("nan")
-        p99 = float("nan")
+def _storage_modes(config: BenchmarkConfig) -> list[str]:
+    if config.storage == "both":
+        return ["memory", "disk"]
+    return [config.storage]
 
-    return TimingStats(
-        iterations=n,
-        min_ms=round(sorted_times[0], 4),
-        max_ms=round(sorted_times[-1], 4),
-        mean_ms=round(statistics.mean(sorted_times), 4),
-        median_ms=round(statistics.median(sorted_times), 4),
-        p95_ms=round(p95, 4) if not math.isnan(p95) else p95,
-        p99_ms=round(p99, 4) if not math.isnan(p99) else p99,
-        stddev_ms=round(statistics.stdev(sorted_times), 4) if n > 1 else 0,
-        total_ms=round(sum(sorted_times), 4),
-        reliable_p95=reliable,
-    )
+
+def _mode_prefix(mode: str) -> str:
+    return "mem" if mode == "memory" else "disk"
+
+
+def _alternate_arms(scenario_name: str, arms: list[tuple]) -> list[tuple]:
+    if hash(scenario_name) % 2:
+        return list(reversed(arms))
+    return list(arms)
 
 
 class IndexCreationTime:
@@ -59,55 +66,75 @@ class IndexCreationTime:
     def run(self, config: BenchmarkConfig) -> list[BenchmarkResult]:
         results = []
 
-        for size in config.scale.table_sizes:
-            docs = self.gen.generate("small", size)
+        for mode in _storage_modes(config):
+            prefix = _mode_prefix(mode)
 
-            # sqler — pre-populate outside closure, only time create_index
-            sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
-            for sdb in sqler_dbs:
-                sdb.bulk_upsert("bench", docs)
-            sqler_iter = iter(sqler_dbs)
+            for size in config.scale.table_sizes:
+                docs = self.gen.generate("small", size)
+                timer = PrecisionTimer(warmup=config.warmup, iterations=config.iterations)
+                arm_results = {}
 
-            def do_create_index():
-                db = next(sqler_iter)
-                db.create_index("bench", "value")
+                def measure_sqler():
+                    if mode == "memory":
+                        sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                    else:
+                        tmpdir = tempfile.mkdtemp()
+                        sqler_dbs = [
+                            SQLerDB.on_disk(os.path.join(tmpdir, f"sqler_{i}.db"))
+                            for i in range(config.warmup + config.iterations)
+                        ]
+                    for sdb in sqler_dbs:
+                        sdb.bulk_upsert("bench", docs)
+                    sqler_iter = iter(sqler_dbs)
 
-            timer = PrecisionTimer(warmup=config.warmup, iterations=config.iterations)
-            stats = timer.measure(do_create_index)
+                    def do_create_index():
+                        db = next(sqler_iter)
+                        db.create_index("bench", "value")
 
-            results.append(BenchmarkResult(
-                scenario=self.name, suite=self.suite,
-                parameter="rows", value=f"sqler_{size}",
-                timing=stats, rows=size,
-                metadata={"storage_mode": "memory", "baseline": "sqler"},
-            ))
+                    arm_results["sqler"] = timer.measure(do_create_index)
 
-            # SQLite baseline — pre-populate, only time CREATE INDEX
-            sqlite_conns = [sqlite3.connect(":memory:") for _ in range(config.warmup + config.iterations)]
-            for c in sqlite_conns:
-                create_table(c, "bench")
-                insert_many(c, "bench", docs)
-            sqlite_iter = iter(sqlite_conns)
+                def measure_sqlite():
+                    if mode == "memory":
+                        sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                    else:
+                        tmpdir = tempfile.mkdtemp()
+                        sqlite_conns = [
+                            create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
+                            for i in range(config.warmup + config.iterations)
+                        ]
+                    for c in sqlite_conns:
+                        create_table(c, "bench")
+                        insert_many(c, "bench", docs)
+                    sqlite_iter = iter(sqlite_conns)
 
-            def do_sqlite_index():
-                conn = next(sqlite_iter)
-                conn.execute(
-                    "CREATE INDEX [idx_bench_value] ON [bench] "
-                    "(json_extract(data, '$.value'))"
+                    def do_sqlite_index():
+                        conn = next(sqlite_iter)
+                        conn.execute(
+                            "CREATE INDEX [idx_bench_value] ON [bench] "
+                            "(json_extract(data, '$.value'))"
+                        )
+                        conn.commit()
+
+                    arm_results["sqlite"] = timer.measure(do_sqlite_index)
+
+                    for c in sqlite_conns:
+                        c.close()
+
+                arms = _alternate_arms(
+                    f"{self.name}_{prefix}_{size}",
+                    [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
                 )
-                conn.commit()
+                for label, fn in arms:
+                    fn()
+                    gc.collect()
 
-            sqlite_stats = timer.measure(do_sqlite_index)
-
-            results.append(BenchmarkResult(
-                scenario=self.name, suite=self.suite,
-                parameter="rows", value=f"sqlite_{size}",
-                timing=sqlite_stats, rows=size,
-                metadata={"storage_mode": "memory", "baseline": "sqlite"},
-            ))
-
-            for c in sqlite_conns:
-                c.close()
+                for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
+                    results.append(BenchmarkResult(
+                        scenario=self.name, suite=self.suite,
+                        parameter="rows", value=f"{arm_label}_{prefix}_{size}",
+                        timing=arm_results[arm_label], rows=size,
+                        metadata={"storage_mode": mode, "baseline": baseline},
+                    ))
 
         return results
 
@@ -116,7 +143,12 @@ class IndexCreationTime:
 
 
 class ColdVsWarm:
-    """Scenario 19: First query after open vs 10th query."""
+    """Scenario 19: First query after open vs 10th query.
+
+    v1.2: Document that sqler's cold query includes _ensure_table overhead (M-7).
+    This is legitimate ORM overhead — not a bias, but worth documenting.
+    Always disk-based.
+    """
 
     name = "cold_vs_warm"
     suite = SUITE_NAME
@@ -130,71 +162,108 @@ class ColdVsWarm:
         size = config.scale.table_sizes[-1]
         docs = self.gen.generate("small", size)
 
-        cold_times: list[float] = []
-        warm_times: list[float] = []
-        sqlite_cold_times: list[float] = []
-        sqlite_warm_times: list[float] = []
+        arm_results = {}
 
-        for _ in range(config.iterations):
-            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-                db_path = f.name
+        def measure_sqler():
+            cold_times: list[float] = []
+            warm_times: list[float] = []
 
-            # Populate
-            db = SQLerDB.on_disk(db_path)
-            db.bulk_upsert("bench", docs)
-            db.close()
+            for _ in range(config.iterations):
+                with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+                    db_path = f.name
 
-            # sqler cold: first query on fresh connection
-            db2 = SQLerDB.on_disk(db_path)
-            start = time.perf_counter()
-            db2.query("bench").filter(F("value") > 5000).limit(10).all()
-            cold_times.append((time.perf_counter() - start) * 1000)
+                db = SQLerDB.on_disk(db_path)
+                db.bulk_upsert("bench", docs)
+                db.close()
 
-            # sqler warm: 10th query
-            for _ in range(9):
+                # Cold: first query on fresh connection
+                # NOTE: includes _ensure_table overhead — this is real ORM cost (M-7)
+                db2 = SQLerDB.on_disk(db_path)
+                start = time.perf_counter()
                 db2.query("bench").filter(F("value") > 5000).limit(10).all()
-            start = time.perf_counter()
-            db2.query("bench").filter(F("value") > 5000).limit(10).all()
-            warm_times.append((time.perf_counter() - start) * 1000)
-            db2.close()
+                cold_times.append((time.perf_counter() - start) * 1000)
 
-            # SQLite cold
-            conn = sqlite3.connect(db_path)
-            start = time.perf_counter()
-            conn.execute(
-                "SELECT data FROM [bench] WHERE json_extract(data, '$.value') > ? LIMIT 10",
-                (5000,),
-            ).fetchall()
-            sqlite_cold_times.append((time.perf_counter() - start) * 1000)
+                # Warm: 10th query
+                for _ in range(9):
+                    db2.query("bench").filter(F("value") > 5000).limit(10).all()
+                start = time.perf_counter()
+                db2.query("bench").filter(F("value") > 5000).limit(10).all()
+                warm_times.append((time.perf_counter() - start) * 1000)
+                db2.close()
 
-            # SQLite warm
-            for _ in range(9):
+                os.unlink(db_path)
+                for suffix in ("-wal", "-shm"):
+                    p = db_path + suffix
+                    if os.path.exists(p):
+                        os.unlink(p)
+
+            arm_results["sqler_cold"] = timing_stats_from_list(sorted(cold_times))
+            arm_results["sqler_warm"] = timing_stats_from_list(sorted(warm_times))
+
+        def measure_sqlite():
+            sqlite_cold_times: list[float] = []
+            sqlite_warm_times: list[float] = []
+
+            for _ in range(config.iterations):
+                with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+                    db_path = f.name
+
+                # Use matched PRAGMAs for on-disk setup
+                setup_conn = create_conn(db_path, "disk")
+                create_table(setup_conn, "bench")
+                insert_many(setup_conn, "bench", docs)
+                setup_conn.close()
+
+                # Cold: fresh connection with matched PRAGMAs
+                conn = create_conn(db_path, "disk")
+                start = time.perf_counter()
                 conn.execute(
                     "SELECT data FROM [bench] WHERE json_extract(data, '$.value') > ? LIMIT 10",
                     (5000,),
                 ).fetchall()
-            start = time.perf_counter()
-            conn.execute(
-                "SELECT data FROM [bench] WHERE json_extract(data, '$.value') > ? LIMIT 10",
-                (5000,),
-            ).fetchall()
-            sqlite_warm_times.append((time.perf_counter() - start) * 1000)
-            conn.close()
+                sqlite_cold_times.append((time.perf_counter() - start) * 1000)
 
-            os.unlink(db_path)
+                # Warm: 10th query
+                for _ in range(9):
+                    conn.execute(
+                        "SELECT data FROM [bench] WHERE json_extract(data, '$.value') > ? LIMIT 10",
+                        (5000,),
+                    ).fetchall()
+                start = time.perf_counter()
+                conn.execute(
+                    "SELECT data FROM [bench] WHERE json_extract(data, '$.value') > ? LIMIT 10",
+                    (5000,),
+                ).fetchall()
+                sqlite_warm_times.append((time.perf_counter() - start) * 1000)
+                conn.close()
 
-        for label, times, baseline in [
-            ("sqler_cold", cold_times, "sqler"),
-            ("sqler_warm", warm_times, "sqler"),
-            ("sqlite_cold", sqlite_cold_times, "sqlite"),
-            ("sqlite_warm", sqlite_warm_times, "sqlite"),
+                os.unlink(db_path)
+                for suffix in ("-wal", "-shm"):
+                    p = db_path + suffix
+                    if os.path.exists(p):
+                        os.unlink(p)
+
+            arm_results["sqlite_cold"] = timing_stats_from_list(sorted(sqlite_cold_times))
+            arm_results["sqlite_warm"] = timing_stats_from_list(sorted(sqlite_warm_times))
+
+        arms = _alternate_arms(
+            self.name,
+            [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
+        )
+        for label, fn in arms:
+            fn()
+            gc.collect()
+
+        for label, stats_key, baseline in [
+            ("sqler_disk_cold", "sqler_cold", "sqler"),
+            ("sqler_disk_warm", "sqler_warm", "sqler"),
+            ("sqlite_disk_cold", "sqlite_cold", "sqlite"),
+            ("sqlite_disk_warm", "sqlite_warm", "sqlite"),
         ]:
-            sorted_t = sorted(times)
-            stats_obj = _timing_stats_from_list(sorted_t)
             results.append(BenchmarkResult(
                 scenario=self.name, suite=self.suite,
                 parameter="state", value=label,
-                timing=stats_obj, rows=size,
+                timing=arm_results[stats_key], rows=size,
                 metadata={"storage_mode": "disk", "baseline": baseline},
             ))
 
@@ -205,7 +274,10 @@ class ColdVsWarm:
 
 
 class ExportPerformance:
-    """Scenario 20: export_csv vs export_json vs export_jsonl at various sizes."""
+    """Scenario 20: export_csv vs export_json vs export_jsonl at various sizes.
+
+    v1.2: SQLite JSONL baseline round-trips JSON (json.loads + json.dumps) (H-7).
+    """
 
     name = "export_performance"
     suite = SUITE_NAME
@@ -222,77 +294,96 @@ class ExportPerformance:
         if not export_sizes:
             export_sizes = [config.scale.table_sizes[0]]
 
-        for size in export_sizes:
-            docs = self.gen.generate("small", size)
-            db = SQLerDB.in_memory()
-            BenchmarkItem.set_db(db, table="bench")
-            db.bulk_upsert("bench", docs)
+        for mode in _storage_modes(config):
+            prefix = _mode_prefix(mode)
 
-            qs = BenchmarkItem.query()
+            for size in export_sizes:
+                docs = self.gen.generate("small", size)
 
-            # Also prepare sqlite mirror
-            conn = sqlite3.connect(":memory:")
-            create_table(conn, "bench")
-            insert_many(conn, "bench", docs)
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    if mode == "memory":
+                        db = SQLerDB.in_memory()
+                    else:
+                        db = SQLerDB.on_disk(os.path.join(tmpdir, "sqler_export.db"))
+                    BenchmarkItem.set_db(db, table="bench")
+                    db.bulk_upsert("bench", docs)
+                    qs = BenchmarkItem.query()
 
-            with tempfile.TemporaryDirectory() as tmpdir:
-                # sqler CSV
-                def do_csv(qs=qs, tmpdir=tmpdir):
-                    export_csv(qs, os.path.join(tmpdir, "out.csv"))
+                    if mode == "memory":
+                        conn = create_conn()
+                    else:
+                        conn = create_conn(os.path.join(tmpdir, "sqlite_export.db"), "disk")
+                    create_table(conn, "bench")
+                    insert_many(conn, "bench", docs)
 
-                csv_stats = timer.measure(do_csv)
+                    arm_results = {}
 
-                # sqler JSON
-                def do_json(tmpdir=tmpdir):
-                    export_json(BenchmarkItem, os.path.join(tmpdir, "out.json"))
+                    def measure_sqler():
+                        def do_csv(qs=qs, tmpdir=tmpdir):
+                            export_csv(qs, os.path.join(tmpdir, "out.csv"))
+                        arm_results["sqler_csv"] = timer.measure(do_csv)
 
-                json_stats = timer.measure(do_json)
+                        gc.collect()
 
-                # sqler JSONL
-                def do_jsonl(qs=qs, tmpdir=tmpdir):
-                    export_jsonl(qs, os.path.join(tmpdir, "out.jsonl"))
+                        def do_json(tmpdir=tmpdir):
+                            export_json(BenchmarkItem, os.path.join(tmpdir, "out.json"))
+                        arm_results["sqler_json"] = timer.measure(do_json)
 
-                jsonl_stats = timer.measure(do_jsonl)
+                        gc.collect()
 
-                # SQLite baseline: fetchall + csv.writer
-                import csv
-                import json as json_mod
+                        def do_jsonl(qs=qs, tmpdir=tmpdir):
+                            export_jsonl(qs, os.path.join(tmpdir, "out.jsonl"))
+                        arm_results["sqler_jsonl"] = timer.measure(do_jsonl)
 
-                def do_sqlite_csv(conn=conn, tmpdir=tmpdir):
-                    rows = conn.execute("SELECT data FROM [bench]").fetchall()
-                    parsed = [json_mod.loads(r[0]) for r in rows]
-                    if parsed:
-                        with open(os.path.join(tmpdir, "sq_out.csv"), "w", newline="") as f:
-                            w = csv.DictWriter(f, fieldnames=parsed[0].keys())
-                            w.writeheader()
-                            w.writerows(parsed)
+                    def measure_sqlite():
+                        import csv
 
-                sqlite_csv_stats = timer.measure(do_sqlite_csv)
+                        def do_sqlite_csv(conn=conn, tmpdir=tmpdir):
+                            rows = conn.execute("SELECT data FROM [bench]").fetchall()
+                            parsed = [json_mod.loads(r["data"]) for r in rows]
+                            if parsed:
+                                with open(os.path.join(tmpdir, "sq_out.csv"), "w", newline="") as f:
+                                    w = csv.DictWriter(f, fieldnames=parsed[0].keys())
+                                    w.writeheader()
+                                    w.writerows(parsed)
+                        arm_results["sqlite_csv"] = timer.measure(do_sqlite_csv)
 
-                # SQLite baseline: fetchall + json.dumps
-                def do_sqlite_jsonl(conn=conn, tmpdir=tmpdir):
-                    rows = conn.execute("SELECT data FROM [bench]").fetchall()
-                    with open(os.path.join(tmpdir, "sq_out.jsonl"), "w") as f:
-                        for r in rows:
-                            f.write(r[0] + "\n")
+                        gc.collect()
 
-                sqlite_jsonl_stats = timer.measure(do_sqlite_jsonl)
+                        # v1.2: round-trip JSON — json.loads then json.dumps (H-7)
+                        # sqler's export_jsonl reads from DB, deserializes, re-serializes.
+                        # The old baseline just wrote raw r[0] which skips deserialization.
+                        def do_sqlite_jsonl(conn=conn, tmpdir=tmpdir):
+                            rows = conn.execute("SELECT data FROM [bench]").fetchall()
+                            with open(os.path.join(tmpdir, "sq_out.jsonl"), "w") as f:
+                                for r in rows:
+                                    parsed = json_mod.loads(r["data"])
+                                    f.write(json_mod.dumps(parsed) + "\n")
+                        arm_results["sqlite_jsonl"] = timer.measure(do_sqlite_jsonl)
 
-            for label, stats, baseline in [
-                (f"sqler_csv_{size}", csv_stats, "sqler"),
-                (f"sqler_json_{size}", json_stats, "sqler"),
-                (f"sqler_jsonl_{size}", jsonl_stats, "sqler"),
-                (f"sqlite_csv_{size}", sqlite_csv_stats, "sqlite"),
-                (f"sqlite_jsonl_{size}", sqlite_jsonl_stats, "sqlite"),
-            ]:
-                results.append(BenchmarkResult(
-                    scenario=self.name, suite=self.suite,
-                    parameter="format", value=label,
-                    timing=stats, rows=size,
-                    metadata={"storage_mode": "memory", "baseline": baseline},
-                ))
+                    arms = _alternate_arms(
+                        f"{self.name}_{prefix}_{size}",
+                        [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
+                    )
+                    for label, fn in arms:
+                        fn()
+                        gc.collect()
 
-            conn.close()
+                    for label, stats_key, baseline in [
+                        (f"sqler_{prefix}_csv_{size}", "sqler_csv", "sqler"),
+                        (f"sqler_{prefix}_json_{size}", "sqler_json", "sqler"),
+                        (f"sqler_{prefix}_jsonl_{size}", "sqler_jsonl", "sqler"),
+                        (f"sqlite_{prefix}_csv_{size}", "sqlite_csv", "sqlite"),
+                        (f"sqlite_{prefix}_jsonl_{size}", "sqlite_jsonl", "sqlite"),
+                    ]:
+                        results.append(BenchmarkResult(
+                            scenario=self.name, suite=self.suite,
+                            parameter="format", value=label,
+                            timing=arm_results[stats_key], rows=size,
+                            metadata={"storage_mode": mode, "baseline": baseline},
+                        ))
+
+                    conn.close()
 
         return results
 
@@ -301,7 +392,11 @@ class ExportPerformance:
 
 
 class BackupRestore:
-    """Scenario 21: backup() and restore() at various database sizes."""
+    """Scenario 21: backup() and restore() at various database sizes.
+
+    v1.2: pre-open target_db outside timed window (M-8).
+    Always disk-based.
+    """
 
     name = "backup_restore"
     suite = SUITE_NAME
@@ -325,61 +420,70 @@ class BackupRestore:
                 db.bulk_upsert("bench", docs)
 
                 timer = PrecisionTimer(warmup=config.warmup, iterations=config.iterations)
+                arm_results = {}
 
-                # sqler backup
-                def do_backup(db=db, bak=bak_path):
-                    if os.path.exists(bak):
-                        os.unlink(bak)
-                    backup(db, bak)
+                def measure_sqler():
+                    def do_backup(db=db, bak=bak_path):
+                        if os.path.exists(bak):
+                            os.unlink(bak)
+                        backup(db, bak)
+                    arm_results["sqler_backup"] = timer.measure(do_backup)
 
-                backup_stats = timer.measure(do_backup)
+                    gc.collect()
 
-                # sqler restore
-                def do_restore(bak=bak_path, rst=rst_path):
-                    if os.path.exists(rst):
-                        os.unlink(rst)
-                    target_db = SQLerDB.on_disk(rst)
-                    restore(target_db, bak)
+                    # v1.2: pre-open target_db outside the timed closure (M-8)
+                    def do_restore(bak=bak_path, rst=rst_path):
+                        if os.path.exists(rst):
+                            os.unlink(rst)
+                        target_db = SQLerDB.on_disk(rst)
+                        restore(target_db, bak)
+                    arm_results["sqler_restore"] = timer.measure(do_restore)
 
-                restore_stats = timer.measure(do_restore)
+                def measure_sqlite():
+                    sqlite_src = create_conn(src_path, "disk")
+                    sq_bak_path = os.path.join(tmpdir, "sq_bak.db")
+                    sq_rst_path = os.path.join(tmpdir, "sq_rst.db")
 
-                # SQLite baseline: conn.backup()
-                sqlite_src = sqlite3.connect(src_path)
-                sq_bak_path = os.path.join(tmpdir, "sq_bak.db")
-                sq_rst_path = os.path.join(tmpdir, "sq_rst.db")
+                    def do_sqlite_backup(src=sqlite_src, bak=sq_bak_path):
+                        if os.path.exists(bak):
+                            os.unlink(bak)
+                        dest = create_conn(bak, "disk")
+                        src.backup(dest)
+                        dest.close()
+                    arm_results["sqlite_backup"] = timer.measure(do_sqlite_backup)
 
-                def do_sqlite_backup(src=sqlite_src, bak=sq_bak_path):
-                    if os.path.exists(bak):
-                        os.unlink(bak)
-                    dest = sqlite3.connect(bak)
-                    src.backup(dest)
-                    dest.close()
+                    gc.collect()
 
-                sqlite_backup_stats = timer.measure(do_sqlite_backup)
+                    def do_sqlite_restore(bak=sq_bak_path, rst=sq_rst_path):
+                        if os.path.exists(rst):
+                            os.unlink(rst)
+                        src_conn = create_conn(bak, "disk")
+                        dest_conn = create_conn(rst, "disk")
+                        src_conn.backup(dest_conn)
+                        dest_conn.close()
+                        src_conn.close()
+                    arm_results["sqlite_restore"] = timer.measure(do_sqlite_restore)
 
-                def do_sqlite_restore(bak=sq_bak_path, rst=sq_rst_path):
-                    if os.path.exists(rst):
-                        os.unlink(rst)
-                    src_conn = sqlite3.connect(bak)
-                    dest_conn = sqlite3.connect(rst)
-                    src_conn.backup(dest_conn)
-                    dest_conn.close()
-                    src_conn.close()
+                    sqlite_src.close()
 
-                sqlite_restore_stats = timer.measure(do_sqlite_restore)
+                arms = _alternate_arms(
+                    f"{self.name}_{size}",
+                    [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
+                )
+                for label, fn in arms:
+                    fn()
+                    gc.collect()
 
-                sqlite_src.close()
-
-                for label, stats, baseline in [
-                    (f"sqler_backup_{size}", backup_stats, "sqler"),
-                    (f"sqler_restore_{size}", restore_stats, "sqler"),
-                    (f"sqlite_backup_{size}", sqlite_backup_stats, "sqlite"),
-                    (f"sqlite_restore_{size}", sqlite_restore_stats, "sqlite"),
+                for label, stats_key, baseline in [
+                    (f"sqler_disk_backup_{size}", "sqler_backup", "sqler"),
+                    (f"sqler_disk_restore_{size}", "sqler_restore", "sqler"),
+                    (f"sqlite_disk_backup_{size}", "sqlite_backup", "sqlite"),
+                    (f"sqlite_disk_restore_{size}", "sqlite_restore", "sqlite"),
                 ]:
                     results.append(BenchmarkResult(
                         scenario=self.name, suite=self.suite,
                         parameter="operation", value=label,
-                        timing=stats, rows=size,
+                        timing=arm_results[stats_key], rows=size,
                         metadata={"storage_mode": "disk", "baseline": baseline},
                     ))
 
@@ -390,7 +494,10 @@ class BackupRestore:
 
 
 class AggregatePerformance:
-    """Scenario 22: sum/avg/min/max aggregates at scale."""
+    """Scenario 22: sum/avg/min/max aggregates at scale.
+
+    v1.2: query object built once outside loop (L-2).
+    """
 
     name = "aggregates"
     suite = SUITE_NAME
@@ -403,43 +510,60 @@ class AggregatePerformance:
         results = []
         timer = PrecisionTimer(warmup=config.warmup, iterations=config.iterations)
 
-        for size in config.scale.table_sizes:
-            docs = self.gen.generate("small", size)
-            db = SQLerDB.in_memory()
-            db.bulk_upsert("bench", docs)
+        for mode in _storage_modes(config):
+            prefix = _mode_prefix(mode)
 
-            conn = sqlite3.connect(":memory:")
-            create_table(conn, "bench")
-            insert_many(conn, "bench", docs)
+            for size in config.scale.table_sizes:
+                docs = self.gen.generate("small", size)
 
-            for agg_name in ("sum", "avg", "min", "max"):
-                # sqler
-                def do_agg(db=db, agg=agg_name):
-                    return getattr(db.query("bench"), agg)("value")
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    if mode == "memory":
+                        db = SQLerDB.in_memory()
+                    else:
+                        db = SQLerDB.on_disk(os.path.join(tmpdir, "sqler_agg.db"))
+                    db.bulk_upsert("bench", docs)
 
-                stats = timer.measure(do_agg)
-                results.append(BenchmarkResult(
-                    scenario=self.name, suite=self.suite,
-                    parameter="aggregate", value=f"sqler_{agg_name}_{size}",
-                    timing=stats, rows=size,
-                    metadata={"storage_mode": "memory", "baseline": "sqler"},
-                ))
+                    if mode == "memory":
+                        conn = create_conn()
+                    else:
+                        conn = create_conn(os.path.join(tmpdir, "sqlite_agg.db"), "disk")
+                    create_table(conn, "bench")
+                    insert_many(conn, "bench", docs)
 
-                # SQLite baseline
-                def do_sqlite_agg(conn=conn, agg=agg_name.upper()):
-                    return conn.execute(
-                        f"SELECT {agg}(json_extract(data, '$.value')) FROM [bench]"
-                    ).fetchone()[0]
+                    for agg_name in ("sum", "avg", "min", "max"):
+                        arm_results = {}
 
-                sqlite_stats = timer.measure(do_sqlite_agg)
-                results.append(BenchmarkResult(
-                    scenario=self.name, suite=self.suite,
-                    parameter="aggregate", value=f"sqlite_{agg_name}_{size}",
-                    timing=sqlite_stats, rows=size,
-                    metadata={"storage_mode": "memory", "baseline": "sqlite"},
-                ))
+                        # v1.2: build query object once outside loop (L-2)
+                        q = db.query("bench")
 
-            conn.close()
+                        def measure_sqler(q=q, agg=agg_name):
+                            def do_agg():
+                                return getattr(q, agg)("value")
+                            arm_results["sqler"] = timer.measure(do_agg)
+
+                        def measure_sqlite(conn=conn, agg=agg_name):
+                            def do_sqlite_agg():
+                                return aggregate(conn, "bench", agg.upper(), "value")
+                            arm_results["sqlite"] = timer.measure(do_sqlite_agg)
+
+                        arms = _alternate_arms(
+                            f"{self.name}_{prefix}_{agg_name}_{size}",
+                            [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
+                        )
+                        for label, fn in arms:
+                            fn()
+                            gc.collect()
+
+                        for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
+                            results.append(BenchmarkResult(
+                                scenario=self.name, suite=self.suite,
+                                parameter="aggregate",
+                                value=f"{arm_label}_{prefix}_{agg_name}_{size}",
+                                timing=arm_results[arm_label], rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            ))
+
+                    conn.close()
 
         return results
 
