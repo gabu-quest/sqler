@@ -121,6 +121,15 @@ class NestedFieldAccess:
                     def do_sqlite(conn=conn, jp=json_path):
                         return query_nested(conn, "bench", jp, ">", 5000)
 
+                    # Result count verification (LOW-3)
+                    sqler_verify = do_query()
+                    sqlite_verify = do_sqlite()
+                    if len(sqler_verify) != len(sqlite_verify):
+                        raise AssertionError(
+                            f"Result count mismatch in nested_field_access_{prefix}_d{depth}: "
+                            f"sqler={len(sqler_verify)}, sqlite={len(sqlite_verify)}"
+                        )
+
                     arm_results = {}
 
                     def measure_sqler(fn=do_query):
