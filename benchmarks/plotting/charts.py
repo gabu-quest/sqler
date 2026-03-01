@@ -1,4 +1,9 @@
-"""Chart generators — scaling lines, comparison bars, heatmaps with p95 bands."""
+"""Chart generators — scaling lines, comparison bars, heatmaps with p95 bands.
+
+v1.2: 4-arm support (sqler_mem, sqler_disk, sqlite_mem, sqlite_disk)
+  - sqler = orange (#E69F00), sqlite = blue (#56B4E9)
+  - memory = solid line, disk = dashed line
+"""
 
 from __future__ import annotations
 
@@ -47,6 +52,28 @@ def _add_value_labels(ax, bars, fmt="{:.1f}", fontsize=8):
             )
 
 
+def _arm_style(label: str) -> tuple[str, str]:
+    """Determine color and linestyle for a series label.
+
+    Returns (color, linestyle) based on:
+      - sqler_* → orange, sqlite_* → blue
+      - *_mem_* → solid, *_disk_* → dashed
+    """
+    if label.startswith("sqler"):
+        c = SQLER_COLOR
+    elif label.startswith("sqlite"):
+        c = SQLITE_COLOR
+    else:
+        c = None  # caller should fallback to palette
+
+    if "_disk_" in label or label.endswith("_disk"):
+        ls = "--"
+    else:
+        ls = "-"
+
+    return c, ls
+
+
 def _detect_paired_results(results: list[dict]) -> bool:
     """Detect if results contain sqler_/sqlite_ prefix pairs."""
     values = {str(r.get("value", "")) for r in results}
@@ -66,6 +93,8 @@ def plot_scaling_lines(results: list[dict], title: str, system_info: str,
 
     Groups results by scenario name. Each line = one scenario variant.
     Adds p95 bands as translucent fill.
+
+    v1.2: Detects _mem_/_disk_ for solid/dashed line styles.
     """
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
@@ -109,12 +138,8 @@ def plot_scaling_lines(results: list[dict], title: str, system_info: str,
         s["min"].append(r["timing"]["min_ms"])
 
     for i, (label, data) in enumerate(sorted(series.items())):
-        # Use fixed colors for sqler/sqlite if detected
-        if label.startswith("sqler"):
-            c = SQLER_COLOR
-        elif label.startswith("sqlite"):
-            c = SQLITE_COLOR
-        else:
+        c, ls = _arm_style(label)
+        if c is None:
             c = color(i)
 
         # Sort by x value
@@ -123,7 +148,8 @@ def plot_scaling_lines(results: list[dict], title: str, system_info: str,
         medians = [p[1] for p in paired]
         p95s = [p[2] for p in paired]
 
-        ax.plot(xs, medians, "o-", color=c, label=f"{label} (median)", zorder=3)
+        marker = "o" if ls == "-" else "s"
+        ax.plot(xs, medians, f"{marker}{ls}", color=c, label=f"{label} (median)", zorder=3)
         ax.fill_between(xs, medians, p95s, alpha=0.15, color=c, zorder=2)
         ax.plot(xs, p95s, "--", color=c, alpha=0.4, linewidth=1, zorder=2)
 
@@ -163,6 +189,8 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
 
     Detects sqler_/sqlite_ prefix pairs and renders grouped bars when found.
     Falls back to single-bar layout when no pairs are detected.
+
+    v1.2: Supports _mem_/_disk_ hatching to distinguish storage modes.
     """
     import matplotlib.pyplot as plt
     import numpy as np
@@ -194,6 +222,8 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
         sqlite_p95s = []
         sqler_tps = []
         sqlite_tps = []
+        sqler_hatches = []
+        sqlite_hatches = []
 
         for suffix in suffixes:
             pair = result_map[suffix]
@@ -221,10 +251,20 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
             sqler_tps.append(sq.get("throughput", 0))
             sqlite_tps.append(sl.get("throughput", 0))
 
+            # Hatch pattern for disk mode
+            sqler_hatches.append("//" if "disk_" in suffix or suffix.startswith("disk") else "")
+            sqlite_hatches.append("//" if "disk_" in suffix or suffix.startswith("disk") else "")
+
         bars1 = ax.bar(x - width / 2, sqler_medians, width, color=SQLER_COLOR,
                         edgecolor=SQLER_COLOR + "88", linewidth=1.5, zorder=3, label="sqler")
         bars2 = ax.bar(x + width / 2, sqlite_medians, width, color=SQLITE_COLOR,
                         edgecolor=SQLITE_COLOR + "88", linewidth=1.5, zorder=3, label="sqlite")
+
+        # Apply hatching for disk bars
+        for bar, hatch in zip(bars1, sqler_hatches):
+            bar.set_hatch(hatch)
+        for bar, hatch in zip(bars2, sqlite_hatches):
+            bar.set_hatch(hatch)
 
         # p95 error caps
         sq_errors = [max(0, p - m) for p, m in zip(sqler_p95s, sqler_medians)]
@@ -274,7 +314,8 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
                 p95s.append(r["timing"]["median_ms"])
             else:
                 p95s.append(p95)
-            colors.append(color(i))
+            c, _ = _arm_style(val)
+            colors.append(c if c else color(i))
             throughputs.append(r.get("throughput", 0))
 
         x = np.arange(len(labels))
@@ -387,13 +428,8 @@ def plot_throughput_comparison(results: list[dict], title: str, system_info: str
         val = str(r.get("value", f"item_{i}"))
         labels.append(val.replace("_", " "))
         throughputs.append(r.get("throughput", 0))
-        # Use fixed colors for sqler/sqlite
-        if val.startswith("sqler"):
-            colors_list.append(SQLER_COLOR)
-        elif val.startswith("sqlite"):
-            colors_list.append(SQLITE_COLOR)
-        else:
-            colors_list.append(color(i))
+        c, _ = _arm_style(val)
+        colors_list.append(c if c else color(i))
 
     y = np.arange(len(labels))
     bars = ax.barh(y, throughputs, height=0.6, color=colors_list,
