@@ -31,6 +31,14 @@
 
 ## Results: 100K rows (large scale, 2026-02-28)
 
+> **Methodology caveat (v1.1 data):** A full adversarial audit found 18 fairness issues (8 HIGH,
+> 10 MEDIUM, 2 LOW) in the v1.1 methodology. Key biases: unmatched PRAGMAs (sqler gets 32 MB cache
+> vs sqlite's 2 MB default), faster array SQL in sqler, missing JSON deserialization in baseline
+> query results, mutated input data across iterations, fixed arm order, asymmetric connection
+> handling, and more. All v1.1 data carries these biases — it shows "sqler-with-tuning vs
+> naive-sqlite", NOT pure ORM overhead. See `TODO-SCRUTINY.md` for the complete issue list and
+> the fair re-run plan.
+
 System: 16 GB RAM | Single run (pre-v2)
 
 | Scenario | Peak MB | Time | Complexity |

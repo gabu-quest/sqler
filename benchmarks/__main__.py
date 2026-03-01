@@ -26,7 +26,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"  Warmup: {config.warmup}, Iterations: {config.iterations}")
 
     runner = BenchmarkRunner(config)
-    print(f"  {runner.system_info.summary_line()}\n")
+    print(f"  {runner.system_info.summary_line()}")
+    print("  NOTE: v1.1 baseline uses untuned sqlite3 (no matched PRAGMAs) — see TODO-SCRUTINY.md\n")
 
     suites = args.suite if args.suite else None
     scenarios = get_scenarios(suites)
