@@ -13,7 +13,6 @@ v1.2 fairness fixes:
 from __future__ import annotations
 
 import gc
-import json
 import os
 import sqlite3
 import tempfile
@@ -419,13 +418,13 @@ class QueryCacheImpact:
                     arm_results["sqler_hit"] = timing_stats_from_list(sorted(hit_times))
 
                 def measure_sqlite():
-                    # Uncached
+                    # Uncached — fetch_as_strings matches sqler's .all() (raw JSON, no parsing)
                     def do_sqlite_uncached(conn=conn):
-                        rows = conn.execute(
+                        cursor = conn.execute(
                             "SELECT data FROM [bench] WHERE json_extract(data, '$.value') > ?",
                             (5000,),
-                        ).fetchall()
-                        return [json.loads(r["data"]) for r in rows]
+                        )
+                        return fetch_as_strings(cursor)
                     arm_results["sqlite_uncached"] = timer.measure(do_sqlite_uncached)
 
                     gc.collect()
