@@ -80,6 +80,15 @@ def _setup_sqlite_mirror(docs: list[dict], mode: str = "memory",
     return conn
 
 
+def _verify_counts(sqler_result: list, sqlite_result: list, label: str) -> None:
+    """Assert both arms return the same number of results (once, outside timed loop)."""
+    if len(sqler_result) != len(sqlite_result):
+        raise AssertionError(
+            f"Result count mismatch in {label}: "
+            f"sqler={len(sqler_result)}, sqlite={len(sqlite_result)}"
+        )
+
+
 class EqualityFilter:
     """Scenario 5: Equality filter with and without index, varying table size."""
 
@@ -212,6 +221,16 @@ class RangeQueries:
                 db = _setup_sqler_db(docs, mode, tmpdir if mode == "disk" else None)
                 conn = _setup_sqlite_mirror(docs, mode, tmpdir if mode == "disk" else None)
 
+                # Result count verification (LOW-3)
+                mid = max_val // 2
+                verify_lo = mid - int(max_val * 0.10) // 2
+                verify_hi = mid + int(max_val * 0.10) // 2
+                sqler_verify = db.query("bench").filter(
+                    (F("value") > verify_lo) & (F("value") < verify_hi)
+                ).all()
+                sqlite_verify = query_range(conn, "bench", "value", verify_lo, verify_hi)
+                _verify_counts(sqler_verify, sqlite_verify, f"range_queries_{prefix}")
+
                 for selectivity, sel_label in [(0.01, "1%"), (0.10, "10%"), (0.50, "50%")]:
                     range_size = int(max_val * selectivity)
                     mid = max_val // 2
@@ -280,6 +299,17 @@ class ComplexFilterChains:
             with tempfile.TemporaryDirectory() as tmpdir:
                 db = _setup_sqler_db(docs, mode, tmpdir if mode == "disk" else None)
                 conn = _setup_sqlite_mirror(docs, mode, tmpdir if mode == "disk" else None)
+
+                # Result count verification (LOW-3)
+                sqler_verify = db.query("bench").filter(
+                    (F("value") > 5000) & (F("category") == "tech")
+                ).all()
+                sqlite_verify = query_complex_filter(
+                    conn, "bench",
+                    "json_extract(data, '$.value') > ? AND json_extract(data, '$.category') = ?",
+                    (5000, "tech"),
+                )
+                _verify_counts(sqler_verify, sqlite_verify, f"complex_filters_{prefix}")
 
                 # Define query pairs: (predicate_count, sqler_fn, sqlite_fn)
                 queries = []
@@ -393,6 +423,11 @@ class TopN:
             with tempfile.TemporaryDirectory() as tmpdir:
                 db = _setup_sqler_db(docs, mode, tmpdir if mode == "disk" else None)
                 conn = _setup_sqlite_mirror(docs, mode, tmpdir if mode == "disk" else None)
+
+                # Result count verification (LOW-3)
+                sqler_verify = db.query("bench").order_by("value").limit(100).all()
+                sqlite_verify = query_top_n(conn, "bench", "value", 100)
+                _verify_counts(sqler_verify, sqlite_verify, f"top_n_{prefix}")
 
                 for n in (10, 100, 1000):
                     arm_results = {}
@@ -581,28 +616,24 @@ class CountVsMaterialize:
                     fn()
                     gc.collect()
 
-                for label, baseline in [
-                    (f"sqler_{prefix}_count()", "sqler"),
-                    (f"sqler_{prefix}_len(all())", "sqler"),
-                    (f"sqler_{prefix}_exists()", "sqler"),
-                    (f"sqler_{prefix}_bool(first())", "sqler"),
-                    (f"sqlite_{prefix}_COUNT(*)", "sqlite"),
-                    (f"sqlite_{prefix}_fetchall+len", "sqlite"),
-                    (f"sqlite_{prefix}_EXISTS", "sqlite"),
-                    (f"sqlite_{prefix}_LIMIT1", "sqlite"),
-                ]:
-                    # Map label to arm_results key
-                    # Strip prefix from label to find the key
-                    for key in arm_results:
-                        stripped = label.removeprefix(f"sqler_{prefix}_").removeprefix(f"sqlite_{prefix}_")
-                        if key.endswith(stripped) or key == stripped:
-                            results.append(BenchmarkResult(
-                                scenario=self.name, suite=self.suite,
-                                parameter="method", value=label,
-                                timing=arm_results[key], rows=size,
-                                metadata={"storage_mode": mode, "baseline": baseline},
-                            ))
-                            break
+                label_to_key = {
+                    f"sqler_{prefix}_count()": "sqler_count()",
+                    f"sqler_{prefix}_len(all())": "sqler_len(all())",
+                    f"sqler_{prefix}_exists()": "sqler_exists()",
+                    f"sqler_{prefix}_bool(first())": "sqler_bool(first())",
+                    f"sqlite_{prefix}_COUNT(*)": "sqlite_COUNT(*)",
+                    f"sqlite_{prefix}_fetchall+len": "sqlite_fetchall+len",
+                    f"sqlite_{prefix}_EXISTS": "sqlite_EXISTS",
+                    f"sqlite_{prefix}_LIMIT1": "sqlite_LIMIT1",
+                }
+                for label, key in label_to_key.items():
+                    baseline = "sqler" if label.startswith("sqler") else "sqlite"
+                    results.append(BenchmarkResult(
+                        scenario=self.name, suite=self.suite,
+                        parameter="method", value=label,
+                        timing=arm_results[key], rows=size,
+                        metadata={"storage_mode": mode, "baseline": baseline},
+                    ))
 
                 conn.close()
 

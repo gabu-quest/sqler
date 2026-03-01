@@ -4,7 +4,7 @@ v1.2 fairness fixes:
   - create_conn() with matched PRAGMAs (H-1, M-2)
   - Export JSONL: baseline round-trips JSON via json.loads + json.dumps (H-7)
   - ColdVsWarm: document _ensure_table as ORM overhead (M-7)
-  - Restore: pre-open target_db outside timed window (M-8)
+  - Restore: symmetric — both arms open connections inside timed window
   - Aggregates: query object built once outside loop (L-2)
   - timing_stats_from_list extracted to core/timer.py (DRY)
   - Arm alternation per scenario (M-1)
@@ -395,7 +395,7 @@ class ExportPerformance:
 class BackupRestore:
     """Scenario 21: backup() and restore() at various database sizes.
 
-    v1.2: pre-open target_db outside timed window (M-8).
+    v1.2: Both arms open connections inside timed window (symmetric).
     Always disk-based.
     """
 

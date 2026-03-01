@@ -35,6 +35,7 @@ from benchmarks.core.sqlite_baseline import (
     SQLiteFTSBaseline,
     create_conn,
     create_table,
+    fetch_as_dicts,
     insert_loop,
     insert_many,
 )
@@ -138,7 +139,12 @@ class FullTextSearch:
                             conn = create_conn(os.path.join(tmpdir, "sqlite_fts.db"), "disk")
                         create_table(conn, "articles")
                         article_docs = [
-                            {"title": d["name"], "content": d["description"]}
+                            {
+                                "title": d["name"],
+                                "content": d["description"],
+                                "author": d.get("category", "unknown"),
+                                "tags": d.get("tags", []),
+                            }
                             for d in docs
                         ]
                         insert_many(conn, "articles", article_docs)
@@ -573,11 +579,12 @@ class ConnectionPoolThroughput:
 
                     def sqlite_worker(c):
                         for _ in range(queries_per_thread):
-                            c.execute(
+                            cursor = c.execute(
                                 "SELECT data FROM [bench] "
                                 "WHERE json_extract(data, '$.value') > ? LIMIT 10",
                                 (5000,),
-                            ).fetchall()
+                            )
+                            fetch_as_dicts(cursor)
 
                     start = time.perf_counter()
                     threads = [
