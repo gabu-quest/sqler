@@ -12,6 +12,43 @@ from typing import Callable
 from .base import TimingStats
 
 
+def timing_stats_from_list(sorted_times: list[float]) -> TimingStats:
+    """Build TimingStats from a pre-sorted list of ms values.
+
+    Shared by suites that collect timings manually (optimistic locking,
+    cold/warm cache, etc.) instead of using PrecisionTimer.measure().
+    """
+    n = len(sorted_times)
+    if n == 0:
+        return TimingStats(
+            iterations=0,
+            min_ms=0, max_ms=0, mean_ms=0, median_ms=0,
+            p95_ms=0, p99_ms=0, stddev_ms=0, total_ms=0,
+            reliable_p95=False,
+        )
+
+    reliable = n >= 20
+    if reliable:
+        p95 = PrecisionTimer._percentile(sorted_times, 0.95)
+        p99 = PrecisionTimer._percentile(sorted_times, 0.99)
+    else:
+        p95 = float("nan")
+        p99 = float("nan")
+
+    return TimingStats(
+        iterations=n,
+        min_ms=round(sorted_times[0], 4),
+        max_ms=round(sorted_times[-1], 4),
+        mean_ms=round(statistics.mean(sorted_times), 4),
+        median_ms=round(statistics.median(sorted_times), 4),
+        p95_ms=round(p95, 4) if not math.isnan(p95) else p95,
+        p99_ms=round(p99, 4) if not math.isnan(p99) else p99,
+        stddev_ms=round(statistics.stdev(sorted_times), 4) if n > 1 else 0,
+        total_ms=round(sum(sorted_times), 4),
+        reliable_p95=reliable,
+    )
+
+
 class PrecisionTimer:
     """High-precision timer for benchmark measurements.
 

@@ -22,5 +22,8 @@ benchmarks/results/
 !benchmarks/results/charts/
 !benchmarks/results/charts/*.svg
 
+# Benchmark v1.1 archive (frozen snapshot, evidence only)
+benchmarks/v1.1-archive/
+
 # Project-local Claude memory (personal, not shared)
 CLAUDE.local.md

@@ -18,16 +18,18 @@ def cmd_run(args: argparse.Namespace) -> None:
         iterations=args.iterations,
         output_dir=args.output,
         suites=args.suite or None,
+        storage=args.storage,
         verbose=args.verbose,
     )
 
-    print("\n  sqler benchmark suite")
+    print("\n  sqler benchmark suite v1.2")
     print(f"  Scale: {scale.name} (max {scale.max_rows:,} rows)")
+    print(f"  Storage: {config.storage}")
     print(f"  Warmup: {config.warmup}, Iterations: {config.iterations}")
 
     runner = BenchmarkRunner(config)
     print(f"  {runner.system_info.summary_line()}")
-    print("  NOTE: v1.1 baseline uses untuned sqlite3 (no matched PRAGMAs) — see TODO-SCRUTINY.md\n")
+    print("  Methodology: matched PRAGMAs, matched SQL, arm alternation, GC isolation\n")
 
     suites = args.suite if args.suite else None
     scenarios = get_scenarios(suites)
@@ -61,7 +63,7 @@ def cmd_plot(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="benchmarks",
-        description="sqler benchmark suite — real benchmarks using only public APIs",
+        description="sqler benchmark suite v1.2 — fair comparison with matched baselines",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -73,6 +75,8 @@ def main() -> None:
     run_p.add_argument("--iterations", type=int, default=20)
     run_p.add_argument("--output", default="benchmarks/results")
     run_p.add_argument("--tag", help="Tag for output filename")
+    run_p.add_argument("--storage", choices=["memory", "disk", "both"], default="memory",
+                       help="Storage mode: memory, disk, or both (default: memory)")
     run_p.add_argument("--verbose", "-v", action="store_true")
     run_p.set_defaults(func=cmd_run)
 

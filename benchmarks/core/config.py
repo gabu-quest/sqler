@@ -86,4 +86,5 @@ class BenchmarkConfig:
     iterations: int = 20
     output_dir: str = "benchmarks/results"
     suites: list[str] | None = None  # None = all suites
+    storage: str = "memory"  # "memory" | "disk" | "both"
     verbose: bool = False
