@@ -35,7 +35,7 @@ from benchmarks.core.sqlite_baseline import (
     SQLiteFTSBaseline,
     create_conn,
     create_table,
-    fetch_as_dicts,
+    fetch_as_strings,
     insert_loop,
     insert_many,
 )
@@ -584,7 +584,7 @@ class ConnectionPoolThroughput:
                                 "WHERE json_extract(data, '$.value') > ? LIMIT 10",
                                 (5000,),
                             )
-                            fetch_as_dicts(cursor)
+                            fetch_as_strings(cursor)
 
                     start = time.perf_counter()
                     threads = [

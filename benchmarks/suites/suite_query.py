@@ -2,7 +2,7 @@
 
 v1.2 fairness fixes:
   - create_conn() with matched PRAGMAs (H-1, M-2)
-  - All baseline queries return deserialized dicts via fetch_as_dicts (H-5)
+  - All baseline queries return raw JSON strings via fetch_as_strings, matching db.query().all()
   - .exists() for S10 bool check (M-10)
   - Arm alternation per scenario (M-1)
   - gc.collect() between arms (M-4)
@@ -26,7 +26,7 @@ from benchmarks.core.sqlite_baseline import (
     create_index,
     create_table,
     exists_filter,
-    fetch_as_dicts,
+    fetch_as_strings,
     insert_many,
     query_complex_filter,
     query_filter,
@@ -584,12 +584,12 @@ class CountVsMaterialize:
                         return count_filter(conn, "bench", "value", ">", 5000)
 
                     def do_sqlite_fetchall(conn=conn):
-                        # v1.2: deserialize JSON like sqler's .all() (H-5)
+                        # Match sqler's .all() — returns raw JSON strings, no parsing
                         cursor = conn.execute(
                             "SELECT data FROM [bench] WHERE json_extract(data, '$.value') > ?",
                             (5000,),
                         )
-                        return len(fetch_as_dicts(cursor))
+                        return len(fetch_as_strings(cursor))
 
                     def do_sqlite_exists(conn=conn):
                         return exists_filter(conn, "bench", "value", ">", 5000)
