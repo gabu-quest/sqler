@@ -3,7 +3,7 @@
 v1.2 fairness fixes:
   - create_conn() with matched PRAGMAs (H-1, M-2)
   - Fixed array SQL: json_each(data, '$.path') not json_each(json_extract(...)) (H-2)
-  - All baselines return deserialized dicts (fetch_as_dicts)
+  - All baselines return raw JSON strings (fetch_as_strings), matching db.query().all()
   - Arm alternation per scenario (M-1)
   - gc.collect() between arms (M-4)
   - Disk mode support via --storage flag

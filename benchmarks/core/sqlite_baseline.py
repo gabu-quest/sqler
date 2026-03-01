@@ -91,12 +91,21 @@ def create_conn(path: str = ":memory:", storage: str = "memory") -> sqlite3.Conn
 # Result helpers
 # ---------------------------------------------------------------------------
 
-def fetch_as_dicts(cursor) -> list[dict]:
-    """Fetch all rows and deserialize JSON, matching sqler's .all() behavior.
+def fetch_as_strings(cursor) -> list[str]:
+    """Fetch all rows as raw JSON strings, matching sqler's .all() behavior.
 
-    sqler's .all() returns list[dict] by parsing the JSON 'data' column.
-    This function does the same for baseline connections, ensuring both arms
-    pay the same deserialization cost.
+    sqler's db.query().all() returns list[str] — the raw JSON from the 'data'
+    column WITHOUT calling json.loads(). This function does the same for
+    baseline connections, ensuring both arms pay the same extraction cost.
+    """
+    return [row["data"] for row in cursor.fetchall()]
+
+
+def fetch_as_dicts(cursor) -> list[dict]:
+    """Fetch all rows and deserialize JSON into dicts.
+
+    Use this when comparing against sqler paths that DO deserialize
+    (e.g., Model.query().all() which returns model instances).
     """
     return [json.loads(row["data"]) for row in cursor.fetchall()]
 
@@ -140,48 +149,48 @@ def insert_loop(conn: sqlite3.Connection, table: str, docs: list[dict]) -> None:
 
 def query_filter(
     conn: sqlite3.Connection, table: str, field: str, op: str, value: object
-) -> list[dict]:
+) -> list[str]:
     """SELECT data WHERE json_extract(data, '$.field') op ?"""
     sql = (
         f"SELECT data FROM [{table}] "
         f"WHERE json_extract(data, '$.{field}') {op} ?"
     )
-    return fetch_as_dicts(conn.execute(sql, (value,)))
+    return fetch_as_strings(conn.execute(sql, (value,)))
 
 
 def query_range(
     conn: sqlite3.Connection, table: str, field: str, lo: object, hi: object
-) -> list[dict]:
+) -> list[str]:
     """Range filter on a JSON field."""
     sql = (
         f"SELECT data FROM [{table}] "
         f"WHERE json_extract(data, '$.{field}') > ? "
         f"AND json_extract(data, '$.{field}') < ?"
     )
-    return fetch_as_dicts(conn.execute(sql, (lo, hi)))
+    return fetch_as_strings(conn.execute(sql, (lo, hi)))
 
 
 def query_top_n(
     conn: sqlite3.Connection, table: str, field: str, n: int
-) -> list[dict]:
+) -> list[str]:
     """ORDER BY json_extract + LIMIT."""
     sql = (
         f"SELECT data FROM [{table}] "
         f"ORDER BY json_extract(data, '$.{field}') LIMIT ?"
     )
-    return fetch_as_dicts(conn.execute(sql, (n,)))
+    return fetch_as_strings(conn.execute(sql, (n,)))
 
 
 def query_paginate(
     conn: sqlite3.Connection, table: str, field: str, page: int, per_page: int
-) -> list[dict]:
+) -> list[str]:
     """ORDER BY + LIMIT + OFFSET pagination."""
     offset = (page - 1) * per_page
     sql = (
         f"SELECT data FROM [{table}] "
         f"ORDER BY json_extract(data, '$.{field}') LIMIT ? OFFSET ?"
     )
-    return fetch_as_dicts(conn.execute(sql, (per_page, offset)))
+    return fetch_as_strings(conn.execute(sql, (per_page, offset)))
 
 
 def count_filter(
@@ -240,14 +249,14 @@ def any_where_eq(
     array_field: str,
     item_field: str,
     value: object,
-) -> list[dict]:
+) -> list[str]:
     """EXISTS + json_each subquery for array-of-objects equality."""
     sql = (
         f"SELECT data FROM [{table}] WHERE EXISTS("
         f"SELECT 1 FROM json_each(data, '$.{array_field}') AS e "
         f"WHERE json_extract(e.value, '$.{item_field}') = ?)"
     )
-    return fetch_as_dicts(conn.execute(sql, (value,)))
+    return fetch_as_strings(conn.execute(sql, (value,)))
 
 
 def any_where_gt(
@@ -256,19 +265,19 @@ def any_where_gt(
     array_field: str,
     item_field: str,
     value: object,
-) -> list[dict]:
+) -> list[str]:
     """EXISTS + json_each subquery for array-of-objects comparison."""
     sql = (
         f"SELECT data FROM [{table}] WHERE EXISTS("
         f"SELECT 1 FROM json_each(data, '$.{array_field}') AS e "
         f"WHERE json_extract(e.value, '$.{item_field}') > ?)"
     )
-    return fetch_as_dicts(conn.execute(sql, (value,)))
+    return fetch_as_strings(conn.execute(sql, (value,)))
 
 
 def array_contains(
     conn: sqlite3.Connection, table: str, array_field: str, value: object
-) -> list[dict]:
+) -> list[str]:
     """EXISTS + json_each for scalar array membership.
 
     v1.2: uses json_each(data, '$.field') — direct path, matches sqler's SQL.
@@ -279,12 +288,12 @@ def array_contains(
         f"SELECT 1 FROM json_each(data, '$.{array_field}') "
         f"WHERE value = ?)"
     )
-    return fetch_as_dicts(conn.execute(sql, (value,)))
+    return fetch_as_strings(conn.execute(sql, (value,)))
 
 
 def array_isin(
     conn: sqlite3.Connection, table: str, array_field: str, values: list
-) -> list[dict]:
+) -> list[str]:
     """EXISTS + json_each + IN(...) for multi-value membership.
 
     v1.2: uses json_each(data, '$.field') — direct path, matches sqler's SQL.
@@ -295,18 +304,18 @@ def array_isin(
         f"SELECT 1 FROM json_each(data, '$.{array_field}') "
         f"WHERE value IN ({placeholders}))"
     )
-    return fetch_as_dicts(conn.execute(sql, values))
+    return fetch_as_strings(conn.execute(sql, values))
 
 
 def query_nested(
     conn: sqlite3.Connection, table: str, json_path: str, op: str, value: object
-) -> list[dict]:
+) -> list[str]:
     """Query nested JSON path like '$.level_0.level_1.target'."""
     sql = (
         f"SELECT data FROM [{table}] "
         f"WHERE json_extract(data, '{json_path}') {op} ?"
     )
-    return fetch_as_dicts(conn.execute(sql, (value,)))
+    return fetch_as_strings(conn.execute(sql, (value,)))
 
 
 # ---------------------------------------------------------------------------
@@ -314,13 +323,13 @@ def query_nested(
 # ---------------------------------------------------------------------------
 
 def query_complex_filter(conn: sqlite3.Connection, table: str,
-                         sql_where: str, params: tuple) -> list[dict]:
-    """Execute a complex filter query and return deserialized dicts.
+                         sql_where: str, params: tuple) -> list[str]:
+    """Execute a complex filter query and return raw JSON strings.
 
-    Used by S7 to ensure baseline deserializes JSON like sqler's .all().
+    Matches sqler's db.query().all() which returns list[str].
     """
     sql = f"SELECT data FROM [{table}] WHERE {sql_where}"
-    return fetch_as_dicts(conn.execute(sql, params))
+    return fetch_as_strings(conn.execute(sql, params))
 
 
 # ---------------------------------------------------------------------------
