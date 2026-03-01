@@ -277,7 +277,7 @@ class RangeQueries:
 class ComplexFilterChains:
     """Scenario 7: Multiple predicate chains (2, 3, 5 predicates).
 
-    v1.2: SQLite baseline now deserializes JSON via fetch_as_dicts (H-5).
+    v1.2: SQLite baseline returns raw JSON strings via fetch_as_strings, matching db.query().all().
     """
 
     name = "complex_filters"
@@ -533,7 +533,7 @@ class PaginationDepth:
 class CountVsMaterialize:
     """Scenario 10: count() vs len(all()), exists() vs bool(first()).
 
-    v1.2: SQLite baseline uses fetch_as_dicts for fetchall+len path.
+    v1.2: SQLite baseline uses fetch_as_strings for fetchall+len path.
     """
 
     name = "count_vs_materialize"
