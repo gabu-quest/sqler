@@ -17,6 +17,7 @@ from __future__ import annotations
 import gc
 import json as json_mod
 import os
+import sqlite3
 import tempfile
 import time
 
@@ -445,23 +446,30 @@ class BackupRestore:
                     sq_bak_path = os.path.join(tmpdir, "sq_bak.db")
                     sq_rst_path = os.path.join(tmpdir, "sq_rst.db")
 
+                    # Backup: sqler uses raw sqlite3.connect() for destination
+                    # (backup API copies pages, PRAGMAs are irrelevant for target)
                     def do_sqlite_backup(src=sqlite_src, bak=sq_bak_path):
                         if os.path.exists(bak):
                             os.unlink(bak)
-                        dest = create_conn(bak, "disk")
+                        dest = sqlite3.connect(bak)
                         src.backup(dest)
                         dest.close()
                     arm_results["sqlite_backup"] = timer.measure(do_sqlite_backup)
 
                     gc.collect()
 
+                    # Restore: sqler uses raw sqlite3.connect() for source,
+                    # SQLerDB.on_disk() for destination (applies PRAGMAs).
+                    # sqler's restore() leaves the adapter connection open after
+                    # backup — don't close dest_conn here to match (closing a WAL
+                    # connection triggers a checkpoint, which is real I/O work
+                    # that sqler defers).
                     def do_sqlite_restore(bak=sq_bak_path, rst=sq_rst_path):
                         if os.path.exists(rst):
                             os.unlink(rst)
-                        src_conn = create_conn(bak, "disk")
+                        src_conn = sqlite3.connect(bak)
                         dest_conn = create_conn(rst, "disk")
                         src_conn.backup(dest_conn)
-                        dest_conn.close()
                         src_conn.close()
                     arm_results["sqlite_restore"] = timer.measure(do_sqlite_restore)
 
