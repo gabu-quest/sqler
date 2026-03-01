@@ -106,13 +106,11 @@ class EqualityFilter:
 
                     def measure_sqler():
                         # Without index
-                        db_no_idx = _setup_sqler_db(
-                            docs, mode, os.path.join(tmpdir, "sqler_noidx") if mode == "disk" else None,
-                        )
-                        if mode == "disk":
-                            os.makedirs(os.path.join(tmpdir, "sqler_noidx"), exist_ok=True)
+                        if mode == "memory":
+                            db_no_idx = SQLerDB.in_memory()
+                        else:
                             db_no_idx = SQLerDB.on_disk(os.path.join(tmpdir, "sqler_noidx.db"))
-                            db_no_idx.bulk_upsert("bench", docs)
+                        db_no_idx.bulk_upsert("bench", docs)
 
                         def query_no_idx(db=db_no_idx, v=target_value):
                             return db.query("bench").filter(F("value") == v).all()

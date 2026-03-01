@@ -65,6 +65,7 @@ class IndexCreationTime:
 
     def run(self, config: BenchmarkConfig) -> list[BenchmarkResult]:
         results = []
+        n_runs = config.warmup + config.iterations
 
         for mode in _storage_modes(config):
             prefix = _mode_prefix(mode)
@@ -74,59 +75,59 @@ class IndexCreationTime:
                 timer = PrecisionTimer(warmup=config.warmup, iterations=config.iterations)
                 arm_results = {}
 
-                def measure_sqler():
-                    if mode == "memory":
-                        sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir = tempfile.mkdtemp()
-                        sqler_dbs = [
-                            SQLerDB.on_disk(os.path.join(tmpdir, f"sqler_{i}.db"))
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    for sdb in sqler_dbs:
-                        sdb.bulk_upsert("bench", docs)
-                    sqler_iter = iter(sqler_dbs)
+                with tempfile.TemporaryDirectory() as tmpdir:
 
-                    def do_create_index():
-                        db = next(sqler_iter)
-                        db.create_index("bench", "value")
+                    def measure_sqler():
+                        if mode == "memory":
+                            sqler_dbs = [SQLerDB.in_memory() for _ in range(n_runs)]
+                        else:
+                            sqler_dbs = [
+                                SQLerDB.on_disk(os.path.join(tmpdir, f"sqler_{i}.db"))
+                                for i in range(n_runs)
+                            ]
+                        for sdb in sqler_dbs:
+                            sdb.bulk_upsert("bench", docs)
+                        sqler_iter = iter(sqler_dbs)
 
-                    arm_results["sqler"] = timer.measure(do_create_index)
+                        def do_create_index():
+                            db = next(sqler_iter)
+                            db.create_index("bench", "value")
 
-                def measure_sqlite():
-                    if mode == "memory":
-                        sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir = tempfile.mkdtemp()
-                        sqlite_conns = [
-                            create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    for c in sqlite_conns:
-                        create_table(c, "bench")
-                        insert_many(c, "bench", docs)
-                    sqlite_iter = iter(sqlite_conns)
+                        arm_results["sqler"] = timer.measure(do_create_index)
 
-                    def do_sqlite_index():
-                        conn = next(sqlite_iter)
-                        conn.execute(
-                            "CREATE INDEX [idx_bench_value] ON [bench] "
-                            "(json_extract(data, '$.value'))"
-                        )
-                        conn.commit()
+                    def measure_sqlite():
+                        if mode == "memory":
+                            sqlite_conns = [create_conn() for _ in range(n_runs)]
+                        else:
+                            sqlite_conns = [
+                                create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
+                                for i in range(n_runs)
+                            ]
+                        for c in sqlite_conns:
+                            create_table(c, "bench")
+                            insert_many(c, "bench", docs)
+                        sqlite_iter = iter(sqlite_conns)
 
-                    arm_results["sqlite"] = timer.measure(do_sqlite_index)
+                        def do_sqlite_index():
+                            conn = next(sqlite_iter)
+                            conn.execute(
+                                "CREATE INDEX [idx_bench_value] ON [bench] "
+                                "(json_extract(data, '$.value'))"
+                            )
+                            conn.commit()
 
-                    for c in sqlite_conns:
-                        c.close()
+                        arm_results["sqlite"] = timer.measure(do_sqlite_index)
 
-                arms = _alternate_arms(
-                    f"{self.name}_{prefix}_{size}",
-                    [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
-                )
-                for label, fn in arms:
-                    fn()
-                    gc.collect()
+                        for c in sqlite_conns:
+                            c.close()
+
+                    arms = _alternate_arms(
+                        f"{self.name}_{prefix}_{size}",
+                        [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
+                    )
+                    for label, fn in arms:
+                        fn()
+                        gc.collect()
 
                 for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
                     results.append(BenchmarkResult(
