@@ -14,7 +14,6 @@ from __future__ import annotations
 import gc
 import json
 import os
-import sqlite3
 import statistics
 import tempfile
 
@@ -70,73 +69,69 @@ class BulkInsertScaling:
 
             for size in config.scale.bulk_sizes:
                 docs = self.gen.generate("small", size)
-                arm_results = {}
 
-                def measure_sqler():
-                    if mode == "memory":
-                        sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir = tempfile.mkdtemp()
-                        sqler_dbs = [
-                            SQLerDB.on_disk(os.path.join(tmpdir, f"sqler_{i}.db"))
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    sqler_iter = iter(sqler_dbs)
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    arm_results = {}
 
-                    def do_insert(docs=docs):
-                        db = next(sqler_iter)
-                        # Deep copy to prevent mutation bias (H-8)
-                        db.bulk_upsert("bench", [d.copy() for d in docs])
+                    def measure_sqler():
+                        if mode == "memory":
+                            sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                        else:
+                            sqler_dbs = [
+                                SQLerDB.on_disk(os.path.join(tmpdir, f"sqler_{i}.db"))
+                                for i in range(config.warmup + config.iterations)
+                            ]
+                        sqler_iter = iter(sqler_dbs)
 
-                    stats = timer.measure(do_insert)
-                    arm_results["sqler"] = stats
+                        def do_insert(docs=docs):
+                            db = next(sqler_iter)
+                            db.bulk_upsert("bench", [d.copy() for d in docs])
 
-                    if mode == "disk":
-                        for db in sqler_dbs:
-                            db.close()
+                        arm_results["sqler"] = timer.measure(do_insert)
 
-                def measure_sqlite():
-                    if mode == "memory":
-                        sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir = tempfile.mkdtemp()
-                        sqlite_conns = [
-                            create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    for c in sqlite_conns:
-                        create_table(c, "bench")
-                    sqlite_iter = iter(sqlite_conns)
+                        if mode == "disk":
+                            for db in sqler_dbs:
+                                db.close()
 
-                    def do_sqlite(docs=docs):
-                        conn = next(sqlite_iter)
-                        insert_many(conn, "bench", [d.copy() for d in docs])
+                    def measure_sqlite():
+                        if mode == "memory":
+                            sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                        else:
+                            sqlite_conns = [
+                                create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
+                                for i in range(config.warmup + config.iterations)
+                            ]
+                        for c in sqlite_conns:
+                            create_table(c, "bench")
+                        sqlite_iter = iter(sqlite_conns)
 
-                    stats = timer.measure(do_sqlite)
-                    arm_results["sqlite"] = stats
+                        def do_sqlite(docs=docs):
+                            conn = next(sqlite_iter)
+                            insert_many(conn, "bench", [d.copy() for d in docs])
 
-                    for c in sqlite_conns:
-                        c.close()
+                        arm_results["sqlite"] = timer.measure(do_sqlite)
 
-                # Alternate arm order (M-1)
-                arms = _alternate_arms(
-                    f"{self.name}_{prefix}_{size}",
-                    [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
-                )
-                for label, fn in arms:
-                    fn()
-                    gc.collect()  # GC between arms (M-4)
+                        for c in sqlite_conns:
+                            c.close()
 
-                for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
-                    stats = arm_results[arm_label]
-                    tp = size / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                    results.append(BenchmarkResult(
-                        scenario=self.name, suite=self.suite,
-                        parameter="rows", value=f"{arm_label}_{prefix}_{size}",
-                        timing=stats, rows=size,
-                        throughput=round(tp, 1),
-                        metadata={"storage_mode": mode, "baseline": baseline},
-                    ))
+                    arms = _alternate_arms(
+                        f"{self.name}_{prefix}_{size}",
+                        [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
+                    )
+                    for label, fn in arms:
+                        fn()
+                        gc.collect()
+
+                    for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
+                        stats = arm_results[arm_label]
+                        tp = size / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
+                        results.append(BenchmarkResult(
+                            scenario=self.name, suite=self.suite,
+                            parameter="rows", value=f"{arm_label}_{prefix}_{size}",
+                            timing=stats, rows=size,
+                            throughput=round(tp, 1),
+                            metadata={"storage_mode": mode, "baseline": baseline},
+                        ))
 
         return results
 
@@ -167,118 +162,115 @@ class SingleVsBulk:
 
             for size in sizes:
                 docs = self.gen.generate("small", size)
-                arm_results = {}
 
-                def measure_sqler_arms():
-                    # sqler bulk insert
-                    if mode == "memory":
-                        sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir = tempfile.mkdtemp()
-                        sqler_dbs = [
-                            SQLerDB.on_disk(os.path.join(tmpdir, f"bulk_{i}.db"))
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    sqler_iter = iter(sqler_dbs)
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    arm_results = {}
 
-                    def do_bulk(docs=docs):
-                        db = next(sqler_iter)
-                        db.bulk_upsert("bench", [d.copy() for d in docs])
+                    def measure_sqler_arms():
+                        # sqler bulk insert
+                        if mode == "memory":
+                            sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                        else:
+                            sqler_dbs = [
+                                SQLerDB.on_disk(os.path.join(tmpdir, f"bulk_{i}.db"))
+                                for i in range(config.warmup + config.iterations)
+                            ]
+                        sqler_iter = iter(sqler_dbs)
 
-                    arm_results["sqler_bulk"] = timer.measure(do_bulk)
+                        def do_bulk(docs=docs):
+                            db = next(sqler_iter)
+                            db.bulk_upsert("bench", [d.copy() for d in docs])
 
-                    gc.collect()
+                        arm_results["sqler_bulk"] = timer.measure(do_bulk)
 
-                    # sqler single save
-                    if mode == "memory":
-                        single_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir2 = tempfile.mkdtemp()
-                        single_dbs = [
-                            SQLerDB.on_disk(os.path.join(tmpdir2, f"single_{i}.db"))
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    single_iter = iter(single_dbs)
+                        gc.collect()
 
-                    def do_single(docs=docs):
-                        db = next(single_iter)
-                        BenchmarkItem.set_db(db, table="bench_model")
-                        for doc in docs:
-                            item = BenchmarkItem(**doc.copy())
-                            item.save()
+                        # sqler single save
+                        if mode == "memory":
+                            single_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                        else:
+                            single_dbs = [
+                                SQLerDB.on_disk(os.path.join(tmpdir, f"single_{i}.db"))
+                                for i in range(config.warmup + config.iterations)
+                            ]
+                        single_iter = iter(single_dbs)
 
-                    arm_results["sqler_single"] = timer.measure(do_single)
+                        def do_single(docs=docs):
+                            db = next(single_iter)
+                            BenchmarkItem.set_db(db, table="bench_model")
+                            for doc in docs:
+                                item = BenchmarkItem(**doc.copy())
+                                item.save()
 
-                def measure_sqlite_arms():
-                    # SQLite batch
-                    if mode == "memory":
-                        batch_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir = tempfile.mkdtemp()
-                        batch_conns = [
-                            create_conn(os.path.join(tmpdir, f"batch_{i}.db"), "disk")
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    for c in batch_conns:
-                        create_table(c, "bench")
-                    batch_iter = iter(batch_conns)
+                        arm_results["sqler_single"] = timer.measure(do_single)
 
-                    def do_sqlite_batch(docs=docs):
-                        conn = next(batch_iter)
-                        insert_many(conn, "bench", [d.copy() for d in docs])
+                    def measure_sqlite_arms():
+                        # SQLite batch
+                        if mode == "memory":
+                            batch_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                        else:
+                            batch_conns = [
+                                create_conn(os.path.join(tmpdir, f"batch_{i}.db"), "disk")
+                                for i in range(config.warmup + config.iterations)
+                            ]
+                        for c in batch_conns:
+                            create_table(c, "bench")
+                        batch_iter = iter(batch_conns)
 
-                    arm_results["sqlite_batch"] = timer.measure(do_sqlite_batch)
+                        def do_sqlite_batch(docs=docs):
+                            conn = next(batch_iter)
+                            insert_many(conn, "bench", [d.copy() for d in docs])
 
-                    gc.collect()
+                        arm_results["sqlite_batch"] = timer.measure(do_sqlite_batch)
 
-                    # SQLite loop
-                    if mode == "memory":
-                        loop_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir2 = tempfile.mkdtemp()
-                        loop_conns = [
-                            create_conn(os.path.join(tmpdir2, f"loop_{i}.db"), "disk")
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    for c in loop_conns:
-                        create_table(c, "bench")
-                    loop_iter = iter(loop_conns)
+                        gc.collect()
 
-                    def do_sqlite_loop(docs=docs):
-                        conn = next(loop_iter)
-                        insert_loop(conn, "bench", [d.copy() for d in docs])
+                        # SQLite loop
+                        if mode == "memory":
+                            loop_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                        else:
+                            loop_conns = [
+                                create_conn(os.path.join(tmpdir, f"loop_{i}.db"), "disk")
+                                for i in range(config.warmup + config.iterations)
+                            ]
+                        for c in loop_conns:
+                            create_table(c, "bench")
+                        loop_iter = iter(loop_conns)
 
-                    arm_results["sqlite_loop"] = timer.measure(do_sqlite_loop)
+                        def do_sqlite_loop(docs=docs):
+                            conn = next(loop_iter)
+                            insert_loop(conn, "bench", [d.copy() for d in docs])
 
-                    for c in batch_conns:
-                        c.close()
-                    for c in loop_conns:
-                        c.close()
+                        arm_results["sqlite_loop"] = timer.measure(do_sqlite_loop)
 
-                # Alternate arm groups (M-1)
-                arms = _alternate_arms(
-                    f"{self.name}_{prefix}_{size}",
-                    [("sqler", measure_sqler_arms), ("sqlite", measure_sqlite_arms)],
-                )
-                for label, fn in arms:
-                    fn()
-                    gc.collect()
+                        for c in batch_conns:
+                            c.close()
+                        for c in loop_conns:
+                            c.close()
 
-                for label, stats_key, baseline in [
-                    (f"sqler_{prefix}_bulk_{size}", "sqler_bulk", "sqler"),
-                    (f"sqler_{prefix}_single_{size}", "sqler_single", "sqler"),
-                    (f"sqlite_{prefix}_batch_{size}", "sqlite_batch", "sqlite"),
-                    (f"sqlite_{prefix}_loop_{size}", "sqlite_loop", "sqlite"),
-                ]:
-                    stats = arm_results[stats_key]
-                    tp = size / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                    results.append(BenchmarkResult(
-                        scenario=self.name, suite=self.suite,
-                        parameter="method", value=label,
-                        timing=stats, rows=size,
-                        throughput=round(tp, 1),
-                        metadata={"storage_mode": mode, "baseline": baseline},
-                    ))
+                    arms = _alternate_arms(
+                        f"{self.name}_{prefix}_{size}",
+                        [("sqler", measure_sqler_arms), ("sqlite", measure_sqlite_arms)],
+                    )
+                    for label, fn in arms:
+                        fn()
+                        gc.collect()
+
+                    for label, stats_key, baseline in [
+                        (f"sqler_{prefix}_bulk_{size}", "sqler_bulk", "sqler"),
+                        (f"sqler_{prefix}_single_{size}", "sqler_single", "sqler"),
+                        (f"sqlite_{prefix}_batch_{size}", "sqlite_batch", "sqlite"),
+                        (f"sqlite_{prefix}_loop_{size}", "sqlite_loop", "sqlite"),
+                    ]:
+                        stats = arm_results[stats_key]
+                        tp = size / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
+                        results.append(BenchmarkResult(
+                            scenario=self.name, suite=self.suite,
+                            parameter="method", value=label,
+                            timing=stats, rows=size,
+                            throughput=round(tp, 1),
+                            metadata={"storage_mode": mode, "baseline": baseline},
+                        ))
 
         return results
 
@@ -307,65 +299,65 @@ class DocumentSizeImpact:
             for profile in ("tiny", "small", "medium", "large", "huge"):
                 docs = self.gen.generate(profile, row_count)
                 avg_doc_bytes = round(statistics.mean(len(json.dumps(d)) for d in docs))
-                arm_results = {}
 
-                def measure_sqler():
-                    if mode == "memory":
-                        sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir = tempfile.mkdtemp()
-                        sqler_dbs = [
-                            SQLerDB.on_disk(os.path.join(tmpdir, f"sqler_{i}.db"))
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    sqler_iter = iter(sqler_dbs)
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    arm_results = {}
 
-                    def do_insert(docs=docs):
-                        db = next(sqler_iter)
-                        db.bulk_upsert("bench", [d.copy() for d in docs])
+                    def measure_sqler():
+                        if mode == "memory":
+                            sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                        else:
+                            sqler_dbs = [
+                                SQLerDB.on_disk(os.path.join(tmpdir, f"sqler_{i}.db"))
+                                for i in range(config.warmup + config.iterations)
+                            ]
+                        sqler_iter = iter(sqler_dbs)
 
-                    arm_results["sqler"] = timer.measure(do_insert)
+                        def do_insert(docs=docs):
+                            db = next(sqler_iter)
+                            db.bulk_upsert("bench", [d.copy() for d in docs])
 
-                def measure_sqlite():
-                    if mode == "memory":
-                        sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
-                    else:
-                        tmpdir = tempfile.mkdtemp()
-                        sqlite_conns = [
-                            create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
-                            for i in range(config.warmup + config.iterations)
-                        ]
-                    for c in sqlite_conns:
-                        create_table(c, "bench")
-                    sqlite_iter = iter(sqlite_conns)
+                        arm_results["sqler"] = timer.measure(do_insert)
 
-                    def do_sqlite(docs=docs):
-                        conn = next(sqlite_iter)
-                        insert_many(conn, "bench", [d.copy() for d in docs])
+                    def measure_sqlite():
+                        if mode == "memory":
+                            sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                        else:
+                            sqlite_conns = [
+                                create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
+                                for i in range(config.warmup + config.iterations)
+                            ]
+                        for c in sqlite_conns:
+                            create_table(c, "bench")
+                        sqlite_iter = iter(sqlite_conns)
 
-                    arm_results["sqlite"] = timer.measure(do_sqlite)
+                        def do_sqlite(docs=docs):
+                            conn = next(sqlite_iter)
+                            insert_many(conn, "bench", [d.copy() for d in docs])
 
-                    for c in sqlite_conns:
-                        c.close()
+                        arm_results["sqlite"] = timer.measure(do_sqlite)
 
-                arms = _alternate_arms(
-                    f"{self.name}_{prefix}_{profile}",
-                    [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
-                )
-                for label, fn in arms:
-                    fn()
-                    gc.collect()
+                        for c in sqlite_conns:
+                            c.close()
 
-                for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
-                    stats = arm_results[arm_label]
-                    tp = row_count / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                    results.append(BenchmarkResult(
-                        scenario=self.name, suite=self.suite,
-                        parameter="profile", value=f"{arm_label}_{prefix}_{profile}",
-                        timing=stats, rows=row_count,
-                        throughput=round(tp, 1),
-                        metadata={"avg_doc_bytes": avg_doc_bytes, "storage_mode": mode, "baseline": baseline},
-                    ))
+                    arms = _alternate_arms(
+                        f"{self.name}_{prefix}_{profile}",
+                        [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
+                    )
+                    for label, fn in arms:
+                        fn()
+                        gc.collect()
+
+                    for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
+                        stats = arm_results[arm_label]
+                        tp = row_count / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
+                        results.append(BenchmarkResult(
+                            scenario=self.name, suite=self.suite,
+                            parameter="profile", value=f"{arm_label}_{prefix}_{profile}",
+                            timing=stats, rows=row_count,
+                            throughput=round(tp, 1),
+                            metadata={"avg_doc_bytes": avg_doc_bytes, "storage_mode": mode, "baseline": baseline},
+                        ))
 
         return results
 
@@ -391,116 +383,114 @@ class ModelOverhead:
         for mode in _storage_modes(config):
             prefix = _mode_prefix(mode)
             docs = self.gen.generate("small", row_count)
-            arm_results = {}
 
-            def measure_sqler_arms():
-                # Raw insert_document (with transaction to match baseline's commit semantics)
-                if mode == "memory":
-                    raw_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
-                else:
-                    tmpdir = tempfile.mkdtemp()
-                    raw_dbs = [
-                        SQLerDB.on_disk(os.path.join(tmpdir, f"raw_{i}.db"))
-                        for i in range(config.warmup + config.iterations)
-                    ]
-                raw_iter = iter(raw_dbs)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                arm_results = {}
 
-                def do_raw(docs=docs):
-                    db = next(raw_iter)
-                    for doc in docs:
-                        db.insert_document("bench", doc.copy())
+                def measure_sqler_arms():
+                    # Raw insert_document
+                    if mode == "memory":
+                        raw_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                    else:
+                        raw_dbs = [
+                            SQLerDB.on_disk(os.path.join(tmpdir, f"raw_{i}.db"))
+                            for i in range(config.warmup + config.iterations)
+                        ]
+                    raw_iter = iter(raw_dbs)
 
-                arm_results["sqler_raw"] = timer.measure(do_raw)
+                    def do_raw(docs=docs):
+                        db = next(raw_iter)
+                        for doc in docs:
+                            db.insert_document("bench", doc.copy())
 
-                gc.collect()
+                    arm_results["sqler_raw"] = timer.measure(do_raw)
 
-                # SQLerModel.save()
-                if mode == "memory":
-                    model_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
-                else:
-                    tmpdir2 = tempfile.mkdtemp()
-                    model_dbs = [
-                        SQLerDB.on_disk(os.path.join(tmpdir2, f"model_{i}.db"))
-                        for i in range(config.warmup + config.iterations)
-                    ]
-                model_iter = iter(model_dbs)
+                    gc.collect()
 
-                def do_model(docs=docs):
-                    db = next(model_iter)
-                    BenchmarkItem.set_db(db, table="bench_model")
-                    for doc in docs:
-                        item = BenchmarkItem(**doc.copy())
-                        item.save()
+                    # SQLerModel.save()
+                    if mode == "memory":
+                        model_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                    else:
+                        model_dbs = [
+                            SQLerDB.on_disk(os.path.join(tmpdir, f"model_{i}.db"))
+                            for i in range(config.warmup + config.iterations)
+                        ]
+                    model_iter = iter(model_dbs)
 
-                arm_results["sqler_pydantic"] = timer.measure(do_model)
+                    def do_model(docs=docs):
+                        db = next(model_iter)
+                        BenchmarkItem.set_db(db, table="bench_model")
+                        for doc in docs:
+                            item = BenchmarkItem(**doc.copy())
+                            item.save()
 
-                gc.collect()
+                    arm_results["sqler_pydantic"] = timer.measure(do_model)
 
-                # SQLerLiteModel.save()
-                if mode == "memory":
-                    lite_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
-                else:
-                    tmpdir3 = tempfile.mkdtemp()
-                    lite_dbs = [
-                        SQLerDB.on_disk(os.path.join(tmpdir3, f"lite_{i}.db"))
-                        for i in range(config.warmup + config.iterations)
-                    ]
-                lite_iter = iter(lite_dbs)
+                    gc.collect()
 
-                def do_lite(docs=docs):
-                    db = next(lite_iter)
-                    BenchmarkItemLite.set_db(db, table="bench_lite")
-                    for doc in docs:
-                        item = BenchmarkItemLite(**doc.copy())
-                        item.save()
+                    # SQLerLiteModel.save()
+                    if mode == "memory":
+                        lite_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                    else:
+                        lite_dbs = [
+                            SQLerDB.on_disk(os.path.join(tmpdir, f"lite_{i}.db"))
+                            for i in range(config.warmup + config.iterations)
+                        ]
+                    lite_iter = iter(lite_dbs)
 
-                arm_results["sqler_lite"] = timer.measure(do_lite)
+                    def do_lite(docs=docs):
+                        db = next(lite_iter)
+                        BenchmarkItemLite.set_db(db, table="bench_lite")
+                        for doc in docs:
+                            item = BenchmarkItemLite(**doc.copy())
+                            item.save()
 
-            def measure_sqlite():
-                if mode == "memory":
-                    sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
-                else:
-                    tmpdir = tempfile.mkdtemp()
-                    sqlite_conns = [
-                        create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
-                        for i in range(config.warmup + config.iterations)
-                    ]
-                for c in sqlite_conns:
-                    create_table(c, "bench")
-                sqlite_iter = iter(sqlite_conns)
+                    arm_results["sqler_lite"] = timer.measure(do_lite)
 
-                def do_sqlite(docs=docs):
-                    conn = next(sqlite_iter)
-                    insert_loop(conn, "bench", [d.copy() for d in docs])
+                def measure_sqlite():
+                    if mode == "memory":
+                        sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                    else:
+                        sqlite_conns = [
+                            create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
+                            for i in range(config.warmup + config.iterations)
+                        ]
+                    for c in sqlite_conns:
+                        create_table(c, "bench")
+                    sqlite_iter = iter(sqlite_conns)
 
-                arm_results["sqlite_loop"] = timer.measure(do_sqlite)
+                    def do_sqlite(docs=docs):
+                        conn = next(sqlite_iter)
+                        insert_loop(conn, "bench", [d.copy() for d in docs])
 
-                for c in sqlite_conns:
-                    c.close()
+                    arm_results["sqlite_loop"] = timer.measure(do_sqlite)
 
-            arms = _alternate_arms(
-                f"{self.name}_{prefix}",
-                [("sqler", measure_sqler_arms), ("sqlite", measure_sqlite)],
-            )
-            for label, fn in arms:
-                fn()
-                gc.collect()
+                    for c in sqlite_conns:
+                        c.close()
 
-            for label, stats_key, baseline in [
-                (f"sqler_{prefix}_raw", "sqler_raw", "sqler"),
-                (f"sqler_{prefix}_pydantic", "sqler_pydantic", "sqler"),
-                (f"sqler_{prefix}_lite", "sqler_lite", "sqler"),
-                (f"sqlite_{prefix}_loop", "sqlite_loop", "sqlite"),
-            ]:
-                stats = arm_results[stats_key]
-                tp = row_count / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                results.append(BenchmarkResult(
-                    scenario=self.name, suite=self.suite,
-                    parameter="method", value=label,
-                    timing=stats, rows=row_count,
-                    throughput=round(tp, 1),
-                    metadata={"storage_mode": mode, "baseline": baseline},
-                ))
+                arms = _alternate_arms(
+                    f"{self.name}_{prefix}",
+                    [("sqler", measure_sqler_arms), ("sqlite", measure_sqlite)],
+                )
+                for label, fn in arms:
+                    fn()
+                    gc.collect()
+
+                for label, stats_key, baseline in [
+                    (f"sqler_{prefix}_raw", "sqler_raw", "sqler"),
+                    (f"sqler_{prefix}_pydantic", "sqler_pydantic", "sqler"),
+                    (f"sqler_{prefix}_lite", "sqler_lite", "sqler"),
+                    (f"sqlite_{prefix}_loop", "sqlite_loop", "sqlite"),
+                ]:
+                    stats = arm_results[stats_key]
+                    tp = row_count / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
+                    results.append(BenchmarkResult(
+                        scenario=self.name, suite=self.suite,
+                        parameter="method", value=label,
+                        timing=stats, rows=row_count,
+                        throughput=round(tp, 1),
+                        metadata={"storage_mode": mode, "baseline": baseline},
+                    ))
 
         return results
 
