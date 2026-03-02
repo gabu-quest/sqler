@@ -19,7 +19,7 @@ Definitive result files:
 | Backup/restore | 1.00x | 1.02x | 1.01x | 1.00x | **Perfect parity** |
 | Bulk insert | 1.92x | 1.91x | 1.87x | 1.87x | **Stable ~1.9x** |
 | any_where (array subqueries) | 1.51x | 1.56x | 1.47x | 1.48x | **Stable ~1.5x** |
-| Export (CSV/JSONL) | 2.85x | 2.74–2.84x | 2.72–2.85x | 2.73–2.77x | **Stable ~2.8x** |
+| Export (CSV/JSONL) | ~~2.85x~~ | ~~2.74–2.84x~~ | ~~2.72–2.85x~~ | ~~2.73–2.77x~~ | **✅ Fixed → 1.0–1.5x** |
 | FTS rebuild | 4.65x | 4.63x | 3.96x | 3.78x | **Improving at scale** |
 | FTS ranked | 0.95x | 0.70x | 1.52x | 1.50x | **Worsening at scale** |
 
@@ -35,41 +35,79 @@ row iteration. This is an irreducible measurement artifact, not a real ORM advan
 | FTS rebuild | 29.2s | 7.7s | **+21.4s** |
 | Bulk insert 1M | 12.2s | 6.5s | **+5.7s** |
 | any_where query | 9.9s | 6.7s | **+3.2s** |
-| Export CSV 250K | 4.7s | 1.7s | **+3.0s** |
+| ~~Export CSV 250K~~ | ~~4.7s~~ | ~~1.7s~~ | ~~+3.0s~~ ✅ Fixed |
 | FTS ranked 1M | 899ms | 599ms | **+300ms** |
 | Equality filter 1M (no idx) | 1.0s | 1.1s | -50ms (noise) |
 | Backup 1M | 606ms | 604ms | +2ms (noise) |
 
 ---
 
-## Priority 1: Export Performance (2.8x overhead) — Easiest Win
+## Priority 1: Export Performance — ✅ DONE (2.8x → 1.0–1.5x)
 
-### What's happening
+### What was done
 
-Stable ~2.8x overhead at every scale. Does not get worse with size.
+Replaced the full ORM hydration pipeline in all 8 sync + 1 async export functions with direct
+query execution against the SQLite adapter. The per-row pipeline went from:
 
-| Format | Rows | sqler (mem) | sqlite (mem) | Ratio |
-|--------|------|-------------|--------------|-------|
-| CSV | 50K | 895ms | 313ms | 2.86x |
-| JSONL | 50K | 829ms | 291ms | 2.85x |
+```
+JSON string → dict → Pydantic model_validate() → dict → JSON string   (BEFORE)
+JSON string → dict → JSON string                                       (AFTER, CSV/JSONL)
+JSON string ────────→ file                                              (AFTER, JSONL fast path)
+```
 
-### Root cause
+Three tiers of optimization depending on the format:
 
-`export_csv()` and `export_jsonl()` iterate through querysets, which go through the full ORM
-pipeline per row: query → fetch → deserialize JSON → build model → re-serialize for output.
-The baseline reads raw JSON strings and writes them directly.
+1. **JSONL fast path** (`include_id=False`, all fields): Zero-parse — raw `data` column strings
+   written directly. No `json.loads()`, no `json.dumps()`. Theoretical minimum.
+2. **JSON/JSONL with ID or field filter**: `json.loads()` → inject `_id` or filter fields → `json.dumps()`.
+   Skips Pydantic entirely.
+3. **CSV**: `json.loads()` → field extract → `_serialize_value(for_csv=True)` → CSV writer.
+   Skips Pydantic, still needs parse for field extraction.
 
-### Why this is priority 1
+### Results (medium scale, 50K rows)
 
-This is the easiest optimization because the `data` column IS already JSON. For JSONL export,
-there is zero reason to parse and re-serialize — just write the raw column value. For CSV, you
-need one parse to extract fields but can skip model hydration entirely.
+| Format | Storage | sqler (ms) | sqlite (ms) | Ratio | Was |
+|--------|---------|-----------|-------------|-------|-----|
+| CSV | memory | 494 | 347 | **1.42x** | 2.86x |
+| CSV | disk | 508 | 340 | **1.49x** | 2.86x |
+| JSON | memory | 489 | 496 | **0.99x** | — |
+| JSON | disk | 499 | 539 | **0.93x** | — |
+| JSONL | memory | 352 | 305 | **1.15x** | 2.85x |
+| JSONL | disk | 356 | 349 | **1.02x** | 2.85x |
+| JSONL noid | memory | 51 | 42 | **1.22x** | — |
+| JSONL noid | disk | 49 | 48 | **1.03x** | — |
 
-### Optimization ideas
+### What we learned
 
-- Add a "raw export" path that reads `data` column directly without ORM overhead
-- For JSONL: `cursor.execute("SELECT data FROM ..."); f.write(row[0] + "\n")` — done
-- For CSV: `json.loads(row[0])` once per row to extract fields, skip model instantiation
+1. **JSON export is at parity (0.93–1.02x).** sqler's `json.loads()` per row + `json.dump(list)`
+   on the collected result matches or beats the sqlite baseline. Sometimes faster because
+   `json.dump()` on a pre-built list is more efficient than the baseline's individual loads.
+
+2. **JSONL fast path is 7x faster than regular JSONL** (51ms vs 352ms at 50K). The remaining
+   ~1.2x gap vs sqlite is `query.all()` overhead (SQL building, cursor wrapping, list comprehension)
+   vs a bare `conn.execute().fetchall()` with direct column access.
+
+3. **CSV has an irreducible ~1.5x floor.** CSV needs per-field extraction + `_serialize_value()`
+   for nested types (list/dict → JSON string). The sqlite baseline's `DictWriter.writerows(parsed)`
+   is simpler because it doesn't need per-value type handling. This gap is inherent to CSV format.
+
+4. **Pydantic hydration was the entire bottleneck.** The 2.8x overhead was almost entirely
+   `model_validate()` + `_model_to_dict()`. Removing them brought every format to within
+   0.93–1.5x of raw sqlite3. No other optimization was needed.
+
+5. **Memory vs disk is irrelevant for export.** Results are nearly identical — the optimization
+   is CPU-bound (Python object construction), not I/O-bound.
+
+### Remaining gap analysis
+
+| Source of remaining overhead | Formats affected | Estimated cost |
+|------------------------------|-----------------|----------------|
+| `query._build_query()` SQL construction | All | ~2-5ms |
+| Cursor wrapping / adapter layer | All | ~2-5ms |
+| `_serialize_value(for_csv=True)` per field | CSV only | ~50ms at 50K |
+| `json.loads()` + field filtering | CSV, JSONL with ID | ~100ms at 50K |
+
+None of these are worth optimizing further — they're inherent to what the format requires.
 
 ---
 
@@ -237,8 +275,8 @@ sqler's wrapper adds literally zero overhead at every scale:
 2. **Insert overhead is constant, not algorithmic.** 1.9x stays 1.9x whether you insert 50K or
    1M rows. It's a per-row cost, not a scaling problem.
 
-3. **Export is the lowest-hanging fruit.** 2.8x overhead from unnecessary deserialize-reserialize.
-   The data column IS already JSON — skip the round trip.
+3. **Export was the lowest-hanging fruit — now fixed.** 2.8x → 1.0–1.5x by bypassing Pydantic
+   hydration. JSONL fast path (zero-parse) is 7x faster than the pre-optimization path.
 
 4. **FTS rebuild improves at scale** (4.65x → 3.78x) but has the biggest absolute cost (+21s at 1M).
    A single SQL statement instead of ORM iteration would nearly eliminate this.
