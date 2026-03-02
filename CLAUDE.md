@@ -6,6 +6,7 @@ Document-oriented JSON store on SQLite.
 - [qler-prerequisites](./ROADMAP-QLER.md) — all milestones complete (M-1 through M-11)
 
 ## Benchmarks
+- [Benchmark journey](./benchmarks/JOURNEY.md) — the full story: v1.1 → v1.2 → export optimization → Pydantic discovery
 - [Findings & optimization roadmap](./benchmarks/FINDINGS.md) — prioritized performance gaps
 - [Memory profiling journey](./benchmarks/MEMPROFILE.md) — tracemalloc methodology
 
