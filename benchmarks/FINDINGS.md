@@ -346,14 +346,84 @@ The query layer already supports this: `query.all()` returns raw strings, `query
 returns dicts with `_id`. The export optimization proved this path is ~2x faster than
 hydration for bulk operations and produces identical output.
 
-### What NOT to conclude
+### Risks and tradeoffs — should we skip Pydantic more broadly?
 
-- This does NOT mean Pydantic is bad. Pydantic earns its cost on write paths (validation,
-  coercion, schema enforcement) and on read paths where the caller needs typed objects.
-- This does NOT mean we should remove model hydration from querysets. `queryset.all()` returns
-  model instances, and that's the correct default — users expect typed objects.
-- The overhead is per-row, not per-query. For queries returning <100 rows (the common case),
-  hydration cost is invisible (~0.3ms). It only matters at bulk scale (10K+ rows).
+The export optimization was safe because exports are a terminal operation: data goes out,
+nothing reads it back as Python objects. But before making "skip Pydantic" a general pattern,
+we need to weigh what Pydantic actually protects against.
+
+#### What Pydantic catches that raw dicts don't
+
+| Risk | Example | Severity |
+|------|---------|----------|
+| **Schema drift** | Field added to model after data was stored. Pydantic fills in the default; raw dict returns `None`/KeyError. | Medium — silent data loss if caller assumes field exists |
+| **Type corruption** | Data modified outside sqler (direct SQL, migration script) stores `"42"` where an int is expected. Pydantic coerces to `42`; raw dict gives `"42"`. | High if downstream code does arithmetic on it |
+| **External mutation** | Another process writes to the SQLite file with malformed JSON or wrong field types. Pydantic's `model_validate()` raises `ValidationError`; raw dict silently passes bad data through. | High — the whole point of validation |
+| **Validator logic** | Model has `@field_validator` that normalizes emails to lowercase, strips whitespace, enforces business rules. Raw dict skips all of it. | Depends on model — could be critical |
+| **Computed fields** | Model has `@computed_field` or `@property` that derives values. Raw dict has no concept of computed fields. | Medium — caller gets stale/missing data |
+| **Relation resolution** | Model has `Ref(OtherModel)` fields. Hydration resolves references; raw dict gives you raw IDs. | Low for exports — you usually WANT the IDs |
+
+#### When skipping is safe
+
+The pattern is safe when ALL of these hold:
+
+1. **Write path is trusted.** Data was written by sqler through `model.save()` or `bulk_upsert()`,
+   which validates on write. If the write path enforces the schema, the read path can trust it.
+2. **No external mutation.** Nobody else writes to the SQLite file. If they do, Pydantic on read
+   is your last line of defense.
+3. **No schema drift.** The model class hasn't added fields with defaults since the data was stored.
+   If it has, raw dicts will be missing those fields.
+4. **Output is JSON/dict.** The caller wants serialized data, not typed Python objects. If they
+   need `datetime` objects or computed properties, they need Pydantic.
+5. **No validators with side effects.** If `@field_validator` does normalization (lowercase, strip,
+   clamp), the raw dict will have the un-normalized value. But if validation only ran on write,
+   the stored value is already normalized.
+
+#### When skipping is dangerous
+
+- **Multi-writer databases.** If another process, migration script, or manual SQL modifies the
+  data, you lose the safety net. Pydantic on read catches corruption from external writes.
+- **Schema evolution.** If you add a field with a default value, old rows won't have it. Pydantic
+  fills the default; raw dict doesn't. This is the most common real-world issue.
+- **Downstream type assumptions.** If API consumers expect `{"created_at": "2024-01-01T00:00:00"}`
+  to always be a string, raw dicts are fine. But if internal code does `obj.created_at.year`,
+  it needs Pydantic to parse the string into a `datetime`.
+
+#### Faster alternatives to full Pydantic
+
+Before expanding the raw-dict pattern, consider whether we can make hydration faster instead:
+
+| Alternative | Speedup | Tradeoff |
+|-------------|---------|----------|
+| **msgspec** (drop-in for Pydantic) | 5–10x faster validation | Different API, migration cost, less ecosystem |
+| **Pydantic `model_construct()`** | ~3x faster (skips validation) | No validators, no coercion — similar risk profile to raw dicts but returns model instances |
+| **TypedDict + manual validation** | ~2x faster | Lose Pydantic ecosystem, more code |
+| **cattrs / attrs** | ~3–5x faster | Different modeling paradigm |
+| **Selective validation** | Varies | Only validate fields that need it; trust the rest |
+
+`model_construct()` is particularly interesting: it builds the Pydantic model without running
+validators, but still gives you a typed object with properties and methods. It's the middle
+ground between full validation and raw dicts. The risk is the same as raw dicts (no validation)
+but the API surface stays the same (callers still get model instances).
+
+#### The verdict (pending discussion)
+
+**The export optimization is safe and should stay.** Exports are terminal, read-only, and the
+caller explicitly asked for serialized data. Pydantic adds nothing here.
+
+**Expanding this to queryset.all() or general reads: not yet decided.** The performance win is
+real (~2x for bulk reads), but the safety tradeoffs are non-trivial. The right answer probably
+depends on the specific use case:
+
+- `queryset.all()` → model instances (current default, keep)
+- `queryset.all_dicts()` → raw dicts (already exists on the query layer, not on queryset)
+- `queryset.as_dicts()` → possible new API that returns dicts from the queryset level
+- Export functions → raw dicts (done, proven safe)
+- FTS rebuild → single SQL statement (no Python objects at all — even better)
+
+**Decision needed:** Should sqler expose `queryset.as_dicts()` as a public API? And if so,
+should it document the tradeoffs explicitly? This is a fundamental API design question that
+deserves its own spec, not just a benchmark finding.
 
 ---
 
