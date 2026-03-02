@@ -367,9 +367,23 @@ class SQLiteFTSBaseline:
         self.conn.commit()
 
     def rebuild(self) -> None:
-        """Rebuild the FTS index."""
+        """Rebuild FTS index from source data (matched to sqler's rebuild).
+
+        Deletes all FTS rows and repopulates via INSERT...SELECT from the
+        source JSON table — the same work sqler's ``FTSIndex.rebuild()``
+        does.  The previous implementation used FTS5's internal
+        ``VALUES('rebuild')`` command which only merges index segments and
+        does NOT re-read source data, creating an apples-to-oranges
+        comparison.
+        """
+        self.conn.execute(f"DELETE FROM [{self.fts_table}]")
+        extract_cols = ", ".join(
+            f"json_extract(data, '$.{f}')" for f in self.fields
+        )
+        cols = ", ".join(self.fields)
         self.conn.execute(
-            f"INSERT INTO [{self.fts_table}]([{self.fts_table}]) VALUES('rebuild')"
+            f"INSERT INTO [{self.fts_table}](rowid, {cols}) "
+            f"SELECT _id, {extract_cols} FROM [{self.table}]"
         )
         self.conn.commit()
 

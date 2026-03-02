@@ -88,6 +88,15 @@ class AsyncSQLerQuerySet(Generic[T]):
             results.append(inst)
         return results
 
+    async def as_dicts(self) -> list[dict[str, Any]]:
+        """Execute and return raw dicts without Pydantic hydration.
+
+        Returns dicts with ``_id`` attached. Respects filters, ordering,
+        limits, and ``.select()`` field projection — but skips model
+        validation, type coercion, computed fields, and relation resolution.
+        """
+        return await self._query.all_dicts()
+
     async def first(self) -> Optional[T]:
         d = await self._query.first_dict()
         if d is None:
