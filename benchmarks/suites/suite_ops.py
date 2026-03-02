@@ -337,6 +337,13 @@ class ExportPerformance:
                             export_jsonl(qs, os.path.join(tmpdir, "out.jsonl"))
                         arm_results["sqler_jsonl"] = timer.measure(do_jsonl)
 
+                        gc.collect()
+
+                        # Fast path: include_id=False skips json.loads/json.dumps entirely
+                        def do_jsonl_noid(qs=qs, tmpdir=tmpdir):
+                            export_jsonl(qs, os.path.join(tmpdir, "out_noid.jsonl"), include_id=False)
+                        arm_results["sqler_jsonl_noid"] = timer.measure(do_jsonl_noid)
+
                     def measure_sqlite():
                         import csv
 
@@ -372,6 +379,16 @@ class ExportPerformance:
                                     f.write(json_mod.dumps(parsed) + "\n")
                         arm_results["sqlite_jsonl"] = timer.measure(do_sqlite_jsonl)
 
+                        gc.collect()
+
+                        # Zero-parse baseline: write raw data column, no json.loads/dumps
+                        def do_sqlite_jsonl_noid(conn=conn, tmpdir=tmpdir):
+                            rows = conn.execute("SELECT data FROM [bench]").fetchall()
+                            with open(os.path.join(tmpdir, "sq_out_noid.jsonl"), "w") as f:
+                                for r in rows:
+                                    f.write(r["data"] + "\n")
+                        arm_results["sqlite_jsonl_noid"] = timer.measure(do_sqlite_jsonl_noid)
+
                     arms = _alternate_arms(
                         f"{self.name}_{prefix}_{size}",
                         [("sqler", measure_sqler), ("sqlite", measure_sqlite)],
@@ -384,9 +401,11 @@ class ExportPerformance:
                         (f"sqler_{prefix}_csv_{size}", "sqler_csv", "sqler"),
                         (f"sqler_{prefix}_json_{size}", "sqler_json", "sqler"),
                         (f"sqler_{prefix}_jsonl_{size}", "sqler_jsonl", "sqler"),
+                        (f"sqler_{prefix}_jsonl_noid_{size}", "sqler_jsonl_noid", "sqler"),
                         (f"sqlite_{prefix}_csv_{size}", "sqlite_csv", "sqlite"),
                         (f"sqlite_{prefix}_json_{size}", "sqlite_json", "sqlite"),
                         (f"sqlite_{prefix}_jsonl_{size}", "sqlite_jsonl", "sqlite"),
+                        (f"sqlite_{prefix}_jsonl_noid_{size}", "sqlite_jsonl_noid", "sqlite"),
                     ]:
                         results.append(BenchmarkResult(
                             scenario=self.name, suite=self.suite,
