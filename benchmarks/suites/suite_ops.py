@@ -352,6 +352,15 @@ class ExportPerformance:
 
                         gc.collect()
 
+                        def do_sqlite_json(conn=conn, tmpdir=tmpdir):
+                            rows = conn.execute("SELECT data FROM [bench]").fetchall()
+                            data = [json_mod.loads(r["data"]) for r in rows]
+                            with open(os.path.join(tmpdir, "sq_out.json"), "w") as f:
+                                json_mod.dump(data, f, ensure_ascii=False)
+                        arm_results["sqlite_json"] = timer.measure(do_sqlite_json)
+
+                        gc.collect()
+
                         # v1.2: round-trip JSON — json.loads then json.dumps (H-7)
                         # sqler's export_jsonl reads from DB, deserializes, re-serializes.
                         # The old baseline just wrote raw r[0] which skips deserialization.
@@ -376,6 +385,7 @@ class ExportPerformance:
                         (f"sqler_{prefix}_json_{size}", "sqler_json", "sqler"),
                         (f"sqler_{prefix}_jsonl_{size}", "sqler_jsonl", "sqler"),
                         (f"sqlite_{prefix}_csv_{size}", "sqlite_csv", "sqlite"),
+                        (f"sqlite_{prefix}_json_{size}", "sqlite_json", "sqlite"),
                         (f"sqlite_{prefix}_jsonl_{size}", "sqlite_jsonl", "sqlite"),
                     ]:
                         results.append(BenchmarkResult(
