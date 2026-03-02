@@ -292,9 +292,7 @@ class ExportPerformance:
         results = []
         timer = PrecisionTimer(warmup=config.warmup, iterations=config.iterations)
 
-        export_sizes = [s for s in config.scale.table_sizes if s <= 50_000]
-        if not export_sizes:
-            export_sizes = [config.scale.table_sizes[0]]
+        export_sizes = config.scale.table_sizes
 
         for mode in _storage_modes(config):
             prefix = _mode_prefix(mode)
@@ -347,21 +345,31 @@ class ExportPerformance:
                     def measure_sqlite():
                         import csv
 
+                        # All baselines use include_id to match sqler's default
+                        # (include_id=True). Both arms SELECT _id, data and inject
+                        # _id into each dict — equivalent work.
                         def do_sqlite_csv(conn=conn, tmpdir=tmpdir):
-                            rows = conn.execute("SELECT data FROM [bench]").fetchall()
-                            parsed = [json_mod.loads(r["data"]) for r in rows]
-                            if parsed:
+                            rows = conn.execute("SELECT _id, data FROM [bench]").fetchall()
+                            if rows:
+                                fieldnames = ["_id"] + list(json_mod.loads(rows[0]["data"]).keys())
                                 with open(os.path.join(tmpdir, "sq_out.csv"), "w", newline="") as f:
-                                    w = csv.DictWriter(f, fieldnames=parsed[0].keys())
+                                    w = csv.DictWriter(f, fieldnames=fieldnames)
                                     w.writeheader()
-                                    w.writerows(parsed)
+                                    for r in rows:
+                                        obj = json_mod.loads(r["data"])
+                                        obj["_id"] = r["_id"]
+                                        w.writerow(obj)
                         arm_results["sqlite_csv"] = timer.measure(do_sqlite_csv)
 
                         gc.collect()
 
                         def do_sqlite_json(conn=conn, tmpdir=tmpdir):
-                            rows = conn.execute("SELECT data FROM [bench]").fetchall()
-                            data = [json_mod.loads(r["data"]) for r in rows]
+                            rows = conn.execute("SELECT _id, data FROM [bench]").fetchall()
+                            data = []
+                            for r in rows:
+                                obj = json_mod.loads(r["data"])
+                                obj["_id"] = r["_id"]
+                                data.append(obj)
                             with open(os.path.join(tmpdir, "sq_out.json"), "w") as f:
                                 json_mod.dump(data, f, ensure_ascii=False)
                         arm_results["sqlite_json"] = timer.measure(do_sqlite_json)
@@ -369,14 +377,14 @@ class ExportPerformance:
                         gc.collect()
 
                         # v1.2: round-trip JSON — json.loads then json.dumps (H-7)
-                        # sqler's export_jsonl reads from DB, deserializes, re-serializes.
-                        # The old baseline just wrote raw r[0] which skips deserialization.
+                        # Both arms SELECT _id + data, inject _id, round-trip JSON.
                         def do_sqlite_jsonl(conn=conn, tmpdir=tmpdir):
-                            rows = conn.execute("SELECT data FROM [bench]").fetchall()
+                            rows = conn.execute("SELECT _id, data FROM [bench]").fetchall()
                             with open(os.path.join(tmpdir, "sq_out.jsonl"), "w") as f:
                                 for r in rows:
-                                    parsed = json_mod.loads(r["data"])
-                                    f.write(json_mod.dumps(parsed) + "\n")
+                                    obj = json_mod.loads(r["data"])
+                                    obj["_id"] = r["_id"]
+                                    f.write(json_mod.dumps(obj) + "\n")
                         arm_results["sqlite_jsonl"] = timer.measure(do_sqlite_jsonl)
 
                         gc.collect()
