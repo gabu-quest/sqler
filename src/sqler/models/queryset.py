@@ -88,6 +88,15 @@ class SQLerQuerySet(Generic[T]):
             results.append(inst)
         return results
 
+    def as_dicts(self) -> list[dict[str, Any]]:
+        """Execute and return raw dicts without Pydantic hydration.
+
+        Returns dicts with ``_id`` attached. Respects filters, ordering,
+        limits, and ``.select()`` field projection — but skips model
+        validation, type coercion, computed fields, and relation resolution.
+        """
+        return self._query.all_dicts()
+
     def first(self) -> Optional[T]:
         """Execute with LIMIT 1 and return the first model instance, if any."""
         d = self._query.first_dict()

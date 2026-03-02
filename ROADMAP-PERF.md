@@ -6,26 +6,25 @@ Branch: `feat/perf-optimizations`
 
 ## Milestones
 
-### M-1: queryset.as_dicts() + FTS single-SQL rebuild 🔄
+### M-1: queryset.as_dicts() + FTS benchmark fix + optimize() 🔄
 
 **as_dicts()** — Expose the existing `query.all_dicts()` through the queryset API.
 Bypasses Pydantic hydration for bulk reads where callers want dicts, not model instances.
 ~2x faster for large result sets. Purely additive, no breaking changes.
 
-- [ ] Add `as_dicts()` to `SQLerQuerySet`
-- [ ] Add `as_dicts()` to `AsyncSQLerQuerySet`
-- [ ] Tests for both sync and async
+- [x] Add `as_dicts()` to `SQLerQuerySet`
+- [x] Add `as_dicts()` to `AsyncSQLerQuerySet`
+- [x] Tests for both sync and async
 - [ ] Document tradeoffs (no validators, no type coercion, no schema drift protection)
 
-**FTS rebuild** — Replace ORM-based rebuild (read all docs → extract fields → re-insert
-row by row) with a single `INSERT INTO fts_table SELECT json_extract(data, ...) FROM source`
-SQL statement. Currently 3.8–4.7x overhead, +21s at 1M rows. Biggest absolute cost.
+**FTS benchmark fix** — The 3.8–4.7x "rebuild gap" was a benchmark asymmetry, not a code
+problem. sqler's `fts.rebuild()` already uses a single `INSERT...SELECT` (no ORM iteration).
+The sqlite baseline was running FTS5's internal `VALUES('rebuild')` (segment merge) instead
+of an equivalent DELETE + repopulate. Fixed the baseline to match.
 
-- [ ] Rewrite `FTSIndex.rebuild()` to use single SQL INSERT...SELECT
-- [ ] Rewrite `FTSIndex.create()` if it uses the same ORM pattern
-- [ ] Async equivalents
-- [ ] Tests — verify identical FTS content before/after
-- [ ] Benchmark comparison against v1.2 baseline
+- [x] Fix `SQLiteFTSBaseline.rebuild()` — DELETE + INSERT...SELECT from source JSON
+- [x] Add `db` parameter to `FTSIndex.optimize()` (already existed, pattern parity)
+- [ ] Benchmark comparison against v1.2 baseline — FTS rebuild ratio should drop to ~1.0x
 
 ### M-2: Query logger + any_where overhead ⬚
 

@@ -535,8 +535,16 @@ class FTSIndex:
             fields=self.fields,
         )
 
-    def optimize(self) -> None:
-        """Optimize the FTS index (merge segments)."""
+    def optimize(self, db: Optional["SQLerDB"] = None) -> None:
+        """Optimize the FTS5 index by merging segments.
+
+        Runs FTS5's ``optimize`` command which merges all index segments
+        into a single optimized segment.  Unlike :meth:`rebuild`, this
+        does **not** re-read source data — it only restructures the
+        internal b-tree for faster queries.
+        """
+        if db:
+            self._db = db
         db = self._get_db()
         sql = f"INSERT INTO {self.index_table}({self.index_table}) VALUES('optimize');"
         db.adapter.execute(sql)

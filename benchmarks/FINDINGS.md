@@ -179,32 +179,39 @@ None of these are worth optimizing further — they're inherent to what the form
 
 ---
 
-## Priority 2: FTS Rebuild (3.8–4.7x overhead) — Biggest Absolute Impact
+## ~~Priority 2: FTS Rebuild (3.8–4.7x overhead)~~ → Benchmark Asymmetry (FIXED)
 
-### What's happening
+### What happened
 
-The overhead IMPROVES at scale (fixed Python cost amortized by growing SQLite work):
+The 3.8–4.7x gap was **not a code problem** — it was a benchmark asymmetry.
 
-| Rows | sqler (mem) | sqlite (mem) | Ratio |
-|------|-------------|--------------|-------|
-| 50K | 1,121ms | 241ms | 4.65x |
-| 100K | 2,246ms | 485ms | 4.63x |
-| 500K | 12,508ms | 3,159ms | 3.96x |
-| 1M | 29,153ms | 7,717ms | 3.78x |
+| | sqler `fts.rebuild()` | sqlite baseline `fb.rebuild()` |
+|--|----------------------|-------------------------------|
+| Operation | DELETE all rows + INSERT...SELECT from source JSON | FTS5 internal `INSERT INTO fts(fts) VALUES('rebuild')` |
+| What it does | Repopulates entire FTS table from JSON data — O(n rows) | Merges FTS5 index segments — O(segments), does NOT re-read source |
 
-At 1M rows this costs 21 extra seconds. The single biggest absolute penalty.
+sqler's `rebuild()` already used a single SQL `INSERT...SELECT` statement (no ORM iteration,
+no per-row Python). The baseline was running FTS5's internal segment optimization command,
+which is a fundamentally cheaper operation (it restructures the b-tree without re-reading
+source data).
 
-### Root cause
+### Fix applied (M-1)
 
-`fts.rebuild()` uses sqler's ORM to read all documents, extract fields, and re-insert into the
-FTS table row by row. The baseline uses a single `INSERT INTO fts_table SELECT ... FROM source`
-SQL statement.
+Updated `SQLiteFTSBaseline.rebuild()` to do the same work as sqler:
+DELETE all FTS rows, then INSERT...SELECT with `json_extract()` from the source table.
+With matched operations, the FTS rebuild ratio should drop to near 1.0x.
 
-### Optimization ideas
+### Previous data (invalid — kept for reference)
 
-- Use a single `INSERT INTO fts SELECT json_extract(data, ...) FROM source` statement
-- FTS index creation could use the same single-SQL approach
-- This one change could bring rebuild close to parity
+| Rows | sqler (mem) | sqlite (mem) | Ratio | Note |
+|------|-------------|--------------|-------|------|
+| 50K | 1,121ms | 241ms | 4.65x | Baseline was measuring segment merge, not rebuild |
+| 100K | 2,246ms | 485ms | 4.63x | |
+| 500K | 12,508ms | 3,159ms | 3.96x | |
+| 1M | 29,153ms | 7,717ms | 3.78x | |
+
+These ratios are invalid because the baseline was doing less work. Re-run needed with the
+fixed baseline to get accurate numbers.
 
 ---
 
