@@ -177,6 +177,19 @@ def _model_to_dict(
 
 
 # =============================================================================
+# Raw-row helpers (bypass Pydantic hydration for export performance)
+# =============================================================================
+
+
+def _get_query_and_model(source: Union["ModelQuerySet", Type["SQLerModel"]]):
+    """Extract the underlying query object and model class from an export source."""
+    if hasattr(source, "_query"):  # queryset (sync or async)
+        return source._query, source._model_cls
+    else:  # model class
+        return source.query()._query, source
+
+
+# =============================================================================
 # CSV Export/Import
 # =============================================================================
 
@@ -204,37 +217,34 @@ def export_csv(
         ExportResult with export statistics
     """
     path = Path(path)
+    query, model_class = _get_query_and_model(source)
 
-    # Get items to export
-    if hasattr(source, "all"):
-        # It's a queryset
-        items = source.all()
-        model_class = source._model_cls
-    else:
-        # It's a model class
-        items = source.query().all()
-        model_class = source
-
-    # Determine fields
     if fields is None:
         fields = _get_model_fields(model_class)
 
     fieldnames = (["_id"] if include_id else []) + fields
 
-    count = 0
+    sql, params = query._build_query(include_id=include_id, include_version=False)
+    rows = query._adapter.execute(sql, params).fetchall()
+
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=delimiter, quoting=quoting)
         writer.writeheader()
 
-        for item in items:
-            row = _model_to_dict(item, fields=fields, include_id=include_id, for_csv=True)
-            writer.writerow(row)
-            count += 1
+        for row in rows:
+            if include_id:
+                obj = json.loads(row[1])
+                record: dict[str, Any] = {"_id": row[0]}
+                record.update({k: _serialize_value(obj.get(k), for_csv=True) for k in fields})
+            else:
+                obj = json.loads(row[0])
+                record = {k: _serialize_value(obj.get(k), for_csv=True) for k in fields}
+            writer.writerow(record)
 
     return ExportResult(
         path=str(path),
         format="csv",
-        count=count,
+        count=len(rows),
         size_bytes=path.stat().st_size,
     )
 
@@ -252,25 +262,28 @@ def export_csv_string(
         CSV content as string
     """
     output = io.StringIO()
-
-    if hasattr(source, "all"):
-        items = source.all()
-        model_class = source._model_cls
-    else:
-        items = source.query().all()
-        model_class = source
+    query, model_class = _get_query_and_model(source)
 
     if fields is None:
         fields = _get_model_fields(model_class)
 
     fieldnames = (["_id"] if include_id else []) + fields
 
+    sql, params = query._build_query(include_id=include_id, include_version=False)
+    rows = query._adapter.execute(sql, params).fetchall()
+
     writer = csv.DictWriter(output, fieldnames=fieldnames, delimiter=delimiter)
     writer.writeheader()
 
-    for item in items:
-        row = _model_to_dict(item, fields=fields, include_id=include_id, for_csv=True)
-        writer.writerow(row)
+    for row in rows:
+        if include_id:
+            obj = json.loads(row[1])
+            record: dict[str, Any] = {"_id": row[0]}
+            record.update({k: _serialize_value(obj.get(k), for_csv=True) for k in fields})
+        else:
+            obj = json.loads(row[0])
+            record = {k: _serialize_value(obj.get(k), for_csv=True) for k in fields}
+        writer.writerow(record)
 
     return output.getvalue()
 
@@ -393,18 +406,27 @@ def export_json(
         ExportResult with export statistics
     """
     path = Path(path)
-
-    if hasattr(source, "all"):
-        items = source.all()
-        model_class = source._model_cls
-    else:
-        items = source.query().all()
-        model_class = source
+    query, model_class = _get_query_and_model(source)
 
     if fields is None:
         fields = _get_model_fields(model_class)
+        all_fields = True
+    else:
+        all_fields = False
 
-    data = [_model_to_dict(item, fields=fields, include_id=include_id) for item in items]
+    sql, params = query._build_query(include_id=include_id, include_version=False)
+    rows = query._adapter.execute(sql, params).fetchall()
+
+    data = []
+    for row in rows:
+        if include_id:
+            obj = json.loads(row[1])
+            obj["_id"] = row[0]
+        else:
+            obj = json.loads(row[0])
+        if not all_fields:
+            obj = {k: obj[k] for k in fields if k in obj}
+        data.append(obj)
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=indent, ensure_ascii=False)
@@ -425,17 +447,28 @@ def export_json_string(
     indent: Optional[int] = None,
 ) -> str:
     """Export to JSON string."""
-    if hasattr(source, "all"):
-        items = source.all()
-        model_class = source._model_cls
-    else:
-        items = source.query().all()
-        model_class = source
+    query, model_class = _get_query_and_model(source)
 
     if fields is None:
         fields = _get_model_fields(model_class)
+        all_fields = True
+    else:
+        all_fields = False
 
-    data = [_model_to_dict(item, fields=fields, include_id=include_id) for item in items]
+    sql, params = query._build_query(include_id=include_id, include_version=False)
+    rows = query._adapter.execute(sql, params).fetchall()
+
+    data = []
+    for row in rows:
+        if include_id:
+            obj = json.loads(row[1])
+            obj["_id"] = row[0]
+        else:
+            obj = json.loads(row[0])
+        if not all_fields:
+            obj = {k: obj[k] for k in fields if k in obj}
+        data.append(obj)
+
     return json.dumps(data, indent=indent, ensure_ascii=False)
 
 
@@ -539,23 +572,34 @@ def export_jsonl(
         ExportResult with export statistics
     """
     path = Path(path)
-
-    if hasattr(source, "all"):
-        items = source.all()
-        model_class = source._model_cls
-    else:
-        items = source.query().all()
-        model_class = source
+    query, model_class = _get_query_and_model(source)
 
     if fields is None:
         fields = _get_model_fields(model_class)
+        all_fields = True
+    else:
+        all_fields = False
 
-    count = 0
     with open(path, "w", encoding="utf-8") as f:
-        for item in items:
-            record = _model_to_dict(item, fields=fields, include_id=include_id)
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            count += 1
+        # Fast path: raw JSON strings, no parsing needed
+        if not include_id and all_fields:
+            raw_rows = query.all()
+            for raw in raw_rows:
+                f.write(raw + "\n")
+            count = len(raw_rows)
+        else:
+            sql, params = query._build_query(include_id=include_id, include_version=False)
+            rows = query._adapter.execute(sql, params).fetchall()
+            for row in rows:
+                if include_id:
+                    obj = json.loads(row[1])
+                    obj["_id"] = row[0]
+                else:
+                    obj = json.loads(row[0])
+                if not all_fields:
+                    obj = {k: obj[k] for k in fields if k in obj}
+                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            count = len(rows)
 
     return ExportResult(
         path=str(path),
@@ -576,20 +620,32 @@ def export_jsonl_string(
     Returns:
         JSONL content as string (newline-separated JSON objects)
     """
-    if hasattr(source, "all"):
-        items = source.all()
-        model_class = source._model_cls
-    else:
-        items = source.query().all()
-        model_class = source
+    query, model_class = _get_query_and_model(source)
 
     if fields is None:
         fields = _get_model_fields(model_class)
+        all_fields = True
+    else:
+        all_fields = False
+
+    # Fast path: raw JSON strings, no parsing needed
+    if not include_id and all_fields:
+        raw_rows = query.all()
+        return "\n".join(raw_rows)
+
+    sql, params = query._build_query(include_id=include_id, include_version=False)
+    rows = query._adapter.execute(sql, params).fetchall()
 
     lines = []
-    for item in items:
-        record = _model_to_dict(item, fields=fields, include_id=include_id)
-        lines.append(json.dumps(record, ensure_ascii=False))
+    for row in rows:
+        if include_id:
+            obj = json.loads(row[1])
+            obj["_id"] = row[0]
+        else:
+            obj = json.loads(row[0])
+        if not all_fields:
+            obj = {k: obj[k] for k in fields if k in obj}
+        lines.append(json.dumps(obj, ensure_ascii=False))
 
     return "\n".join(lines)
 
@@ -605,19 +661,32 @@ def stream_jsonl(
     Yields:
         JSON string for each record (no newline)
     """
-    if hasattr(source, "all"):
-        items = source.all()
-        model_class = source._model_cls
-    else:
-        items = source.query().all()
-        model_class = source
+    query, model_class = _get_query_and_model(source)
 
     if fields is None:
         fields = _get_model_fields(model_class)
+        all_fields = True
+    else:
+        all_fields = False
 
-    for item in items:
-        record = _model_to_dict(item, fields=fields, include_id=include_id)
-        yield json.dumps(record, ensure_ascii=False)
+    # Fast path: raw JSON strings, no parsing needed
+    if not include_id and all_fields:
+        raw_rows = query.all()
+        yield from raw_rows
+        return
+
+    sql, params = query._build_query(include_id=include_id, include_version=False)
+    rows = query._adapter.execute(sql, params).fetchall()
+
+    for row in rows:
+        if include_id:
+            obj = json.loads(row[1])
+            obj["_id"] = row[0]
+        else:
+            obj = json.loads(row[0])
+        if not all_fields:
+            obj = {k: obj[k] for k in fields if k in obj}
+        yield json.dumps(obj, ensure_ascii=False)
 
 
 def import_jsonl(
@@ -947,23 +1016,37 @@ async def async_export_jsonl(
     import aiofiles
 
     path = Path(path)
-
-    if hasattr(source, "all"):
-        items = await source.all()
-        model_class = source._model_cls
-    else:
-        items = await source.query().all()
-        model_class = source
+    query, model_class = _get_query_and_model(source)
 
     if fields is None:
         fields = _get_model_fields(model_class)
+        all_fields = True
+    else:
+        all_fields = False
 
-    count = 0
     async with aiofiles.open(path, "w", encoding="utf-8") as f:
-        for item in items:
-            record = _model_to_dict(item, fields=fields, include_id=include_id)
-            await f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            count += 1
+        # Fast path: raw JSON strings, no parsing needed
+        if not include_id and all_fields:
+            raw_rows = await query.all()
+            for raw in raw_rows:
+                await f.write(raw + "\n")
+            count = len(raw_rows)
+        else:
+            sql, params = query._build_query(include_id=include_id)
+            cur = await query._adapter.execute(sql, params)
+            rows = await cur.fetchall()
+            await cur.close()
+            await query._adapter.auto_commit()
+            for row in rows:
+                if include_id:
+                    obj = json.loads(row[1])
+                    obj["_id"] = row[0]
+                else:
+                    obj = json.loads(row[0])
+                if not all_fields:
+                    obj = {k: obj[k] for k in fields if k in obj}
+                await f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            count = len(rows)
 
     return ExportResult(
         path=str(path),
