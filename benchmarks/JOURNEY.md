@@ -343,33 +343,38 @@ code was never the problem. The baseline was simply doing less work.
 Made `SQLiteFTSBaseline.rebuild()` do equivalent work: DELETE all FTS rows, then
 INSERT...SELECT with `json_extract()` from the source table. Same operation, same cost.
 
-### Results — medium scale (10K–50K, 20 iterations, 3 warmup)
+### Results — medium + large scale (10K–100K, 20 iterations, 3 warmup)
 
-**FTS Rebuild** — 4.65x → 1.16x:
+**FTS Rebuild** — 4.65x → 1.05–1.23x:
 
 | Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
 |------|-------------|--------------|-------|--------------|---------------|-------|
 | 10K | 202ms | 164ms | 1.23x | 214ms | 197ms | 1.09x |
 | 25K | 502ms | 416ms | 1.21x | 561ms | 479ms | 1.17x |
-| 50K | 1,176ms | 1,011ms | **1.16x** | 1,228ms | 1,103ms | **1.11x** |
+| 50K | 1,176ms | 1,011ms | 1.16x | 1,228ms | 1,103ms | 1.11x |
+| 100K | 2,342ms | 2,027ms | **1.16x** | 2,451ms | 2,335ms | **1.05x** |
 
-The remaining ~1.1–1.2x overhead is real ORM cost: sqler's adapter layer, query logger,
+The remaining ~1.05–1.23x overhead is real ORM cost: sqler's adapter layer, query logger,
 and auto-commit wrapping around the same SQL. This is consistent with the ~1.0–1.2x
-overhead seen in other query-layer operations.
+overhead seen in other query-layer operations. On disk at 100K, the overhead is just 5%.
 
-**FTS Ranked** — sqler is now consistently faster than the baseline at medium scale:
+**FTS Ranked** — sqler is consistently faster than the baseline up to 100K:
 
-| Rows | sqler (mem) | sqlite (mem) | Ratio |
-|------|-------------|--------------|-------|
-| 10K | 4.1ms | 5.7ms | 0.72x |
-| 25K | 15.1ms | 29.5ms | 0.51x |
-| 50K | 27.6ms | 37.6ms | 0.73x |
+| Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
+|------|-------------|--------------|-------|--------------|---------------|-------|
+| 10K | 4.1ms | 5.7ms | 0.72x | 4.1ms | 5.7ms | 0.72x |
+| 25K | 15.1ms | 29.5ms | 0.51x | 14.9ms | 29.3ms | 0.51x |
+| 50K | 27.6ms | 37.6ms | 0.73x | 26.1ms | 37.2ms | 0.70x |
+| 100K | 38.1ms | 115.2ms | **0.33x** | 61.6ms | 111.5ms | **0.55x** |
 
-This is unexpected. At medium scale, sqler's ranked search is 27–49% *faster* than raw
-sqlite3. The previous finding that ranked worsens at 500K+ still needs investigation at
-larger scales — the medium-scale advantage may not hold.
+This is unexpected. At 100K, sqler's ranked search is **3x faster** than raw sqlite3 in
+memory mode. The previous v1.2 finding showed ranked *worsening* at 500K+ (1.52x). The
+medium/large results show the opposite — sqler getting *better* at scale. The inversion
+point must be somewhere between 100K and 500K. Needs xlarge-scale validation to understand
+whether the v1.2 regression at 500K+ was also affected by the baseline asymmetry, or is a
+real separate issue.
 
-**FTS Highlights** — still shows a large gap (60–270x) but this is an apples-to-oranges
+**FTS Highlights** — still shows a large gap (60–370x) but this is an apples-to-oranges
 comparison. sqler's `search_with_highlights()` returns full model instances with
 highlights attached (Pydantic hydration + model loading). The baseline returns raw tuples
 with just the highlighted text. These are fundamentally different operations measuring
@@ -385,13 +390,13 @@ Also added `db` parameter to `FTSIndex.optimize()` for API consistency with othe
 
 ### Updated summary table
 
-| Category | v1.2 ratio | After M-1 | What changed |
-|----------|-----------|-----------|--------------|
+| Category | v1.2 ratio | After M-1 (10K–100K) | What changed |
+|----------|-----------|----------------------|--------------|
 | Queries | 0.95–0.98x | — | No change |
 | Bulk insert | 1.87–1.92x | — | No change |
 | Exports | 0.96–1.37x | — | No change (fixed in Ch.4) |
-| FTS rebuild | 3.78–4.65x | **1.11–1.23x** | Baseline fix — was measuring different operations |
-| FTS ranked (medium) | 0.95x | **0.51–0.73x** | sqler faster at medium scale |
+| FTS rebuild | 3.78–4.65x | **1.05–1.23x** | Baseline fix — was measuring different operations |
+| FTS ranked | 0.70–1.52x | **0.33–0.73x** | sqler faster up to 100K; 500K+ needs revalidation |
 | any_where | 1.47–1.51x | — | No change |
 
 ### The lesson (again)
