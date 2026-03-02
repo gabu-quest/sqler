@@ -19,6 +19,9 @@ Document-oriented JSON store on SQLite.
 
 ## Follow-up TODO
 
+### Architecture decisions pending
+- [ ] [Hydration alternatives](./docs/HYDRATION-ALTERNATIVES.md) — Pydantic vs msgspec vs raw dicts for bulk reads. Export optimization proved hydration is the bottleneck; need to decide on `queryset.as_dicts()` API and whether to prototype `SQLerMsgspecModel`.
+
 ### From BUG-1/BUG-2 plan (not in scope)
 - [~] Deprecate `set_db()` — soft deprecation with `warnings.warn()` added (M-5); full removal deferred
 - [x] Add `db` param to `save()`/`delete()` instance methods (M-4 complete)
