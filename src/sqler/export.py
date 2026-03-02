@@ -1034,9 +1034,11 @@ async def async_export_jsonl(
         else:
             sql, params = query._build_query(include_id=include_id)
             cur = await query._adapter.execute(sql, params)
-            rows = await cur.fetchall()
-            await cur.close()
-            await query._adapter.auto_commit()
+            try:
+                rows = await cur.fetchall()
+            finally:
+                await cur.close()
+                await query._adapter.auto_commit()
             for row in rows:
                 if include_id:
                     obj = json.loads(row[1])
