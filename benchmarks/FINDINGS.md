@@ -288,6 +288,75 @@ sqler's wrapper adds literally zero overhead at every scale:
 
 ---
 
+## Architectural Insight: Pydantic Hydration is the Dominant Cost
+
+The export optimization revealed something fundamental about where sqler's overhead lives.
+
+### The evidence
+
+Export functions went from 2.8x to 1.0–1.5x by making a single change: skip `model_validate()`.
+No algorithm change, no caching, no batching — just stop constructing Pydantic models when the
+caller doesn't need them. The entire 2.8x overhead was Pydantic.
+
+### What Pydantic does per row
+
+When sqler hydrates a model from a database row, every row goes through:
+
+1. `json.loads(data)` → Python dict (unavoidable, both arms do this)
+2. `model_validate(dict)` → Pydantic model (**the bottleneck**)
+   - Type coercion (str → datetime, str → int, etc.)
+   - Default value injection for missing fields
+   - Nested model construction
+   - Validator execution
+   - Field alias resolution
+3. `_model_to_dict(model)` → back to dict for output (**wasted work**)
+   - `getattr(model, field)` per field
+   - `_serialize_value()` to undo Pydantic's type coercion (datetime → str)
+
+Steps 2 and 3 cancel each other out for read-only paths. Pydantic parses ISO strings into
+`datetime` objects, then `_serialize_value` converts them back to ISO strings. The round-trip
+produces identical output to just... not parsing.
+
+### Where this pattern recurs
+
+| Code path | Does hydration? | Could skip it? |
+|-----------|----------------|----------------|
+| `export_csv/json/jsonl` | ~~Yes~~ **Fixed** | ✅ Done |
+| `fts.rebuild()` | Yes — reads all docs via ORM | Yes — `INSERT INTO fts SELECT json_extract(...)` |
+| `queryset.all()` → serialize for API | Yes | Maybe — `query.all_dicts()` exists |
+| `model.save()` + re-read pattern | Yes | Depends on use case |
+
+### The rule
+
+**If the output format is JSON (or derived from JSON), and the input is the `data` column
+(which IS JSON), Pydantic hydration is pure overhead.** The data went into SQLite as JSON,
+it's stored as JSON, and the caller wants JSON back. Converting to Python objects and back
+adds latency with zero information gain.
+
+### Implications for sqler's API
+
+This suggests sqler should offer two read paths:
+
+1. **Model path** (current default): Full Pydantic hydration. Use when you need type-safe
+   Python objects, validators, computed properties, or relation resolution.
+2. **Raw path**: `json.loads()` only. Use for bulk reads, exports, API serialization,
+   streaming — anywhere the caller wants dicts/JSON, not model instances.
+
+The query layer already supports this: `query.all()` returns raw strings, `query.all_dicts()`
+returns dicts with `_id`. The export optimization proved this path is ~2x faster than
+hydration for bulk operations and produces identical output.
+
+### What NOT to conclude
+
+- This does NOT mean Pydantic is bad. Pydantic earns its cost on write paths (validation,
+  coercion, schema enforcement) and on read paths where the caller needs typed objects.
+- This does NOT mean we should remove model hydration from querysets. `queryset.all()` returns
+  model instances, and that's the correct default — users expect typed objects.
+- The overhead is per-row, not per-query. For queries returning <100 rows (the common case),
+  hydration cost is invisible (~0.3ms). It only matters at bulk scale (10K+ rows).
+
+---
+
 ## Known Measurement Caveats
 
 1. **Row factory artifact (~3-6% across all query/aggregate scenarios)**: The baseline uses
