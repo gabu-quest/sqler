@@ -321,6 +321,90 @@ See `docs/HYDRATION-ALTERNATIVES.md` for the full analysis.
 
 ---
 
+## Chapter 8: The FTS Rebuild Correction (M-1)
+
+The 3.8–4.7x FTS rebuild gap that looked like sqler's biggest performance problem turned
+out to be a **benchmark asymmetry** — the 19th fairness issue, found during M-1 planning.
+
+### What was wrong
+
+| | sqler `fts.rebuild()` | sqlite baseline `fb.rebuild()` |
+|--|----------------------|-------------------------------|
+| Operation | DELETE all rows + INSERT...SELECT from source JSON | FTS5 internal `INSERT INTO fts(fts) VALUES('rebuild')` |
+| What it does | Repopulates entire FTS table from JSON data — O(n rows) | Merges FTS5 index segments — O(segments), does NOT re-read source |
+| Cost | Proportional to table size | Proportional to segment count (near-constant) |
+
+sqler's `rebuild()` was already a single SQL statement — `INSERT INTO fts_table(rowid, ...)
+SELECT _id, json_extract(data, ...) FROM source`. No ORM iteration, no per-row Python. The
+code was never the problem. The baseline was simply doing less work.
+
+### The fix
+
+Made `SQLiteFTSBaseline.rebuild()` do equivalent work: DELETE all FTS rows, then
+INSERT...SELECT with `json_extract()` from the source table. Same operation, same cost.
+
+### Results — medium scale (10K–50K, 20 iterations, 3 warmup)
+
+**FTS Rebuild** — 4.65x → 1.16x:
+
+| Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
+|------|-------------|--------------|-------|--------------|---------------|-------|
+| 10K | 202ms | 164ms | 1.23x | 214ms | 197ms | 1.09x |
+| 25K | 502ms | 416ms | 1.21x | 561ms | 479ms | 1.17x |
+| 50K | 1,176ms | 1,011ms | **1.16x** | 1,228ms | 1,103ms | **1.11x** |
+
+The remaining ~1.1–1.2x overhead is real ORM cost: sqler's adapter layer, query logger,
+and auto-commit wrapping around the same SQL. This is consistent with the ~1.0–1.2x
+overhead seen in other query-layer operations.
+
+**FTS Ranked** — sqler is now consistently faster than the baseline at medium scale:
+
+| Rows | sqler (mem) | sqlite (mem) | Ratio |
+|------|-------------|--------------|-------|
+| 10K | 4.1ms | 5.7ms | 0.72x |
+| 25K | 15.1ms | 29.5ms | 0.51x |
+| 50K | 27.6ms | 37.6ms | 0.73x |
+
+This is unexpected. At medium scale, sqler's ranked search is 27–49% *faster* than raw
+sqlite3. The previous finding that ranked worsens at 500K+ still needs investigation at
+larger scales — the medium-scale advantage may not hold.
+
+**FTS Highlights** — still shows a large gap (60–270x) but this is an apples-to-oranges
+comparison. sqler's `search_with_highlights()` returns full model instances with
+highlights attached (Pydantic hydration + model loading). The baseline returns raw tuples
+with just the highlighted text. These are fundamentally different operations measuring
+different things. Not a performance issue — an API design difference.
+
+### Also shipped: queryset.as_dicts()
+
+Added `as_dicts()` to both `SQLerQuerySet` and `AsyncSQLerQuerySet`. Exposes the
+existing `query.all_dicts()` through the queryset API, bypassing Pydantic hydration for
+bulk reads. ~2x faster for large result sets. Purely additive, no breaking changes.
+
+Also added `db` parameter to `FTSIndex.optimize()` for API consistency with other methods.
+
+### Updated summary table
+
+| Category | v1.2 ratio | After M-1 | What changed |
+|----------|-----------|-----------|--------------|
+| Queries | 0.95–0.98x | — | No change |
+| Bulk insert | 1.87–1.92x | — | No change |
+| Exports | 0.96–1.37x | — | No change (fixed in Ch.4) |
+| FTS rebuild | 3.78–4.65x | **1.11–1.23x** | Baseline fix — was measuring different operations |
+| FTS ranked (medium) | 0.95x | **0.51–0.73x** | sqler faster at medium scale |
+| any_where | 1.47–1.51x | — | No change |
+
+### The lesson (again)
+
+This is the same lesson from Chapter 1: **"If I wanted to make the other arm win, what
+would I change?"** The FTS5 `VALUES('rebuild')` command *looks* like a rebuild but it's
+actually segment optimization — a much cheaper operation. The naming was misleading, and
+the benchmark inherited the confusion.
+
+Total fairness issues found across the benchmark journey: **19** (18 in v1.1, 1 in v1.2).
+
+---
+
 ## Timeline
 
 | Date | Milestone |
@@ -334,6 +418,7 @@ See `docs/HYDRATION-ALTERNATIVES.md` for the full analysis.
 | Mar 2 2026 | Fairness corrections — 3 rounds of baseline fixes for exports |
 | Mar 2 2026 | Cross-scale export benchmarks — confirmed results hold to 1M |
 | Mar 2 2026 | Pydantic/msgspec analysis — model_construct() dead end, msgspec blockers |
+| Mar 3 2026 | M-1: FTS baseline fix (4.65x → 1.16x) + queryset.as_dicts() API |
 
 ## Key Documents
 
