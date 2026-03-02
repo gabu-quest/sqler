@@ -5,6 +5,18 @@ Document-oriented JSON store on SQLite.
 ## Active Roadmaps
 - [qler-prerequisites](./ROADMAP-QLER.md) — all milestones complete (M-1 through M-11)
 
+## Benchmarks
+- [Findings & optimization roadmap](./benchmarks/FINDINGS.md) — prioritized performance gaps
+- [Memory profiling journey](./benchmarks/MEMPROFILE.md) — tracemalloc methodology
+
+### Benchmark Hygiene (MANDATORY)
+
+1. **Always run with `--storage both`** — never report memory-only results. Disk I/O can change ratios.
+2. **Every sqler measurement needs a sqlite baseline** — no orphan measurements. If there's no natural baseline, document why.
+3. **Both arms must do equivalent work** — matched PRAGMAs, matched SQL, matched serialization. See `benchmarks/TODO-SCRUTINY.md` for the full fairness checklist.
+4. **Run at medium scale minimum** (50K rows) — small scale results are noisy and misleading.
+5. **Document known caveats** — every benchmark has weaknesses. State them, don't hide them.
+
 ## Follow-up TODO
 
 ### From BUG-1/BUG-2 plan (not in scope)
