@@ -67,21 +67,27 @@ dirty tracking, and relationship encoding interfaces.
 - [x] `SQLerMsgspecModelBase` (Struct-based `model_validate`/`model_dump`)
 - [x] `SQLerMsgspecModel` (persistence: save/delete/query/filter/all/from_id/etc.)
 - [x] Conditional import guard in `models/msgspec/__init__.py`
-- [x] 29 tests covering base, CRUD, queryset compat, dirty tracking
+- [x] 38 tests covering base, CRUD, queryset compat, dirty tracking, error paths
 - [x] Hydration benchmark suite (pure + queryset end-to-end)
+- [x] Optimization: eliminate dict filtering in model_validate(), cache fields()
 
-**Benchmark results (50K rows, medium scale):**
+**Benchmark results (50K rows, medium scale, post-optimization):**
 
 | Scenario | Lite (dataclass) | Msgspec (Struct) | Speedup |
 |----------|-----------------|-----------------|---------|
-| Pure `model_validate()` | 148.7ms | 69.2ms | **2.1x** |
-| `queryset.all()` mem | 441.1ms | 349.7ms | **1.26x** end-to-end |
-| `queryset.all()` disk | 433.1ms | 336.3ms | **1.29x** end-to-end |
-| Hydration-only (mem) | 283.9ms | 192.5ms | **1.47x** |
-| Hydration-only (disk) | 280.2ms | 183.4ms | **1.53x** |
+| Pure `model_validate()` | 151.6ms | 29.7ms | **5.1x** |
+| `model_dump()` | 256ms | 189ms | **1.4x** |
+| `queryset.all()` mem | 473.7ms | 324.4ms | **1.46x** end-to-end |
+| `queryset.all()` disk | 454.8ms | 311.1ms | **1.46x** end-to-end |
+| Hydration-only (mem) | ~303ms | ~153ms | **~2.0x** |
+| Hydration-only (disk) | ~302ms | ~159ms | **~1.9x** |
 
-Wrapper overhead vs raw `msgspec.convert()`: 13% — acceptably lean.
-Prototype passes viability: 2.1x pure hydration speedup, 1.26-1.29x
-end-to-end queryset improvement.
+Key optimizations applied:
+- Removed dict filtering in `model_validate()` — `_id` is a declared Struct
+  field, `strict=False` ignores unknowns. Saved ~40ms/50K rows.
+- Cached `msgspec.structs.fields()` — uncached reflection was 70µs/call,
+  dominating `model_dump()` (3.6s→189ms for 50K calls).
+
+Prototype passes viability: 5.1x pure hydration, 1.46x end-to-end.
 
 See: `docs/HYDRATION-ALTERNATIVES.md`

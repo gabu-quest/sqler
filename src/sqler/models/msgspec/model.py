@@ -18,7 +18,7 @@ import msgspec.structs
 
 from sqler import registry
 from sqler.exceptions import NotBoundError
-from sqler.models.msgspec.base import SQLerMsgspecModelBase
+from sqler.models.msgspec.base import SQLerMsgspecModelBase, _public_fields
 from sqler.utils import validate_table_name
 
 T = TypeVar("T", bound="SQLerMsgspecModel")
@@ -334,9 +334,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
         # Update fields in-place
-        for f in msgspec.structs.fields(self):
-            if f.name.startswith("_"):
-                continue
+        for f in _public_fields(type(self)):
             if f.name in doc:
                 setattr(self, f.name, doc[f.name])
         self._snapshot = cls._make_snapshot(doc)
@@ -387,9 +385,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             return value
 
         payload: dict = {}
-        for f in msgspec.structs.fields(self):
-            if f.name.startswith("_"):
-                continue
+        for f in _public_fields(type(self)):
             payload[f.name] = encode(getattr(self, f.name))
         return payload
 
