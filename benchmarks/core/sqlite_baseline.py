@@ -355,19 +355,17 @@ class SQLiteFTSBaseline:
         self.fields = fields
 
     def create(self) -> None:
-        """Create standalone FTS5 virtual table and populate from JSON data."""
+        """Create standalone FTS5 virtual table (empty).
+
+        Matches sqler's FTSIndex.create() which only creates the virtual
+        table. Population happens via rebuild(). Previously this method
+        also populated the index, which left extra tombstones after
+        rebuild cycles — making the baseline ~7% slower than it should be.
+        """
         cols = ", ".join(self.fields)
         self.conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS [{self.fts_table}] "
             f"USING fts5({cols}, tokenize='porter unicode61')"
-        )
-        # Populate from JSON source table
-        extract_cols = ", ".join(
-            f"json_extract(data, '$.{f}')" for f in self.fields
-        )
-        self.conn.execute(
-            f"INSERT INTO [{self.fts_table}] ({cols}) "
-            f"SELECT {extract_cols} FROM [{self.table}]"
         )
         self.conn.commit()
 
