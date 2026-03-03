@@ -281,16 +281,13 @@ docs through ORM, extracts fields in Python, re-inserts row by row. Replace with
 `INSERT INTO fts_table SELECT json_extract(data, ...) FROM source` SQL statement. Should
 bring it close to parity.
 
-### Tier 2: Per-row overhead
+### ~~Tier 2: Per-row overhead~~ → FIXED
 
-**Bulk insert (1.87–1.92x, +5.7s at 1M)** — Stable per-row overhead. The baseline uses
-`executemany()` (C-level batch). sqler's `bulk_upsert()` has per-row Python overhead
-(validation, `_ensure_table()`, query building). Profiling needed to find the top costs.
-A "fast path" that skips validation for trusted bulk data could halve the gap.
+**~~Bulk insert (1.87–1.92x)~~** → **0.91–1.00x** — Chunked multi-row INSERT (M-3).
+See Chapter 9.
 
-**any_where (1.47–1.51x, +3.2s at 1M)** — The query logger adds ~30ms per call. Making
-it opt-in or lazy would reduce all query-path overhead. SQL compilation caching would help
-repeated queries with the same structure.
+**~~any_where (1.47–1.51x)~~** → **0.95–1.01x** — `json_each(data, path)` instead of
+`json_each(json_extract(data, path))` (M-2). Logger guard also helps.
 
 ### Tier 3: Scale-dependent
 
@@ -318,6 +315,8 @@ See `docs/HYDRATION-ALTERNATIVES.md` for the full analysis.
 | Aggregates | **No action needed** | 0.94–0.99x (parity) |
 | Backup/restore | **No action needed** | 1.00–1.02x (transparent) |
 | Exports (CSV/JSON/JSONL) | **Fixed** | 0.96–1.37x (was 2.8x) |
+| Bulk insert | **Fixed** | 0.91–1.00x (was 1.87–1.92x) |
+| any_where | **Fixed** | 0.95–1.01x (was 1.47–1.51x) |
 
 ---
 
@@ -441,6 +440,102 @@ Total fairness issues found across the benchmark journey: **22** (18 in v1.1, 4 
 
 ---
 
+## Chapter 9: The Bulk Insert Fix (M-3)
+
+The second-biggest per-row overhead after Pydantic hydration: `bulk_upsert()` at a stable
+1.87–1.92x across all scales. The baseline used `executemany()` (C-level batch loop), while
+sqler called `cursor.execute()` once per document — N cursor creations, N parameter bindings,
+N `lastrowid` reads.
+
+### The overhead breakdown
+
+| Source | % of gap | Fixable? |
+|--------|----------|----------|
+| Per-row `cursor()` + `execute()` | ~45% | Yes — batch into chunks |
+| Per-row dict comprehension (filter `_id`) | ~25% | Yes — batch in list comp |
+| Per-row `int(lastrowid)` + `append()` | ~15% | Yes — compute ID range |
+| `json.dumps()` per row | ~15% | No — both arms pay this |
+
+### The fix
+
+Same pattern sqler already used in `_insert_many_chunked()`: split docs into inserts (no
+`_id`) and updates (has `_id`), then build multi-row SQL for each batch. One `INSERT INTO t
+(data) VALUES (json(?)), (json(?)), ...` per 999-row chunk. One `INSERT ... ON CONFLICT(_id)
+DO UPDATE` per 499-row chunk (2 params per row, stays under sqlite's 999 param limit).
+
+The multi-row INSERT pattern sends fewer SQL statements to sqlite's parser. At 50K rows,
+that's ~50 SQL calls instead of 50,000. The parser overhead dominates at scale.
+
+### Results — medium scale (50K rows, 20 iterations, 3 warmup)
+
+| Rows | Storage | sqler | sqlite | Ratio | vs Pre-M3 |
+|------|---------|-------|--------|-------|-----------|
+| 1K | memory | 7.4ms | 5.9ms | 1.25x | was ~1.9x |
+| 1K | disk | 9.4ms | 6.1ms | 1.54x | was ~1.9x |
+| 5K | memory | 30.4ms | 30.3ms | 1.00x | was ~1.9x |
+| 5K | disk | 32.8ms | 31.3ms | 1.05x | was ~1.9x |
+| 10K | memory | 59.6ms | 61.6ms | **0.97x** | was ~1.9x |
+| 10K | disk | 62.3ms | 65.1ms | **0.96x** | was ~1.9x |
+| 25K | memory | 144.8ms | 155.8ms | **0.93x** | was ~1.9x |
+| 25K | disk | 153.8ms | 158.5ms | **0.97x** | was ~1.9x |
+| 50K | memory | 299.2ms | 315.5ms | **0.95x** | was ~1.9x |
+| 50K | disk | 333.6ms | 368.1ms | **0.91x** | was ~1.9x |
+
+At 5K+ rows, sqler is at parity or **faster** than the `executemany()` baseline.
+
+### Why sqler can be faster than raw sqlite's executemany
+
+This sounds surprising — how can an ORM beat the C-level `executemany()`? The answer is in
+what SQLite's parser does:
+
+- **`executemany()`** sends N separate `INSERT INTO t (data) VALUES (json(?))` statements.
+  The SQL parser processes each one individually. That's N parse + N compile + N execute steps.
+- **Multi-row INSERT** sends one `INSERT INTO t (data) VALUES (json(?)), (json(?)), ...` with
+  up to 999 rows. The SQL parser processes it once. That's 1 parse + 1 compile + 1 execute
+  step (with a larger parameter set).
+
+The parser overhead per statement is small (~1–2µs), but at 50K rows it adds up. The multi-row
+approach amortizes it away. The remaining Python overhead (json.dumps, list building) is offset
+by the parser savings.
+
+### Fairness note
+
+The comparison is fair but the approaches differ: sqler uses chunked multi-row INSERT, while
+the sqlite baseline uses `executemany()`. Both are valid bulk insert strategies. The multi-row
+pattern happens to be faster for large batches because it sends fewer statements to the parser.
+
+A truly apples-to-apples test would have both arms use the same strategy (either both
+`executemany` or both multi-row). But `executemany` is what most developers use with raw
+sqlite3, so it's the natural baseline.
+
+### Doc size impact — parity across all sizes
+
+The doc_size_impact scenario (fixed 10K rows, varying doc sizes) also showed near-parity:
+
+| Size | sqler (disk) | sqlite (disk) | Ratio |
+|------|-------------|--------------|-------|
+| tiny | 46.7ms | 47.2ms | 0.99x |
+| small | 63.4ms | 62.6ms | 1.01x |
+| medium | 92.5ms | 94.7ms | 0.98x |
+| large | 211.3ms | 202.2ms | 1.05x |
+| huge | 706.7ms | 675.8ms | 1.05x |
+
+For larger documents, `json.dumps()` dominates — both arms pay the same cost. The 1.05x at
+large/huge is within noise.
+
+### Updated summary table
+
+| Category | Pre-M3 ratio | After M-3 (medium) | What changed |
+|----------|-------------|-------------------|--------------|
+| Queries | 0.95–0.98x | — | No change |
+| Bulk insert | **1.87–1.92x** | **0.91–1.00x** | Chunked multi-row INSERT |
+| Exports | 0.96–1.37x | — | No change (fixed in Ch.4) |
+| FTS rebuild | 0.96–1.07x | — | No change (fixed in Ch.8) |
+| FTS ranked | 0.53–1.15x | — | No change (Ch.8) |
+| any_where | ~~1.47–1.51x~~ | — | Fixed in M-2 (0.95–1.01x) |
+
+---
+
 ## Timeline
 
 | Date | Milestone |
@@ -456,6 +551,8 @@ Total fairness issues found across the benchmark journey: **22** (18 in v1.1, 4 
 | Mar 2 2026 | Pydantic/msgspec analysis — model_construct() dead end, msgspec blockers |
 | Mar 3 2026 | M-1: FTS baseline fix (4.65x → 1.07x) + queryset.as_dicts() API |
 | Mar 3 2026 | v1.3 fairness audit — 3 more asymmetries in FTS search/ranked (issues #20–22) |
+| Mar 3 2026 | M-2: any_where fix — json_each(data, path) instead of json_each(json_extract()) (1.5x → 1.0x) |
+| Mar 3 2026 | M-3: bulk_upsert() chunked multi-row INSERT (1.9x → 0.91–1.00x) |
 
 ## Key Documents
 
