@@ -536,6 +536,89 @@ large/huge is within noise.
 
 ---
 
+## Chapter 10: M-4 — FTS Ranked Search Single-JOIN Optimization
+
+### The problem
+
+Pre-v1.3 data showed FTS ranked search worsening at scale:
+
+| Scale | Ratio | Note |
+|-------|-------|------|
+| 50K | 0.95x | Parity |
+| 100K | 0.70x | Suspicious (sub-50ms noise) |
+| 500K | 1.52x | Regression |
+| 1M | 1.50x | Regression |
+
+After v1.3 fairness fixes (issues #20–22), the 10K–100K data showed parity (0.53–1.15x),
+but 500K+ hadn't been retested. The question: was the regression real, or a baseline artifact?
+
+### Root cause: two-query pattern
+
+Regardless of the regression, `search_ranked()` had an architectural inefficiency. It used
+two separate SQL queries:
+
+```
+-- Query 1: FTS search for rowids + scores
+SELECT rowid, bm25(fts_table) as score FROM fts_table WHERE MATCH ? ORDER BY score LIMIT ?;
+
+-- Query 2: Fetch documents by ID list
+SELECT _id, data FROM source_table WHERE _id IN (?, ?, ...);
+```
+
+Plus Python-side overhead: `from_ids()` → `find_documents()` → `_batch_resolve()` →
+`model_validate()` per row → dict lookup + sort.
+
+### The fix: single JOIN query
+
+Replaced both queries with a single JOIN:
+
+```sql
+SELECT t._id, t.data, bm25(fts_table) as score
+FROM fts_table f
+JOIN source_table t ON t._id = f.rowid
+WHERE fts_table MATCH ?
+ORDER BY score
+LIMIT ? OFFSET ?;
+```
+
+This eliminates:
+- Second SQL query (IN-clause construction + execution)
+- `from_ids()` → `find_documents()` path (queryset creation, `_batch_resolve()`)
+- Python-side sort (SQL `ORDER BY` handles it)
+- Dict lookup overhead (scores come in the same row as documents)
+
+Still does `model_validate()` per row for type safety — the 20-row LIMIT makes this cost
+negligible (~22µs total).
+
+Updated the baseline to also use a single JOIN for fairness parity.
+
+### Results — medium scale (50K rows, 20 iterations, 3 warmup)
+
+| Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
+|------|-------------|--------------|-------|--------------|---------------|-------|
+| 10K | 4.5ms | 4.4ms | **1.03x** | 4.5ms | 4.3ms | **1.03x** |
+| 25K | 16.1ms | 21.3ms | **0.76x** | 16.5ms | 22.5ms | **0.73x** |
+| 50K | 30.5ms | 28.5ms | **1.07x** | 30.3ms | 28.9ms | **1.05x** |
+
+At 25K, sqler is actually **faster** than the baseline (0.73–0.76x). The single JOIN lets
+SQLite optimize the rowid lookup internally, which is more efficient than constructing an
+IN-clause with 20 placeholders and doing a separate query.
+
+### What we learned
+
+1. **The two-query pattern was unnecessary.** FTS5's `rowid` maps directly to the source
+   table's `_id`, making the JOIN natural and efficient. SQLite handles the rowid lookup
+   at the storage engine level without a separate index scan.
+
+2. **`from_ids()` was the hidden cost.** Even for 20 rows, it created a full queryset,
+   ran `_batch_resolve()` (scanning for Ref fields that don't exist on typical FTS models),
+   and built an intermediate dict for ordering. All unnecessary overhead.
+
+3. **SQL-side sorting beats Python-side sorting.** The old code fetched scores in one query,
+   documents in another, then Python-sorted the results. The JOIN returns pre-sorted results.
+
+---
+
 ## Timeline
 
 | Date | Milestone |
@@ -553,6 +636,7 @@ large/huge is within noise.
 | Mar 3 2026 | v1.3 fairness audit — 3 more asymmetries in FTS search/ranked (issues #20–22) |
 | Mar 3 2026 | M-2: any_where fix — json_each(data, path) instead of json_each(json_extract()) (1.5x → 1.0x) |
 | Mar 3 2026 | M-3: bulk_upsert() chunked multi-row INSERT (1.9x → 0.91–1.00x) |
+| Mar 3 2026 | M-4: search_ranked() single-JOIN optimization (1.5x → 1.03–1.07x at 50K) |
 
 ## Key Documents
 

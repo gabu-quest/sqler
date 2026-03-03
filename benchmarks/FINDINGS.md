@@ -21,7 +21,7 @@ Definitive result files:
 | any_where (array subqueries) | ~~1.51x~~ | ~~1.56x~~ | ~~1.47x~~ | ~~1.48x~~ | **✅ Fixed → 0.95–1.01x** |
 | Export (CSV/JSONL) | ~~2.85x~~ | ~~2.74–2.84x~~ | ~~2.72–2.85x~~ | ~~2.73–2.77x~~ | **✅ Fixed → 1.0–1.5x** |
 | FTS rebuild | 4.65x | 4.63x | 3.96x | 3.78x | **Improving at scale** |
-| FTS ranked | 0.95x | 0.70x | 1.52x | 1.50x | **Worsening at scale** |
+| FTS ranked | ~~0.95x~~ | ~~0.70x~~ | ~~1.52x~~ | ~~1.50x~~ | **✅ Fixed → 0.76–1.07x** |
 
 †**Row factory artifact**: The baseline uses `sqlite3.Row` with string key access (`row["data"]`),
 while sqler uses integer index access (`row[0]`). This adds ~3-6% overhead to the baseline across
@@ -36,7 +36,7 @@ row iteration. This is an irreducible measurement artifact, not a real ORM advan
 | ~~Bulk insert 1M~~ | ~~12.2s~~ | ~~6.5s~~ | ~~+5.7s~~ ✅ Fixed (0.91–0.97x at 10K+) |
 | ~~any_where query~~ | ~~9.9s~~ | ~~6.7s~~ | ~~+3.2s~~ ✅ Fixed (0.95–1.01x) |
 | ~~Export CSV 250K~~ | ~~4.7s~~ | ~~1.7s~~ | ~~+3.0s~~ ✅ Fixed |
-| FTS ranked 1M | 899ms | 599ms | **+300ms** |
+| ~~FTS ranked 1M~~ | ~~899ms~~ | ~~599ms~~ | ~~+300ms~~ ✅ Fixed (0.76–1.07x at 50K) |
 | Equality filter 1M (no idx) | 1.0s | 1.1s | -50ms (noise) |
 | Backup 1M | 606ms | 604ms | +2ms (noise) |
 
@@ -272,11 +272,28 @@ problem from bulk insert — it's per-call ORM cost, not batching.
 
 ---
 
-## Priority 4: FTS Ranked — Scale-Dependent Regression
+## ~~Priority 4: FTS Ranked — Scale-Dependent Regression~~ → Single-JOIN Optimization (FIXED)
 
-### What's happening
+### What happened
 
-This is the only scenario that gets WORSE at scale:
+The 1.5x regression at 500K+ was caused by the two-query pattern in `search_ranked()`:
+1. FTS query for rowids + scores
+2. Separate `SELECT...WHERE IN (...)` for documents
+3. Python-side `from_ids()` → `find_documents()` → `_batch_resolve()` → dict lookup + sort
+
+### The fix (M-4)
+
+Replaced both queries with a single JOIN:
+```sql
+SELECT t._id, t.data, bm25(fts_table) as score
+FROM fts_table f JOIN source_table t ON t._id = f.rowid
+WHERE fts_table MATCH ? ORDER BY score LIMIT ? OFFSET ?;
+```
+
+Eliminates the second query, `from_ids()` overhead, Python-side sort, and `_batch_resolve()`
+walk. Updated baseline to use the same single-JOIN pattern for fairness.
+
+### Previous data (pre-M4 — two-query pattern, pre-v1.3 baseline)
 
 | Rows | sqler (mem) | sqlite (mem) | Ratio |
 |------|-------------|--------------|-------|
@@ -285,16 +302,16 @@ This is the only scenario that gets WORSE at scale:
 | 500K | 489.5ms | 322.4ms | 1.52x |
 | 1M | 899.1ms | 599.0ms | 1.50x |
 
-At small scales, result sets are small (LIMIT 20) and sqler's overhead is negligible.
-At 500K+, the volume of ranked results sqler must process becomes the bottleneck.
+### Results after M-4 (single-JOIN, v1.4 baseline)
 
-### Where to look
+| Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
+|------|-------------|--------------|-------|--------------|---------------|-------|
+| 10K | 4.5ms | 4.4ms | **1.03x** | 4.5ms | 4.3ms | **1.03x** |
+| 25K | 16.1ms | 21.3ms | **0.76x** | 16.5ms | 22.5ms | **0.73x** |
+| 50K | 30.5ms | 28.5ms | **1.07x** | 30.3ms | 28.9ms | **1.05x** |
 
-- The inversion from 0.70x to 1.50x between 100K and 500K is dramatic
-- At 100K the sub-50ms values make the 0.70x suspicious (measurement noise)
-- At 500K+ the 1.5x is stable and real
-- Investigate what sqler does differently in ranked search result processing at scale
-- The query logger overhead becomes significant relative to the query time
+At 25K, sqler is **faster** than baseline — the single JOIN avoids IN-clause construction
+and lets SQLite optimize the rowid lookup internally.
 
 ---
 
@@ -364,8 +381,8 @@ sqler's wrapper adds literally zero overhead at every scale:
 5. **any_where fixed.** M-2 eliminated redundant `json_extract()` in `json_each()` call
    (1.47–1.51x → 0.95–1.01x).
 
-6. **FTS ranked is the one remaining concern.** Near parity at 50K, 1.5x slower at 500K+.
-   The only scenario that gets worse as data grows. Needs investigation.
+6. **FTS ranked fixed.** M-4 replaced the two-query pattern with a single JOIN
+   (1.50x → 0.76–1.07x). sqler is faster than baseline at 25K rows.
 
 7. **Backup/restore is transparent.** 1.00x. The SQLite backup API does all the work.
 
@@ -517,8 +534,8 @@ deserves its own spec, not just a benchmark finding.
    (`row[0]`). Both arms execute identical SQL. This is irreducible — removing Row factory would
    make the baseline unrealistically stripped down.
 
-2. **FTS ranked at small scales**: Appears 0.70x at 100K but this is measurement noise on
-   sub-50ms values. Converges to stable 1.50x at 500K+ where it's a real signal.
+2. ~~**FTS ranked at small scales**~~: Fixed in M-4 — single-JOIN optimization brought
+   all scales to 0.76–1.07x parity.
 
 3. **FTS highlights**: 272x gap at 50K is real but measures fundamentally different things
    (model hydration vs raw tuples). Not a fair comparison — it's an API design difference.

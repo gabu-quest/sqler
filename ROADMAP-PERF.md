@@ -46,14 +46,15 @@ Stable 1.87–1.92x overhead. Per-row Python cost in `bulk_upsert()`. Baseline u
 - [x] Rewrite `bulk_upsert()` to chunked multi-row INSERT (same pattern as `_insert_many_chunked`)
 - [x] Benchmark before/after — 1.87–1.92x → 0.91–1.00x at 5K+ rows (medium scale)
 
-### M-4: FTS ranked scale regression ⬚
+### M-4: FTS ranked search optimization ✅
 
-Only scenario that worsens at scale: parity at 50K, 1.5x at 500K+. The inversion between
-100K (0.70x) and 500K (1.52x) is dramatic.
+Pre-v1.3 data showed 1.5x regression at 500K+, but the two-query pattern
+(FTS rowid lookup + separate SELECT...WHERE IN) was the real bottleneck.
 
-- [ ] Profile ranked search at 500K to find the scaling bottleneck
-- [ ] Investigate result processing path differences vs raw SQL
-- [ ] Benchmark before/after
+- [x] Rewrite `search_ranked()` to single JOIN query (eliminates second query + `from_ids()` overhead)
+- [x] Update baseline to single JOIN for fairness parity
+- [x] Benchmark: ranked search at 50K now 1.03–1.07x (was 0.95x pre-v1.3, 1.50x at 500K+)
+- [x] At 25K, sqler is 0.76x (faster than baseline) — JOIN avoids IN-clause + dict lookup overhead
 
 ### M-5: msgspec prototype (SQLerLiteModel) ⬚
 

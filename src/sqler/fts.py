@@ -29,6 +29,7 @@ Usage::
     results = fts.search_with_highlights("python", highlight_tags=("<b>", "</b>"))
 """
 
+import json
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
@@ -341,19 +342,25 @@ class FTSIndex:
     ) -> list[SearchResult]:
         """Search with BM25 ranking scores.
 
+        Uses a single JOIN query to fetch FTS scores and source documents
+        in one round-trip, avoiding the overhead of separate FTS + lookup
+        queries and the ``from_ids()`` hydration pipeline.
+
         Args:
             query: FTS5 query string
             limit: Maximum results
             offset: Skip first N results
 
         Returns:
-            List of SearchResult with scores
+            List of SearchResult with scores (sorted by relevance)
         """
         db = self._get_db()
+        source_table = self.table
 
         sql = f"""
-        SELECT rowid, bm25({self.index_table}) as score
-        FROM {self.index_table}
+        SELECT t._id, t.data, bm25({self.index_table}) as score
+        FROM {self.index_table} f
+        JOIN {source_table} t ON t._id = f.rowid
         WHERE {self.index_table} MATCH ?
         ORDER BY score
         LIMIT ? OFFSET ?;
@@ -365,23 +372,14 @@ class FTSIndex:
         if not rows:
             return []
 
-        # Load models
-        id_to_score = {row[0]: row[1] for row in rows}
-        ids = list(id_to_score.keys())
-        models = self.model_class.from_ids(ids)
-
-        # Create results
         results = []
-        for model in models:
-            results.append(
-                SearchResult(
-                    model=model,
-                    score=id_to_score.get(model._id, 0.0),
-                )
-            )
+        for row in rows:
+            doc = json.loads(row[1])
+            doc["_id"] = row[0]
+            inst = self.model_class.model_validate(doc)
+            inst._id = row[0]
+            results.append(SearchResult(model=inst, score=row[2]))
 
-        # Sort by score (lower is better for BM25)
-        results.sort(key=lambda r: r.score)
         return results
 
     def search_with_highlights(
