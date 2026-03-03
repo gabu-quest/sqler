@@ -4,7 +4,8 @@ These tests verify that msgspec models provide API compatibility with
 the dataclass-based lite models while using msgspec Structs.
 """
 
-from datetime import datetime
+import warnings
+from datetime import date, datetime
 from typing import Optional
 
 import pytest
@@ -77,6 +78,7 @@ class TestSQLerMsgspecModelBase:
 
         user = User.model_validate({"name": "Carol", "unknown_field": "value"})
         assert user.name == "Carol"
+        assert not hasattr(user, "unknown_field")
 
     def test_model_dump(self):
         """model_dump should serialize to dict."""
@@ -394,7 +396,7 @@ class TestMsgspecQuerysetCompat:
         return SQLerDB.in_memory()
 
     def test_attach_metadata_on_all(self, db):
-        """_attach_metadata should set _id and _snapshot on Struct instances."""
+        """_attach_metadata should set correct _id and _snapshot on Struct instances."""
 
         class Item(SQLerMsgspecModel):
             __tablename__ = "msg_meta_items"
@@ -403,33 +405,36 @@ class TestMsgspecQuerysetCompat:
 
         Item.set_db(db)
 
-        Item(name="A", value=10).save()
-        Item(name="B", value=20).save()
+        a = Item(name="A", value=10)
+        a.save()
+        b = Item(name="B", value=20)
+        b.save()
 
         items = Item.all()
         assert len(items) == 2
 
-        for item in items:
-            assert item._id is not None
-            assert item._snapshot is not None
-            assert isinstance(item._snapshot, dict)
-            assert "name" in item._snapshot
+        by_name = {i.name: i for i in items}
+        assert by_name["A"]._id == a._id
+        assert by_name["A"]._snapshot == {"name": "A", "value": 10}
+        assert by_name["B"]._id == b._id
+        assert by_name["B"]._snapshot == {"name": "B", "value": 20}
 
     def test_queryset_first(self, db):
-        """first() should return a single instance with metadata."""
+        """first() should return a single instance with correct metadata."""
 
         class Item(SQLerMsgspecModel):
             __tablename__ = "msg_first_items"
             name: str
 
         Item.set_db(db)
-        Item(name="Only").save()
+        saved = Item(name="Only")
+        saved.save()
 
         item = Item.first()
         assert item is not None
         assert item.name == "Only"
-        assert item._id is not None
-        assert item._snapshot is not None
+        assert item._id == saved._id
+        assert item._snapshot == {"name": "Only"}
 
     def test_as_dicts_bypass(self, db):
         """as_dicts() should bypass hydration."""
@@ -446,4 +451,126 @@ class TestMsgspecQuerysetCompat:
         assert len(dicts) == 1
         assert dicts[0]["name"] == "X"
         assert dicts[0]["value"] == 42
-        assert "_id" in dicts[0]
+        assert dicts[0]["_id"] == 1
+
+
+class TestMsgspecErrorPaths:
+    """Test error paths and edge cases."""
+
+    @pytest.fixture
+    def db(self):
+        return SQLerDB.in_memory()
+
+    def test_set_db_emits_deprecation_warning(self, db):
+        """set_db() should emit DeprecationWarning."""
+
+        class Item(SQLerMsgspecModel):
+            __tablename__ = "msg_warn_items"
+            name: str
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            Item.set_db(db)
+
+        assert len(w) == 1
+        assert issubclass(w[0].category, DeprecationWarning)
+        assert "set_db() is deprecated" in str(w[0].message)
+
+    def test_unbound_model_raises_not_bound_error(self):
+        """Calling all() on an unbound model should raise NotBoundError."""
+        from sqler import NotBoundError
+
+        class Ghost(SQLerMsgspecModel):
+            __tablename__ = "msg_ghost"
+            name: str
+
+        with pytest.raises(NotBoundError, match="not bound"):
+            Ghost.all()
+
+    def test_delete_unsaved_raises_value_error(self, db):
+        """delete() on unsaved instance should raise ValueError."""
+
+        class Item(SQLerMsgspecModel):
+            __tablename__ = "msg_del_unsaved"
+            name: str
+
+        Item.set_db(db)
+
+        with pytest.raises(ValueError, match="Cannot delete unsaved model"):
+            Item(name="unsaved").delete()
+
+    def test_refresh_unsaved_raises_value_error(self, db):
+        """refresh() on unsaved instance should raise ValueError."""
+
+        class Item(SQLerMsgspecModel):
+            __tablename__ = "msg_refresh_unsaved"
+            name: str
+
+        Item.set_db(db)
+
+        with pytest.raises(ValueError, match="Cannot refresh unsaved"):
+            Item(name="unsaved").refresh()
+
+    def test_refresh_deleted_row_raises_lookup_error(self, db):
+        """refresh() on a row deleted from DB should raise LookupError."""
+
+        class Item(SQLerMsgspecModel):
+            __tablename__ = "msg_refresh_deleted"
+            name: str
+
+        Item.set_db(db)
+
+        item = Item(name="doomed")
+        item.save()
+        saved_id = item._id
+
+        # Delete directly in DB
+        db.delete_document("msg_refresh_deleted", saved_id)
+
+        with pytest.raises(LookupError, match="not found for refresh"):
+            item.refresh()
+
+    def test_invalid_on_delete_raises_value_error(self, db):
+        """delete_with_policy with invalid policy should raise ValueError."""
+
+        class Item(SQLerMsgspecModel):
+            __tablename__ = "msg_bad_policy"
+            name: str
+
+        Item.set_db(db)
+        item = Item(name="test")
+        item.save()
+
+        with pytest.raises(ValueError, match="on_delete must be"):
+            item.delete_with_policy(on_delete="nuke")
+
+    def test_from_ids_empty_list(self, db):
+        """from_ids with empty list should return empty list without DB call."""
+
+        class Item(SQLerMsgspecModel):
+            __tablename__ = "msg_empty_ids"
+            name: str
+
+        Item.set_db(db)
+        assert Item.from_ids([]) == []
+
+    def test_date_serialization(self):
+        """model_dump should serialize date to ISO format."""
+
+        class Event(SQLerMsgspecModelBase):
+            name: str
+            day: date
+
+        event = Event(name="Holiday", day=date(2024, 3, 15))
+        data = event.model_dump()
+        assert data["day"] == "2024-03-15"
+        assert data["name"] == "Holiday"
+
+    def test_reserved_word_table_name(self, db):
+        """Reserved SQL words should get _tbl suffix."""
+
+        class Table(SQLerMsgspecModel):
+            name: str
+
+        Table.set_db(db)
+        assert Table._table == "table_tbl"

@@ -45,7 +45,8 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True):
         # Strip underscore-prefixed keys for conversion
         filtered = {k: v for k, v in data.items() if not k.startswith("_")}
 
-        # Use msgspec.convert for C-level speed (strict=False allows coercion)
+        # strict=False mirrors Pydantic's permissive coercion (e.g. str "123" → int 123).
+        # This is intentional for compatibility with data stored by other model backends.
         inst = msgspec.convert(filtered, cls, strict=False)
 
         # Restore _id from original data
