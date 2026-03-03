@@ -26,13 +26,13 @@ of an equivalent DELETE + repopulate. Fixed the baseline to match.
 - [x] Add `db` parameter to `FTSIndex.optimize()` (already existed, pattern parity)
 - [ ] Benchmark comparison against v1.2 baseline — FTS rebuild ratio should drop to ~1.0x
 
-### M-2: Query logger + any_where overhead ⬚
+### M-2: Query logger + any_where overhead 🔄
 
 The query logger runs on every `adapter.execute()` call — two `perf_counter()` calls +
 `query_logger.log()` per query. Adds ~30ms per complex query at 50K. Primary source of
 the any_where 1.5x gap.
 
-- [ ] Make query logger opt-in or lazy (only record when someone is listening)
+- [x] Guard timing behind `query_logger.enabled` check (sync + async adapters)
 - [ ] Profile any_where to confirm logger is the main cost
 - [ ] Consider SQL compilation caching for repeated query structures
 - [ ] Benchmark before/after

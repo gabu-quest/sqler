@@ -107,7 +107,9 @@ class SQLiteAdapter(AdapterABC):
         """
         conn = self._conn()  # Raises NotConnectedError if not connected
         cursor = conn.cursor()
-        start = time.perf_counter()
+        _logging = query_logger.enabled
+        if _logging:
+            start = time.perf_counter()
         error_msg = None
         try:
             if params is not None:
@@ -120,14 +122,15 @@ class SQLiteAdapter(AdapterABC):
             error_msg = str(e)
             raise
         finally:
-            duration_ms = (time.perf_counter() - start) * 1000
-            query_logger.log(
-                sql=query,
-                params=list(params) if params else [],
-                duration_ms=duration_ms,
-                rows_affected=cursor.rowcount if cursor.rowcount >= 0 else None,
-                error=error_msg,
-            )
+            if _logging:
+                duration_ms = (time.perf_counter() - start) * 1000
+                query_logger.log(
+                    sql=query,
+                    params=list(params) if params else [],
+                    duration_ms=duration_ms,
+                    rows_affected=cursor.rowcount if cursor.rowcount >= 0 else None,
+                    error=error_msg,
+                )
         return cursor
 
     def executemany(self, query: str, param_list: Optional[list[Any]]) -> sqlite3.Cursor:
