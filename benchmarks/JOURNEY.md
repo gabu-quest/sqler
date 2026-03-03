@@ -345,36 +345,53 @@ INSERT...SELECT with `json_extract()` from the source table. Same operation, sam
 
 ### Results — medium + large scale (10K–100K, 20 iterations, 3 warmup)
 
-**FTS Rebuild** — 4.65x → 1.05–1.23x:
+**First run** used the M-1 rebuild fix only. Ranked search showed sqler 3x faster than
+raw sqlite3 at 100K — suspiciously good. Adversarial audit found **3 more asymmetries**
+(fairness issues #20–22):
+
+| # | Issue | Bias direction |
+|---|-------|---------------|
+| 20 | **Tokenizer mismatch** — sqler used `porter unicode61`, baseline used `unicode61` only | Different index structures, different match sets |
+| 21 | **search/search_ranked work asymmetry** — baseline returned raw FTS tuples; sqler did FTS query → second SQL query → json.loads() → model_validate() → SearchResult | Baseline doing dramatically less work |
+| 22 | **No result count verification** between arms | Could be matching different document counts |
+
+Fixed all three: matched tokenizer, made baseline do two-query + `json.loads()` (matched
+to sqler minus Pydantic), added result count awareness via consistent LIMIT.
+
+**FTS Rebuild** — 4.65x → 1.03–1.07x (v1.3 fair baseline):
 
 | Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
 |------|-------------|--------------|-------|--------------|---------------|-------|
-| 10K | 202ms | 164ms | 1.23x | 214ms | 197ms | 1.09x |
-| 25K | 502ms | 416ms | 1.21x | 561ms | 479ms | 1.17x |
-| 50K | 1,176ms | 1,011ms | 1.16x | 1,228ms | 1,103ms | 1.11x |
-| 100K | 2,342ms | 2,027ms | **1.16x** | 2,451ms | 2,335ms | **1.05x** |
+| 10K | 195ms | 183ms | 1.07x | 211ms | 207ms | 1.02x |
+| 25K | 501ms | 473ms | 1.06x | 542ms | 524ms | 1.04x |
+| 50K | 1,156ms | 1,087ms | **1.06x** | 1,231ms | 1,189ms | **1.04x** |
+| 100K | 2,424ms | 2,271ms | **1.07x** | 2,480ms | 2,573ms | **0.96x** |
 
-The remaining ~1.05–1.23x overhead is real ORM cost: sqler's adapter layer, query logger,
-and auto-commit wrapping around the same SQL. This is consistent with the ~1.0–1.2x
-overhead seen in other query-layer operations. On disk at 100K, the overhead is just 5%.
+Rebuild is now at near-parity. The matched tokenizer tightened the ratio further
+(v1.3 baseline builds a matched Porter index). On disk at 100K, sqler is actually
+*faster* (0.96x) — likely within noise, but the overhead is negligible either way.
 
-**FTS Ranked** — sqler is consistently faster than the baseline up to 100K:
+**FTS Ranked** — sqler 0.53–1.15x (v1.3 fair baseline):
 
 | Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
 |------|-------------|--------------|-------|--------------|---------------|-------|
-| 10K | 4.1ms | 5.7ms | 0.72x | 4.1ms | 5.7ms | 0.72x |
-| 25K | 15.1ms | 29.5ms | 0.51x | 14.9ms | 29.3ms | 0.51x |
-| 50K | 27.6ms | 37.6ms | 0.73x | 26.1ms | 37.2ms | 0.70x |
-| 100K | 38.1ms | 115.2ms | **0.33x** | 61.6ms | 111.5ms | **0.55x** |
+| 10K | 4.2ms | 3.6ms | 1.15x | 4.0ms | 3.9ms | 1.02x |
+| 25K | 14.8ms | 19.4ms | 0.76x | 15.0ms | 19.5ms | 0.77x |
+| 50K | 26.5ms | 24.3ms | 1.09x | 27.5ms | 25.8ms | 1.07x |
+| 100K | 40.1ms | 76.0ms | **0.53x** | 63.6ms | 78.7ms | **0.81x** |
 
-This is unexpected. At 100K, sqler's ranked search is **3x faster** than raw sqlite3 in
-memory mode. The previous v1.2 finding showed ranked *worsening* at 500K+ (1.52x). The
-medium/large results show the opposite — sqler getting *better* at scale. The inversion
-point must be somewhere between 100K and 500K. Needs xlarge-scale validation to understand
-whether the v1.2 regression at 500K+ was also affected by the baseline asymmetry, or is a
-real separate issue.
+With the v1.3 fair baseline (two-query + json.loads, matched tokenizer), the wild 0.33x
+is gone. At 10K and 50K, ranked is near parity (1.02–1.15x). At 25K, sqler is faster
+(0.76x). At 100K, sqler is still faster (0.53x mem, 0.81x disk) — this is more plausible
+since sqler's FTS search reuses an already-open adapter and skips connection overhead,
+but the remaining gap at 100K still deserves investigation at 500K+.
 
-**FTS Highlights** — still shows a large gap (60–370x) but this is an apples-to-oranges
+**Note:** The baseline still does less work than sqler — it skips Pydantic `model_validate()`
+and `SearchResult` wrapping. A perfectly matched comparison would make the baseline even
+slower. The current v1.3 baseline is conservative (biased against sqler), which is the
+correct direction for credible results.
+
+**FTS Highlights** — still shows a large gap (55–370x) but this is an apples-to-oranges
 comparison. sqler's `search_with_highlights()` returns full model instances with
 highlights attached (Pydantic hydration + model loading). The baseline returns raw tuples
 with just the highlighted text. These are fundamentally different operations measuring
@@ -390,23 +407,37 @@ Also added `db` parameter to `FTSIndex.optimize()` for API consistency with othe
 
 ### Updated summary table
 
-| Category | v1.2 ratio | After M-1 (10K–100K) | What changed |
-|----------|-----------|----------------------|--------------|
+| Category | v1.2 ratio | After M-1 (v1.3 fair, 10K–100K) | What changed |
+|----------|-----------|--------------------------------|--------------|
 | Queries | 0.95–0.98x | — | No change |
 | Bulk insert | 1.87–1.92x | — | No change |
 | Exports | 0.96–1.37x | — | No change (fixed in Ch.4) |
-| FTS rebuild | 3.78–4.65x | **1.05–1.23x** | Baseline fix — was measuring different operations |
-| FTS ranked | 0.70–1.52x | **0.33–0.73x** | sqler faster up to 100K; 500K+ needs revalidation |
+| FTS rebuild | 3.78–4.65x | **0.96–1.07x** | Baseline fix — was measuring different operations |
+| FTS ranked | 0.70–1.52x | **0.53–1.15x** | Fair baseline (two-query + json.loads + matched tokenizer) |
 | any_where | 1.47–1.51x | — | No change |
 
-### The lesson (again)
+### The lesson (again, and again)
 
-This is the same lesson from Chapter 1: **"If I wanted to make the other arm win, what
-would I change?"** The FTS5 `VALUES('rebuild')` command *looks* like a rebuild but it's
-actually segment optimization — a much cheaper operation. The naming was misleading, and
-the benchmark inherited the confusion.
+Three fairness lessons in one chapter:
 
-Total fairness issues found across the benchmark journey: **19** (18 in v1.1, 1 in v1.2).
+1. **Rebuild (issue #19)**: FTS5's `VALUES('rebuild')` command *looks* like a rebuild but
+   is actually segment optimization. The naming was misleading, and the benchmark inherited
+   the confusion.
+
+2. **Ranked search (issues #20–21)**: The baseline was returning raw tuples from the FTS
+   table while sqler was doing a second SQL query, JSON deserialization, Pydantic validation,
+   and result wrapping. Reporting sqler as 3x faster than raw sqlite3 would have been
+   immediately falsifiable.
+
+3. **Tokenizer (issue #22)**: Different tokenizers produce different index structures. Even
+   if both arms run the same SQL, the underlying b-tree shapes differ, making query time
+   comparisons invalid.
+
+The adversarial question caught all three: **"Would a competitor accept these results?"**
+No — they'd immediately spot that sqler can't be 3x faster than raw sqlite3 while doing
+4x more work per call. The skepticism was correct.
+
+Total fairness issues found across the benchmark journey: **22** (18 in v1.1, 4 in v1.2/v1.3).
 
 ---
 
@@ -423,7 +454,8 @@ Total fairness issues found across the benchmark journey: **19** (18 in v1.1, 1 
 | Mar 2 2026 | Fairness corrections — 3 rounds of baseline fixes for exports |
 | Mar 2 2026 | Cross-scale export benchmarks — confirmed results hold to 1M |
 | Mar 2 2026 | Pydantic/msgspec analysis — model_construct() dead end, msgspec blockers |
-| Mar 3 2026 | M-1: FTS baseline fix (4.65x → 1.16x) + queryset.as_dicts() API |
+| Mar 3 2026 | M-1: FTS baseline fix (4.65x → 1.07x) + queryset.as_dicts() API |
+| Mar 3 2026 | v1.3 fairness audit — 3 more asymmetries in FTS search/ranked (issues #20–22) |
 
 ## Key Documents
 
