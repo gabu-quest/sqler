@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .suite_advanced import SUITE as ADVANCED_SUITE
+from .suite_hydration import SUITE as HYDRATION_SUITE
 from .suite_insert import SUITE as INSERT_SUITE
 from .suite_json import SUITE as JSON_SUITE
 from .suite_ops import SUITE as OPS_SUITE
@@ -14,6 +15,7 @@ ALL_SUITES: dict[str, list] = {
     "json": JSON_SUITE,
     "advanced": ADVANCED_SUITE,
     "ops": OPS_SUITE,
+    "hydration": HYDRATION_SUITE,
 }
 
 

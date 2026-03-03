@@ -1,10 +1,11 @@
-"""Compatibility layer for optional Pydantic dependency.
+"""Compatibility layer for optional dependencies (Pydantic, msgspec).
 
 This module provides detection and helper functions for working with
-optional Pydantic dependency. SQLer can work in two modes:
+optional model backends. SQLer supports three modes:
 
 1. Full mode (with Pydantic): Use SQLerModel, SQLerSafeModel, etc.
 2. Lite mode (without Pydantic): Use SQLerLiteModel, SQLerLiteSafeModel, etc.
+3. Msgspec mode (with msgspec): Use SQLerMsgspecModel for C-level speed.
 
 The lite mode uses standard library dataclasses and is compatible with
 Pyodide and other environments where Pydantic's native extensions
@@ -65,6 +66,51 @@ def is_pydantic_model(cls: type) -> bool:
     from pydantic import BaseModel
 
     return isinstance(cls, type) and issubclass(cls, BaseModel)
+
+
+# Detect if msgspec is available
+try:
+    import msgspec
+
+    MSGSPEC_AVAILABLE = True
+    MSGSPEC_VERSION = msgspec.__version__
+except ImportError:
+    MSGSPEC_AVAILABLE = False
+    MSGSPEC_VERSION = None
+
+
+def require_msgspec(feature: str = "This feature") -> None:
+    """Raise ImportError if msgspec is not installed.
+
+    Args:
+        feature: Name of the feature requiring msgspec for error message.
+
+    Raises:
+        ImportError: If msgspec is not installed.
+    """
+    if not MSGSPEC_AVAILABLE:
+        raise ImportError(
+            f"{feature} requires msgspec.\n"
+            f"Install with: pip install 'sqler[msgspec]' or pip install msgspec\n\n"
+            f"For Pydantic-free environments, use lite models instead:\n"
+            f"    from sqler import SQLerLiteModel"
+        )
+
+
+def is_msgspec_model(cls: type) -> bool:
+    """Check if a class is a SQLerMsgspecModel subclass.
+
+    Args:
+        cls: Class to check.
+
+    Returns:
+        True if cls is a SQLerMsgspecModelBase subclass.
+    """
+    if not MSGSPEC_AVAILABLE:
+        return False
+    from sqler.models.msgspec.base import SQLerMsgspecModelBase
+
+    return isinstance(cls, type) and issubclass(cls, SQLerMsgspecModelBase)
 
 
 def is_lite_model(cls: type) -> bool:

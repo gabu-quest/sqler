@@ -1219,6 +1219,9 @@ default = [
 full = [
     { name = "pydantic" },
 ]
+msgspec = [
+    { name = "msgspec" },
+]
 pydantic = [
     { name = "pydantic" },
 ]
@@ -1245,11 +1248,12 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.21.0" },
+    { name = "msgspec", marker = "extra == 'msgspec'", specifier = ">=0.19.0" },
     { name = "pydantic", marker = "extra == 'default'", specifier = ">=2.7.0" },
     { name = "pydantic", marker = "extra == 'full'", specifier = ">=2.7.0" },
     { name = "pydantic", marker = "extra == 'pydantic'", specifier = ">=2.7.0" },
 ]
-provides-extras = ["lite", "pydantic", "full", "default"]
+provides-extras = ["lite", "pydantic", "msgspec", "full", "default"]
 
 [package.metadata.requires-dev]
 benchmarks = [{ name = "matplotlib", specifier = ">=3.9.0" }]
