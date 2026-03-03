@@ -37,15 +37,14 @@ the any_where 1.5x gap.
 - [x] Fix `json_each(json_extract(data, path))` → `json_each(data, path)` — eliminates 46% overhead
 - [x] Benchmark: any_where 1.44–1.67x → 0.95–1.01x (parity)
 
-### M-3: Bulk insert fast path ⬚
+### M-3: Bulk insert fast path 🔄
 
 Stable 1.87–1.92x overhead. Per-row Python cost in `bulk_upsert()`. Baseline uses
 `executemany()` (C-level batch).
 
-- [ ] Profile `bulk_upsert()` to identify top per-row costs
-- [ ] Evaluate "trusted bulk" fast path that skips validation for pre-validated data
-- [ ] Benchmark `executemany` vs chunked multi-row INSERT in sqler's adapter
-- [ ] Consider batch-save API for `model.save()` amortization
+- [x] Profile `bulk_upsert()` to identify top per-row costs
+- [x] Rewrite `bulk_upsert()` to chunked multi-row INSERT (same pattern as `_insert_many_chunked`)
+- [ ] Benchmark before/after — insert suite at medium scale
 
 ### M-4: FTS ranked scale regression ⬚
 

@@ -453,6 +453,9 @@ class SQLerDB:
         New docs (without ``_id``) are inserted and receive ids. Existing docs
         (with ``_id``) are updated.
 
+        Uses chunked multi-row INSERT statements (same pattern as
+        ``_insert_many_chunked``) to minimize per-row Python overhead.
+
         Args:
             table: Table name.
             docs: List of documents. If an element contains ``_id``, it is
@@ -462,27 +465,64 @@ class SQLerDB:
             list[int]: The ``_id`` for each input document, preserving order.
         """
         self._ensure_table(table)
-        assigned: list[int] = []
+        if not docs:
+            return []
+
+        # Split into inserts (no _id) and updates (has _id), tracking
+        # original indices so we can return IDs in input order.
+        inserts: list[tuple[int, dict]] = []
+        updates: list[tuple[int, dict]] = []
+        for i, doc in enumerate(docs):
+            if doc.get("_id") is None:
+                inserts.append((i, doc))
+            else:
+                updates.append((i, doc))
+
+        assigned = [0] * len(docs)
+
         with self.adapter as adapter:
-            for doc in docs:
-                doc_id = doc.get("_id")
-                payload_dict = {k: v for k, v in doc.items() if k != "_id"}
-                payload = json.dumps(payload_dict)
-                if doc_id is None:
-                    cursor = adapter.execute(
-                        f"INSERT INTO {table} (data) VALUES (json(?));",
-                        [payload],
+            # Batch inserts: chunked multi-row INSERT, 1 param per row.
+            if inserts:
+                for offset in range(0, len(inserts), 999):
+                    chunk = inserts[offset : offset + 999]
+                    params = [
+                        json.dumps({k: v for k, v in doc.items() if k != "_id"})
+                        for _, doc in chunk
+                    ]
+                    values_sql = ", ".join("(json(?))" for _ in chunk)
+                    sql = f"INSERT INTO {table} (data) VALUES {values_sql};"
+                    cursor = adapter.execute(sql, params)
+                    last_id = cursor.lastrowid
+                    # ID range is contiguous because BEGIN IMMEDIATE (from
+                    # self.adapter context) holds an exclusive write lock.
+                    first_id = last_id - len(chunk) + 1
+                    for j, (orig_idx, doc) in enumerate(chunk):
+                        new_id = first_id + j
+                        assigned[orig_idx] = new_id
+                        doc["_id"] = new_id
+
+            # Batch updates: chunked multi-row INSERT ON CONFLICT, 2 params
+            # per row.  Chunk size 499 keeps params under sqlite's 999 limit.
+            if updates:
+                for offset in range(0, len(updates), 499):
+                    chunk = updates[offset : offset + 499]
+                    params = []
+                    for _, doc in chunk:
+                        params.extend([
+                            int(doc["_id"]),
+                            json.dumps(
+                                {k: v for k, v in doc.items() if k != "_id"}
+                            ),
+                        ])
+                    values_sql = ", ".join("(?, json(?))" for _ in chunk)
+                    sql = (
+                        f"INSERT INTO {table} (_id, data) VALUES {values_sql} "
+                        "ON CONFLICT(_id) DO UPDATE SET data = excluded.data;"
                     )
-                    new_id = int(cursor.lastrowid)
-                    assigned.append(new_id)
-                    doc["_id"] = new_id
-                else:
-                    adapter.execute(
-                        f"INSERT INTO {table} (_id, data) VALUES (?, json(?)) "
-                        "ON CONFLICT(_id) DO UPDATE SET data = excluded.data;",
-                        [int(doc_id), payload],
-                    )
-                    assigned.append(int(doc_id))
+                    adapter.execute(sql, params)
+                    for orig_idx, doc in chunk:
+                        assigned[orig_idx] = int(doc["_id"])
+
         return assigned
 
     def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
