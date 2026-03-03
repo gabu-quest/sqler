@@ -32,11 +32,15 @@ from sqler.exceptions import ReferentialIntegrityError, StaleVersionError
 
 # Compatibility layer
 from ._compat import (
+    MSGSPEC_AVAILABLE,
+    MSGSPEC_VERSION,
     PYDANTIC_AVAILABLE,
     PYDANTIC_VERSION,
     get_model_backend,
     is_lite_model,
+    is_msgspec_model,
     is_pydantic_model,
+    require_msgspec,
     require_pydantic,
 )
 
@@ -46,6 +50,9 @@ from .lite import (
     SQLerLiteModelBase,
     SQLerLiteSafeModel,
 )
+
+# Msgspec models (optional - requires msgspec)
+from .msgspec import SQLerMsgspecModel, SQLerMsgspecModelBase
 
 # Always-available imports (no Pydantic dependency)
 from .utils import (
@@ -187,6 +194,9 @@ __all__ = [
     "SQLerLiteSafeModel",
     "AsyncSQLerLiteModel",
     "AsyncSQLerLiteSafeModel",
+    # Msgspec models (optional - requires msgspec)
+    "SQLerMsgspecModel",
+    "SQLerMsgspecModelBase",
     # Exceptions
     "StaleVersionError",
     "ReferentialIntegrityError",

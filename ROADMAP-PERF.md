@@ -55,15 +55,33 @@ Pre-v1.3 data showed 1.5x regression at 500K+, but the two-query pattern
 - [x] Update baseline to single JOIN for fairness parity
 - [x] Benchmark: ranked search at 50K now 1.03–1.07x (was 1.50x at 500K+ pre-M4)
 
-### M-5: msgspec prototype (SQLerLiteModel) ⬚
+### M-5: msgspec prototype ✅
 
-Prototype msgspec on the dataclass-based lite model first. It already uses
-`object.__setattr__()` for `_id` — no PrivateAttr blocker. Proves the pattern before
-touching Pydantic models.
+New `SQLerMsgspecModel` backed by `msgspec.Struct` with `kw_only=True`.
+Declared `_id`/`_snapshot` as actual Struct fields with defaults (no `dict=True`).
+Full API compatibility with `SQLerLiteModel` — same persistence, queryset,
+dirty tracking, and relationship encoding interfaces.
 
-- [ ] Prototype `SQLerLiteModel` backed by msgspec Struct
-- [ ] Validate `_id` / `_snapshot` via `__setattr__` injection
-- [ ] Benchmark against current dataclass implementation
-- [ ] If viable: design `SQLerMsgspecModel` API for opt-in Pydantic replacement
+- [x] Add `msgspec>=0.19.0` optional dependency (`pip install sqler[msgspec]`)
+- [x] Extend `_compat.py` — `MSGSPEC_AVAILABLE`, `is_msgspec_model()`
+- [x] `SQLerMsgspecModelBase` (Struct-based `model_validate`/`model_dump`)
+- [x] `SQLerMsgspecModel` (persistence: save/delete/query/filter/all/from_id/etc.)
+- [x] Conditional import guard in `models/msgspec/__init__.py`
+- [x] 29 tests covering base, CRUD, queryset compat, dirty tracking
+- [x] Hydration benchmark suite (pure + queryset end-to-end)
+
+**Benchmark results (50K rows, medium scale):**
+
+| Scenario | Lite (dataclass) | Msgspec (Struct) | Speedup |
+|----------|-----------------|-----------------|---------|
+| Pure `model_validate()` | 148.7ms | 69.2ms | **2.1x** |
+| `queryset.all()` mem | 441.1ms | 349.7ms | **1.26x** end-to-end |
+| `queryset.all()` disk | 433.1ms | 336.3ms | **1.29x** end-to-end |
+| Hydration-only (mem) | 283.9ms | 192.5ms | **1.47x** |
+| Hydration-only (disk) | 280.2ms | 183.4ms | **1.53x** |
+
+Wrapper overhead vs raw `msgspec.convert()`: 13% — acceptably lean.
+Prototype passes viability: 2.1x pure hydration speedup, 1.26-1.29x
+end-to-end queryset improvement.
 
 See: `docs/HYDRATION-ALTERNATIVES.md`

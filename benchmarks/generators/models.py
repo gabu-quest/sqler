@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
-from sqler import SQLerLiteModel, SQLerModel, SQLerSafeModel
+from sqler import MSGSPEC_AVAILABLE, SQLerLiteModel, SQLerModel, SQLerSafeModel
 
 
 class BenchmarkItem(SQLerModel):
@@ -44,3 +45,22 @@ class BenchmarkArticle(SQLerModel):
     content: str
     author: str = ""
     tags: list[str] = []
+
+
+# Msgspec model — only available when msgspec is installed
+BenchmarkItemMsgspec: Optional[type] = None
+
+if MSGSPEC_AVAILABLE:
+    from sqler import SQLerMsgspecModel
+
+    class _BenchmarkItemMsgspec(SQLerMsgspecModel):
+        """Msgspec Struct-based model for hydration benchmarks."""
+
+        name: str = ""
+        value: int = 0
+        category: str = ""
+        tags: list[str] = []
+        score: float = 0.0
+        description: str = ""
+
+    BenchmarkItemMsgspec = _BenchmarkItemMsgspec

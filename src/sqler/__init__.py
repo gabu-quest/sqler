@@ -74,16 +74,23 @@ from .models import (
     SQLerLiteModel,
     SQLerLiteModelBase,
     SQLerLiteSafeModel,
+    # Msgspec models (optional - requires msgspec)
+    SQLerMsgspecModel,
+    SQLerMsgspecModelBase,
     is_lite_model,
+    is_msgspec_model,
     # Compatibility helpers
     is_pydantic_model,
 )
 
 # Import compatibility helpers first (no Pydantic dependency)
 from .models._compat import (
+    MSGSPEC_AVAILABLE,
+    MSGSPEC_VERSION,
     PYDANTIC_AVAILABLE,
     PYDANTIC_VERSION,
     get_model_backend,
+    require_msgspec,
     require_pydantic,
 )
 
@@ -192,6 +199,13 @@ __all__ = [
     "SQLerLiteSafeModel",
     "AsyncSQLerLiteModel",
     "AsyncSQLerLiteSafeModel",
+    # Msgspec models (optional)
+    "SQLerMsgspecModel",
+    "SQLerMsgspecModelBase",
+    "MSGSPEC_AVAILABLE",
+    "MSGSPEC_VERSION",
+    "require_msgspec",
+    "is_msgspec_model",
     # Compatibility helpers
     "PYDANTIC_AVAILABLE",
     "PYDANTIC_VERSION",

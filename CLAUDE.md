@@ -3,7 +3,7 @@
 Document-oriented JSON store on SQLite.
 
 ## Active Roadmaps
-- [perf-optimizations](./ROADMAP-PERF.md) — M-1 through M-4 complete, next: M-5 (msgspec)
+- [perf-optimizations](./ROADMAP-PERF.md) — M-1 through M-5 complete (msgspec prototype: 2.1x hydration speedup)
 - [qler-prerequisites](./ROADMAP-QLER.md) — all milestones complete (M-1 through M-11)
 
 ## Benchmarks
