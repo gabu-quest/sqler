@@ -87,7 +87,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     async def execute(self, query: str, params: Optional[List[Any]] = None) -> aiosqlite.Cursor:
         """Execute a SQL query with optional parameters and return cursor."""
         conn = await self._acquire()
-        start = time.perf_counter()
+        _logging = query_logger.enabled
+        if _logging:
+            start = time.perf_counter()
         error_msg = None
         cursor = None
         try:
@@ -96,14 +98,15 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             error_msg = str(e)
             raise
         finally:
-            duration_ms = (time.perf_counter() - start) * 1000
-            query_logger.log(
-                sql=query,
-                params=list(params) if params else [],
-                duration_ms=duration_ms,
-                rows_affected=cursor.rowcount if cursor and cursor.rowcount >= 0 else None,
-                error=error_msg,
-            )
+            if _logging:
+                duration_ms = (time.perf_counter() - start) * 1000
+                query_logger.log(
+                    sql=query,
+                    params=list(params) if params else [],
+                    duration_ms=duration_ms,
+                    rows_affected=cursor.rowcount if cursor and cursor.rowcount >= 0 else None,
+                    error=error_msg,
+                )
         return cursor
 
     async def executemany(self, query: str, param_list: List[List[Any]]) -> aiosqlite.Cursor:

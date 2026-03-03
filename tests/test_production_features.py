@@ -460,6 +460,49 @@ class TestMetrics:
 
         metrics.disable()
 
+    def test_no_timing_overhead_when_disabled(self):
+        """No query logging or timing occurs when metrics are disabled."""
+        from sqler.logging import query_logger
+
+        metrics.reset()
+        metrics.disable()
+        query_logger.disable()
+        query_logger.clear()
+        assert metrics._enabled is False
+        assert query_logger.enabled is False
+
+        db = SQLerDB.in_memory(shared=False)
+
+        class Item(SQLerModel):
+            name: str
+
+        Item.set_db(db)
+        Item(name="test").save()
+        Item.query().all()
+
+        # Logger should have captured nothing — timing was skipped entirely
+        assert len(query_logger.logs) == 0
+
+    def test_timing_active_when_enabled(self):
+        """Queries are timed and logged when metrics are enabled."""
+        from sqler.logging import query_logger
+
+        metrics.reset()
+        metrics.enable()
+
+        db = SQLerDB.in_memory(shared=False)
+
+        class Item(SQLerModel):
+            name: str
+
+        Item.set_db(db)
+        Item(name="test").save()
+
+        assert len(query_logger.logs) > 0
+        assert all(log.duration_ms >= 0 for log in query_logger.logs)
+
+        metrics.disable()
+
     def test_metrics_callback(self):
         """Custom callbacks receive query logs."""
         metrics.reset()
