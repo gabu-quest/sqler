@@ -21,7 +21,7 @@ Definitive result files:
 | any_where (array subqueries) | ~~1.51x~~ | ~~1.56x~~ | ~~1.47x~~ | ~~1.48x~~ | **✅ Fixed → 0.95–1.01x** |
 | Export (CSV/JSONL) | ~~2.85x~~ | ~~2.74–2.84x~~ | ~~2.72–2.85x~~ | ~~2.73–2.77x~~ | **✅ Fixed → 1.0–1.5x** |
 | FTS rebuild | 4.65x | 4.63x | 3.96x | 3.78x | **Improving at scale** |
-| FTS ranked | ~~0.95x~~ | ~~0.70x~~ | ~~1.52x~~ | ~~1.50x~~ | **✅ Fixed → ~1.05x** |
+| FTS ranked | ~~0.95x~~ | ~~0.70x~~ | ~~1.52x~~ | ~~1.50x~~ | **✅ Fixed → 1.00–1.06x** |
 
 †**Row factory artifact**: The baseline uses `sqlite3.Row` with string key access (`row["data"]`),
 while sqler uses integer index access (`row[0]`). This adds ~3-6% overhead to the baseline across
@@ -36,7 +36,7 @@ row iteration. This is an irreducible measurement artifact, not a real ORM advan
 | ~~Bulk insert 1M~~ | ~~12.2s~~ | ~~6.5s~~ | ~~+5.7s~~ ✅ Fixed (0.91–0.97x at 10K+) |
 | ~~any_where query~~ | ~~9.9s~~ | ~~6.7s~~ | ~~+3.2s~~ ✅ Fixed (0.95–1.01x) |
 | ~~Export CSV 250K~~ | ~~4.7s~~ | ~~1.7s~~ | ~~+3.0s~~ ✅ Fixed |
-| ~~FTS ranked 1M~~ | ~~899ms~~ | ~~599ms~~ | ~~+300ms~~ ✅ Fixed (~1.05x at 50K) |
+| ~~FTS ranked 1M~~ | ~~899ms~~ | ~~599ms~~ | ~~+300ms~~ ✅ Fixed (1.00–1.06x at 50K) |
 | Equality filter 1M (no idx) | 1.0s | 1.1s | -50ms (noise) |
 | Backup 1M | 606ms | 604ms | +2ms (noise) |
 
@@ -302,19 +302,22 @@ walk. Updated baseline to use the same single-JOIN pattern for fairness.
 | 500K | 489.5ms | 322.4ms | 1.52x |
 | 1M | 899.1ms | 599.0ms | 1.50x |
 
-### Results after M-4 (single-JOIN, v1.4 baseline)
+### Results after M-4 (single-JOIN, v1.5 baseline)
 
 | Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
 |------|-------------|--------------|-------|--------------|---------------|-------|
-| 10K | 4.5ms | 4.4ms | **1.03x** | 4.5ms | 4.3ms | **1.03x** |
-| 25K | 16.1ms | 21.3ms | 0.76x† | 16.5ms | 22.5ms | 0.73x† |
-| 50K | 30.5ms | 28.5ms | **1.07x** | 30.3ms | 28.9ms | **1.05x** |
+| 10K | 5.0ms | 4.4ms | 1.13x† | 4.4ms | 6.5ms | 0.68x† |
+| 25K | 17.0ms | 16.6ms | **1.03x** | 16.8ms | 16.8ms | **1.00x** |
+| 50K | 31.4ms | 29.9ms | **1.05x** | 33.4ms | 31.5ms | **1.06x** |
 
-†**25K result is measurement noise, not a real advantage.** sqler does `model_validate()`
-per row which the baseline skips — it cannot genuinely be faster while doing more work.
-The 5ms gap (16ms vs 21ms) is within GC pause / CPU frequency variance. The zig-zag
-pattern (1.03x → 0.76x → 1.07x) is characteristic of noise. Trustworthy signal: **1.03–1.07x
-at 10K and 50K** — near parity with negligible Pydantic overhead at LIMIT 20.
+†10K results are noise — sub-7ms absolute times where a single GC pause swings the ratio.
+Trustworthy signal at 25K+: **1.00–1.06x** — near parity with ~5% `model_validate()` overhead.
+
+**v1.5 fairness fix**: The baseline's `create()` previously populated the FTS table before
+the rebuild timer, leaving extra tombstones in FTS5 shadow tables. After 23 rebuild cycles,
+these tombstones made the baseline ~15% slower than sqler — creating a false "sqler is faster"
+artifact (0.73x at 25K in v1.4). Fixed by making `create()` only create the virtual table,
+matching sqler's behavior.
 
 **Remaining asymmetry**: sqler does `model_validate()` + `SearchResult` wrapping per row;
 baseline returns raw dicts. At LIMIT 20, `model_validate()` costs ~22µs total — invisible
@@ -389,7 +392,7 @@ sqler's wrapper adds literally zero overhead at every scale:
    (1.47–1.51x → 0.95–1.01x).
 
 6. **FTS ranked fixed.** M-4 replaced the two-query pattern with a single JOIN
-   (1.50x → ~1.05x). Near parity at all scales tested.
+   (1.50x → 1.00–1.06x). Near parity at all scales tested.
 
 7. **Backup/restore is transparent.** 1.00x. The SQLite backup API does all the work.
 
@@ -541,8 +544,8 @@ deserves its own spec, not just a benchmark finding.
    (`row[0]`). Both arms execute identical SQL. This is irreducible — removing Row factory would
    make the baseline unrealistically stripped down.
 
-2. ~~**FTS ranked at small scales**~~: Fixed in M-4 — single-JOIN optimization brought
-   all scales to 0.76–1.07x parity.
+2. ~~**FTS ranked at small scales**~~: Fixed in M-4 — single-JOIN optimization + v1.5
+   baseline fairness fix brought all scales to 1.00–1.06x parity.
 
 3. **FTS highlights**: 272x gap at 50K is real but measures fundamentally different things
    (model hydration vs raw tuples). Not a fair comparison — it's an API design difference.

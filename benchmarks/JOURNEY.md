@@ -596,14 +596,17 @@ Updated the baseline to also use a single JOIN for fairness parity.
 
 | Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
 |------|-------------|--------------|-------|--------------|---------------|-------|
-| 10K | 4.5ms | 4.4ms | **1.03x** | 4.5ms | 4.3ms | **1.03x** |
-| 25K | 16.1ms | 21.3ms | 0.76x† | 16.5ms | 22.5ms | 0.73x† |
-| 50K | 30.5ms | 28.5ms | **1.07x** | 30.3ms | 28.9ms | **1.05x** |
+| 10K | 5.0ms | 4.4ms | 1.13x† | 4.4ms | 6.5ms | 0.68x† |
+| 25K | 17.0ms | 16.6ms | **1.03x** | 16.8ms | 16.8ms | **1.00x** |
+| 50K | 31.4ms | 29.9ms | **1.05x** | 33.4ms | 31.5ms | **1.06x** |
 
-†The 25K result is **measurement noise** — sqler does `model_validate()` per row which the
-baseline skips, so it cannot genuinely be faster. The 5ms gap is within GC/CPU variance,
-and the zig-zag pattern (1.03x → 0.76x → 1.07x) confirms noise. Trustworthy signal:
-**1.03–1.07x** at 10K and 50K.
+†10K results are noise (sub-7ms). Trustworthy signal at 25K+: **1.00–1.06x**.
+
+**v1.5 fairness fix**: The initial results showed 0.73–0.76x at 25K (sqler "faster") which
+was suspicious — sqler does `model_validate()` per row, so it can't genuinely be faster.
+Root cause: the baseline's `create()` populated the FTS table before the rebuild timer,
+leaving extra tombstones in FTS5 shadow tables. After 23 rebuild cycles, these accumulated
+and made the baseline ~15% slower. Fixed by making `create()` only create the virtual table.
 
 ### What we learned
 
@@ -618,10 +621,16 @@ and the zig-zag pattern (1.03x → 0.76x → 1.07x) confirms noise. Trustworthy 
 3. **SQL-side sorting beats Python-side sorting.** The old code fetched scores in one query,
    documents in another, then Python-sorted the results. The JOIN returns pre-sorted results.
 
-4. **Be skeptical of "faster than baseline" results.** The 0.76x at 25K was noise, not
-   signal. sqler does `model_validate()` per row — it cannot genuinely be faster than
-   raw sqlite doing the same SQL + json.loads(). When results look too good, check the
-   absolute times: 16ms vs 21ms is a 5ms gap, well within GC/CPU variance at this scale.
+4. **Be skeptical of "faster than baseline" results.** The initial 0.76x at 25K was a
+   baseline fairness bug, not real performance. sqler does `model_validate()` per row —
+   it cannot genuinely be faster than raw sqlite doing the same SQL + json.loads(). Root
+   cause: the baseline's `create()` left extra FTS5 tombstones that accumulated across
+   rebuild cycles. Fix: make `create()` only create the virtual table (matching sqler).
+
+5. **FTS5 tombstones accumulate across DELETE + INSERT cycles.** A fresh FTS5 index is ~2x
+   faster to search than one that's been through 23 DELETE + INSERT rebuilds. Any benchmark
+   that measures search performance after rebuild iterations must ensure both arms have the
+   same tombstone history — even one extra population round creates measurable bias.
 
 ---
 
@@ -642,7 +651,8 @@ and the zig-zag pattern (1.03x → 0.76x → 1.07x) confirms noise. Trustworthy 
 | Mar 3 2026 | v1.3 fairness audit — 3 more asymmetries in FTS search/ranked (issues #20–22) |
 | Mar 3 2026 | M-2: any_where fix — json_each(data, path) instead of json_each(json_extract()) (1.5x → 1.0x) |
 | Mar 3 2026 | M-3: bulk_upsert() chunked multi-row INSERT (1.9x → 0.91–1.00x) |
-| Mar 3 2026 | M-4: search_ranked() single-JOIN optimization (1.5x → 1.03–1.07x at 50K) |
+| Mar 3 2026 | M-4: search_ranked() single-JOIN optimization (1.5x → 1.00–1.06x at 50K) |
+| Mar 3 2026 | v1.5 fairness fix: baseline create() left extra FTS5 tombstones (issue #23) |
 
 ## Key Documents
 
