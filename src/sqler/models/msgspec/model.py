@@ -94,7 +94,9 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             stacklevel=2,
         )
         explicit = getattr(cls, "__tablename__", None)
-        chosen = table or explicit or _default_table_name(cls.__name__)
+        chosen = validate_table_name(
+            table or explicit or _default_table_name(cls.__name__)
+        )
         cls._db = db
         cls._table = chosen
         cls.__tablename__ = chosen  # type: ignore[attr-defined]
@@ -150,6 +152,11 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
     def from_id(cls: Type[T], id_: int) -> Optional[T]:
         """Hydrate an instance by ``_id``.
 
+        Note: relation resolution is not performed (prototype scope).
+        Fields containing reference dicts (``{"_table": ..., "_id": ...}``)
+        are returned as-is. Use ``SQLerLiteModel`` if relation hydration
+        is needed.
+
         Args:
             id_: Row id to load.
 
@@ -168,6 +175,9 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
     @classmethod
     def from_ids(cls: Type[T], ids: list[int]) -> list[T]:
         """Hydrate multiple instances by id list (batch operation).
+
+        Note: relation resolution is not performed (prototype scope).
+        See :meth:`from_id` for details.
 
         Args:
             ids: List of row ids to load.
@@ -345,12 +355,21 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         """
         from datetime import date, datetime
 
+        visited: set[tuple[str, int]] = set()
+
         def encode(value: object) -> Any:
             # Handle SQLerMsgspecModel instances
             if isinstance(value, SQLerMsgspecModel):
                 if value._id is None:
                     raise ValueError("Related model must be saved before saving parent")
                 table = value.__class__._table
+                if table is None:
+                    raise ValueError(
+                        f"Related model {value.__class__.__name__} has no bound table"
+                    )
+                table = validate_table_name(table)
+                if (table, int(value._id)) not in visited:
+                    visited.add((table, int(value._id)))
                 return {"_table": table, "_id": value._id}
 
             # Handle already-encoded ref dicts
