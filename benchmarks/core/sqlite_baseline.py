@@ -341,6 +341,11 @@ class SQLiteFTSBaseline:
 
     Uses a standalone FTS5 table (no content= sync) because the source table
     stores data as JSON blobs, not separate columns.
+
+    v1.3 fairness fixes:
+      - Matched tokenizer to sqler's default (porter unicode61)
+      - search() and search_ranked() now do two-query + json.loads()
+        to match sqler's model hydration work
     """
 
     def __init__(self, conn: sqlite3.Connection, table: str, fields: list[str]):
@@ -354,7 +359,7 @@ class SQLiteFTSBaseline:
         cols = ", ".join(self.fields)
         self.conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS [{self.fts_table}] "
-            f"USING fts5({cols})"
+            f"USING fts5({cols}, tokenize='porter unicode61')"
         )
         # Populate from JSON source table
         extract_cols = ", ".join(
@@ -387,21 +392,66 @@ class SQLiteFTSBaseline:
         )
         self.conn.commit()
 
-    def search(self, query: str, limit: int = 20) -> list[tuple]:
-        """Basic FTS5 search."""
+    def search(self, query: str, limit: int = 20) -> list[dict]:
+        """FTS5 search — matched to sqler's fts.search() work.
+
+        v1.3: Two-query pattern + json.loads() to match sqler's search()
+        which does: FTS rowid query → SELECT _id,data WHERE _id IN (...)
+        → json.loads() → model_validate(). We skip model_validate() since
+        the baseline has no model, but match the SQL + deserialization work.
+
+        v1.2: Returned raw tuples from FTS table only (no source lookup).
+        """
         sql = (
-            f"SELECT rowid, * FROM [{self.fts_table}] "
+            f"SELECT rowid FROM [{self.fts_table}] "
             f"WHERE [{self.fts_table}] MATCH ? LIMIT ?"
         )
-        return self.conn.execute(sql, (query, limit)).fetchall()
+        rows = self.conn.execute(sql, (query, limit)).fetchall()
+        if not rows:
+            return []
+        ids = [row[0] for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        doc_rows = self.conn.execute(
+            f"SELECT _id, data FROM [{self.table}] WHERE _id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        return [
+            {**json.loads(row[1]), "_id": row[0]} for row in doc_rows
+        ]
 
-    def search_ranked(self, query: str, limit: int = 20) -> list[tuple]:
-        """FTS5 search with BM25 ranking."""
+    def search_ranked(self, query: str, limit: int = 20) -> list[dict]:
+        """FTS5 search with BM25 ranking — matched to sqler's search_ranked() work.
+
+        v1.3: Two-query pattern + json.loads() to match sqler's search_ranked()
+        which does: FTS rowid+score query → SELECT _id,data WHERE _id IN (...)
+        → json.loads() → model_validate() → SearchResult wrapping + sort.
+        We skip model_validate() but match the SQL + deserialization + sort.
+
+        v1.2: Returned raw tuples from FTS table only (no source lookup).
+        """
         sql = (
-            f"SELECT rowid, *, rank FROM [{self.fts_table}] "
-            f"WHERE [{self.fts_table}] MATCH ? ORDER BY rank LIMIT ?"
+            f"SELECT rowid, bm25([{self.fts_table}]) as score "
+            f"FROM [{self.fts_table}] "
+            f"WHERE [{self.fts_table}] MATCH ? ORDER BY score LIMIT ?"
         )
-        return self.conn.execute(sql, (query, limit)).fetchall()
+        rows = self.conn.execute(sql, (query, limit)).fetchall()
+        if not rows:
+            return []
+        id_to_score = {row[0]: row[1] for row in rows}
+        ids = list(id_to_score.keys())
+        placeholders = ",".join("?" for _ in ids)
+        doc_rows = self.conn.execute(
+            f"SELECT _id, data FROM [{self.table}] WHERE _id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        results = []
+        for row in doc_rows:
+            doc = json.loads(row[1])
+            doc["_id"] = row[0]
+            doc["score"] = id_to_score[row[0]]
+            results.append(doc)
+        results.sort(key=lambda r: r["score"])
+        return results
 
     def search_with_highlights(self, query: str, limit: int = 20) -> list[tuple]:
         """FTS5 search with highlighted snippets — matches sqler's search_with_highlights().
