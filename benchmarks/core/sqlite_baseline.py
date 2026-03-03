@@ -422,35 +422,29 @@ class SQLiteFTSBaseline:
     def search_ranked(self, query: str, limit: int = 20) -> list[dict]:
         """FTS5 search with BM25 ranking — matched to sqler's search_ranked() work.
 
-        v1.3: Two-query pattern + json.loads() to match sqler's search_ranked()
-        which does: FTS rowid+score query → SELECT _id,data WHERE _id IN (...)
-        → json.loads() → model_validate() → SearchResult wrapping + sort.
-        We skip model_validate() but match the SQL + deserialization + sort.
+        v1.4: Single JOIN query to match sqler's optimized search_ranked()
+        which does: JOIN FTS + source → json.loads() → model_validate() →
+        SearchResult wrapping. We skip model_validate() but match the SQL +
+        deserialization work.
 
+        v1.3: Two-query pattern + json.loads() + sort.
         v1.2: Returned raw tuples from FTS table only (no source lookup).
         """
         sql = (
-            f"SELECT rowid, bm25([{self.fts_table}]) as score "
-            f"FROM [{self.fts_table}] "
+            f"SELECT t._id, t.data, bm25([{self.fts_table}]) as score "
+            f"FROM [{self.fts_table}] f "
+            f"JOIN [{self.table}] t ON t._id = f.rowid "
             f"WHERE [{self.fts_table}] MATCH ? ORDER BY score LIMIT ?"
         )
         rows = self.conn.execute(sql, (query, limit)).fetchall()
         if not rows:
             return []
-        id_to_score = {row[0]: row[1] for row in rows}
-        ids = list(id_to_score.keys())
-        placeholders = ",".join("?" for _ in ids)
-        doc_rows = self.conn.execute(
-            f"SELECT _id, data FROM [{self.table}] WHERE _id IN ({placeholders})",
-            ids,
-        ).fetchall()
         results = []
-        for row in doc_rows:
+        for row in rows:
             doc = json.loads(row[1])
             doc["_id"] = row[0]
-            doc["score"] = id_to_score[row[0]]
+            doc["score"] = row[2]
             results.append(doc)
-        results.sort(key=lambda r: r["score"])
         return results
 
     def search_with_highlights(self, query: str, limit: int = 20) -> list[tuple]:
