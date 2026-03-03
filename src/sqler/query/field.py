@@ -40,15 +40,15 @@ class SQLerField:
       SQLerField(['arr']).any()['field'] == 5
       # -> EXISTS (
       #     SELECT 1
-      #     FROM json_each(json_extract(data, '$.arr')) AS a
+      #     FROM json_each(data, '$.arr') AS a
       #     WHERE json_extract(a.value, '$.field') = ?
       #   )
 
       SQLerField(['level1']).any()['arr2'].any()['val'] > 0
       # -> EXISTS (
       #     SELECT 1
-      #     FROM json_each(json_extract(data, '$.level1')) AS a
-      #     JOIN json_each(json_extract(a.value, '$.arr2')) AS b
+      #     FROM json_each(data, '$.level1') AS a
+      #     JOIN json_each(a.value, '$.arr2') AS b
       #     WHERE json_extract(b.value, '$.val') > ?
       #   )
 
@@ -124,8 +124,8 @@ class SQLerField:
           SQLerField(['level1']).any()['arr2'].any()['score'] > 50
           # -> EXISTS (
           #     SELECT 1
-          #     FROM json_each(json_extract(data, '$.level1')) AS a
-          #     JOIN json_each(json_extract(a.value, '$.arr2')) AS b
+          #     FROM json_each(data, '$.level1') AS a
+          #     JOIN json_each(a.value, '$.arr2') AS b
           #     WHERE json_extract(b.value, '$.score') > ?
           #   )
         """
@@ -343,15 +343,15 @@ class SQLerAnyExpression(SQLerExpression):
       SQLerField(['arr']).any()['val'] == 1
       # -> EXISTS (
       #     SELECT 1
-      #     FROM json_each(json_extract(data, '$.arr')) AS a
+      #     FROM json_each(data, '$.arr') AS a
       #     WHERE json_extract(a.value, '$.val') = ?
       #   )
 
       SQLerField(['level1']).any()['arr2'].any()['field3'] > 100
       # -> EXISTS (
       #     SELECT 1
-      #     FROM json_each(json_extract(data, '$.level1')) AS a
-      #     JOIN json_each(json_extract(a.value, '$.arr2')) AS b
+      #     FROM json_each(data, '$.level1') AS a
+      #     JOIN json_each(a.value, '$.arr2') AS b
       #     WHERE json_extract(b.value, '$.field3') > ?
       #   )
     """
@@ -389,7 +389,7 @@ class SQLerAnyExpression(SQLerExpression):
 
         first_alias = aliases[0]
         # first FROM: make a table out of the first array
-        joins.append(f"json_each(json_extract(data, '{base_json}')) AS {first_alias}")
+        joins.append(f"json_each(data, '{base_json}') AS {first_alias}")
         first_where = norm[0][2]
         if first_where is not None:
             wsql, wparams = _scope_expr(first_where, first_alias)
@@ -399,8 +399,8 @@ class SQLerAnyExpression(SQLerExpression):
 
         # handle more .any()s: join each nested array
         for alias, array_key, wexpr in norm[1:]:
-            # e.g. JOIN json_each(json_extract(a.value, '$.arr2')) AS b
-            joins.append(f"json_each(json_extract({prev_alias}.value, '$.{array_key}')) AS {alias}")
+            # e.g. JOIN json_each(a.value, '$.arr2') AS b
+            joins.append(f"json_each({prev_alias}.value, '$.{array_key}') AS {alias}")
             if wexpr is not None:
                 wsql, wparams = _scope_expr(wexpr, alias)
                 where_clauses.append(wsql)
@@ -484,7 +484,7 @@ class SQLerAnyContext:
         params: list[Any] = []
 
         first_alias, _, first_where = norm[0]
-        joins.append(f"json_each(json_extract(data, '{base_json}')) AS {first_alias}")
+        joins.append(f"json_each(data, '{base_json}') AS {first_alias}")
         if first_where is not None:
             wsql, wparams = _scope_expr(first_where, first_alias)
             where_clauses.append(wsql)
@@ -492,7 +492,7 @@ class SQLerAnyContext:
         prev_alias = first_alias
 
         for alias, array_key, wexpr in norm[1:]:
-            joins.append(f"json_each(json_extract({prev_alias}.value, '$.{array_key}')) AS {alias}")
+            joins.append(f"json_each({prev_alias}.value, '$.{array_key}') AS {alias}")
             if wexpr is not None:
                 wsql, wparams = _scope_expr(wexpr, alias)
                 where_clauses.append(wsql)

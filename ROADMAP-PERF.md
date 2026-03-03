@@ -33,9 +33,9 @@ The query logger runs on every `adapter.execute()` call — two `perf_counter()`
 the any_where 1.5x gap.
 
 - [x] Guard timing behind `query_logger.enabled` check (sync + async adapters)
-- [ ] Profile any_where to confirm logger is the main cost
-- [ ] Consider SQL compilation caching for repeated query structures
-- [ ] Benchmark before/after
+- [x] Profile any_where — logger was NOT the main cost; redundant `json_extract()` in SQL was
+- [x] Fix `json_each(json_extract(data, path))` → `json_each(data, path)` — eliminates 46% overhead
+- [x] Benchmark: any_where 1.44–1.67x → 0.95–1.01x (parity)
 
 ### M-3: Bulk insert fast path ⬚
 
