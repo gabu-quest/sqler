@@ -597,12 +597,13 @@ Updated the baseline to also use a single JOIN for fairness parity.
 | Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
 |------|-------------|--------------|-------|--------------|---------------|-------|
 | 10K | 4.5ms | 4.4ms | **1.03x** | 4.5ms | 4.3ms | **1.03x** |
-| 25K | 16.1ms | 21.3ms | **0.76x** | 16.5ms | 22.5ms | **0.73x** |
+| 25K | 16.1ms | 21.3ms | 0.76x† | 16.5ms | 22.5ms | 0.73x† |
 | 50K | 30.5ms | 28.5ms | **1.07x** | 30.3ms | 28.9ms | **1.05x** |
 
-At 25K, sqler is actually **faster** than the baseline (0.73–0.76x). The single JOIN lets
-SQLite optimize the rowid lookup internally, which is more efficient than constructing an
-IN-clause with 20 placeholders and doing a separate query.
+†The 25K result is **measurement noise** — sqler does `model_validate()` per row which the
+baseline skips, so it cannot genuinely be faster. The 5ms gap is within GC/CPU variance,
+and the zig-zag pattern (1.03x → 0.76x → 1.07x) confirms noise. Trustworthy signal:
+**1.03–1.07x** at 10K and 50K.
 
 ### What we learned
 
@@ -616,6 +617,11 @@ IN-clause with 20 placeholders and doing a separate query.
 
 3. **SQL-side sorting beats Python-side sorting.** The old code fetched scores in one query,
    documents in another, then Python-sorted the results. The JOIN returns pre-sorted results.
+
+4. **Be skeptical of "faster than baseline" results.** The 0.76x at 25K was noise, not
+   signal. sqler does `model_validate()` per row — it cannot genuinely be faster than
+   raw sqlite doing the same SQL + json.loads(). When results look too good, check the
+   absolute times: 16ms vs 21ms is a 5ms gap, well within GC/CPU variance at this scale.
 
 ---
 
