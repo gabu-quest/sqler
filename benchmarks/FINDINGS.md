@@ -21,7 +21,7 @@ Definitive result files:
 | any_where (array subqueries) | ~~1.51x~~ | ~~1.56x~~ | ~~1.47x~~ | ~~1.48x~~ | **✅ Fixed → 0.95–1.01x** |
 | Export (CSV/JSONL) | ~~2.85x~~ | ~~2.74–2.84x~~ | ~~2.72–2.85x~~ | ~~2.73–2.77x~~ | **✅ Fixed → 1.0–1.5x** |
 | FTS rebuild | 4.65x | 4.63x | 3.96x | 3.78x | **Improving at scale** |
-| FTS ranked | ~~0.95x~~ | ~~0.70x~~ | ~~1.52x~~ | ~~1.50x~~ | **✅ Fixed → 0.76–1.07x** |
+| FTS ranked | ~~0.95x~~ | ~~0.70x~~ | ~~1.52x~~ | ~~1.50x~~ | **✅ Fixed → ~1.05x** |
 
 †**Row factory artifact**: The baseline uses `sqlite3.Row` with string key access (`row["data"]`),
 while sqler uses integer index access (`row[0]`). This adds ~3-6% overhead to the baseline across
@@ -36,7 +36,7 @@ row iteration. This is an irreducible measurement artifact, not a real ORM advan
 | ~~Bulk insert 1M~~ | ~~12.2s~~ | ~~6.5s~~ | ~~+5.7s~~ ✅ Fixed (0.91–0.97x at 10K+) |
 | ~~any_where query~~ | ~~9.9s~~ | ~~6.7s~~ | ~~+3.2s~~ ✅ Fixed (0.95–1.01x) |
 | ~~Export CSV 250K~~ | ~~4.7s~~ | ~~1.7s~~ | ~~+3.0s~~ ✅ Fixed |
-| ~~FTS ranked 1M~~ | ~~899ms~~ | ~~599ms~~ | ~~+300ms~~ ✅ Fixed (0.76–1.07x at 50K) |
+| ~~FTS ranked 1M~~ | ~~899ms~~ | ~~599ms~~ | ~~+300ms~~ ✅ Fixed (~1.05x at 50K) |
 | Equality filter 1M (no idx) | 1.0s | 1.1s | -50ms (noise) |
 | Backup 1M | 606ms | 604ms | +2ms (noise) |
 
@@ -307,11 +307,18 @@ walk. Updated baseline to use the same single-JOIN pattern for fairness.
 | Rows | sqler (mem) | sqlite (mem) | Ratio | sqler (disk) | sqlite (disk) | Ratio |
 |------|-------------|--------------|-------|--------------|---------------|-------|
 | 10K | 4.5ms | 4.4ms | **1.03x** | 4.5ms | 4.3ms | **1.03x** |
-| 25K | 16.1ms | 21.3ms | **0.76x** | 16.5ms | 22.5ms | **0.73x** |
+| 25K | 16.1ms | 21.3ms | 0.76x† | 16.5ms | 22.5ms | 0.73x† |
 | 50K | 30.5ms | 28.5ms | **1.07x** | 30.3ms | 28.9ms | **1.05x** |
 
-At 25K, sqler is **faster** than baseline — the single JOIN avoids IN-clause construction
-and lets SQLite optimize the rowid lookup internally.
+†**25K result is measurement noise, not a real advantage.** sqler does `model_validate()`
+per row which the baseline skips — it cannot genuinely be faster while doing more work.
+The 5ms gap (16ms vs 21ms) is within GC pause / CPU frequency variance. The zig-zag
+pattern (1.03x → 0.76x → 1.07x) is characteristic of noise. Trustworthy signal: **1.03–1.07x
+at 10K and 50K** — near parity with negligible Pydantic overhead at LIMIT 20.
+
+**Remaining asymmetry**: sqler does `model_validate()` + `SearchResult` wrapping per row;
+baseline returns raw dicts. At LIMIT 20, `model_validate()` costs ~22µs total — invisible
+against the SQL time. This asymmetry is inherent (the baseline has no model) and documented.
 
 ---
 
@@ -382,7 +389,7 @@ sqler's wrapper adds literally zero overhead at every scale:
    (1.47–1.51x → 0.95–1.01x).
 
 6. **FTS ranked fixed.** M-4 replaced the two-query pattern with a single JOIN
-   (1.50x → 0.76–1.07x). sqler is faster than baseline at 25K rows.
+   (1.50x → ~1.05x). Near parity at all scales tested.
 
 7. **Backup/restore is transparent.** 1.00x. The SQLite backup API does all the work.
 

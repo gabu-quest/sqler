@@ -53,8 +53,7 @@ Pre-v1.3 data showed 1.5x regression at 500K+, but the two-query pattern
 
 - [x] Rewrite `search_ranked()` to single JOIN query (eliminates second query + `from_ids()` overhead)
 - [x] Update baseline to single JOIN for fairness parity
-- [x] Benchmark: ranked search at 50K now 1.03–1.07x (was 0.95x pre-v1.3, 1.50x at 500K+)
-- [x] At 25K, sqler is 0.76x (faster than baseline) — JOIN avoids IN-clause + dict lookup overhead
+- [x] Benchmark: ranked search at 50K now 1.03–1.07x (was 1.50x at 500K+ pre-M4)
 
 ### M-5: msgspec prototype (SQLerLiteModel) ⬚
 
