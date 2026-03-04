@@ -20,10 +20,35 @@ class ALItem(AsyncSQLerLiteModel):
 
 
 @dataclass
+class ALPromotedItem(AsyncSQLerLiteModel):
+    __tablename__ = "lite_promoted_items"
+    __promoted__ = {
+        "status": "TEXT NOT NULL DEFAULT 'active'",
+        "priority": "INTEGER DEFAULT 0",
+    }
+    __checks__ = {
+        "valid_status": "status IN ('active', 'inactive', 'archived')",
+    }
+    name: str = ""
+    status: str = "active"
+    priority: int = 0
+
+
+@dataclass
 class ALSafeItem(AsyncSQLerLiteSafeModel):
     __tablename__ = "lite_safe_items"
     name: str = ""
     value: int = 0
+
+
+@dataclass
+class ALSafePromotedItem(AsyncSQLerLiteSafeModel):
+    __tablename__ = "lite_safe_promoted_items"
+    __promoted__ = {
+        "status": "TEXT NOT NULL DEFAULT 'pending'",
+    }
+    name: str = ""
+    status: str = "pending"
 
 
 # ---- fixtures ----
@@ -82,6 +107,54 @@ async def test_asave_many_rejects_existing(db):
     finally:
         ALItem._db = None
         ALItem._table = None
+
+
+@pytest.mark.asyncio
+async def test_asave_many_with_promoted(db):
+    ALPromotedItem.set_db(db)
+    try:
+        items = [
+            ALPromotedItem(name="a", status="active", priority=1),
+            ALPromotedItem(name="b", status="inactive", priority=2),
+            ALPromotedItem(name="c", status="archived", priority=3),
+        ]
+        await ALPromotedItem.asave_many(items)
+
+        ids = [item._id for item in items]
+        assert ids == list(range(ids[0], ids[0] + 3))
+
+        found = await ALPromotedItem.query().order_by("priority").all()
+        assert len(found) == 3
+        assert found[0].name == "a"
+        assert found[0].status == "active"
+        assert found[0].priority == 1
+        assert found[1].name == "b"
+        assert found[1].status == "inactive"
+        assert found[2].name == "c"
+        assert found[2].status == "archived"
+        assert found[2].priority == 3
+    finally:
+        ALPromotedItem._db = None
+        ALPromotedItem._table = None
+
+
+@pytest.mark.asyncio
+async def test_asave_many_atomicity_promoted(db):
+    """If one row violates a CHECK constraint, no rows should be saved."""
+    ALPromotedItem.set_db(db)
+    try:
+        items = [
+            ALPromotedItem(name="good", status="active", priority=1),
+            ALPromotedItem(name="bad", status="INVALID_STATUS", priority=2),
+        ]
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            await ALPromotedItem.asave_many(items)
+
+        count = await ALPromotedItem.query().count()
+        assert count == 0
+    finally:
+        ALPromotedItem._db = None
+        ALPromotedItem._table = None
 
 
 @pytest.mark.asyncio
@@ -182,6 +255,33 @@ async def test_asave_many_safe_model(db):
     finally:
         ALSafeItem._db = None
         ALSafeItem._table = None
+
+
+@pytest.mark.asyncio
+async def test_asave_many_safe_model_with_promoted(db):
+    ALSafePromotedItem.set_db(db)
+    try:
+        items = [
+            ALSafePromotedItem(name="x", status="pending"),
+            ALSafePromotedItem(name="y", status="pending"),
+        ]
+        await ALSafePromotedItem.asave_many(items)
+
+        ids = [item._id for item in items]
+        assert ids == list(range(ids[0], ids[0] + 2))
+        assert all(item._version == 0 for item in items)
+
+        found = await ALSafePromotedItem.query().order_by("_id").all()
+        assert len(found) == 2
+        assert found[0].name == "x"
+        assert found[0].status == "pending"
+        assert found[0]._version == 0
+        assert found[1].name == "y"
+        assert found[1].status == "pending"
+        assert found[1]._version == 0
+    finally:
+        ALSafePromotedItem._db = None
+        ALSafePromotedItem._table = None
 
 
 @pytest.mark.asyncio

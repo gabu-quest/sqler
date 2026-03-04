@@ -101,6 +101,9 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
         )
         q = AsyncSQLerQuery(table=table, adapter=db.adapter)
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            q = q._clone(promoted_fields=list(promoted.keys()))
         return AsyncSQLerQuerySet[TAModel](cls, q)
 
     @classmethod
@@ -189,6 +192,9 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
 
         db, table = cls._require_binding()
         q = AsyncSQLerQuery(table=table, adapter=db.adapter)
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            q = q._clone(promoted_fields=list(promoted.keys()))
         return AsyncSQLerQuerySet[TAModel](cls, q)
 
     @classmethod
@@ -284,8 +290,18 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """
         cls = self.__class__
         db, table = cls._resolve_binding(db)
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted and table not in db._promoted_columns:
+            checks = getattr(cls, "__checks__", None)
+            await db._ensure_table_with_promoted(table, promoted, checks)
+        elif not promoted:
+            await db._ensure_table(table)
         payload = await self._adump_with_relations()
-        new_id = await db.upsert_document(table, self._id, payload)
+        if promoted:
+            promoted_fields = list(promoted.keys())
+            new_id = await db.upsert_document_promoted(table, self._id, payload, promoted_fields)
+        else:
+            new_id = await db.upsert_document(table, self._id, payload)
         object.__setattr__(self, "_id", new_id)
         object.__setattr__(self, "_snapshot", payload.copy())
         return self

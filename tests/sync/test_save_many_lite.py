@@ -19,10 +19,35 @@ class LItem(SQLerLiteModel):
 
 
 @dataclass
+class LPromotedItem(SQLerLiteModel):
+    __tablename__ = "lite_promoted_items"
+    __promoted__ = {
+        "status": "TEXT NOT NULL DEFAULT 'active'",
+        "priority": "INTEGER DEFAULT 0",
+    }
+    __checks__ = {
+        "valid_status": "status IN ('active', 'inactive', 'archived')",
+    }
+    name: str = ""
+    status: str = "active"
+    priority: int = 0
+
+
+@dataclass
 class LSafeItem(SQLerLiteSafeModel):
     __tablename__ = "lite_safe_items"
     name: str = ""
     value: int = 0
+
+
+@dataclass
+class LSafePromotedItem(SQLerLiteSafeModel):
+    __tablename__ = "lite_safe_promoted_items"
+    __promoted__ = {
+        "status": "TEXT NOT NULL DEFAULT 'pending'",
+    }
+    name: str = ""
+    status: str = "pending"
 
 
 # ---- fixtures ----
@@ -75,6 +100,52 @@ def test_save_many_rejects_existing(db):
     finally:
         LItem._db = None
         LItem._table = None
+
+
+def test_save_many_with_promoted(db):
+    LPromotedItem.set_db(db)
+    try:
+        items = [
+            LPromotedItem(name="a", status="active", priority=1),
+            LPromotedItem(name="b", status="inactive", priority=2),
+            LPromotedItem(name="c", status="archived", priority=3),
+        ]
+        LPromotedItem.save_many(items)
+
+        ids = [item._id for item in items]
+        assert ids == list(range(ids[0], ids[0] + 3))
+
+        found = LPromotedItem.query().order_by("priority").all()
+        assert len(found) == 3
+        assert found[0].name == "a"
+        assert found[0].status == "active"
+        assert found[0].priority == 1
+        assert found[1].name == "b"
+        assert found[1].status == "inactive"
+        assert found[2].name == "c"
+        assert found[2].status == "archived"
+        assert found[2].priority == 3
+    finally:
+        LPromotedItem._db = None
+        LPromotedItem._table = None
+
+
+def test_save_many_atomicity_promoted(db):
+    """If one row violates a CHECK constraint, no rows should be saved."""
+    LPromotedItem.set_db(db)
+    try:
+        items = [
+            LPromotedItem(name="good", status="active", priority=1),
+            LPromotedItem(name="bad", status="INVALID_STATUS", priority=2),
+        ]
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            LPromotedItem.save_many(items)
+
+        count = LPromotedItem.query().count()
+        assert count == 0
+    finally:
+        LPromotedItem._db = None
+        LPromotedItem._table = None
 
 
 def test_save_many_roundtrip(db):
@@ -172,6 +243,32 @@ def test_save_many_safe_model(db):
     finally:
         LSafeItem._db = None
         LSafeItem._table = None
+
+
+def test_save_many_safe_model_with_promoted(db):
+    LSafePromotedItem.set_db(db)
+    try:
+        items = [
+            LSafePromotedItem(name="x", status="pending"),
+            LSafePromotedItem(name="y", status="pending"),
+        ]
+        LSafePromotedItem.save_many(items)
+
+        ids = [item._id for item in items]
+        assert ids == list(range(ids[0], ids[0] + 2))
+        assert all(item._version == 0 for item in items)
+
+        found = LSafePromotedItem.query().order_by("_id").all()
+        assert len(found) == 2
+        assert found[0].name == "x"
+        assert found[0].status == "pending"
+        assert found[0]._version == 0
+        assert found[1].name == "y"
+        assert found[1].status == "pending"
+        assert found[1]._version == 0
+    finally:
+        LSafePromotedItem._db = None
+        LSafePromotedItem._table = None
 
 
 def test_save_many_safe_model_rejects_existing(db):
