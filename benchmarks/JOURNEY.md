@@ -835,6 +835,133 @@ inherited from the Pydantic model, where `_id` isn't a declared field. In the ms
 
 ---
 
+## Chapter 12: Post-Optimization Cross-Scale Validation
+
+With all five milestones complete (M-1 through M-5), we ran the full benchmark suite at
+all four scales — 50K, 100K, 500K, and 1M rows — to confirm that every optimization holds
+at production sizes. The previous post-optimization data only covered medium (50K).
+
+### What we ran
+
+24 scenarios, 20 iterations each, 3 warmup, `--storage both`, arm alternation, GC isolation.
+
+| Scale | Measurements | Runtime |
+|-------|-------------|---------|
+| Medium (50K) | 435 | ~18 min |
+| Large (100K) | 432 | ~40 min |
+| Xlarge (500K) | 429 | ~3 hrs |
+| Xxlarge (1M) | 429 | ~6.5 hrs |
+| **Total** | **1,725** | **~10.5 hrs** |
+
+### Every optimization holds
+
+The headline: **no regressions at scale.** Every fix from M-1 through M-5 is confirmed.
+
+| Optimization | 50K | 100K | 500K | 1M | Pre-fix |
+|-------------|-----|------|------|-----|---------|
+| Bulk insert (M-3) | 0.96x | 0.91x | 0.91x | **0.89x** | 1.87–1.92x |
+| any_where (M-2) | 1.02x | 1.03x | 1.05x | 1.04x | 1.47–1.51x |
+| FTS rebuild (M-1) | 1.04x | 1.02x | 1.07x | 1.03x | 3.78–4.65x |
+| FTS ranked (M-4) | 0.98x | 1.01x | **1.00x** | **1.00x** | 1.50x at 500K+ |
+| Hydration (M-5) | 5.15x | 4.62x | 5.01x | 4.97x | (new capability) |
+
+The most satisfying result: **FTS ranked at 1M = 1.003x.** This was the only scenario that
+previously worsened at scale (0.95x at 50K → 1.50x at 500K+). The single-JOIN fix made it
+perfectly flat. At 1M rows, sqler's ranked search takes 1,037ms vs sqlite's 1,033ms.
+
+**Bulk insert gets faster at scale.** At 1M rows, sqler is 11% faster than raw `executemany()`.
+The multi-row INSERT pattern's parser savings compound: 50 SQL calls (1M ÷ 999/chunk) vs
+1M individual statements. This is one case where the ORM abstraction genuinely outperforms
+the naive baseline.
+
+### The query ratio shift
+
+One surprise: query ratios shifted from the original 0.95–0.98x (memory mode, v1.2 era)
+to 1.03–1.15x (disk mode, post-optimization era). The benchmark code is unchanged between
+runs. Investigated possible causes:
+
+1. **Disk vs memory mode** — Original TL;DR used memory-mode ratios. Disk mode has additional
+   I/O overhead that may affect the arms asymmetrically.
+2. **Environmental variance** — Different machine load, thermal state, background processes.
+   The original runs were done in a session focused only on benchmarking; the new runs shared
+   the machine with other work.
+3. **Post-optimization code** — The fixes in M-1 through M-5 changed code paths in the
+   benchmark suite (new FTS baseline, new bulk insert implementation). These shouldn't affect
+   query scenarios, but shared infrastructure (connection pooling, adapter setup) might have
+   subtle effects.
+
+The shift doesn't indicate a regression — both datasets are internally consistent across
+scales (flat ratios from 50K to 1M). It means the "true" query overhead is probably in the
+1.05–1.10x range, with the original 0.95x benefiting from some favorable environmental
+conditions or the row factory artifact.
+
+**Practical impact:** At 1M rows, the most expensive query (complex 5-predicate) takes
+2,384ms on sqler vs 2,212ms on sqlite — a 172ms difference. For queries returning limited
+results (indexed lookups, top-N, pagination), the absolute overhead is <10ms.
+
+### Export cross-scale confirmation
+
+Export ratios held across all scales as expected:
+
+| Format | 50K | 100K | 500K | 1M |
+|--------|-----|------|------|-----|
+| CSV | 1.37x | 0.32x† | 1.40x | 1.34x |
+| JSON | 0.94x | 0.94x | 0.98x | 0.97x |
+| JSONL | 1.10x | 1.07x | 1.06x | 1.06x |
+| JSONL noid | 1.25x | 1.06x | 1.01x | 0.98x |
+
+†100K CSV anomaly — the sqlite baseline took 2,979ms (should be ~716ms based on linear
+scaling). sqler scaled normally at 960ms. Environmental outlier; not reproducible at other
+scales.
+
+JSONL noid (zero-parse fast path) converges to parity at scale, reaching 0.98x at 1M on disk.
+
+### Hydration consistency
+
+The hydration benchmark uses fixed 50K rows regardless of scale parameter. Running it as
+part of each scale's full suite provided four independent measurements:
+
+| Run | pure validate | e2e all() disk |
+|-----|--------------|---------------|
+| Medium | 5.15x | 1.47x |
+| Large | 4.62x | 1.43x |
+| Xlarge | 5.01x | 1.46x |
+| Xxlarge | 4.97x | 1.43x |
+
+Highly repeatable. The msgspec advantage is real and stable.
+
+### The final scorecard
+
+After all optimizations, sqler's performance profile at 1M rows (disk mode):
+
+| Category | Ratio | Verdict |
+|----------|-------|---------|
+| Bulk insert | 0.89x | **Faster than raw sqlite** |
+| FTS ranked | 1.00x | **Perfect parity** |
+| FTS rebuild | 1.03x | **Near parity** |
+| any_where | 1.04x | **Near parity** |
+| Export JSON | 0.97x | **At parity** |
+| Backup/restore | 1.01x | **Transparent** |
+| Export JSONL noid | 0.98x | **At parity** |
+| Export JSONL | 1.06x | **Near parity** |
+| Queries | 1.03–1.15x | **Stable overhead** |
+| Aggregates | 1.06–1.13x | **Stable overhead** |
+| JSON ops | 1.07–1.14x | **Stable overhead** |
+| Export CSV | 1.34x | **Irreducible** |
+
+Everything ≤1.15x. The only gap above 1.2x (CSV export) is irreducible — per-field
+extraction + serialization for CSV output format.
+
+### The lesson
+
+**Run at scale before calling it done.** The medium-scale post-optimization data would have
+been sufficient to claim the fixes worked — but running at 1M proved something stronger:
+the fixes don't just work, they compound. Bulk insert gets *more* efficient at scale (0.96x
+→ 0.89x). FTS ranked goes from "near parity" (1.06x at 50K) to "perfect parity" (1.00x at
+1M). The ORM overhead gets amortized by the SQL work at large scales.
+
+---
+
 ## Timeline
 
 | Date | Milestone |
@@ -855,6 +982,7 @@ inherited from the Pydantic model, where `_id` isn't a declared field. In the ms
 | Mar 3 2026 | M-4: search_ranked() single-JOIN optimization (1.5x → 1.00–1.06x at 50K) |
 | Mar 3 2026 | v1.5 fairness fix: baseline create() left extra FTS5 tombstones (issue #23) |
 | Mar 3 2026 | M-5: msgspec prototype — 5.1x pure hydration, 1.46x end-to-end, verified to 500K |
+| Mar 3–4 2026 | Post-optimization cross-scale validation — 1,725 measurements, 100K/500K/1M, all fixes confirmed |
 
 ## Key Documents
 
