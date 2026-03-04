@@ -64,6 +64,23 @@ jobs:
             uv run marimo export html-wasm "$notebook" -o "_site/lite/${name}"
           done
 
+      - name: Enable cross-origin isolation (SharedArrayBuffer)
+        # GitHub Pages doesn't set COOP/COEP headers, which are required for
+        # SharedArrayBuffer (used by Pyodide workers). coi-serviceworker injects
+        # these headers via a service worker, enabling full interactivity.
+        # See: https://github.com/gzuidhof/coi-serviceworker
+        run: |
+          # Download coi-serviceworker to site root
+          curl -sL https://unpkg.com/coi-serviceworker@0.1.7/coi-serviceworker.min.js \
+            -o _site/coi-serviceworker.min.js
+
+          # Inject the script tag into every generated index.html
+          find _site -name 'index.html' -exec sed -i \
+            's|<head>|<head><script src="/sqler/coi-serviceworker.min.js"></script>|' {} \;
+
+          # Prevent Jekyll processing
+          touch _site/.nojekyll
+
           # Create English index page
           cat > _site/index.html << 'HTMLEOF'
           <!DOCTYPE html>
