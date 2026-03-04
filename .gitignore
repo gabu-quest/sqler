@@ -19,6 +19,12 @@ __marimo__/
 benchmarks/results/
 !benchmarks/results/.gitkeep
 
+# Claude Code local config (contains private plans/settings)
+.claude/
+
+# Generated site output
+_site/
+
 # Benchmark v1.1 archive (frozen snapshot, evidence only)
 benchmarks/v1.1-archive/
 
