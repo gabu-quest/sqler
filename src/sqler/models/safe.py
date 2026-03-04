@@ -127,14 +127,10 @@ class SQLerSafeModel(SQLerModel):
         else:
             id_version_pairs = db.insert_many_with_version(table, payloads)
 
-        for inst, (id_, version) in zip(instances, id_version_pairs):
+        for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             inst._id = id_
             inst._version = version
-            try:
-                payload = inst._dump_with_relations()
-                inst._snapshot = {k: v for k, v in payload.items() if k not in {"_id", "_version"}}
-            except Exception:
-                pass
+            inst._snapshot = {k: v for k, v in payload.items() if k not in {"_id", "_version"}}
         return instances
 
     def save(self: TSafe, *, db=None) -> TSafe:  # type: ignore[override]
