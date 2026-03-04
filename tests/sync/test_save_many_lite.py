@@ -8,7 +8,6 @@ from sqler import SQLerDB
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
 
-
 # ---- test models ----
 
 @dataclass

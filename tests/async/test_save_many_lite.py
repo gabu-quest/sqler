@@ -9,7 +9,6 @@ from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 
-
 # ---- test models ----
 
 @dataclass

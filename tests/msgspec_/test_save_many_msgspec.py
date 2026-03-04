@@ -6,7 +6,6 @@ import pytest
 from sqler import SQLerDB
 from sqler.models.msgspec.model import SQLerMsgspecModel
 
-
 # ---- test models ----
 
 class MItem(SQLerMsgspecModel):
