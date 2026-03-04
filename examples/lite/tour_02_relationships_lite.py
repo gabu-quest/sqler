@@ -46,16 +46,11 @@ async def _():
             sqler_ready = True
         else:
             try:
-                import js
                 import micropip
 
-                wheel_name = "sqler-1.2026.1.6-py3-none-any.whl"
-                wheel_url = str(
-                    js.URL.new(f"../../{wheel_name}", js.self.location.href)
-                )
-                await micropip.install(wheel_url)
+                await micropip.install("sqler")
             except Exception as exc:
-                print("Failed to install sqler wheel in Pyodide:", exc)
+                print("Failed to install sqler in Pyodide:", exc)
             else:
                 if importlib_util.find_spec("sqler") is not None:
                     sqler_ready = True
