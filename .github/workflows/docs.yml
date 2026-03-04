@@ -68,15 +68,20 @@ jobs:
         # GitHub Pages doesn't set COOP/COEP headers, which are required for
         # SharedArrayBuffer (used by Pyodide workers). coi-serviceworker injects
         # these headers via a service worker, enabling full interactivity.
+        # The .js file MUST be in each notebook directory (not just site root)
+        # because service worker scope is limited to the script's directory.
         # See: https://github.com/gzuidhof/coi-serviceworker
         run: |
-          # Download coi-serviceworker to site root
+          # Download coi-serviceworker
           curl -sL https://unpkg.com/coi-serviceworker@0.1.7/coi-serviceworker.min.js \
-            -o _site/coi-serviceworker.min.js
+            -o /tmp/coi-serviceworker.min.js
 
-          # Inject the script tag into every generated index.html
-          find _site -name 'index.html' -exec sed -i \
-            's|<head>|<head><script src="/sqler/coi-serviceworker.min.js"></script>|' {} \;
+          # Copy into every notebook directory and inject script tag
+          for dir in $(find _site -name 'index.html' -exec dirname {} \;); do
+            cp /tmp/coi-serviceworker.min.js "$dir/"
+            sed -i 's|<head>|<head><script src="coi-serviceworker.min.js"></script>|' \
+              "$dir/index.html"
+          done
 
           # Prevent Jekyll processing
           touch _site/.nojekyll
