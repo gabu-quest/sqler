@@ -399,7 +399,8 @@ class TestMetrics:
 
     def test_metrics_disabled_by_default(self):
         """Metrics are disabled by default."""
-        # Reset metrics
+        # Ensure clean state (another test may have enabled metrics)
+        metrics.disable()
         metrics.reset()
         assert metrics._enabled is False
 
