@@ -38,53 +38,36 @@ jobs:
       - name: Export notebooks to WASM (fully interactive)
         # Lite tours install sqler from PyPI at runtime via micropip.install("sqler").
         # No wheel bundling needed — Pyodide fetches the latest release automatically.
+        # Uses --mode edit for full interactivity (code editing + execution).
+        # marimo pinned to 0.13.x — newer versions have a WASM template regression
+        # where {{ version }}, {{ user_config }}, {{ server_token }} are not resolved,
+        # breaking the frontend-to-worker RPC handshake.
         run: |
           mkdir -p _site
           mkdir -p _site/ja
           mkdir -p _site/lite
+          touch _site/.nojekyll
 
-          # Export each English tour notebook as WASM for full interactivity
+          # Export each English tour notebook as WASM
           for notebook in examples/tour_*.py; do
             name=$(basename "$notebook" .py)
             echo "Exporting $name as WASM..."
-            uv run marimo export html-wasm "$notebook" -o "_site/${name}"
+            uv run marimo export html-wasm "$notebook" -o "_site/${name}" --mode edit
           done
 
           # Export each Japanese tour notebook as WASM
           for notebook in examples/ja/tour_*.py; do
             name=$(basename "$notebook" .py)
             echo "Exporting ja/$name as WASM..."
-            uv run marimo export html-wasm "$notebook" -o "_site/ja/${name}"
+            uv run marimo export html-wasm "$notebook" -o "_site/ja/${name}" --mode edit
           done
 
           # Export lite tours (dataclass-based, WASM-compatible)
           for notebook in examples/lite/tour_*_lite.py; do
             name=$(basename "$notebook" .py)
             echo "Exporting lite/$name as WASM..."
-            uv run marimo export html-wasm "$notebook" -o "_site/lite/${name}"
+            uv run marimo export html-wasm "$notebook" -o "_site/lite/${name}" --mode edit
           done
-
-      - name: Enable cross-origin isolation (SharedArrayBuffer)
-        # GitHub Pages doesn't set COOP/COEP headers, which are required for
-        # SharedArrayBuffer (used by Pyodide workers). coi-serviceworker injects
-        # these headers via a service worker, enabling full interactivity.
-        # The .js file MUST be in each notebook directory (not just site root)
-        # because service worker scope is limited to the script's directory.
-        # See: https://github.com/gzuidhof/coi-serviceworker
-        run: |
-          # Download coi-serviceworker
-          curl -sL https://unpkg.com/coi-serviceworker@0.1.7/coi-serviceworker.min.js \
-            -o /tmp/coi-serviceworker.min.js
-
-          # Copy into every notebook directory and inject script tag
-          for dir in $(find _site -name 'index.html' -exec dirname {} \;); do
-            cp /tmp/coi-serviceworker.min.js "$dir/"
-            sed -i 's|<head>|<head><script src="coi-serviceworker.min.js"></script>|' \
-              "$dir/index.html"
-          done
-
-          # Prevent Jekyll processing
-          touch _site/.nojekyll
 
           # Create English index page
           cat > _site/index.html << 'HTMLEOF'
