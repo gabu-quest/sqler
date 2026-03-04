@@ -7,7 +7,7 @@
 [![Tests](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml/badge.svg)](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**A lightweight, JSON-first micro-ORM for SQLite.** Define Pydantic models, persist them as JSON documents, query with a fluent API. Sync and async.
+**A lightweight, JSON-first micro-ORM for SQLite.** Define models with Pydantic, dataclasses, or msgspec — persist them as JSON documents, query with a fluent API. Sync and async.
 
 ## Install
 
@@ -40,6 +40,50 @@ assert admins[0].name == "Alice"
 young = User.query().filter(F("age") < 28).order_by("name").all()
 assert young[0].name == "Bob"
 ```
+
+### Three Model Backends, One API
+
+<details>
+<summary><b>Dataclass</b> — zero dependencies, WASM compatible</summary>
+
+```python
+from dataclasses import dataclass
+from sqler import SQLerDB
+from sqler.models.lite import SQLerLiteModel
+
+@dataclass
+class User(SQLerLiteModel):
+    __tablename__ = "users"
+    name: str = ""
+    age: int = 0
+
+db = SQLerDB.in_memory()
+User.set_db(db)
+User(name="Alice", age=30).save()
+```
+
+</details>
+
+<details>
+<summary><b>msgspec</b> — C-level JSON performance</summary>
+
+```python
+from sqler import SQLerDB
+from sqler.models.msgspec import SQLerMsgspecModel
+
+class User(SQLerMsgspecModel):
+    __tablename__ = "users"
+    name: str = ""
+    age: int = 0
+
+db = SQLerDB.in_memory()
+User.set_db(db)
+User(name="Alice", age=30).save()
+```
+
+</details>
+
+All three backends share the same query API (`filter`, `order_by`, `save_many`, etc.), safe model variants with optimistic locking, and sync + async support.
 
 ## See It in Action
 
@@ -105,7 +149,7 @@ uv run marimo edit examples/tour_01_fundamentals.py
 
 ## Why sqler?
 
-SQLite is the most deployed database on earth, and JSON1 turns it into a document store. sqler bridges that gap: you get Pydantic validation with document-style flexibility, a fluent query builder that reaches into nested JSON, and real data integrity (optimistic locking, referential policies, transactions) — all in a single file, zero-config database.
+SQLite is the most deployed database on earth, and JSON1 turns it into a document store. sqler bridges that gap: define models with your preferred backend (Pydantic, dataclasses, or msgspec), get document-style flexibility with a fluent query builder that reaches into nested JSON, and real data integrity (optimistic locking, referential policies, transactions) — all in a single file, zero-config database.
 
 ---
 
@@ -120,7 +164,7 @@ Real numbers from the benchmark suite (22 scenarios, Python 3.12, SQLite 3.50):
 | Cache hit | **7,000x** | 14ms → 0.002ms with `@cached_query` |
 | FTS search | **0.28ms** | Sub-millisecond across all dataset sizes |
 | Bulk vs single | **5.2x** | `bulk_upsert` vs `save()` loop at 10K |
-| Lite models | **1.3x** | Dataclass variant vs Pydantic overhead |
+| Lite/msgspec models | **1.3x** | Dataclass or msgspec variant vs Pydantic overhead |
 
 ### Honest Limitations
 
@@ -136,7 +180,10 @@ Run `uv run python -m benchmarks run --scale medium --storage both` to generate 
 ## Features
 
 **Core**
-- JSON document models with Pydantic validation (+ lightweight dataclass variant)
+- Three model backends — all with the same API:
+  - **Pydantic** (`SQLerModel`) — full validation, rich serialization
+  - **Dataclass** (`SQLerLiteModel`) — zero dependencies, WASM/Pyodide compatible
+  - **msgspec** (`SQLerMsgspecModel`) — C-level JSON performance, Struct-based
 - Fluent query builder: `filter`, `exclude`, `order_by`, `paginate`, `contains`, `isin`, `between`
 - `F()` operator for nested fields: `F("x")["y"]`, `F(["items"]).any().where(...)`
 - Sync and async APIs with matching semantics
@@ -164,7 +211,8 @@ Run `uv run python -m benchmarks run --scale medium --storage both` to generate 
 - Fast prototyping with real persistence
 - SQLite as embedded app state (Electron, CLI tools, mobile)
 - JSON flexibility + data integrity in one package
-- Pydantic validation on your data layer
+- Pick your model backend: Pydantic (validation), dataclasses (lightweight), msgspec (speed)
+- Browser/WASM apps via Pyodide (dataclass backend)
 
 **Consider alternatives:**
 - Need multi-database support → [SQLAlchemy](https://www.sqlalchemy.org/)
