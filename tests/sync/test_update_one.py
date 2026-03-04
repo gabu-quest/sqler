@@ -1,8 +1,7 @@
 """Tests for update_one with RETURNING."""
 
 import pytest
-from sqler import SQLerDB, SQLerModel, SQLerSafeModel, F
-
+from sqler import F, SQLerDB, SQLerModel, SQLerSafeModel
 
 # ---- Basic update_one tests ----
 

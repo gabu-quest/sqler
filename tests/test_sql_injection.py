@@ -1,15 +1,11 @@
 """Adversarial tests for SQL injection prevention via field/identifier validation."""
 
-import re
-from unittest.mock import MagicMock
 
 import pytest
-
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import InvalidFieldNameError, InvalidIdentifierError
 from sqler.fts import FTSIndex
 from sqler.ops import checkpoint
-from sqler.query.query import SQLerQuery
 from sqler.utils import validate_field_name, validate_identifier
 
 # ---------------------------------------------------------------------------

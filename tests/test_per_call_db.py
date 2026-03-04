@@ -6,16 +6,18 @@ SQLerModel, SQLerSafeModel, SQLerLiteModel, SQLerLiteSafeModel.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
-from sqler.exceptions import InvalidIdentifierError, InvalidTableNameError, NotBoundError, StaleVersionError
+from sqler.exceptions import (
+    InvalidIdentifierError,
+    InvalidTableNameError,
+    NotBoundError,
+    StaleVersionError,
+)
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
 from sqler.models.utils import RebaseConfig
-from sqler.query import F
-
 
 # ── Pydantic model fixtures ──────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 """Sync tests for update_n (batch update with RETURNING)."""
 
 import pytest
-from sqler import SQLerDB, SQLerModel, SQLerSafeModel, F
+from sqler import F, SQLerDB, SQLerModel, SQLerSafeModel
 
 
 class SyncItem(SQLerModel):

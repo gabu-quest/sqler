@@ -2,10 +2,8 @@
 
 import pytest
 import pytest_asyncio
-
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import InvalidFieldNameError, InvalidIdentifierError
-from sqler.query.async_query import AsyncSQLerQuery
 
 EVIL_FIELDS = [
     "x') FROM users--",

@@ -5,7 +5,6 @@ import pytest_asyncio
 from sqler import AsyncSQLerDB
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.query import F
-from sqler.query.field import SQLerUpdateExpression
 
 
 class AsyncCounter(AsyncSQLerModel):

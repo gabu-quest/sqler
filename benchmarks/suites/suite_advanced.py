@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import gc
 import os
-import sqlite3
 import tempfile
 import threading
 import time
@@ -35,7 +34,6 @@ from benchmarks.core.sqlite_baseline import (
     create_conn,
     create_table,
     fetch_as_strings,
-    insert_loop,
     insert_many,
 )
 from benchmarks.core.timer import PrecisionTimer, timing_stats_from_list

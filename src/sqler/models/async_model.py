@@ -384,6 +384,7 @@ class AsyncSQLerModel(BaseModel):
     async def _adump_with_relations(self) -> dict:
         async def aencode(value: Any):
             from datetime import datetime
+
             from sqler.models.async_model import AsyncSQLerModel
             from sqler.models.model import SQLerModel
 

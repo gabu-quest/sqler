@@ -338,7 +338,7 @@ def _extrapolate(scenarios: list[ScenarioMemProfile], scale_name: str, available
     if not targets:
         return
 
-    _print(f"\n  Extrapolation (per-scenario complexity class):")
+    _print("\n  Extrapolation (per-scenario complexity class):")
 
     for mult, target_name, rows in targets:
         _print(f"\n    {target_name} ({rows:,} rows):")
@@ -395,7 +395,6 @@ def main() -> None:
     baseline_mb = _get_python_baseline()
 
     from benchmarks.core.config import BenchmarkConfig, ScaleConfig
-    from benchmarks.core.runner import BenchmarkRunner
     from benchmarks.suites import get_scenarios
 
     scale = ScaleConfig.from_name(args.scale)
@@ -413,18 +412,15 @@ def main() -> None:
         python_baseline_mb=round(baseline_mb, 2),
     )
 
-    _print(f"\n  Memory-profiled benchmark run")
+    _print("\n  Memory-profiled benchmark run")
     _print(f"  Scale: {scale.name} (max {scale.max_rows:,} rows)")
     _print(f"  Runs per scenario: {args.runs}")
     _print(f"  System: {total_mb:,.0f} MB total, {available_mb:,.0f} MB available")
     _print(f"  Python baseline: {baseline_mb:.1f} MB")
 
-    runner = BenchmarkRunner(config)
     scenarios = get_scenarios(args.suite)
     total = len(scenarios)
     _print(f"  Running {total} scenarios × {args.runs} runs...\n")
-
-    all_results = []
 
     for i, scenario in enumerate(scenarios, 1):
         label = f"{scenario.suite}/{scenario.name}"
@@ -454,7 +450,7 @@ def main() -> None:
 
         # Overhead estimation (extra pass without tracemalloc)
         if args.estimate_overhead:
-            _print(f"       estimating overhead (no-tracemalloc pass)...")
+            _print("       estimating overhead (no-tracemalloc pass)...")
             rss_delta = _estimate_overhead(scenario, config)
             if rss_delta is not None and profile.peak_mb > 0:
                 overhead = ((profile.peak_mb - rss_delta) / profile.peak_mb) * 100
@@ -472,7 +468,7 @@ def main() -> None:
 
         # Top 3 diff allocators (run-phase only)
         if profile.diff_allocators:
-            _print(f"       run-phase allocators:")
+            _print("       run-phase allocators:")
             for alloc in profile.diff_allocators[:3]:
                 _print(f"          {alloc['size_diff_mb']:6.1f} MB  "
                        f"{alloc['file']}:{alloc['line']} "
@@ -517,10 +513,10 @@ def main() -> None:
     _extrapolate(report.scenarios, scale.name, available_mb)
 
     _print(f"\n  Full report: {report_path}")
-    _print(f"  Caveats:")
-    _print(f"    - tracemalloc adds ~30% overhead to measured peaks")
-    _print(f"    - setup memory (pre-created DBs) separated from run memory")
-    _print(f"    - indexes scale O(n log n), connections O(1), only docs are O(n)")
+    _print("  Caveats:")
+    _print("    - tracemalloc adds ~30% overhead to measured peaks")
+    _print("    - setup memory (pre-created DBs) separated from run memory")
+    _print("    - indexes scale O(n log n), connections O(1), only docs are O(n)")
     _print(f"    - peaks are median of {args.runs} runs (min/max shown in brackets)")
 
     # Budget enforcement

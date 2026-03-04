@@ -222,8 +222,12 @@ __all__ = [
     # Compatibility helpers
     "PYDANTIC_AVAILABLE",
     "PYDANTIC_VERSION",
+    "MSGSPEC_AVAILABLE",
+    "MSGSPEC_VERSION",
     "require_pydantic",
+    "require_msgspec",
     "get_model_backend",
     "is_pydantic_model",
     "is_lite_model",
+    "is_msgspec_model",
 ]

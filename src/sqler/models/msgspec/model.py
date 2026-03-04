@@ -5,21 +5,25 @@ SQLerLiteModel that uses msgspec Structs for C-level JSON decode+validate.
 It maintains full API compatibility with SQLerLiteModel.
 """
 
+from __future__ import annotations
+
 import warnings
 from typing import (
+    TYPE_CHECKING,
     Any,
-    ClassVar,
     Optional,
     Type,
     TypeVar,
 )
 
-import msgspec.structs
-
 from sqler import registry
 from sqler.exceptions import NotBoundError
 from sqler.models.msgspec.base import SQLerMsgspecModelBase, _public_fields
 from sqler.utils import validate_table_name
+
+if TYPE_CHECKING:
+    from sqler.db.sqler_db import SQLerDB
+    from sqler.models.queryset import SQLerQuerySet
 
 T = TypeVar("T", bound="SQLerMsgspecModel")
 

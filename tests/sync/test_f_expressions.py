@@ -1,9 +1,8 @@
 """Tests for F-expression support in update()."""
 
 import pytest
-from sqler import SQLerDB, SQLerModel, SQLerSafeModel, F
+from sqler import F, SQLerDB, SQLerModel
 from sqler.query.field import SQLerUpdateExpression
-
 
 # ---- Expression building tests ----
 

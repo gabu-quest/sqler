@@ -18,7 +18,6 @@ from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
 
-
 # ── Sync model classes ────────────────────────────────────────────────────
 
 

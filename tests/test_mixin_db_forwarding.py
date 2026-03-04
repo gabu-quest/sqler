@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqler import SQLerDB, SQLerModel
-from sqler.query import F
 from sqler.models.mixins import (
     AuditLogMixin,
     AuditMixin,
@@ -17,7 +16,7 @@ from sqler.models.mixins import (
     SoftDeleteMixin,
     TimestampMixin,
 )
-
+from sqler.query import F
 
 # ── Model fixtures ──────────────────────────────────────────────────────────
 
