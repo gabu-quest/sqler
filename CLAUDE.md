@@ -2,27 +2,18 @@
 
 Document-oriented JSON store on SQLite.
 
-## Active Roadmaps
-- [perf-optimizations](./ROADMAP-PERF.md) — M-1 through M-5 complete (msgspec prototype: 2.1x hydration speedup)
-- [qler-prerequisites](./ROADMAP-QLER.md) — all milestones complete (M-1 through M-11)
-
-## Benchmarks
-- [Benchmark journey](./benchmarks/JOURNEY.md) — the full story: v1.1 → v1.2 → export optimization → Pydantic discovery
-- [Findings & optimization roadmap](./benchmarks/FINDINGS.md) — prioritized performance gaps
-- [Memory profiling journey](./benchmarks/MEMPROFILE.md) — tracemalloc methodology
-
-### Benchmark Hygiene (MANDATORY)
+## Benchmark Hygiene (MANDATORY)
 
 1. **Always run with `--storage both`** — never report memory-only results. Disk I/O can change ratios.
 2. **Every sqler measurement needs a sqlite baseline** — no orphan measurements. If there's no natural baseline, document why.
-3. **Both arms must do equivalent work** — matched PRAGMAs, matched SQL, matched serialization. See `benchmarks/TODO-SCRUTINY.md` for the full fairness checklist.
+3. **Both arms must do equivalent work** — matched PRAGMAs, matched SQL, matched serialization.
 4. **Run at medium scale minimum** (50K rows) — small scale results are noisy and misleading.
 5. **Document known caveats** — every benchmark has weaknesses. State them, don't hide them.
 
 ## Follow-up TODO
 
 ### Architecture decisions pending
-- [ ] [Hydration alternatives](./docs/HYDRATION-ALTERNATIVES.md) — Pydantic vs msgspec vs raw dicts for bulk reads. Export optimization proved hydration is the bottleneck; need to decide on `queryset.as_dicts()` API and whether to prototype `SQLerMsgspecModel`.
+- [x] Hydration alternatives — msgspec prototype shipped (M-5: 2.1x hydration speedup). `SQLerMsgspecModel` available as opt-in.
 
 ### From BUG-1/BUG-2 plan (not in scope)
 - [~] Deprecate `set_db()` — soft deprecation with `warnings.warn()` added (M-5); full removal deferred
