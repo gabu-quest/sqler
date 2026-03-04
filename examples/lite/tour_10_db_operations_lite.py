@@ -12,6 +12,7 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    # --- marimo scaffolding (please ignore) ---
     import marimo as mo
 
     return (mo,)
@@ -19,6 +20,9 @@ def _():
 
 @app.cell
 async def _():
+    # --- WASM scaffolding (please ignore) ---
+    # Loads sqlite3 + sqler in Pyodide/browser environments.
+    # Not needed when running locally with `marimo edit`.
     import sys
 
     pyodide_sqlite3_ready = True

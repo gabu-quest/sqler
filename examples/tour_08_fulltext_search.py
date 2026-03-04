@@ -11,6 +11,7 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    # --- marimo scaffolding (please ignore) ---
     import marimo as mo
     return (mo,)
 
