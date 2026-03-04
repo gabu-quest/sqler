@@ -39,33 +39,25 @@ jobs:
         # Lite tours install sqler from PyPI at runtime via micropip.install("sqler").
         # No wheel bundling needed — Pyodide fetches the latest release automatically.
         # Uses --mode edit for full interactivity (code editing + execution).
-        # marimo pinned to 0.13.x — newer versions have a WASM template regression
-        # where {{ version }}, {{ user_config }}, {{ server_token }} are not resolved,
-        # breaking the frontend-to-worker RPC handshake.
         run: |
-          mkdir -p _site
-          mkdir -p _site/ja
-          mkdir -p _site/lite
+          mkdir -p _site _site/ja _site/lite
           touch _site/.nojekyll
 
-          # Export each English tour notebook as WASM
           for notebook in examples/tour_*.py; do
             name=$(basename "$notebook" .py)
-            echo "Exporting $name as WASM..."
+            echo "Exporting $name..."
             uv run marimo export html-wasm "$notebook" -o "_site/${name}" --mode edit
           done
 
-          # Export each Japanese tour notebook as WASM
           for notebook in examples/ja/tour_*.py; do
             name=$(basename "$notebook" .py)
-            echo "Exporting ja/$name as WASM..."
+            echo "Exporting ja/$name..."
             uv run marimo export html-wasm "$notebook" -o "_site/ja/${name}" --mode edit
           done
 
-          # Export lite tours (dataclass-based, WASM-compatible)
           for notebook in examples/lite/tour_*_lite.py; do
             name=$(basename "$notebook" .py)
-            echo "Exporting lite/$name as WASM..."
+            echo "Exporting lite/$name..."
             uv run marimo export html-wasm "$notebook" -o "_site/lite/${name}" --mode edit
           done
 
