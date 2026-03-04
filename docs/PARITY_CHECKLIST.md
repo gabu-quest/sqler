@@ -208,6 +208,7 @@ This document enumerates every feature in the sync implementation and tracks par
 | `add_index(field, ...)` | ✅ | ✅ | ✅ | |
 | `ensure_index(field, ...)` | ✅ | ✅ | ✅ | |
 | **Instance Methods** |
+| `save_many(instances, db=None)` | ✅ | ✅ | ✅ | Batch insert for new instances |
 | `save(db=None)` | ✅ | ✅ | ✅ | Per-call DB override (M-4) |
 | `delete(db=None)` | ✅ | ✅ | ✅ | Per-call DB override (M-4) |
 | `delete_with_policy(on_delete, db=None)` | ✅ | ✅ | ✅ | restrict, set_null, cascade all work |
@@ -243,6 +244,7 @@ This document enumerates every feature in the sync implementation and tracks par
 | `set_db(db, table)` | ✅ | ⚠️ | ⚠️ | Sync ensures versioned table, async is lazy (by design) |
 | `from_id(id_)` | ✅ | ✅ | ✅ | |
 | `query()` | ✅ | ✅ | ✅ | |
+| `save_many(instances, db=None)` | ✅ | ✅ | ✅ | Batch insert with version=0 |
 | `save(db=None)` | ✅ | ✅ | ✅ | Per-call DB override (M-4) |
 | `refresh()` | ✅ | ✅ | ✅ | |
 | **Intent Rebasing** |
@@ -318,6 +320,7 @@ This document enumerates every feature in the sync implementation and tracks par
 |---------|------|-------|--------|-------|
 | `using(db, table)` | ✅ | ✅ | ✅ | Per-query DB binding (M-5) |
 | `_resolve_binding(db)` | ✅ | ✅ | ✅ | Per-call DB with table validation (M-4/M-6) |
+| `save_many(instances, db=None)` | ✅ | ✅ | ✅ | Batch insert for new instances |
 | `save(db=None)` | ✅ | ✅ | ✅ | Per-call DB override (M-4) |
 | `delete(db=None)` | ✅ | ✅ | ✅ | Per-call DB override (M-4) |
 | `delete_with_policy(on_delete, db=None)` | ✅ | ✅ | ✅ | restrict, set_null, cascade |

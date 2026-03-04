@@ -142,6 +142,51 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
             instances.append(inst)
         return instances
 
+    @classmethod
+    async def asave_many(cls: Type[TASafe], instances: list[TASafe], *, db=None) -> list[TASafe]:  # type: ignore[override]
+        """Insert multiple new instances with ``_version=0``.
+
+        Uses multi-row INSERT for significantly better throughput. Only
+        supports new (unsaved) instances. All instances get ``_version=0``.
+
+        Args:
+            instances: List of model instances with ``_id is None``.
+            db: Optional database (overrides class-level binding).
+
+        Returns:
+            list: The same instances with ``_id`` and ``_version`` populated.
+
+        Raises:
+            ValueError: If any instance already has an ``_id``.
+        """
+        if not instances:
+            return instances
+        for inst in instances:
+            if inst._id is not None:
+                raise ValueError("asave_many() only accepts new instances (_id must be None)")
+
+        db, table = cls._resolve_binding(db)
+        promoted = getattr(cls, "__promoted__", None)
+
+        if promoted and table not in db._promoted_columns:
+            checks = getattr(cls, "__checks__", None)
+            await db._ensure_table_with_promoted(table, promoted, checks)
+        await db._ensure_versioned_table(table)
+
+        payloads = [await inst._adump_with_relations() for inst in instances]
+
+        if promoted:
+            promoted_fields = list(promoted.keys())
+            id_version_pairs = await db.insert_many_with_version_promoted(table, payloads, promoted_fields)
+        else:
+            id_version_pairs = await db.insert_many_with_version(table, payloads)
+
+        for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
+            object.__setattr__(inst, "_id", id_)
+            object.__setattr__(inst, "_version", version)
+            object.__setattr__(inst, "_snapshot", {k: v for k, v in payload.items() if k not in {"_id", "_version"}})
+        return instances
+
     async def save(self: TASafe, *, db=None) -> TASafe:
         """Insert or update with optimistic locking and intent rebasing.
 
