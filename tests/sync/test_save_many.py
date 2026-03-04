@@ -3,9 +3,7 @@
 import sqlite3
 
 import pytest
-
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
-
 
 # ---- test models ----
 

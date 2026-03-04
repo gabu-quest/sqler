@@ -111,7 +111,7 @@ SQLite is the most deployed database on earth, and JSON1 turns it into a documen
 
 ## Performance
 
-Real numbers from the [benchmark suite](benchmarks/results/REPORT.md) (22 scenarios, Python 3.12, SQLite 3.50):
+Real numbers from the benchmark suite (22 scenarios, Python 3.12, SQLite 3.50):
 
 | Operation | Result | Context |
 |-----------|--------|---------|
@@ -122,8 +122,6 @@ Real numbers from the [benchmark suite](benchmarks/results/REPORT.md) (22 scenar
 | Bulk vs single | **5.2x** | `bulk_upsert` vs `save()` loop at 10K |
 | Lite models | **1.3x** | Dataclass variant vs Pydantic overhead |
 
-![Index speedup: 470x faster queries](benchmarks/results/charts/05_equality_filter.svg)
-
 ### Honest Limitations
 
 - **Single writer** — SQLite's architecture. Use `save_many()` / `bulk_upsert` and transactions to batch writes.
@@ -131,7 +129,7 @@ Real numbers from the [benchmark suite](benchmarks/results/REPORT.md) (22 scenar
 - **No JOINs** — Relationships use reference hydration, not SQL JOINs. Fine for typical document patterns.
 - **Memory-bound** — Large result sets materialize in Python. Use `paginate()` and `count()` to limit.
 
-Full report with 22 charts: [benchmarks/results/REPORT.md](benchmarks/results/REPORT.md)
+Run `uv run python -m benchmarks run --scale medium --storage both` to generate your own report.
 
 ---
 
@@ -270,7 +268,7 @@ ranked = fts.search_ranked("Python")   # with relevance scores
 | [API Reference](docs/API.md) | All 46 tested contracts (C01–C46) |
 | [Examples Cookbook](docs/EXAMPLES.md) | End-to-end scripts for every feature |
 | [Interactive Tours](https://gabu-quest.github.io/sqler/) | 11 marimo notebooks — run in browser |
-| [Benchmark Report](benchmarks/results/REPORT.md) | 22 scenarios with charts |
+| Benchmark Suite | `uv run python -m benchmarks run` — 22 scenarios |
 | [Changelog](CHANGELOG.md) | Version history |
 
 ---

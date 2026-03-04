@@ -6,7 +6,6 @@ from their parent so they're tested too.
 
 from dataclasses import dataclass
 
-import pytest
 from sqler import SQLerDB
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel

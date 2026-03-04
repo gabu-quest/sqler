@@ -10,7 +10,6 @@ import pytest
 import pytest_asyncio
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.async_model import AsyncSQLerModel
-from sqler.query import F
 from sqler.models.mixins import (
     AsyncAuditLogMixin,
     AsyncAuditMixin,
@@ -19,7 +18,7 @@ from sqler.models.mixins import (
     AsyncSoftDeleteMixin,
     TimestampMixin,
 )
-
+from sqler.query import F
 
 # ── Model fixtures ──────────────────────────────────────────────────────────
 

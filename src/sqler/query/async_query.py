@@ -1,10 +1,9 @@
-import re
 from typing import Any, Optional, Self
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
 from sqler.query.expression import SQLerExpression
-from sqler.query.query import PaginatedResult, _META_COLUMNS, _rewrite_promoted_refs
+from sqler.query.query import _META_COLUMNS, PaginatedResult, _rewrite_promoted_refs
 from sqler.utils import validate_field_name
 
 

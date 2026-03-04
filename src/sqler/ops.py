@@ -657,7 +657,6 @@ async def async_backup(
     Returns:
         BackupResult with success status and metadata.
     """
-    import asyncio
 
     start = time.perf_counter()
     source_path = db.adapter.path

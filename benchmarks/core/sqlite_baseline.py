@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import sqlite3
 
-
 # ---------------------------------------------------------------------------
 # PRAGMA helpers — exact copies of sqler's adapter PRAGMAs
 # ---------------------------------------------------------------------------

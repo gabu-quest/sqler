@@ -1,6 +1,5 @@
 import pytest
 import pytest_asyncio
-
 from sqler import AsyncSQLerModel
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.query import SQLerField as F

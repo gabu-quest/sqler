@@ -1,11 +1,9 @@
 """Tests for promoted columns support."""
 
 import json
-import sqlite3
 
 import pytest
-from sqler import SQLerDB, SQLerModel, SQLerSafeModel, F
-
+from sqler import F, SQLerDB, SQLerModel, SQLerSafeModel
 
 # ---- Schema tests ----
 

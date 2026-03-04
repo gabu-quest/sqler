@@ -5,7 +5,6 @@ AsyncSQLerModel, AsyncSQLerSafeModel, AsyncSQLerLiteModel, AsyncSQLerLiteSafeMod
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 import pytest_asyncio
@@ -16,7 +15,6 @@ from sqler.models.async_safe import AsyncSQLerSafeModel
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 from sqler.models.utils import RebaseConfig
-
 
 # ── Pydantic model fixtures ──────────────────────────────────────────────────
 

@@ -15,12 +15,9 @@ sandbox/
 .sandbox/
 __marimo__/
 
-# Benchmark results (keep charts and report for README)
+# Benchmark results (local only)
 benchmarks/results/
 !benchmarks/results/.gitkeep
-!benchmarks/results/REPORT.md
-!benchmarks/results/charts/
-!benchmarks/results/charts/*.svg
 
 # Benchmark v1.1 archive (frozen snapshot, evidence only)
 benchmarks/v1.1-archive/
