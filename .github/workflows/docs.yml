@@ -36,6 +36,8 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Export notebooks to WASM (fully interactive)
+        # Lite tours install sqler from PyPI at runtime via micropip.install("sqler").
+        # No wheel bundling needed — Pyodide fetches the latest release automatically.
         run: |
           mkdir -p _site
           mkdir -p _site/ja
