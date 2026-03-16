@@ -8,6 +8,8 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Optional, Self
 
+from sqler.utils import validate_table_name
+
 
 # Context variables for thread/async-safe user tracking
 _current_user_var: ContextVar[Optional[str]] = ContextVar("audit_current_user", default=None)
@@ -704,7 +706,7 @@ class AuditLogMixin:
         import json
 
         db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
-        audit_table = f"{table}_audit"
+        audit_table = validate_table_name(f"{table}_audit")
 
         # Ensure audit table exists
         ddl = f"""
@@ -760,7 +762,7 @@ class AuditLogMixin:
         import json
 
         db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
-        audit_table = f"{table}_audit"
+        audit_table = validate_table_name(f"{table}_audit")
         record_id = getattr(self, "_id", None)
 
         if record_id is None:
@@ -869,7 +871,7 @@ class AsyncAuditLogMixin:
         import json
 
         db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
-        audit_table = f"{table}_audit"
+        audit_table = validate_table_name(f"{table}_audit")
 
         ddl = f"""
         CREATE TABLE IF NOT EXISTS {audit_table} (
@@ -923,7 +925,7 @@ class AsyncAuditLogMixin:
         import json
 
         db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
-        audit_table = f"{table}_audit"
+        audit_table = validate_table_name(f"{table}_audit")
         record_id = getattr(self, "_id", None)
 
         if record_id is None:
