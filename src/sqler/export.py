@@ -677,16 +677,18 @@ def stream_jsonl(
 
     sql, params = query._build_query(include_id=include_id, include_version=False)
     cur = query._adapter.execute(sql, params)
-
-    for row in cur:
-        if include_id:
-            obj = json.loads(row[1])
-            obj["_id"] = row[0]
-        else:
-            obj = json.loads(row[0])
-        if not all_fields:
-            obj = {k: obj[k] for k in fields if k in obj}
-        yield json.dumps(obj, ensure_ascii=False)
+    try:
+        for row in cur:
+            if include_id:
+                obj = json.loads(row[1])
+                obj["_id"] = row[0]
+            else:
+                obj = json.loads(row[0])
+            if not all_fields:
+                obj = {k: obj[k] for k in fields if k in obj}
+            yield json.dumps(obj, ensure_ascii=False)
+    finally:
+        cur.close()
 
 
 def import_jsonl(

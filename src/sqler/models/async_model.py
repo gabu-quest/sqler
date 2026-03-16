@@ -13,7 +13,7 @@ from sqler.models.async_queryset import AsyncSQLerQuerySet
 from sqler.models.model import _default_table_name
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
-from sqler.utils import validate_table_name
+from sqler.utils import validate_field_name, validate_table_name
 
 TAModel = TypeVar("TAModel", bound="AsyncSQLerModel")
 
@@ -180,6 +180,8 @@ class AsyncSQLerModel(BaseModel):
         """
         from sqler.query.field import SQLerField as F
 
+        for key in lookup:
+            validate_field_name(key)
         if db is not None:
             qs = cls.using(db)
         else:

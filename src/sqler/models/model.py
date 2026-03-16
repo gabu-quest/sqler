@@ -10,7 +10,7 @@ from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import NotBoundError
 from sqler.models.queryset import SQLerQuerySet
 from sqler.query import SQLerExpression
-from sqler.utils import validate_table_name
+from sqler.utils import validate_field_name, validate_table_name
 
 TModel = TypeVar("TModel", bound="SQLerModel")
 
@@ -274,6 +274,8 @@ class SQLerModel(BaseModel):
         """
         from sqler.query.field import SQLerField as F
 
+        for key in lookup:
+            validate_field_name(key)
         if db is not None:
             qs = cls.using(db)
         else:

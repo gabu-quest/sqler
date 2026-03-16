@@ -743,32 +743,35 @@ class SQLerQuery:
         ver_offset = 1 if self._include_version else 0
         promoted_start = 2 + ver_offset
 
-        for row in cur:
-            try:
-                _id, data_json = row[0], row[1]
-                ver = row[2] if self._include_version and len(row) > 2 else None
-            except (IndexError, TypeError) as e:
-                import warnings
+        try:
+            for row in cur:
+                try:
+                    _id, data_json = row[0], row[1]
+                    ver = row[2] if self._include_version and len(row) > 2 else None
+                except (IndexError, TypeError) as e:
+                    import warnings
 
-                warnings.warn(f"Skipping malformed row in {self._table}: {e}", RuntimeWarning)
-                continue
-            if data_json is None:
-                raise InvariantViolationError(f"Row {_id} in {self._table} has NULL data JSON")
-            obj = json.loads(data_json)
+                    warnings.warn(f"Skipping malformed row in {self._table}: {e}", RuntimeWarning)
+                    continue
+                if data_json is None:
+                    raise InvariantViolationError(f"Row {_id} in {self._table} has NULL data JSON")
+                obj = json.loads(data_json)
 
-            if self._promoted_fields:
-                for i, col_name in enumerate(self._promoted_fields):
-                    idx = promoted_start + i
-                    if idx < len(row):
-                        obj[col_name] = row[idx]
+                if self._promoted_fields:
+                    for i, col_name in enumerate(self._promoted_fields):
+                        idx = promoted_start + i
+                        if idx < len(row):
+                            obj[col_name] = row[idx]
 
-            if self._select_fields:
-                obj = {k: obj.get(k) for k in self._select_fields if k in obj}
+                if self._select_fields:
+                    obj = {k: obj.get(k) for k in self._select_fields if k in obj}
 
-            obj["_id"] = _id
-            if ver is not None:
-                obj["_version"] = ver
-            yield obj
+                obj["_id"] = _id
+                if ver is not None:
+                    obj["_version"] = ver
+                yield obj
+        finally:
+            cur.close()
 
     def update(self, **fields) -> int:
         """Update matching rows with the given field values.

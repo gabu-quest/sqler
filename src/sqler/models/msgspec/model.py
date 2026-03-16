@@ -19,7 +19,7 @@ from typing import (
 from sqler import registry
 from sqler.exceptions import NotBoundError
 from sqler.models.msgspec.base import SQLerMsgspecModelBase, _public_fields
-from sqler.utils import validate_table_name
+from sqler.utils import validate_field_name, validate_table_name
 
 if TYPE_CHECKING:
     from sqler.db.sqler_db import SQLerDB
@@ -264,6 +264,8 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         """
         from sqler.query.field import SQLerField as F
 
+        for key in lookup:
+            validate_field_name(key)
         if db is not None:
             qs = cls.using(db)
         else:
