@@ -5,8 +5,9 @@ alternative to the dataclass-based lite model that uses msgspec Structs for
 C-level JSON decode+validate speed.
 """
 
+import typing
 from datetime import date, datetime
-from typing import Any, Optional, Type, TypeVar
+from typing import Any, ClassVar, Optional, Type, TypeVar
 
 import msgspec
 import msgspec.structs
@@ -17,6 +18,7 @@ T = TypeVar("T", bound="SQLerMsgspecModelBase")
 # uncached reflection (~70µs/call), which dominates model_dump() at scale.
 _PUBLIC_FIELDS_CACHE: dict[type, tuple] = {}
 _PUBLIC_FIELD_NAMES_CACHE: dict[type, set[str]] = {}
+_MIXIN_FIELD_NAMES_CACHE: dict[type, frozenset[str]] = {}
 
 
 def _public_fields(cls: type) -> tuple:
@@ -37,6 +39,35 @@ def _public_field_names(cls: type) -> set[str]:
     names = {f.name for f in _public_fields(cls)}
     _PUBLIC_FIELD_NAMES_CACHE[cls] = names
     return names
+
+
+def _mixin_field_names(cls: type) -> frozenset[str]:
+    """Return cached set of field names declared by non-Struct mixin bases.
+
+    Msgspec's Struct metaclass doesn't pick up annotations from non-Struct
+    parent classes (e.g. ``TimestampMixin.created_at``). This helper scans
+    the MRO so that serialization/deserialization can include them.
+    """
+    cached = _MIXIN_FIELD_NAMES_CACHE.get(cls)
+    if cached is not None:
+        return cached
+    struct_names = _public_field_names(cls)
+    names: set[str] = set()
+    for base in cls.__mro__:
+        if base is cls or base is object:
+            continue
+        if isinstance(base, type) and issubclass(base, msgspec.Struct):
+            continue
+        base_ann = base.__dict__.get("__annotations__", {})
+        for name, ann in base_ann.items():
+            if name.startswith("_") or name in struct_names or name in names:
+                continue
+            if typing.get_origin(ann) is ClassVar:
+                continue
+            names.add(name)
+    result = frozenset(names)
+    _MIXIN_FIELD_NAMES_CACHE[cls] = result
+    return result
 
 
 class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True):
@@ -72,7 +103,12 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True):
         # strict=False: (1) ignores unknown keys like _version, (2) allows
         # permissive coercion (e.g. str "123" → int 123) for Pydantic compat.
         # _id is a declared Struct field — set directly by convert from data.
-        return msgspec.convert(data, cls, strict=False)
+        inst = msgspec.convert(data, cls, strict=False)
+        # Restore mixin fields (not recognized as Struct fields by msgspec)
+        for name in _mixin_field_names(cls):
+            if name in data:
+                setattr(inst, name, data[name])
+        return inst
 
     def model_dump(
         self,
@@ -102,6 +138,15 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True):
                 continue
             result[f.name] = self._serialize_value(value)
 
+        # Include mixin fields (not visible to msgspec.structs.fields)
+        for name in _mixin_field_names(type(self)):
+            if name in exclude:
+                continue
+            value = getattr(self, name, None)
+            if exclude_none and value is None:
+                continue
+            result[name] = self._serialize_value(value)
+
         return result
 
     @staticmethod
@@ -128,7 +173,12 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True):
         def __get__(self, obj: Any, cls: type | None = None) -> dict[str, Any]:
             if cls is None:
                 cls = type(obj)
-            return {f.name: f for f in _public_fields(cls)}
+            result = {f.name: f for f in _public_fields(cls)}
+            # Include mixin fields so mixins can iterate model_fields
+            for name in _mixin_field_names(cls):
+                if name not in result:
+                    result[name] = name
+            return result
 
     # No type annotation — prevents msgspec from treating this as a Struct field
     model_fields = _ModelFieldsDescriptor()  # type: ignore[assignment]
@@ -136,7 +186,7 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True):
     @classmethod
     def get_field_names(cls) -> set[str]:
         """Return set of public field names."""
-        return _public_field_names(cls)
+        return _public_field_names(cls) | _mixin_field_names(cls)
 
     def __repr__(self) -> str:
         """Return string representation."""

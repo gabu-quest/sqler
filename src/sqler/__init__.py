@@ -94,28 +94,30 @@ from .models._compat import (
     require_pydantic,
 )
 
+# Mixins (always available — no Pydantic dependency)
+from .models.mixins import (
+    AsyncAuditLogMixin,
+    AsyncAuditMixin,
+    AsyncFullMixin,
+    AsyncHooksMixin,
+    AsyncSoftDeleteMixin,
+    AuditLogMixin,
+    AuditMixin,
+    FullMixin,
+    HooksMixin,
+    SoftDeleteMixin,
+    TimestampMixin,
+)
+
 # Conditionally import Pydantic-dependent items
 if PYDANTIC_AVAILABLE:
     from .models import (
-        AsyncFullMixin,
-        AsyncHooksMixin,
         AsyncSQLerModel,
         AsyncSQLerQuerySet,
         AsyncSQLerSafeModel,
-        FullMixin,
-        HooksMixin,
-        SoftDeleteMixin,
         SQLerModel,
         SQLerQuerySet,
         SQLerSafeModel,
-        TimestampMixin,
-    )
-    from .models.mixins import (
-        AsyncAuditLogMixin,
-        AsyncAuditMixin,
-        AsyncSoftDeleteMixin,
-        AuditLogMixin,
-        AuditMixin,
     )
 else:
     # Provide stub classes that raise helpful errors
@@ -138,17 +140,6 @@ else:
     AsyncSQLerSafeModel = _pydantic_required_class("AsyncSQLerSafeModel")
     SQLerQuerySet = _pydantic_required_class("SQLerQuerySet")
     AsyncSQLerQuerySet = _pydantic_required_class("AsyncSQLerQuerySet")
-    TimestampMixin = _pydantic_required_class("TimestampMixin")
-    SoftDeleteMixin = _pydantic_required_class("SoftDeleteMixin")
-    AsyncSoftDeleteMixin = _pydantic_required_class("AsyncSoftDeleteMixin")
-    HooksMixin = _pydantic_required_class("HooksMixin")
-    AsyncHooksMixin = _pydantic_required_class("AsyncHooksMixin")
-    FullMixin = _pydantic_required_class("FullMixin")
-    AsyncFullMixin = _pydantic_required_class("AsyncFullMixin")
-    AuditMixin = _pydantic_required_class("AuditMixin")
-    AsyncAuditMixin = _pydantic_required_class("AsyncAuditMixin")
-    AuditLogMixin = _pydantic_required_class("AuditLogMixin")
-    AsyncAuditLogMixin = _pydantic_required_class("AsyncAuditLogMixin")
 from .ops import (
     BackupResult,
     DatabaseStats,

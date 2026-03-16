@@ -18,7 +18,7 @@ from typing import (
 
 from sqler import registry
 from sqler.exceptions import NotBoundError
-from sqler.models.msgspec.base import SQLerMsgspecModelBase, _public_fields
+from sqler.models.msgspec.base import SQLerMsgspecModelBase, _mixin_field_names, _public_fields
 from sqler.utils import validate_field_name, validate_table_name
 
 if TYPE_CHECKING:
@@ -485,6 +485,9 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         payload: dict = {}
         for f in _public_fields(type(self)):
             payload[f.name] = encode(getattr(self, f.name))
+        # Include mixin fields (not visible to msgspec.structs.fields)
+        for name in _mixin_field_names(type(self)):
+            payload[name] = encode(getattr(self, name, None))
         return payload
 
     # ----- dirty tracking -----

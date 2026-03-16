@@ -8,11 +8,19 @@ and other environments where Pydantic cannot be installed.
 from __future__ import annotations
 
 import dataclasses
+import typing
 from dataclasses import fields
 from datetime import date, datetime
-from typing import Any, Optional, Type, TypeVar
+from typing import Any, ClassVar, Optional, Type, TypeVar
 
 T = TypeVar("T", bound="SQLerLiteModelBase")
+
+
+def _is_classvar(ann: object) -> bool:
+    """Check if an annotation is ClassVar[X]."""
+    if isinstance(ann, str):
+        return "ClassVar" in ann
+    return typing.get_origin(ann) is ClassVar
 
 
 class SQLerLiteModelBase:
@@ -26,6 +34,35 @@ class SQLerLiteModelBase:
     # These are NOT dataclass fields
     _id: Optional[int] = None
     _snapshot: Optional[dict] = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Inject annotations from non-dataclass mixin bases.
+
+        When a mixin like TimestampMixin declares ``created_at: Optional[datetime] = None``,
+        ``@dataclass`` on the subclass won't see it (only dataclass bases contribute fields).
+        This hook copies those annotations into the subclass so ``@dataclass`` picks them up.
+        """
+        super().__init_subclass__(**kwargs)
+        own_ann = cls.__dict__.get("__annotations__", None)
+        if own_ann is None:
+            own_ann = {}
+            cls.__annotations__ = own_ann
+
+        for base in cls.__mro__[1:]:
+            if base is object or base is SQLerLiteModelBase:
+                continue
+            if dataclasses.is_dataclass(base):
+                continue
+            base_ann = base.__dict__.get("__annotations__", {})
+            for name, ann in base_ann.items():
+                if name in own_ann or name.startswith("_"):
+                    continue
+                if _is_classvar(ann):
+                    continue
+                own_ann[name] = ann
+                # Copy default value so @dataclass can find it in cls.__dict__
+                if name in base.__dict__:
+                    setattr(cls, name, base.__dict__[name])
 
     def __post_init__(self) -> None:
         """Initialize private attributes after dataclass __init__."""

@@ -8,6 +8,7 @@ from .suite_insert import SUITE as INSERT_SUITE
 from .suite_json import SUITE as JSON_SUITE
 from .suite_ops import SUITE as OPS_SUITE
 from .suite_query import SUITE as QUERY_SUITE
+from .suite_tabular import SUITE as TABULAR_SUITE
 
 ALL_SUITES: dict[str, list] = {
     "insert": INSERT_SUITE,
@@ -16,6 +17,7 @@ ALL_SUITES: dict[str, list] = {
     "advanced": ADVANCED_SUITE,
     "ops": OPS_SUITE,
     "hydration": HYDRATION_SUITE,
+    "tabular": TABULAR_SUITE,
 }
 
 

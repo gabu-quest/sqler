@@ -8,7 +8,6 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Optional, Self
 
-from pydantic import Field, PrivateAttr
 
 # Context variables for thread/async-safe user tracking
 _current_user_var: ContextVar[Optional[str]] = ContextVar("audit_current_user", default=None)
@@ -30,8 +29,8 @@ class TimestampMixin:
         print(user.updated_at)  # datetime when last saved
     """
 
-    created_at: Optional[datetime] = Field(default=None)
-    updated_at: Optional[datetime] = Field(default=None)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     def _set_timestamps(self) -> None:
         """Set timestamp fields before save."""
@@ -69,7 +68,7 @@ class SoftDeleteMixin:
         User.only_deleted() # Only deleted records
     """
 
-    deleted_at: Optional[datetime] = Field(default=None)
+    deleted_at: Optional[datetime] = None
 
     # Class-level configuration for default query behavior
     _soft_delete_default_exclude: ClassVar[bool] = True
@@ -183,7 +182,7 @@ class AsyncSoftDeleteMixin:
         await User.only_deleted().all() # Only deleted records
     """
 
-    deleted_at: Optional[datetime] = Field(default=None)
+    deleted_at: Optional[datetime] = None
 
     _soft_delete_default_exclude: ClassVar[bool] = True
 
@@ -518,10 +517,10 @@ class AuditMixin:
             return response
     """
 
-    created_at: Optional[datetime] = Field(default=None)
-    updated_at: Optional[datetime] = Field(default=None)
-    created_by: Optional[str] = Field(default=None)
-    updated_by: Optional[str] = Field(default=None)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
 
     # Optional custom getter (takes precedence over context var)
     _current_user_getter: ClassVar[Optional[Any]] = None
@@ -595,10 +594,10 @@ class AsyncAuditMixin:
         user = await User(name="Alice").save()
     """
 
-    created_at: Optional[datetime] = Field(default=None)
-    updated_at: Optional[datetime] = Field(default=None)
-    created_by: Optional[str] = Field(default=None)
-    updated_by: Optional[str] = Field(default=None)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
 
     # Optional custom getter (takes precedence over context var)
     _current_user_getter: ClassVar[Optional[Any]] = None
@@ -666,9 +665,6 @@ class AuditLogMixin:
     The audit log is stored in a table named `{model_table}_audit`.
     """
 
-    # Private attribute to store the snapshot before save
-    _pre_save_snapshot: Optional[dict[str, Any]] = PrivateAttr(default=None)
-
     def _capture_snapshot(self) -> None:
         """Capture current state before save for change detection."""
         # Get model data excluding private fields
@@ -678,17 +674,18 @@ class AuditLogMixin:
                 data[field_name] = getattr(self, field_name)
             except AttributeError:
                 pass
-        self._pre_save_snapshot = data
+        object.__setattr__(self, "_pre_save_snapshot", data)
 
     def _get_changes(self) -> dict[str, dict[str, Any]]:
         """Get dict of changed fields with old/new values."""
-        if self._pre_save_snapshot is None:
+        snapshot = getattr(self, "_pre_save_snapshot", None)
+        if snapshot is None:
             return {}
 
         changes = {}
         for field_name in self.__class__.model_fields:  # type: ignore[attr-defined]
             try:
-                old_value = self._pre_save_snapshot.get(field_name)
+                old_value = snapshot.get(field_name)
                 new_value = getattr(self, field_name)
                 if old_value != new_value:
                     changes[field_name] = {"old": old_value, "new": new_value}
@@ -802,9 +799,9 @@ class AuditLogMixin:
             db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
             current = db.find_document(table, self._id)
             if current:
-                self._pre_save_snapshot = {
+                object.__setattr__(self, "_pre_save_snapshot", {
                     k: v for k, v in current.items() if k not in ("_id", "_version")
-                }
+                })
 
         result = super().save(db=db)  # type: ignore[misc]
 
@@ -839,8 +836,6 @@ class AsyncAuditLogMixin:
         logs = await user.get_audit_log()
     """
 
-    _pre_save_snapshot: Optional[dict[str, Any]] = PrivateAttr(default=None)
-
     def _capture_snapshot(self) -> None:
         """Capture current state before save."""
         data = {}
@@ -849,17 +844,18 @@ class AsyncAuditLogMixin:
                 data[field_name] = getattr(self, field_name)
             except AttributeError:
                 pass
-        self._pre_save_snapshot = data
+        object.__setattr__(self, "_pre_save_snapshot", data)
 
     def _get_changes(self) -> dict[str, dict[str, Any]]:
         """Get dict of changed fields with old/new values."""
-        if self._pre_save_snapshot is None:
+        snapshot = getattr(self, "_pre_save_snapshot", None)
+        if snapshot is None:
             return {}
 
         changes = {}
         for field_name in self.__class__.model_fields:  # type: ignore[attr-defined]
             try:
-                old_value = self._pre_save_snapshot.get(field_name)
+                old_value = snapshot.get(field_name)
                 new_value = getattr(self, field_name)
                 if old_value != new_value:
                     changes[field_name] = {"old": old_value, "new": new_value}
@@ -967,9 +963,9 @@ class AsyncAuditLogMixin:
             db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
             current = await db.find_document(table, self._id)
             if current:
-                self._pre_save_snapshot = {
+                object.__setattr__(self, "_pre_save_snapshot", {
                     k: v for k, v in current.items() if k not in ("_id", "_version")
-                }
+                })
 
         result = await super().save(db=db)  # type: ignore[misc]
 

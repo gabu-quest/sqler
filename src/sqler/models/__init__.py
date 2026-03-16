@@ -74,6 +74,17 @@ class BrokenRef:
     target_id: int
 
 
+# Mixins (always available — no Pydantic dependency)
+from .mixins import (
+    AsyncFullMixin,
+    AsyncHooksMixin,
+    AsyncSoftDeleteMixin,
+    FullMixin,
+    HooksMixin,
+    SoftDeleteMixin,
+    TimestampMixin,
+)
+
 # Conditionally import Pydantic-based models
 if PYDANTIC_AVAILABLE:
     from .async_integrity import (
@@ -85,15 +96,6 @@ if PYDANTIC_AVAILABLE:
     from .async_model import AsyncSQLerModel
     from .async_queryset import AsyncSQLerQuerySet
     from .async_safe import AsyncSQLerSafeModel
-    from .mixins import (
-        AsyncFullMixin,
-        AsyncHooksMixin,
-        AsyncSoftDeleteMixin,
-        FullMixin,
-        HooksMixin,
-        SoftDeleteMixin,
-        TimestampMixin,
-    )
     from .model import SQLerModel
     from .model_field import SQLerModelField
     from .queryset import SQLerQuerySet
@@ -129,15 +131,6 @@ else:
 
     def as_ref(*args, **kwargs):
         require_pydantic("as_ref")
-
-    # Mixins
-    TimestampMixin = _pydantic_required_class("TimestampMixin")  # type: ignore[misc]
-    SoftDeleteMixin = _pydantic_required_class("SoftDeleteMixin")  # type: ignore[misc]
-    AsyncSoftDeleteMixin = _pydantic_required_class("AsyncSoftDeleteMixin")  # type: ignore[misc]
-    HooksMixin = _pydantic_required_class("HooksMixin")  # type: ignore[misc]
-    AsyncHooksMixin = _pydantic_required_class("AsyncHooksMixin")  # type: ignore[misc]
-    FullMixin = _pydantic_required_class("FullMixin")  # type: ignore[misc]
-    AsyncFullMixin = _pydantic_required_class("AsyncFullMixin")  # type: ignore[misc]
 
     # Async integrity helpers
     async def async_find_referrers(*args, **kwargs):
