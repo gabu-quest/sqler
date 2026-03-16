@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Generic, Optional, Type, TypeVar
+from typing import Any, Generic, Iterator, Optional, Type, TypeVar
 
 from sqler.query import SQLerExpression, SQLerQuery
 
@@ -61,6 +61,17 @@ class SQLerQuerySet(Generic[T]):
         """Return a new queryset with a LIMIT clause."""
         return self.__class__(self._model_cls, self._query.limit(n))
 
+    def group_by(self, *fields: str) -> "SQLerQuerySet[T]":
+        """Return a new queryset grouped by the given field(s).
+
+        When active, aggregate methods return ``list[dict]`` instead of scalars.
+        """
+        return self.__class__(self._model_cls, self._query.group_by(*fields))
+
+    def having(self, expression: SQLerExpression) -> "SQLerQuerySet[T]":
+        """Return a new queryset with a HAVING clause (requires group_by)."""
+        return self.__class__(self._model_cls, self._query.having(expression))
+
     # execution
     def all(self) -> list[T]:
         """Execute and return a list of model instances."""
@@ -96,6 +107,21 @@ class SQLerQuerySet(Generic[T]):
         validation, type coercion, computed fields, and relation resolution.
         """
         return self._query.all_dicts()
+
+    def iter(self) -> Iterator[T]:
+        """Yield model instances one at a time (memory-efficient streaming).
+
+        Unlike ``all()`` which loads all rows into memory and resolves
+        relations in batch, this method streams row by row. Relation
+        resolution is NOT performed during streaming.
+
+        Yields:
+            T: Model instances.
+        """
+        for doc in self._query.iter_dicts():
+            inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
+            self._attach_metadata(inst, doc)
+            yield inst
 
     def first(self) -> Optional[T]:
         """Execute with LIMIT 1 and return the first model instance, if any."""

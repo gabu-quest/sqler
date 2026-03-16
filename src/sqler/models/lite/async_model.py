@@ -203,6 +203,40 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         return cls.query().filter(expression)
 
     @classmethod
+    async def first_or_create(
+        cls: Type[TAModel],
+        lookup: dict,
+        defaults: Optional[dict] = None,
+        *,
+        db=None,
+    ) -> tuple[TAModel, bool]:
+        """Find the first matching row or create a new one (async).
+
+        Args:
+            lookup: Fields to filter by (used for both lookup and creation).
+            defaults: Additional fields merged into the new instance on creation.
+            db: Optional database (overrides class-level binding).
+
+        Returns:
+            tuple[Model, bool]: (instance, created) where created is True if new.
+        """
+        from sqler.query.field import SQLerField as F
+
+        if db is not None:
+            qs = cls.using(db)
+        else:
+            qs = cls.query()
+        for key, value in lookup.items():
+            qs = qs.filter(F(key) == value)
+        existing = await qs.first()
+        if existing is not None:
+            return existing, False
+        merged = {**lookup, **(defaults or {})}
+        inst = cls(**merged)
+        await inst.save(db=db)
+        return inst, True
+
+    @classmethod
     async def all(cls: Type[TAModel]) -> list[TAModel]:
         """Return all instances from the database."""
         return await cls.query().all()

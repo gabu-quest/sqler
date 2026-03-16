@@ -50,6 +50,14 @@ class AsyncSQLerQuerySet(Generic[T]):
     def limit(self, n: int) -> "AsyncSQLerQuerySet[T]":
         return self.__class__(self._model_cls, self._query.limit(n))
 
+    def group_by(self, *fields: str) -> "AsyncSQLerQuerySet[T]":
+        """Return a new queryset grouped by the given field(s)."""
+        return self.__class__(self._model_cls, self._query.group_by(*fields))
+
+    def having(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
+        """Return a new queryset with a HAVING clause (requires group_by)."""
+        return self.__class__(self._model_cls, self._query.having(expression))
+
     # execution
     async def all(self) -> list[T]:
         docs = await self._query.all_dicts()

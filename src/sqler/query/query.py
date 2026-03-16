@@ -1,5 +1,5 @@
 import re
-from typing import Any, Optional, Self
+from typing import Any, Iterator, Optional, Self
 
 from sqler.adapter.abstract import AdapterABC
 from sqler.query import SQLerExpression
@@ -62,6 +62,8 @@ class SQLerQuery:
         distinct: bool = False,
         order_fields: Optional[list[tuple[str, bool]]] = None,
         promoted_fields: Optional[list[str]] = None,
+        group_by_fields: Optional[list[str]] = None,
+        having: Optional[SQLerExpression] = None,
     ):
         self._table = table
         self._adapter = adapter
@@ -75,6 +77,8 @@ class SQLerQuery:
         self._distinct = distinct
         self._order_fields = order_fields
         self._promoted_fields = promoted_fields or []
+        self._group_by_fields = group_by_fields or []
+        self._having = having
 
     def _clone(self, **kwargs) -> Self:
         """Create a clone with optional overrides."""
@@ -91,6 +95,8 @@ class SQLerQuery:
             distinct=kwargs.get("distinct", self._distinct),
             order_fields=kwargs.get("order_fields", self._order_fields),
             promoted_fields=kwargs.get("promoted_fields", self._promoted_fields),
+            group_by_fields=kwargs.get("group_by_fields", self._group_by_fields),
+            having=kwargs.get("having", self._having),
         )
 
     def filter(self, expression: SQLerExpression) -> Self:
@@ -213,6 +219,128 @@ class SQLerQuery:
     def with_version(self) -> Self:
         """Return a new query that includes `_version` column in results."""
         return self._clone(include_version=True)
+
+    def group_by(self, *fields: str) -> Self:
+        """Return a new query grouped by the given field(s).
+
+        When group_by is active, aggregate methods (count, sum, avg, min, max)
+        return ``list[dict]`` instead of scalars.
+
+        Args:
+            *fields: Field names to group by.
+
+        Returns:
+            SQLerQuery: New query instance.
+        """
+        for f in fields:
+            validate_field_name(f)
+        return self._clone(group_by_fields=list(fields))
+
+    def having(self, expression: SQLerExpression) -> Self:
+        """Return a new query with a HAVING clause (requires group_by).
+
+        Args:
+            expression: Boolean expression for the HAVING clause.
+
+        Returns:
+            SQLerQuery: New query instance.
+        """
+        return self._clone(having=expression)
+
+    def _field_expr(self, field: str) -> str:
+        """Return the SQL expression for a field (promoted or json_extract)."""
+        if field == "_id":
+            return "_id"
+        if field == "_version":
+            return "_version"
+        if self._promoted_fields and field in self._promoted_fields:
+            return field
+        return f"json_extract(data, '$.{field}')"
+
+    def _build_grouped_aggregate_query(
+        self, func: str, field: Optional[str] = None
+    ) -> tuple[str, list[Any]]:
+        """Build a grouped aggregate query.
+
+        Returns:
+            tuple[str, list[Any]]: SQL string and parameter list.
+        """
+        group_exprs = [self._field_expr(f) for f in self._group_by_fields]
+
+        if field is None:
+            agg = f"{func}(*)"
+        else:
+            if field != "_id":
+                validate_field_name(field)
+            agg = f"{func}({self._field_expr(field)})"
+
+        select_parts = group_exprs + [agg]
+        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        group_by = "GROUP BY " + ", ".join(group_exprs)
+
+        having_clause = ""
+        if self._having:
+            having_sql = self._having.sql
+            # Replace pseudo-fields like _count, _sum etc with aggregate expressions
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._count'\)",
+                "COUNT(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._sum'\)",
+                agg if func == "SUM" else "SUM(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._avg'\)",
+                agg if func == "AVG" else "AVG(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._min'\)",
+                agg if func == "MIN" else "MIN(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._max'\)",
+                agg if func == "MAX" else "MAX(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_clause = f"HAVING {having_sql}"
+
+        sql = f"SELECT {', '.join(select_parts)} FROM {self._table} {where} {group_by} {having_clause}".strip()
+        sql = " ".join(sql.split())
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
+
+        params = list(self._expression.params) if self._expression else []
+        if self._having:
+            params.extend(self._having.params)
+        return sql, params
+
+    def _execute_grouped_aggregate(
+        self, func: str, field: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Execute a grouped aggregate and return list[dict]."""
+        sql, params = self._build_grouped_aggregate_query(func, field)
+        cur = self._adapter.execute(sql, params)
+        rows = cur.fetchall()
+        agg_key = func.lower()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            d: dict[str, Any] = {}
+            for i, gf in enumerate(self._group_by_fields):
+                d[gf] = row[i]
+            d[agg_key] = row[len(self._group_by_fields)]
+            results.append(d)
+        return results
 
     def _build_query(
         self, *, include_id: bool = False, include_version: bool = False
@@ -353,90 +481,103 @@ class SQLerQuery:
         results = self.limit(1).all()
         return results[0] if results else None
 
-    def count(self) -> int:
+    def count(self):
         """Return the count of matching rows.
+
+        When ``group_by`` is active, returns ``list[dict]`` with counts per group.
+        Otherwise returns ``int``.
 
         Raises:
             NoAdapterError: If the query has no adapter.
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return self._execute_grouped_aggregate("COUNT")
         sql, params = self._build_aggregate_query("COUNT")
         cur = self._adapter.execute(sql, params)
         row = cur.fetchone()
         return int(row[0]) if row else 0
 
-    def sum(self, field: str) -> Optional[float]:
+    def sum(self, field: str):
         """Return the sum of values for the specified field.
+
+        When ``group_by`` is active, returns ``list[dict]`` with sums per group.
+        Otherwise returns ``float | None``.
 
         Args:
             field: JSON field path to sum.
 
         Raises:
             NoAdapterError: If the query has no adapter.
-
-        Returns:
-            float | None: Sum of values, or None if no rows match.
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return self._execute_grouped_aggregate("SUM", field)
         sql, params = self._build_aggregate_query("SUM", field)
         cur = self._adapter.execute(sql, params)
         row = cur.fetchone()
         return float(row[0]) if row and row[0] is not None else None
 
-    def avg(self, field: str) -> Optional[float]:
+    def avg(self, field: str):
         """Return the average of values for the specified field.
+
+        When ``group_by`` is active, returns ``list[dict]`` with averages per group.
+        Otherwise returns ``float | None``.
 
         Args:
             field: JSON field path to average.
 
         Raises:
             NoAdapterError: If the query has no adapter.
-
-        Returns:
-            float | None: Average of values, or None if no rows match.
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return self._execute_grouped_aggregate("AVG", field)
         sql, params = self._build_aggregate_query("AVG", field)
         cur = self._adapter.execute(sql, params)
         row = cur.fetchone()
         return float(row[0]) if row and row[0] is not None else None
 
-    def min(self, field: str) -> Optional[Any]:
+    def min(self, field: str):
         """Return the minimum value for the specified field.
+
+        When ``group_by`` is active, returns ``list[dict]`` with minimums per group.
+        Otherwise returns ``Any | None``.
 
         Args:
             field: JSON field path to find minimum.
 
         Raises:
             NoAdapterError: If the query has no adapter.
-
-        Returns:
-            Any | None: Minimum value, or None if no rows match.
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return self._execute_grouped_aggregate("MIN", field)
         sql, params = self._build_aggregate_query("MIN", field)
         cur = self._adapter.execute(sql, params)
         row = cur.fetchone()
         return row[0] if row else None
 
-    def max(self, field: str) -> Optional[Any]:
+    def max(self, field: str):
         """Return the maximum value for the specified field.
+
+        When ``group_by`` is active, returns ``list[dict]`` with maximums per group.
+        Otherwise returns ``Any | None``.
 
         Args:
             field: JSON field path to find maximum.
 
         Raises:
             NoAdapterError: If the query has no adapter.
-
-        Returns:
-            Any | None: Maximum value, or None if no rows match.
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return self._execute_grouped_aggregate("MAX", field)
         sql, params = self._build_aggregate_query("MAX", field)
         cur = self._adapter.execute(sql, params)
         row = cur.fetchone()
@@ -580,6 +721,54 @@ class SQLerQuery:
             raise NoAdapterError("No adapter set for query")
         results = self.limit(1).all_dicts()
         return results[0] if results else None
+
+    def iter_dicts(self) -> Iterator[dict[str, Any]]:
+        """Yield parsed dicts one at a time (memory-efficient streaming).
+
+        Unlike ``all_dicts()`` which loads all rows into memory, this method
+        iterates over the cursor row by row.
+
+        Raises:
+            NoAdapterError: If the query has no adapter.
+
+        Yields:
+            dict[str, Any]: One document per row with ``_id`` included.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        import json
+
+        sql, params = self._build_query(include_id=True, include_version=False)
+        cur = self._adapter.execute(sql, params)
+        ver_offset = 1 if self._include_version else 0
+        promoted_start = 2 + ver_offset
+
+        for row in cur:
+            try:
+                _id, data_json = row[0], row[1]
+                ver = row[2] if self._include_version and len(row) > 2 else None
+            except (IndexError, TypeError) as e:
+                import warnings
+
+                warnings.warn(f"Skipping malformed row in {self._table}: {e}", RuntimeWarning)
+                continue
+            if data_json is None:
+                raise InvariantViolationError(f"Row {_id} in {self._table} has NULL data JSON")
+            obj = json.loads(data_json)
+
+            if self._promoted_fields:
+                for i, col_name in enumerate(self._promoted_fields):
+                    idx = promoted_start + i
+                    if idx < len(row):
+                        obj[col_name] = row[idx]
+
+            if self._select_fields:
+                obj = {k: obj.get(k) for k in self._select_fields if k in obj}
+
+            obj["_id"] = _id
+            if ver is not None:
+                obj["_version"] = ver
+            yield obj
 
     def update(self, **fields) -> int:
         """Update matching rows with the given field values.

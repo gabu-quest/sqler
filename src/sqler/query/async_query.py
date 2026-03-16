@@ -1,3 +1,4 @@
+import re
 from typing import Any, Optional, Self
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
@@ -24,6 +25,8 @@ class AsyncSQLerQuery:
         distinct: bool = False,
         order_fields: Optional[list[tuple[str, bool]]] = None,
         promoted_fields: Optional[list[str]] = None,
+        group_by_fields: Optional[list[str]] = None,
+        having: Optional[SQLerExpression] = None,
     ):
         self._table = table
         self._adapter = adapter
@@ -37,6 +40,8 @@ class AsyncSQLerQuery:
         self._distinct = distinct
         self._order_fields = order_fields
         self._promoted_fields = promoted_fields or []
+        self._group_by_fields = group_by_fields or []
+        self._having = having
 
     def _clone(self, **kwargs) -> Self:
         """Create a clone with optional overrides."""
@@ -53,6 +58,8 @@ class AsyncSQLerQuery:
             distinct=kwargs.get("distinct", self._distinct),
             order_fields=kwargs.get("order_fields", self._order_fields),
             promoted_fields=kwargs.get("promoted_fields", self._promoted_fields),
+            group_by_fields=kwargs.get("group_by_fields", self._group_by_fields),
+            having=kwargs.get("having", self._having),
         )
 
     def filter(self, expression: SQLerExpression) -> Self:
@@ -124,6 +131,108 @@ class AsyncSQLerQuery:
 
     def with_version(self) -> Self:
         return self._clone(include_version=True)
+
+    def group_by(self, *fields: str) -> Self:
+        """Return a new query grouped by the given field(s)."""
+        for f in fields:
+            validate_field_name(f)
+        return self._clone(group_by_fields=list(fields))
+
+    def having(self, expression: SQLerExpression) -> Self:
+        """Return a new query with a HAVING clause (requires group_by)."""
+        return self._clone(having=expression)
+
+    def _field_expr(self, field: str) -> str:
+        """Return the SQL expression for a field (promoted or json_extract)."""
+        if field == "_id":
+            return "_id"
+        if field == "_version":
+            return "_version"
+        if self._promoted_fields and field in self._promoted_fields:
+            return field
+        return f"json_extract(data, '$.{field}')"
+
+    def _build_grouped_aggregate_query(
+        self, func: str, field: Optional[str] = None
+    ) -> tuple[str, list[Any]]:
+        """Build a grouped aggregate query."""
+        group_exprs = [self._field_expr(f) for f in self._group_by_fields]
+
+        if field is None:
+            agg = f"{func}(*)"
+        else:
+            if field != "_id":
+                validate_field_name(field)
+            agg = f"{func}({self._field_expr(field)})"
+
+        select_parts = group_exprs + [agg]
+        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        group_by = "GROUP BY " + ", ".join(group_exprs)
+
+        having_clause = ""
+        if self._having:
+            having_sql = self._having.sql
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._count'\)",
+                "COUNT(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._sum'\)",
+                agg if func == "SUM" else "SUM(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._avg'\)",
+                agg if func == "AVG" else "AVG(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._min'\)",
+                agg if func == "MIN" else "MIN(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._max'\)",
+                agg if func == "MAX" else "MAX(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_clause = f"HAVING {having_sql}"
+
+        sql = f"SELECT {', '.join(select_parts)} FROM {self._table} {where} {group_by} {having_clause}".strip()
+        sql = " ".join(sql.split())
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
+
+        params = list(self._expression.params) if self._expression else []
+        if self._having:
+            params.extend(self._having.params)
+        return sql, params
+
+    async def _execute_grouped_aggregate(
+        self, func: str, field: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Execute a grouped aggregate and return list[dict]."""
+        sql, params = self._build_grouped_aggregate_query(func, field)
+        cur = await self._adapter.execute(sql, params)
+        rows = await cur.fetchall()
+        await cur.close()
+        await self._adapter.auto_commit()
+        agg_key = func.lower()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            d: dict[str, Any] = {}
+            for i, gf in enumerate(self._group_by_fields):
+                d[gf] = row[i]
+            d[agg_key] = row[len(self._group_by_fields)]
+            results.append(d)
+        return results
 
     def _build_query(self, *, include_id: bool = False) -> tuple[str, list[Any]]:
         where = f"WHERE {self._expression.sql}" if self._expression else ""
@@ -251,9 +360,12 @@ class AsyncSQLerQuery:
         res = await limited.all()
         return res[0] if res else None
 
-    async def count(self) -> int:
+    async def count(self):
+        """Return count. With group_by returns list[dict], otherwise int."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return await self._execute_grouped_aggregate("COUNT")
         sql, params = self._build_aggregate_query("COUNT")
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
@@ -261,10 +373,12 @@ class AsyncSQLerQuery:
         await self._adapter.auto_commit()
         return int(row[0]) if row else 0
 
-    async def sum(self, field: str) -> Optional[float]:
-        """Return the sum of values for the specified field."""
+    async def sum(self, field: str):
+        """Return sum. With group_by returns list[dict], otherwise float|None."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return await self._execute_grouped_aggregate("SUM", field)
         sql, params = self._build_aggregate_query("SUM", field)
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
@@ -272,10 +386,12 @@ class AsyncSQLerQuery:
         await self._adapter.auto_commit()
         return float(row[0]) if row and row[0] is not None else None
 
-    async def avg(self, field: str) -> Optional[float]:
-        """Return the average of values for the specified field."""
+    async def avg(self, field: str):
+        """Return average. With group_by returns list[dict], otherwise float|None."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return await self._execute_grouped_aggregate("AVG", field)
         sql, params = self._build_aggregate_query("AVG", field)
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
@@ -283,10 +399,12 @@ class AsyncSQLerQuery:
         await self._adapter.auto_commit()
         return float(row[0]) if row and row[0] is not None else None
 
-    async def min(self, field: str) -> Optional[Any]:
-        """Return the minimum value for the specified field."""
+    async def min(self, field: str):
+        """Return minimum. With group_by returns list[dict], otherwise Any|None."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return await self._execute_grouped_aggregate("MIN", field)
         sql, params = self._build_aggregate_query("MIN", field)
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()
@@ -294,10 +412,12 @@ class AsyncSQLerQuery:
         await self._adapter.auto_commit()
         return row[0] if row else None
 
-    async def max(self, field: str) -> Optional[Any]:
-        """Return the maximum value for the specified field."""
+    async def max(self, field: str):
+        """Return maximum. With group_by returns list[dict], otherwise Any|None."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._group_by_fields:
+            return await self._execute_grouped_aggregate("MAX", field)
         sql, params = self._build_aggregate_query("MAX", field)
         cur = await self._adapter.execute(sql, params)
         row = await cur.fetchone()

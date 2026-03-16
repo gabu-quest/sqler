@@ -676,9 +676,9 @@ def stream_jsonl(
         return
 
     sql, params = query._build_query(include_id=include_id, include_version=False)
-    rows = query._adapter.execute(sql, params).fetchall()
+    cur = query._adapter.execute(sql, params)
 
-    for row in rows:
+    for row in cur:
         if include_id:
             obj = json.loads(row[1])
             obj["_id"] = row[0]
