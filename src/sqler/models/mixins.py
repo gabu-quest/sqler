@@ -667,6 +667,10 @@ class AuditLogMixin:
     The audit log is stored in a table named `{model_table}_audit`.
     """
 
+    # Internal snapshot for change detection — not a model field.
+    # Untyped to avoid being picked up by @dataclass or msgspec Struct.
+    _pre_save_snapshot = None
+
     def _capture_snapshot(self) -> None:
         """Capture current state before save for change detection."""
         # Get model data excluding private fields
@@ -676,11 +680,11 @@ class AuditLogMixin:
                 data[field_name] = getattr(self, field_name)
             except AttributeError:
                 pass
-        object.__setattr__(self, "_pre_save_snapshot", data)
+        self.__dict__["_pre_save_snapshot"] = data
 
     def _get_changes(self) -> dict[str, dict[str, Any]]:
         """Get dict of changed fields with old/new values."""
-        snapshot = getattr(self, "_pre_save_snapshot", None)
+        snapshot = self.__dict__.get("_pre_save_snapshot")
         if snapshot is None:
             return {}
 
@@ -801,9 +805,9 @@ class AuditLogMixin:
             db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
             current = db.find_document(table, self._id)
             if current:
-                object.__setattr__(self, "_pre_save_snapshot", {
+                self.__dict__["_pre_save_snapshot"] = {
                     k: v for k, v in current.items() if k not in ("_id", "_version")
-                })
+                }
 
         result = super().save(db=db)  # type: ignore[misc]
 
@@ -838,6 +842,8 @@ class AsyncAuditLogMixin:
         logs = await user.get_audit_log()
     """
 
+    _pre_save_snapshot = None
+
     def _capture_snapshot(self) -> None:
         """Capture current state before save."""
         data = {}
@@ -846,11 +852,11 @@ class AsyncAuditLogMixin:
                 data[field_name] = getattr(self, field_name)
             except AttributeError:
                 pass
-        object.__setattr__(self, "_pre_save_snapshot", data)
+        self.__dict__["_pre_save_snapshot"] = data
 
     def _get_changes(self) -> dict[str, dict[str, Any]]:
         """Get dict of changed fields with old/new values."""
-        snapshot = getattr(self, "_pre_save_snapshot", None)
+        snapshot = self.__dict__.get("_pre_save_snapshot")
         if snapshot is None:
             return {}
 
@@ -965,9 +971,9 @@ class AsyncAuditLogMixin:
             db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
             current = await db.find_document(table, self._id)
             if current:
-                object.__setattr__(self, "_pre_save_snapshot", {
+                self.__dict__["_pre_save_snapshot"] = {
                     k: v for k, v in current.items() if k not in ("_id", "_version")
-                })
+                }
 
         result = await super().save(db=db)  # type: ignore[misc]
 

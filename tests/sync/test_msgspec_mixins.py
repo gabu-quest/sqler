@@ -11,6 +11,7 @@ import pytest
 from sqler import SQLerDB
 from sqler.models._compat import MSGSPEC_AVAILABLE
 from sqler.models.mixins import (
+    AuditLogMixin,
     AuditMixin,
     FullMixin,
     HooksMixin,
@@ -62,6 +63,10 @@ if MSGSPEC_AVAILABLE:
 
     class MsgAuditItem(AuditMixin, SQLerMsgspecModel, tag=False):
         __tablename__ = "msg_audit_items"
+        name: str
+
+    class MsgAuditLogItem(AuditLogMixin, SQLerMsgspecModel, tag=False):
+        __tablename__ = "msg_audit_log_items"
         name: str
 
     class MsgFullItem(FullMixin, SQLerMsgspecModel, tag=False):
@@ -248,6 +253,50 @@ class TestMsgspecAuditMixin:
             assert item.updated_by == "updater"
         finally:
             AuditMixin.set_current_user(None)
+
+
+class TestMsgspecAuditLogMixin:
+    def test_create_logged(self):
+        db1, db2 = make_db_pair()
+        setup(MsgAuditLogItem, db1, db2)
+
+        item = MsgAuditLogItem(name="log_test")
+        item.save(db=db2)
+
+        logs = item.get_audit_log(db=db2)
+        assert len(logs) == 1
+        assert logs[0]["action"] == "create"
+        assert logs[0]["snapshot"]["name"] == "log_test"
+
+    def test_update_logged_with_changes(self):
+        db1, db2 = make_db_pair()
+        setup(MsgAuditLogItem, db1, db2)
+
+        item = MsgAuditLogItem(name="original")
+        item.save(db=db2)
+
+        item.name = "updated"
+        item.save(db=db2)
+
+        logs = item.get_audit_log(db=db2)
+        assert len(logs) == 2
+        assert logs[0]["action"] == "update"
+        assert logs[0]["changes"]["name"]["old"] == "original"
+        assert logs[0]["changes"]["name"]["new"] == "updated"
+        assert logs[1]["action"] == "create"
+
+    def test_no_entry_on_unchanged_save(self):
+        db1, db2 = make_db_pair()
+        setup(MsgAuditLogItem, db1, db2)
+
+        item = MsgAuditLogItem(name="unchanged")
+        item.save(db=db2)
+
+        item.save(db=db2)
+
+        logs = item.get_audit_log(db=db2)
+        assert len(logs) == 1
+        assert logs[0]["action"] == "create"
 
 
 class TestMsgspecFullMixin:

@@ -12,6 +12,8 @@ import pytest_asyncio
 from sqler import AsyncSQLerLiteModel
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.mixins import (
+    AsyncAuditLogMixin,
+    AsyncAuditMixin,
     AsyncFullMixin,
     AsyncHooksMixin,
     AsyncSoftDeleteMixin,
@@ -61,6 +63,18 @@ class ALiteVetoSaveItem(AsyncHooksMixin, AsyncSQLerLiteModel):
 @dataclass
 class ALiteSoftItem(AsyncSoftDeleteMixin, AsyncSQLerLiteModel):
     __tablename__ = "alite_soft_items"
+    name: str = ""
+
+
+@dataclass
+class ALiteAuditItem(AsyncAuditMixin, AsyncSQLerLiteModel):
+    __tablename__ = "alite_audit_items"
+    name: str = ""
+
+
+@dataclass
+class ALiteAuditLogItem(AsyncAuditLogMixin, AsyncSQLerLiteModel):
+    __tablename__ = "alite_audit_log_items"
     name: str = ""
 
 
@@ -203,6 +217,87 @@ class TestAsyncLiteSoftDeleteMixin:
         await item.hard_delete(db=db2)
         assert item._id is None
         assert await db2.find_document("alite_soft_items", saved_id) is None
+
+        await db1.close()
+        await db2.close()
+
+
+class TestAsyncLiteAuditMixin:
+    @pytest.mark.asyncio
+    async def test_created_by_updated_by(self):
+        db1, db2 = await make_async_db_pair()
+        await async_setup(ALiteAuditItem, db1, db2)
+
+        AsyncAuditMixin.set_current_user("test_user")
+        try:
+            item = ALiteAuditItem(name="audit")
+            await item.save(db=db2)
+
+            assert item.created_by == "test_user"
+            assert item.updated_by == "test_user"
+            assert_recent_utc(item.created_at, "created_at")
+            assert_recent_utc(item.updated_at, "updated_at")
+        finally:
+            AsyncAuditMixin.set_current_user(None)
+            await db1.close()
+            await db2.close()
+
+    @pytest.mark.asyncio
+    async def test_created_by_immutable_on_update(self):
+        db1, db2 = await make_async_db_pair()
+        await async_setup(ALiteAuditItem, db1, db2)
+
+        AsyncAuditMixin.set_current_user("creator")
+        try:
+            item = ALiteAuditItem(name="original")
+            await item.save(db=db2)
+
+            AsyncAuditMixin.set_current_user("updater")
+            item.name = "updated"
+            await item.save(db=db2)
+
+            assert item.created_by == "creator"
+            assert item.updated_by == "updater"
+        finally:
+            AsyncAuditMixin.set_current_user(None)
+            await db1.close()
+            await db2.close()
+
+
+class TestAsyncLiteAuditLogMixin:
+    @pytest.mark.asyncio
+    async def test_create_logged(self):
+        db1, db2 = await make_async_db_pair()
+        await async_setup(ALiteAuditLogItem, db1, db2)
+
+        item = ALiteAuditLogItem(name="log_test")
+        await item.save(db=db2)
+
+        logs = await item.get_audit_log(db=db2)
+        assert len(logs) == 1
+        assert logs[0]["action"] == "create"
+        assert logs[0]["snapshot"]["name"] == "log_test"
+
+        await db1.close()
+        await db2.close()
+
+    @pytest.mark.asyncio
+    async def test_update_logged_with_changes(self):
+        db1, db2 = await make_async_db_pair()
+        await async_setup(ALiteAuditLogItem, db1, db2)
+
+        item = ALiteAuditLogItem(name="original")
+        await item.save(db=db2)
+
+        item.name = "updated"
+        await item.save(db=db2)
+
+        logs = await item.get_audit_log(db=db2)
+        assert len(logs) == 2
+        assert logs[0]["action"] == "update"
+        assert logs[0]["changes"]["name"]["old"] == "original"
+        assert logs[0]["changes"]["name"]["new"] == "updated"
+        assert logs[1]["action"] == "create"
 
         await db1.close()
         await db2.close()
