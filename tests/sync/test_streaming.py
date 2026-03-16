@@ -1,5 +1,8 @@
 """Tests for streaming query results (iter_dicts, queryset.iter, stream_jsonl)."""
 
+import json
+import types
+
 from sqler import SQLerDB, SQLerModel, stream_jsonl
 from sqler.query import SQLerField as F
 
@@ -36,10 +39,10 @@ class TestIterDicts:
             assert len(results) == 5
             names = {r["name"] for r in results}
             assert names == {"A", "B", "C", "D", "E"}
-            # Each result should have _id
             for r in results:
-                assert "_id" in r
                 assert isinstance(r["_id"], int)
+                assert r["category"] in {"x", "y", "z"}
+                assert isinstance(r["price"], (int, float))
         finally:
             db.close()
 
@@ -75,18 +78,34 @@ class TestIterDicts:
         finally:
             db.close()
 
-    def test_iter_dicts_is_generator(self):
-        """Verify iter_dicts returns a generator, not a list."""
+    def test_iter_dicts_is_generator_with_correct_data(self):
+        """Verify iter_dicts returns a generator that yields correct dicts."""
         db = setup_db()
         try:
             seed_items()
-            q = db.query("items")
+            q = db.query("items").order_by("name")
             gen = q.iter_dicts()
-            import types
             assert isinstance(gen, types.GeneratorType)
-            # Can consume one at a time
             first = next(gen)
-            assert "name" in first
+            assert first["name"] == "A"
+            assert first["price"] == 10.0
+            assert isinstance(first["_id"], int)
+            second = next(gen)
+            assert second["name"] == "B"
+        finally:
+            db.close()
+
+    def test_iter_dicts_matches_all_dicts(self):
+        """iter_dicts and all_dicts should return identical data."""
+        db = setup_db()
+        try:
+            seed_items()
+            q = db.query("items").order_by("name")
+            streamed = list(q.iter_dicts())
+            eager = q.all_dicts()
+            assert len(streamed) == len(eager) == 5
+            for s, e in zip(streamed, eager):
+                assert s == e
         finally:
             db.close()
 
@@ -96,11 +115,12 @@ class TestQuerySetIter:
         db = setup_db()
         try:
             seed_items()
-            results = list(Item.query().iter())
+            results = list(Item.query().order_by("name").iter())
             assert len(results) == 5
+            assert [inst.name for inst in results] == ["A", "B", "C", "D", "E"]
             for inst in results:
                 assert isinstance(inst, Item)
-                assert inst._id is not None
+                assert isinstance(inst._id, int)
         finally:
             db.close()
 
@@ -115,13 +135,15 @@ class TestQuerySetIter:
         finally:
             db.close()
 
-    def test_queryset_iter_is_generator(self):
+    def test_queryset_iter_is_generator_with_data(self):
         db = setup_db()
         try:
             seed_items()
-            gen = Item.query().iter()
-            import types
+            gen = Item.query().order_by("name").iter()
             assert isinstance(gen, types.GeneratorType)
+            first = next(gen)
+            assert first.name == "A"
+            assert first.price == 10.0
         finally:
             db.close()
 
@@ -133,29 +155,70 @@ class TestStreamJsonl:
             seed_items()
             lines = list(stream_jsonl(Item))
             assert len(lines) == 5
+            parsed = [json.loads(line) for line in lines]
+            names = {obj["name"] for obj in parsed}
+            assert names == {"A", "B", "C", "D", "E"}
         finally:
             db.close()
 
-    def test_stream_jsonl_is_generator(self):
-        """stream_jsonl should yield rows, not build a list."""
+    def test_stream_jsonl_is_generator_with_data(self):
         db = setup_db()
         try:
             seed_items()
             gen = stream_jsonl(Item)
-            import types
             assert isinstance(gen, types.GeneratorType)
+            first = json.loads(next(gen))
+            assert first["_id"] is not None
+            assert first["name"] in {"A", "B", "C", "D", "E"}
         finally:
             db.close()
 
-    def test_stream_jsonl_valid_json(self):
-        import json
-
+    def test_stream_jsonl_valid_json_with_values(self):
         db = setup_db()
         try:
             seed_items()
-            for line in stream_jsonl(Item):
+            lines = list(stream_jsonl(Item))
+            assert len(lines) == 5
+            for line in lines:
+                obj = json.loads(line)
+                assert obj["name"] in {"A", "B", "C", "D", "E"}
+                assert isinstance(obj["_id"], int)
+                assert obj["category"] in {"x", "y", "z"}
+                assert isinstance(obj["price"], (int, float))
+        finally:
+            db.close()
+
+    def test_stream_jsonl_exclude_id(self):
+        db = setup_db()
+        try:
+            seed_items()
+            lines = list(stream_jsonl(Item, include_id=False))
+            assert len(lines) == 5
+            for line in lines:
+                obj = json.loads(line)
+                assert "_id" not in obj
+                assert obj["name"] in {"A", "B", "C", "D", "E"}
+        finally:
+            db.close()
+
+    def test_stream_jsonl_field_projection(self):
+        db = setup_db()
+        try:
+            seed_items()
+            lines = list(stream_jsonl(Item, fields=["name", "price"]))
+            assert len(lines) == 5
+            for line in lines:
                 obj = json.loads(line)
                 assert "name" in obj
-                assert "_id" in obj
+                assert "price" in obj
+                assert "category" not in obj
+        finally:
+            db.close()
+
+    def test_stream_jsonl_empty_table(self):
+        db = setup_db()
+        try:
+            lines = list(stream_jsonl(Item))
+            assert lines == []
         finally:
             db.close()

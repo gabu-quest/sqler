@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from sqler import SQLerDB, SQLerLiteModel, SQLerModel
+from sqler.query import SQLerField as F
 
 
 class User(SQLerModel):
@@ -151,6 +152,25 @@ class TestFirstOrCreateLite:
             assert created is False
             assert user.name == "Bob"
             assert user._id == original._id
+        finally:
+            db.close()
+
+    def test_idempotent(self):
+        db = setup_db()
+        try:
+            user1, created1 = LiteUser.first_or_create(
+                lookup={"email": "carol@lite.com"},
+                defaults={"name": "Carol"},
+            )
+            user2, created2 = LiteUser.first_or_create(
+                lookup={"email": "carol@lite.com"},
+                defaults={"name": "Different"},
+            )
+            assert created1 is True
+            assert created2 is False
+            assert user1._id == user2._id
+            assert user2.name == "Carol"
+            assert LiteUser.query().filter(F("email") == "carol@lite.com").count() == 1
         finally:
             db.close()
 

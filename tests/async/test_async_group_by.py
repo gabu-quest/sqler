@@ -40,6 +40,7 @@ async def test_group_by_count(db):
     await seed_employees()
     result = await Employee.query().group_by("department").count()
     assert isinstance(result, list)
+    assert len(result) == 3
     by_dept = {r["department"]: r["count"] for r in result}
     assert by_dept == {"eng": 3, "sales": 2, "hr": 1}
 
@@ -48,10 +49,44 @@ async def test_group_by_count(db):
 async def test_group_by_sum(db):
     await seed_employees()
     result = await Employee.query().group_by("department").sum("salary")
+    assert len(result) == 3
     by_dept = {r["department"]: r["sum"] for r in result}
     assert by_dept["eng"] == 380000.0
     assert by_dept["sales"] == 200000.0
     assert by_dept["hr"] == 110000.0
+
+
+@pytest.mark.asyncio
+async def test_group_by_avg(db):
+    await seed_employees()
+    result = await Employee.query().group_by("department").avg("salary")
+    assert len(result) == 3
+    by_dept = {r["department"]: r["avg"] for r in result}
+    assert abs(by_dept["eng"] - 126666.67) < 1
+    assert by_dept["sales"] == 100000.0
+    assert by_dept["hr"] == 110000.0
+
+
+@pytest.mark.asyncio
+async def test_group_by_min(db):
+    await seed_employees()
+    result = await Employee.query().group_by("department").min("salary")
+    assert len(result) == 3
+    by_dept = {r["department"]: r["min"] for r in result}
+    assert by_dept["eng"] == 90000
+    assert by_dept["sales"] == 80000
+    assert by_dept["hr"] == 110000
+
+
+@pytest.mark.asyncio
+async def test_group_by_max(db):
+    await seed_employees()
+    result = await Employee.query().group_by("department").max("salary")
+    assert len(result) == 3
+    by_dept = {r["department"]: r["max"] for r in result}
+    assert by_dept["eng"] == 150000
+    assert by_dept["sales"] == 120000
+    assert by_dept["hr"] == 110000
 
 
 @pytest.mark.asyncio
@@ -63,6 +98,7 @@ async def test_group_by_with_filter(db):
         .group_by("department")
         .count()
     )
+    assert len(result) == 3
     by_dept = {r["department"]: r["count"] for r in result}
     assert by_dept == {"eng": 2, "sales": 1, "hr": 1}
 
@@ -76,6 +112,7 @@ async def test_group_by_with_having(db):
         .having(F("_count") > 1)
         .count()
     )
+    assert len(result) == 2
     by_dept = {r["department"]: r["count"] for r in result}
     assert "hr" not in by_dept
     assert by_dept["eng"] == 3
@@ -86,9 +123,13 @@ async def test_group_by_with_having(db):
 async def test_group_by_multiple_fields(db):
     await seed_employees()
     result = await Employee.query().group_by("department", "role").count()
+    assert len(result) == 5
     lookup = {(r["department"], r["role"]): r["count"] for r in result}
     assert lookup[("eng", "senior")] == 2
     assert lookup[("eng", "junior")] == 1
+    assert lookup[("sales", "lead")] == 1
+    assert lookup[("sales", "junior")] == 1
+    assert lookup[("hr", "lead")] == 1
 
 
 @pytest.mark.asyncio
@@ -97,6 +138,8 @@ async def test_scalar_aggregates_still_work(db):
     await seed_employees()
     assert await Employee.query().count() == 6
     assert await Employee.query().sum("salary") == 690000.0
+    assert await Employee.query().min("salary") == 80000
+    assert await Employee.query().max("salary") == 150000
 
 
 @pytest.mark.asyncio

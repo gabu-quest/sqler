@@ -36,6 +36,7 @@ class TestGroupByOnQuery:
             q = db.query("employees")
             result = q.group_by("department").count()
             assert isinstance(result, list)
+            assert len(result) == 3
             by_dept = {r["department"]: r["count"] for r in result}
             assert by_dept == {"eng": 3, "sales": 2, "hr": 1}
         finally:
@@ -47,6 +48,7 @@ class TestGroupByOnQuery:
             seed_employees()
             q = db.query("employees")
             result = q.group_by("department").sum("salary")
+            assert len(result) == 3
             by_dept = {r["department"]: r["sum"] for r in result}
             assert by_dept["eng"] == 380000.0
             assert by_dept["sales"] == 200000.0
@@ -100,7 +102,7 @@ class TestGroupByOnQuery:
             q = db.query("employees")
             result = q.group_by("department", "role").count()
             assert isinstance(result, list)
-            # eng has 2 senior, 1 junior
+            assert len(result) == 5
             lookup = {(r["department"], r["role"]): r["count"] for r in result}
             assert lookup[("eng", "senior")] == 2
             assert lookup[("eng", "junior")] == 1
@@ -116,6 +118,7 @@ class TestGroupByOnQuery:
             seed_employees()
             q = db.query("employees")
             result = q.filter(F("salary") >= 100000).group_by("department").count()
+            assert len(result) == 3
             by_dept = {r["department"]: r["count"] for r in result}
             assert by_dept == {"eng": 2, "sales": 1, "hr": 1}
         finally:
