@@ -45,7 +45,8 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         For simple counter operations, the model supports automatic conflict
         resolution called "intent rebasing". Configure via ``_rebase_config``.
 
-    Usage:
+    Usage::
+
         from dataclasses import dataclass
         from sqler import AsyncSQLerLiteSafeModel, AsyncSQLerDB
 
@@ -57,10 +58,12 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
 
         db = AsyncSQLerDB(":memory:")
         await db.connect()
-        Counter.set_db(db)
-
         c = Counter(name="views", count=0)
-        await c.save()  # _version = 0
+        await c.save(db=db)  # _version = 0
+
+    .. note::
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
+        ``await .save(db=db)`` / ``await .delete(db=db)`` for writes.
 
     Attributes:
         _version: The current version number for optimistic locking.

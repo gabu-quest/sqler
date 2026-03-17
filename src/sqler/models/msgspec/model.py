@@ -52,8 +52,7 @@ def _default_table_name(name: str) -> str:
 class SQLerMsgspecModel(SQLerMsgspecModelBase):
     """Msgspec Struct-based SQLer model with persistence helpers.
 
-    Define subclasses as msgspec Structs. Bind the class to a database
-    via :meth:`set_db`. Instances persist as JSON into SQLite.
+    Instances persist as JSON into SQLite.
 
     Usage::
 
@@ -66,10 +65,13 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             email: str
 
         db = SQLerDB(":memory:")
-        User.set_db(db)
-
         user = User(name="Alice", email="alice@example.com")
-        user.save()
+        user.save(db=db)
+        users = User.using(db).filter(F("age") > 30).all()
+
+    .. note::
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
+        ``.save(db=db)`` / ``.delete(db=db)`` for writes.
     """
 
     # Class-level database binding — no type annotation to avoid msgspec
@@ -114,7 +116,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
 
     @classmethod
     def bind(cls: Type[T], db: "SQLerDB", table: Optional[str] = None) -> None:
-        """Alias for set_db()."""
+        """Alias for set_db() (deprecated)."""
         cls.set_db(db, table)
 
     @classmethod
@@ -143,7 +145,8 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         """Return the bound DB and table or raise if unbound."""
         if cls._db is None or cls._table is None:
             raise NotBoundError(
-                f"Model {cls.__name__} is not bound. Call set_db(db, table?) first.",
+                f"Model {cls.__name__} is not bound. "
+                "Use .using(db) for queries or .save(db=db) for writes.",
                 details={"model": cls.__name__},
             )
         return cls._db, cls._table

@@ -35,10 +35,10 @@ TAModel = TypeVar("TAModel", bound="AsyncSQLerLiteModel")
 class AsyncSQLerLiteModel(SQLerLiteModelBase):
     """Async dataclass-based SQLer model with persistence helpers.
 
-    Define subclasses decorated with @dataclass. Bind the class to an async
-    database via :meth:`set_db`. Instances persist as JSON into SQLite.
+    Instances persist as JSON into SQLite.
 
-    Usage:
+    Usage::
+
         from dataclasses import dataclass
         from sqler import AsyncSQLerLiteModel, AsyncSQLerDB
 
@@ -50,10 +50,13 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
 
         db = AsyncSQLerDB(":memory:")
         await db.connect()
-        User.set_db(db)
-
         user = User(name="Alice", email="alice@example.com")
-        await user.save()
+        await user.save(db=db)
+        users = await User.using(db).filter(F("age") > 30).all()
+
+    .. note::
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
+        ``await .save(db=db)`` / ``await .delete(db=db)`` for writes.
     """
 
     # Class-level database binding (not dataclass fields)
@@ -88,7 +91,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
 
     @classmethod
     def bind(cls, db: "AsyncSQLerDB", table: Optional[str] = None) -> None:
-        """Alias for set_db()."""
+        """Alias for set_db() (deprecated)."""
         cls.set_db(db, table)
 
     @classmethod
@@ -111,7 +114,8 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """Return the bound DB and table or raise if unbound."""
         if cls._db is None or cls._table is None:
             raise NotBoundError(
-                f"Model {cls.__name__} is not bound. Call set_db(db, table?) first.",
+                f"Model {cls.__name__} is not bound. "
+                "Use .using(db) for queries or .save(db=db) for writes.",
                 details={"model": cls.__name__},
             )
         return cls._db, cls._table

@@ -27,8 +27,7 @@ For SQLerDB integration::
     class User(SQLerModel):
         name: str
 
-    User.set_db(db)
-    users = User.query().all()  # Uses pooled connection
+    users = User.using(db).all()  # Uses pooled connection
 """
 
 import queue
@@ -520,10 +519,8 @@ class PooledSQLerDB:
         class User(SQLerModel):
             name: str
 
-        User.set_db(db)
-
         # Queries use pooled connections
-        users = User.query().all()
+        users = User.using(db).all()
 
         # Check pool stats
         print(db.pool_stats())

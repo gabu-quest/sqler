@@ -47,7 +47,8 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         the model supports automatic conflict resolution called "intent rebasing".
         Configure rebasing via the ``_rebase_config`` class variable.
 
-    Usage:
+    Usage::
+
         from dataclasses import dataclass
         from sqler import SQLerLiteSafeModel, SQLerDB
 
@@ -58,19 +59,17 @@ class SQLerLiteSafeModel(SQLerLiteModel):
             count: int = 0
 
         db = SQLerDB(":memory:")
-        Counter.set_db(db)
-
         c = Counter(name="views", count=0)
-        c.save()  # _version = 0
+        c.save(db=db)  # _version = 0
 
         # Concurrent update simulation
-        c2 = Counter.from_id(c._id)
+        c2 = Counter.using(db).filter(F("name") == "views").first()
         c2.count += 1
-        c2.save()  # _version = 1
+        c2.save(db=db)  # _version = 1
 
-        # Original instance has stale version
-        c.count += 1
-        c.save()  # Raises StaleVersionError (or rebases if configured)
+    .. note::
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
+        ``.save(db=db)`` / ``.delete(db=db)`` for writes.
 
     Attributes:
         _version: The current version number for optimistic locking.

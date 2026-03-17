@@ -135,7 +135,7 @@ class FTSIndex:
         self.tokenizer = tokenizer
         self.content_sync = content_sync
 
-        # Get table name - _table is set when set_db() is called
+        # Get table name - _table is set via set_db() or using()
         self.index_table = index_name  # Set later if needed
 
         # Get database
@@ -144,7 +144,7 @@ class FTSIndex:
     @property
     def table(self) -> str:
         """Get the table name from the model class."""
-        # Try _table first (set by set_db)
+        # Try _table first (set by set_db or using)
         table = getattr(self.model_class, "_table", None)
         if table:
             return table

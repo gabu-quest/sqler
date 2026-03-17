@@ -38,7 +38,7 @@ class SQLerModelField:
         else:
             first = first_raw.strip("[]'\"")
         # related table name is default-plural of field type's class; we rely on registry-set table on model
-        # find table by inspecting registry mapping done in set_db; use child model's _table
+        # find table by inspecting registry mapping; use child model's _table
         # fall back to pluralized field name if unknown
         try:
             # prefer registry-known names

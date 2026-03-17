@@ -4,7 +4,8 @@ This module provides Pydantic-free alternatives using standard library
 dataclasses. All models maintain API compatibility with their Pydantic
 counterparts.
 
-Usage:
+Usage::
+
     from dataclasses import dataclass
     from sqler import SQLerLiteModel, SQLerDB
 
@@ -15,10 +16,8 @@ Usage:
         email: str
 
     db = SQLerDB(":memory:")
-    User.set_db(db)
-
     user = User(name="Alice", email="alice@example.com")
-    user.save()
+    user.save(db=db)
 """
 
 from sqler.models.lite.base import SQLerLiteModelBase

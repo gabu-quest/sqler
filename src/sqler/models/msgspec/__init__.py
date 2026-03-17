@@ -14,10 +14,8 @@ Usage::
         email: str
 
     db = SQLerDB(":memory:")
-    User.set_db(db)
-
     user = User(name="Alice", email="alice@example.com")
-    user.save()
+    user.save(db=db)
 """
 
 from sqler.models._compat import MSGSPEC_AVAILABLE

@@ -56,10 +56,19 @@ def _default_table_name(name: str) -> str:
 class SQLerModel(BaseModel):
     """Pydantic-based model with persistence helpers for SQLerDB.
 
-    Define subclasses to model your domain. Bind the class to a database via
-    :meth:`set_db`, optionally overriding the table name. Instances persist as
-    JSON (excluding the private ``_id`` attribute) into a table with schema
+    Instances persist as JSON (excluding the private ``_id`` attribute) into
+    a table with schema
     ``(_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)``.
+
+    Usage::
+
+        db = SQLerDB(":memory:")
+        user = User(name="Alice").save(db=db)
+        users = User.using(db).filter(F("age") > 30).all()
+
+    .. note::
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
+        ``.save(db=db)`` / ``.delete(db=db)`` for writes.
     """
 
     # internal id stored outside the JSON blob
@@ -153,7 +162,8 @@ class SQLerModel(BaseModel):
         """
         if cls._db is None or cls._table is None:
             raise NotBoundError(
-                f"Model {cls.__name__} is not bound. Call set_db(db, table?) first.",
+                f"Model {cls.__name__} is not bound. "
+                "Use .using(db) for queries or .save(db=db) for writes.",
                 details={"model": cls.__name__},
             )
         return cls._db, cls._table
