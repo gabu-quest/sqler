@@ -6,7 +6,7 @@ from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import InvalidFieldNameError, InvalidIdentifierError
 from sqler.fts import FTSIndex
 from sqler.ops import checkpoint
-from sqler.utils import validate_field_name, validate_identifier
+from sqler.utils import validate_column_name, validate_field_name, validate_identifier
 
 # ---------------------------------------------------------------------------
 # Evil payloads
@@ -334,3 +334,55 @@ class TestCheckpointModeValidation:
     def test_case_insensitive(self, db):
         result = checkpoint(db, mode="passive")
         assert isinstance(result, dict)
+
+
+# ---------------------------------------------------------------------------
+# Reserved-word protection for promoted column names
+# ---------------------------------------------------------------------------
+
+RESERVED_COLUMN_NAMES = [
+    "index", "order", "group", "table", "select", "from", "where",
+    "values", "set", "key", "primary", "column", "create", "drop",
+    "insert", "update", "delete", "join", "on", "having", "limit",
+    "offset", "union", "check", "default", "foreign", "references",
+    "constraint", "unique", "case", "when", "then", "else", "end",
+    "between", "like", "in", "is", "not", "null", "and", "or", "as",
+]
+
+
+class TestReservedWordProtection:
+    """Reserved words must be rejected as promoted column names."""
+
+    @pytest.mark.parametrize("word", RESERVED_COLUMN_NAMES)
+    def test_validate_column_name_rejects_reserved(self, word):
+        with pytest.raises(InvalidIdentifierError, match="reserved word"):
+            validate_column_name(word)
+
+    @pytest.mark.parametrize("word", RESERVED_COLUMN_NAMES)
+    def test_case_insensitive_rejection(self, word):
+        with pytest.raises(InvalidIdentifierError, match="reserved word"):
+            validate_column_name(word.upper())
+
+    @pytest.mark.parametrize("name", ["status", "name", "email", "age", "score", "is_active"])
+    def test_accepts_non_reserved_names(self, name):
+        assert validate_column_name(name) == name
+
+    def test_promoted_column_rejects_reserved_at_table_creation(self, db):
+        with pytest.raises(InvalidIdentifierError, match="reserved word"):
+            db._ensure_table_with_promoted("items", {"index": "TEXT"})
+
+    def test_promoted_column_rejects_order(self, db):
+        with pytest.raises(InvalidIdentifierError, match="reserved word"):
+            db._ensure_table_with_promoted("items", {"order": "INTEGER"})
+
+    def test_promoted_column_accepts_valid_names(self, db):
+        db._ensure_table_with_promoted("items", {"status": "TEXT", "priority": "INTEGER"})
+        # Verify table was created with the columns
+        cursor = db.adapter.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='items';"
+        )
+        row = cursor.fetchone()
+        assert row is not None
+        ddl = row[0]
+        assert "status" in ddl
+        assert "priority" in ddl

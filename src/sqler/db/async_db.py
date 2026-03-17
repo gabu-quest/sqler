@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import StaleVersionError
-from sqler.utils import validate_field_name, validate_identifier, validate_table_name
+from sqler.utils import validate_column_name, validate_field_name, validate_identifier, validate_table_name
 
 
 class AsyncSQLerDB:
@@ -53,7 +53,7 @@ class AsyncSQLerDB:
         table = validate_table_name(table)
         checks = checks or {}
         for col_name in promoted:
-            validate_identifier(col_name)
+            validate_column_name(col_name)
 
         # Check if table exists
         cur = await self.adapter.execute(

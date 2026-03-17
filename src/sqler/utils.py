@@ -16,6 +16,32 @@ if TYPE_CHECKING:
 # Compiled regex for table name validation
 _TABLE_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
+# SQLite reserved words that produce invalid SQL when used as unquoted column names.
+# Source: https://www.sqlite.org/lang_keywords.html
+_SQL_RESERVED_WORDS: frozenset[str] = frozenset({
+    "abort", "action", "add", "after", "all", "alter", "always", "analyze",
+    "and", "as", "asc", "attach", "autoincrement", "before", "begin",
+    "between", "by", "cascade", "case", "cast", "check", "collate", "column",
+    "commit", "conflict", "constraint", "create", "cross", "current",
+    "current_date", "current_time", "current_timestamp", "database", "default",
+    "deferrable", "deferred", "delete", "desc", "detach", "distinct", "do",
+    "drop", "each", "else", "end", "escape", "except", "exclude", "exclusive",
+    "exists", "explain", "fail", "filter", "first", "following", "for",
+    "foreign", "from", "full", "generated", "glob", "group", "groups",
+    "having", "if", "ignore", "immediate", "in", "index", "indexed",
+    "initially", "inner", "insert", "instead", "intersect", "into", "is",
+    "isnull", "join", "key", "last", "left", "like", "limit", "match",
+    "materialized", "natural", "no", "not", "nothing", "notnull", "null",
+    "nulls", "of", "offset", "on", "or", "order", "others", "outer", "over",
+    "partition", "plan", "pragma", "preceding", "primary", "query", "raise",
+    "range", "recursive", "references", "regexp", "reindex", "release",
+    "rename", "replace", "restrict", "returning", "right", "rollback", "row",
+    "rows", "savepoint", "select", "set", "table", "temp", "temporary",
+    "then", "ties", "to", "transaction", "trigger", "unbounded", "union",
+    "unique", "update", "using", "vacuum", "values", "view", "virtual",
+    "when", "where", "window", "with", "without",
+})
+
 logger = logging.getLogger("sqler.utils")
 
 
@@ -102,6 +128,33 @@ def validate_identifier(name: str) -> str:
     if not _TABLE_NAME_PATTERN.match(name):
         raise InvalidIdentifierError(
             f"Invalid identifier: {name!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*",
+            identifier=name,
+        )
+    return name
+
+
+def validate_column_name(name: str) -> str:
+    """Validate a SQL column name — format check plus reserved-word rejection.
+
+    Promoted columns appear unquoted in DDL and DML, so SQLite reserved words
+    like ``index``, ``order``, or ``group`` would produce invalid SQL.
+
+    Args:
+        name: Column name to validate.
+
+    Returns:
+        str: The validated column name.
+
+    Raises:
+        InvalidIdentifierError: If the name is invalid or a reserved word.
+    """
+    from sqler.exceptions import InvalidIdentifierError
+
+    validate_identifier(name)
+    if name.lower() in _SQL_RESERVED_WORDS:
+        raise InvalidIdentifierError(
+            f"'{name}' is a SQLite reserved word and cannot be used as a column name. "
+            f"Choose a different name (e.g. '{name}_val', '{name}_col').",
             identifier=name,
         )
     return name
