@@ -31,5 +31,8 @@ benchmarks/v1.1-archive/
 # Project-local Claude memory (personal, not shared)
 CLAUDE.local.md
 
+# Project-local bug log (personal, not shared)
+BUGLOG.local.md
+
 # Built site output
 _site/

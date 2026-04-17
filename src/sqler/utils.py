@@ -133,6 +133,119 @@ def validate_identifier(name: str) -> str:
     return name
 
 
+# Grammar for promoted-column definitions.
+# Accepts: TYPE [NOT NULL] [DEFAULT literal]
+#   TYPE ::= TEXT | INTEGER | REAL | BLOB | NUMERIC [(p[,s])]
+#   literal ::= integer | float | 'single-quoted' | NULL | CURRENT_TIMESTAMP | CURRENT_DATE | CURRENT_TIME
+# DEFAULT sub-queries, expression-valued DEFAULTs, and parenthesized expressions are intentionally rejected
+# — those are DDL-injection vectors that cannot be parameterized in SQLite.
+_COLUMN_DEF_PATTERN = re.compile(
+    r"""
+    ^\s*
+    (?:TEXT|INTEGER|REAL|BLOB|NUMERIC(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)
+    (?:\s+NOT\s+NULL)?
+    (?:\s+DEFAULT\s+
+        (?:
+            -?\d+(?:\.\d+)?                # numeric literal
+          | '(?:[^'\\;]|'')*'              # single-quoted string literal (SQL-style '' escape allowed)
+          | NULL
+          | CURRENT_TIMESTAMP
+          | CURRENT_DATE
+          | CURRENT_TIME
+        )
+    )?
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Keywords that must never appear inside a CHECK expression — they belong to DDL/DML, not predicates.
+_CHECK_EXPR_BANNED_KEYWORDS = re.compile(
+    r"\b(?:DROP|CREATE|ALTER|ATTACH|DETACH|PRAGMA|INSERT|UPDATE|DELETE|REPLACE|VACUUM|REINDEX)\b",
+    re.IGNORECASE,
+)
+
+
+def validate_column_def(col_def: str) -> str:
+    """Validate a promoted-column definition string (e.g. ``TEXT NOT NULL DEFAULT 'pending'``).
+
+    Promoted column *definitions* are interpolated into DDL unparameterized (SQLite DDL does
+    not accept bound parameters), so the accepted grammar is strict: a SQLite storage type,
+    optional ``NOT NULL``, and optional ``DEFAULT`` of a literal value. Anything richer —
+    subqueries, parenthesised expressions, function calls — is rejected.
+
+    Args:
+        col_def: The definition to validate.
+
+    Returns:
+        str: The validated definition, unchanged.
+
+    Raises:
+        InvalidColumnDefError: If the definition contains anything outside the accepted grammar.
+    """
+    from sqler.exceptions import InvalidColumnDefError
+
+    if not isinstance(col_def, str) or not col_def.strip():
+        raise InvalidColumnDefError(
+            f"Column definition must be a non-empty string, got: {type(col_def).__name__}",
+            definition=col_def,
+        )
+    if not _COLUMN_DEF_PATTERN.match(col_def):
+        raise InvalidColumnDefError(
+            f"Invalid column definition: {col_def!r}. "
+            "Accepted grammar: "
+            "TYPE [NOT NULL] [DEFAULT <literal>] where TYPE is TEXT|INTEGER|REAL|BLOB|NUMERIC "
+            "and <literal> is a number, quoted string, NULL, or CURRENT_TIMESTAMP/CURRENT_DATE/CURRENT_TIME.",
+            definition=col_def,
+        )
+    return col_def
+
+
+def validate_check_expression(expr: str) -> str:
+    """Validate a CHECK-constraint expression.
+
+    CHECK expressions are interpolated raw into DDL, so we forbid anything that could escape
+    the constraint context: semicolons, SQL comment markers, and DDL/DML keywords.
+
+    This is not a full SQL parser — it's an allowlist of the *shape* we expect (a predicate),
+    rejecting the common injection vectors. Users who need richer CHECK expressions should
+    construct the table DDL directly rather than relying on promoted-column convenience.
+
+    Args:
+        expr: The CHECK expression to validate.
+
+    Returns:
+        str: The validated expression, unchanged.
+
+    Raises:
+        InvalidColumnDefError: If the expression contains a forbidden token.
+    """
+    from sqler.exceptions import InvalidColumnDefError
+
+    if not isinstance(expr, str) or not expr.strip():
+        raise InvalidColumnDefError(
+            f"CHECK expression must be a non-empty string, got: {type(expr).__name__}",
+            definition=expr,
+        )
+    if ";" in expr:
+        raise InvalidColumnDefError(
+            f"CHECK expression may not contain ';': {expr!r}",
+            definition=expr,
+        )
+    if "--" in expr or "/*" in expr or "*/" in expr:
+        raise InvalidColumnDefError(
+            f"CHECK expression may not contain SQL comment markers: {expr!r}",
+            definition=expr,
+        )
+    match = _CHECK_EXPR_BANNED_KEYWORDS.search(expr)
+    if match:
+        raise InvalidColumnDefError(
+            f"CHECK expression may not contain keyword {match.group(0)!r}: {expr!r}",
+            definition=expr,
+        )
+    return expr
+
+
 def validate_column_name(name: str) -> str:
     """Validate a SQL column name — format check plus reserved-word rejection.
 

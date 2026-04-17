@@ -3,7 +3,11 @@
 import pytest
 import pytest_asyncio
 from sqler.db.async_db import AsyncSQLerDB
-from sqler.exceptions import InvalidFieldNameError, InvalidIdentifierError
+from sqler.exceptions import (
+    InvalidColumnDefError,
+    InvalidFieldNameError,
+    InvalidIdentifierError,
+)
 
 EVIL_FIELDS = [
     "x') FROM users--",
@@ -191,3 +195,74 @@ class TestAsyncPromotedColumnRejectsInjection:
     async def test_rejects(self, adb, evil):
         with pytest.raises(InvalidIdentifierError, match="Invalid identifier|non-empty string"):
             await adb._ensure_table_with_promoted("items", {evil: "TEXT"})
+
+
+class TestAsyncPromotedColumnDefRejectsInjection:
+    """H-3 (async): _ensure_table_with_promoted must validate col_def strings."""
+
+    @pytest.mark.parametrize(
+        "evil_def",
+        [
+            "TEXT; DROP TABLE items",
+            "TEXT DEFAULT (SELECT 1)",
+            "TEXT/* injected */",
+            "TEXT -- comment",
+            "VARCHAR(10)",
+            "",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_rejects(self, adb, evil_def):
+        with pytest.raises(
+            InvalidColumnDefError,
+            match="Invalid column definition|non-empty string",
+        ):
+            await adb._ensure_table_with_promoted("items", {"status": evil_def})
+
+
+class TestAsyncPromotedChecksRejectInjection:
+    @pytest.mark.asyncio
+    async def test_rejects_semicolon(self, adb):
+        with pytest.raises(InvalidColumnDefError, match="may not contain ';'"):
+            await adb._ensure_table_with_promoted(
+                "items",
+                {"status": "TEXT"},
+                checks={"evil": "status = 'x'; DROP TABLE items"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejects_keyword(self, adb):
+        with pytest.raises(InvalidColumnDefError, match="may not contain keyword"):
+            await adb._ensure_table_with_promoted(
+                "items",
+                {"status": "TEXT"},
+                checks={"evil": "status = 'x' OR DROP TABLE items"},
+            )
+
+
+class TestAsyncCreateIndexWhereRejectsInjection:
+    @pytest.mark.parametrize(
+        "evil_where",
+        [
+            "1=1); DROP TABLE items; --",
+            "1=1 -- trick",
+            "1=1 /* trick */",
+            "1=1 OR DROP TABLE items",
+            "1=1 OR PRAGMA writable_schema=ON",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_rejects_evil_where(self, adb, evil_where):
+        with pytest.raises(
+            InvalidColumnDefError,
+            match="may not contain|non-empty string",
+        ):
+            await adb.create_index("items", "name", where=evil_where)
+
+    @pytest.mark.asyncio
+    async def test_accepts_legit_partial_where(self, adb):
+        await adb.create_index(
+            "items",
+            "name",
+            where="json_extract(data,'$.name') IS NOT NULL",
+        )

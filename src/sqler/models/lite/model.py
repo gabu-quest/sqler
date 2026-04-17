@@ -104,7 +104,9 @@ class SQLerLiteModel(SQLerLiteModelBase):
             stacklevel=2,
         )
         explicit = getattr(cls, "__tablename__", None)
-        chosen = table or explicit or _default_table_name(cls.__name__)
+        chosen = validate_table_name(
+            table or explicit or _default_table_name(cls.__name__)
+        )
         cls._db = db
         cls._table = chosen
         cls.__tablename__ = chosen  # type: ignore[attr-defined]

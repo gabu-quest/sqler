@@ -3,7 +3,14 @@ from typing import Any, Optional
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import StaleVersionError
-from sqler.utils import validate_column_name, validate_field_name, validate_identifier, validate_table_name
+from sqler.utils import (
+    validate_check_expression,
+    validate_column_def,
+    validate_column_name,
+    validate_field_name,
+    validate_identifier,
+    validate_table_name,
+)
 
 
 class AsyncSQLerDB:
@@ -52,8 +59,11 @@ class AsyncSQLerDB:
         """Create or upgrade a table with promoted columns (async)."""
         table = validate_table_name(table)
         checks = checks or {}
-        for col_name in promoted:
+        for col_name, col_def in promoted.items():
             validate_column_name(col_name)
+            validate_column_def(col_def)
+        for chk_expr in checks.values():
+            validate_check_expression(chk_expr)
 
         # Check if table exists
         cur = await self.adapter.execute(
@@ -574,6 +584,8 @@ class AsyncSQLerDB:
         validate_field_name(field) if not field.startswith("_") else validate_identifier(field)
         if name is not None:
             validate_identifier(name)
+        if where is not None:
+            validate_check_expression(where)
         idx_name = name or f"idx_{table}_{field.replace('.', '_')}"
         unique_sql = "UNIQUE" if unique else ""
         expr = f"json_extract(data, '$.{field}')" if not field.startswith("_") else field

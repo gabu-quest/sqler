@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [1.2026.4.1] - 2026-04-17
+
+### Security
+
+- **`_ensure_table_with_promoted` — validate promoted-column definitions.** `col_def` strings (e.g. `TEXT NOT NULL DEFAULT 'pending'`) and CHECK expressions are now validated via new `validate_column_def()` / `validate_check_expression()` helpers. Unvalidated DDL interpolation was a latent injection surface for callers passing definitions from dynamic config.
+- **`create_index(where=...)` — validate partial-index WHERE clauses.** The `where` string is now passed through `validate_check_expression()`, which rejects `;`, SQL comment markers (`--`, `/*`, `*/`), and DDL/DML keywords. Legitimate partial indexes (e.g. `json_extract(data,'$.name') IS NOT NULL`) continue to work.
+- **`set_db()` — validate table names on Pydantic and Lite backends.** The msgspec backend already validated, but the Pydantic and Lite backends accepted arbitrary table strings. All three backends now mirror the same injection guard.
+
+### Fixed
+
+- **`SQLerModel.refresh()` — update the dirty-tracking snapshot.** The Pydantic `refresh()` updated instance fields but left `_snapshot` at its stale pre-refresh value, causing downstream dirty-tracking consumers to see incorrect state. Now matches the Lite and Msgspec backends.
+
+### Added
+
+- **`validate_column_def()` and `validate_check_expression()`** — reusable predicate-grammar validators in `sqler.utils`.
+- **`InvalidColumnDefError`** — new `SchemaError` subclass.
+
+---
+
 ## [1.2026.3.4] - 2026-03-04
 
 ### Added

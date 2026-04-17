@@ -270,6 +270,20 @@ class InvalidIdentifierError(SchemaError):
         self.identifier = identifier
 
 
+class InvalidColumnDefError(SchemaError):
+    """Raised when a promoted-column definition or CHECK expression is invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        definition: Optional[str] = None,
+        details: Optional[dict[str, Any]] = None,
+    ):
+        super().__init__(message, details=details)
+        self.definition = definition
+
+
 # Hook Errors
 
 
