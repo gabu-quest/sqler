@@ -51,10 +51,19 @@ from .lite import (
     SQLerLiteSafeModel,
 )
 
+# Always-available imports (no Pydantic dependency)
+from .mixins import (
+    AsyncFullMixin,
+    AsyncHooksMixin,
+    AsyncSoftDeleteMixin,
+    FullMixin,
+    HooksMixin,
+    SoftDeleteMixin,
+    TimestampMixin,
+)
+
 # Msgspec models (optional - requires msgspec)
 from .msgspec import SQLerMsgspecModel, SQLerMsgspecModelBase
-
-# Always-available imports (no Pydantic dependency)
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     NO_REBASE_CONFIG,
@@ -72,18 +81,6 @@ class BrokenRef:
     path: str
     target_table: str
     target_id: int
-
-
-# Mixins (always available — no Pydantic dependency)
-from .mixins import (
-    AsyncFullMixin,
-    AsyncHooksMixin,
-    AsyncSoftDeleteMixin,
-    FullMixin,
-    HooksMixin,
-    SoftDeleteMixin,
-    TimestampMixin,
-)
 
 # Conditionally import Pydantic-based models
 if PYDANTIC_AVAILABLE:

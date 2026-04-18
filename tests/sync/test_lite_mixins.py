@@ -6,7 +6,6 @@ Pydantic-free dataclass backend.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 import pytest
 from sqler import SQLerDB, SQLerLiteModel

@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import pytest
-import pytest_asyncio
 from sqler import AsyncSQLerLiteModel
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.mixins import (
@@ -19,7 +18,6 @@ from sqler.models.mixins import (
     AsyncSoftDeleteMixin,
     TimestampMixin,
 )
-
 
 # ── Model fixtures ──────────────────────────────────────────────────────────
 

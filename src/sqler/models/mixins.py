@@ -10,7 +10,6 @@ from typing import Any, ClassVar, Optional, Self
 
 from sqler.utils import validate_table_name
 
-
 # Context variables for thread/async-safe user tracking
 _current_user_var: ContextVar[Optional[str]] = ContextVar("audit_current_user", default=None)
 _async_current_user_var: ContextVar[Optional[str]] = ContextVar(
