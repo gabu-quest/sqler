@@ -35,10 +35,13 @@ class TimestampMixin:
 
     def _set_timestamps(self) -> None:
         """Set timestamp fields before save."""
+        from datetime import timedelta
+
         now = datetime.now(timezone.utc)
         if self.created_at is None:  # type: ignore[attr-defined]
             self.created_at = now  # type: ignore[attr-defined]
-        self.updated_at = now  # type: ignore[attr-defined]
+        # Guarantee updated_at is strictly after created_at on fast clocks
+        self.updated_at = max(now, self.created_at + timedelta(microseconds=1))  # type: ignore[attr-defined]
 
     def save(self, *, db=None) -> Self:
         """Save with automatic timestamp updates."""
@@ -567,6 +570,8 @@ class AuditMixin:
 
     def _set_audit_fields(self) -> None:
         """Set audit fields before save."""
+        from datetime import timedelta
+
         now = datetime.now(timezone.utc)
         user = self.get_current_user()
 
@@ -574,7 +579,7 @@ class AuditMixin:
             self.created_at = now  # type: ignore[attr-defined]
             self.created_by = user  # type: ignore[attr-defined]
 
-        self.updated_at = now  # type: ignore[attr-defined]
+        self.updated_at = max(now, self.created_at + timedelta(microseconds=1))  # type: ignore[attr-defined]
         self.updated_by = user  # type: ignore[attr-defined]
 
     def save(self, *, db=None) -> Self:
@@ -625,6 +630,8 @@ class AsyncAuditMixin:
 
     def _set_audit_fields(self) -> None:
         """Set audit fields before save."""
+        from datetime import timedelta
+
         now = datetime.now(timezone.utc)
         user = self.get_current_user()
 
@@ -632,7 +639,7 @@ class AsyncAuditMixin:
             self.created_at = now  # type: ignore[attr-defined]
             self.created_by = user  # type: ignore[attr-defined]
 
-        self.updated_at = now  # type: ignore[attr-defined]
+        self.updated_at = max(now, self.created_at + timedelta(microseconds=1))  # type: ignore[attr-defined]
         self.updated_by = user  # type: ignore[attr-defined]
 
     async def save(self, *, db=None) -> Self:
