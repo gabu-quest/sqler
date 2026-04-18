@@ -80,16 +80,13 @@ class SQLerQuerySet(Generic[T]):
             try:
                 docs = self._batch_resolve(docs)
             except RecursionError:
-                # Circular reference detected - log and continue with unresolved refs
+                # Circular reference detected - log and continue with unresolved refs.
+                # We tolerate this specifically because resolution is bounded-depth and
+                # the partial result is still useful. Any other exception indicates a
+                # real bug in resolution and is re-raised so callers see it.
                 logger.warning(
                     f"Circular reference detected during batch resolution for "
                     f"{self._model_cls.__name__}. Returning partially resolved documents."
-                )
-            except Exception as e:
-                # Log unexpected errors instead of silently ignoring them
-                logger.warning(
-                    f"Error during batch resolution for {self._model_cls.__name__}: "
-                    f"{type(e).__name__}: {e}. Continuing with unresolved references."
                 )
         results: list[T] = []
         for d in docs:
@@ -132,14 +129,11 @@ class SQLerQuerySet(Generic[T]):
             try:
                 d = self._batch_resolve([d])[0]
             except RecursionError:
+                # See note in all() — bounded-depth circular refs are tolerated;
+                # any other resolution error is a real bug and re-raises.
                 logger.warning(
                     f"Circular reference detected during resolution for "
                     f"{self._model_cls.__name__}. Returning partially resolved document."
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Error during resolution for {self._model_cls.__name__}: "
-                    f"{type(e).__name__}: {e}. Continuing with unresolved references."
                 )
         inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
         self._attach_metadata(inst, d)
@@ -299,7 +293,8 @@ class SQLerQuerySet(Generic[T]):
         import json
 
         adapter = self._query._adapter  # type: ignore[attr-defined]
-        assert adapter is not None, "Query has no adapter bound"
+        if adapter is None:
+            raise RuntimeError("QuerySet has no adapter bound")
 
         # Master dict to hold ALL resolved refs across all depths
         resolved: dict[tuple[str, int], dict] = {}

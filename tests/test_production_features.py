@@ -499,7 +499,12 @@ class TestMetrics:
         Item.set_db(db)
         Item(name="test").save()
 
-        assert len(query_logger.logs) > 0
+        # The save() must produce at least one INSERT log; counting only INSERTs
+        # makes this resilient to changes in surrounding bookkeeping SQL while
+        # still failing loudly if the logger silently stopped collecting.
+        insert_logs = [log for log in query_logger.logs if "INSERT" in log.sql.upper()]
+        assert len(insert_logs) == 1
+        assert "items" in insert_logs[0].sql.lower()
         assert all(log.duration_ms >= 0 for log in query_logger.logs)
 
         metrics.disable()

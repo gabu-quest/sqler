@@ -284,6 +284,14 @@ def backup(
     Returns:
         BackupResult with success status and metadata.
 
+    Security:
+        ``destination`` is passed directly to ``sqlite3.connect()`` and
+        ``os.path.getsize()`` — **never** call this with a path that came
+        from untrusted input (HTTP form, query string, file upload). A
+        caller-controlled path can be used to overwrite arbitrary files
+        the process has write access to. Validate or sandbox the path
+        in your application layer before passing it here.
+
     Usage::
 
         from sqler.ops import backup
@@ -362,6 +370,13 @@ def restore(
 
     Returns:
         BackupResult with success status and metadata.
+
+    Security:
+        ``source`` is passed directly to ``sqlite3.connect()`` — **never**
+        call this with a path that came from untrusted input. A
+        caller-controlled path can be used to load an attacker-supplied
+        SQLite file as the live database. Validate or sandbox the path
+        in your application layer before passing it here.
 
     Usage::
 

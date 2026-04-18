@@ -82,6 +82,33 @@ class TestExportCSV:
         assert "Alice" in csv_str
         assert "Bob" in csv_str
 
+    def test_export_csv_escapes_formula_injection(self):
+        """Values starting with =, +, -, @ must be escaped to neutralize spreadsheet formula injection.
+
+        Without this escape, a stored value like ``=HYPERLINK("http://attacker", "click")``
+        would be interpreted as a formula when the CSV is opened in Excel/Sheets.
+        """
+        # Insert a payload that would otherwise be interpreted as a formula
+        evil_user = self.User(
+            name='=HYPERLINK("http://attacker.com","click")',
+            email="@SUM(A1:A10)",
+            age=42,
+        )
+        evil_user.save()
+        plus_user = self.User(name="+1234567", email="-CMD|'/c calc'!A0", age=21)
+        plus_user.save()
+
+        csv_str = export_csv_string(self.User)
+
+        # The original payloads must NOT appear unprefixed (they'd run as formulas)
+        assert '=HYPERLINK' not in csv_str.replace("'=HYPERLINK", "")
+        assert "@SUM" not in csv_str.replace("'@SUM", "")
+        # Each payload must appear with a leading single-quote (the spreadsheet escape)
+        assert "'=HYPERLINK" in csv_str
+        assert "'@SUM" in csv_str
+        assert "'+1234567" in csv_str
+        assert "'-CMD" in csv_str
+
     def test_export_csv_specific_fields(self):
         """Export specific fields only."""
         with tempfile.TemporaryDirectory() as tmpdir:

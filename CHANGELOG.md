@@ -6,6 +6,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [1.2026.4.2] - 2026-04-18
+
+### Security
+
+- **`PartialUpdateMixin.save_partial()` / `asave_partial()` — validate field names.** `field_name` is now run through `validate_field_name()` before interpolation into `json_set()`. Defence-in-depth, consistent with every other field-path site.
+- **CSV export escapes formula-injection prefixes.** Values starting with `=`, `+`, `-`, `@` get a leading single quote so spreadsheet apps treat them as text, not formulas. Affects all `export_csv*` paths.
+- **`set_db()` validates table names on async backends too.** The async Pydantic model and async Lite model now call `validate_table_name()` (parity with the sync fix in 1.2026.4.1).
+
+### Added
+
+- **`SQLerModel.all()` / `SQLerModel.first()`** — convenience classmethods, parity with Lite and Msgspec backends.
+- **`SQLerModel.is_dirty()` / `SQLerModel.get_dirty_fields()`** — surface the existing `_snapshot` for Pydantic users, parity with Lite and Msgspec backends. Method (not property) to match the other backends.
+- **`bind()` emits its own dedicated `DeprecationWarning`** with `stacklevel=2` so the warning points at the user's call site and names `bind()` (not `set_db()`). Applies to Lite, Msgspec, and async Lite.
+
+### Changed
+
+- **`QuerySet.all()` / `QuerySet.first()` no longer swallow arbitrary exceptions.** Only `RecursionError` from circular reference resolution is tolerated; everything else now re-raises so real bugs surface instead of being silently logged.
+- **Bare `assert adapter is not None` in `_batch_resolve` replaced with explicit `RuntimeError`** — so the check survives `python -O`.
+
+### Internal
+
+- **De-duplicated `_pluralize` / `_default_table_name`** into `src/sqler/models/_table_names.py`. Was byte-identical across three model files; now sourced from one place.
+- **Added security warnings to `backup()` and `restore()` docstrings** about path-traversal risk when paths come from untrusted input.
+- **Added DoS warning to `FTSIndex.search()` docstring** about wildcard queries on large indexes.
+- **Tightened `test_timing_active_when_enabled`** softball — was `len(logs) > 0`, now asserts exactly one INSERT log against the items table.
+
+---
+
 ## [1.2026.4.1] - 2026-04-17
 
 ### Security

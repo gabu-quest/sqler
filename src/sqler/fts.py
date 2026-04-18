@@ -314,6 +314,15 @@ class FTSIndex:
 
         Returns:
             List of matching model instances
+
+        Security note:
+            The query string is passed as a SQL bound parameter, so it is
+            safe from SQL injection. However, FTS5 query syntax allows
+            wildcard prefix searches (``pyth*``) and very-broad disjunctions
+            that can be expensive on large indexes — a DoS risk if the
+            string comes directly from user input. If you expose this to
+            untrusted callers, validate or truncate the query string and
+            consider rate-limiting search endpoints in your application.
         """
         db = self._get_db()
 

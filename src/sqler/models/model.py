@@ -8,49 +8,12 @@ from pydantic import BaseModel, PrivateAttr
 from sqler import registry
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import NotBoundError
+from sqler.models._table_names import _default_table_name, _pluralize  # noqa: F401
 from sqler.models.queryset import SQLerQuerySet
 from sqler.query import SQLerExpression
 from sqler.utils import validate_field_name, validate_table_name
 
 TModel = TypeVar("TModel", bound="SQLerModel")
-
-
-def _pluralize(word: str) -> str:
-    """Pluralize a word using common English rules.
-
-    Handles:
-    - Words ending in consonant + y → ies (category → categories)
-    - Words ending in s, x, z, ch, sh → es (box → boxes)
-    - Regular words → s (user → users)
-
-    For irregular plurals (person, child, etc.), use __tablename__.
-    """
-    w = word.lower()
-    if w.endswith("s"):
-        return w  # Already plural or ends in s
-    if w.endswith("y") and len(w) > 1 and w[-2] not in "aeiou":
-        return w[:-1] + "ies"  # category → categories
-    if w.endswith(("s", "x", "z", "ch", "sh")):
-        return w + "es"  # box → boxes, class → classes
-    return w + "s"  # user → users
-
-
-def _default_table_name(name: str) -> str:
-    """Generate default table name from class name.
-
-    Examples:
-        User → users
-        Category → categories
-        Address → addresses
-        As → as_tbl (SQL reserved word)
-    """
-    lower = name.lower()
-    # Check reserved words BEFORE pluralization (for words like "by", "as")
-    # Also include words that pluralize to reserved words (a → as)
-    reserved = {"a", "as", "by", "and", "or", "not", "null", "index", "table"}
-    if lower in reserved:
-        return lower + "_tbl"
-    return _pluralize(name)
 
 
 class SQLerModel(BaseModel):
@@ -246,6 +209,16 @@ class SQLerModel(BaseModel):
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
         return SQLerQuerySet[TModel](cls, q)
+
+    @classmethod
+    def all(cls: Type[TModel]) -> list[TModel]:
+        """Return all instances from the database."""
+        return cls.query().all()
+
+    @classmethod
+    def first(cls: Type[TModel]) -> Optional[TModel]:
+        """Return the first instance or ``None``."""
+        return cls.query().first()
 
     @classmethod
     def using(cls: Type[TModel], db: SQLerDB) -> SQLerQuerySet[TModel]:
@@ -467,6 +440,29 @@ class SQLerModel(BaseModel):
         # refresh the dirty-tracking snapshot so is_dirty() reflects the new loaded state
         self._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
         return self
+
+    # ----- dirty tracking -----
+    def is_dirty(self) -> bool:
+        """Return True if any field differs from the last loaded/refreshed state.
+
+        The snapshot is captured by the queryset hydration path and refreshed
+        by ``refresh()``. Instances created directly (not loaded from DB) have
+        no snapshot and are considered dirty until first save.
+        """
+        if self._snapshot is None:
+            return True
+        return self.model_dump() != self._snapshot
+
+    def get_dirty_fields(self) -> set[str]:
+        """Return names of fields that differ from the last loaded/refreshed state."""
+        if self._snapshot is None:
+            return set(self.__class__.model_fields.keys())
+        current = self.model_dump()
+        dirty: set[str] = set()
+        for key, value in current.items():
+            if key not in self._snapshot or self._snapshot[key] != value:
+                dirty.add(key)
+        return dirty
 
     # ----- ref integrity utils -----
     @classmethod

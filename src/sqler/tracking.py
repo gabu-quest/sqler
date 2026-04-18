@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional, Set, Tuple, Type, TypeVar
 
+from sqler.utils import validate_field_name
+
 T = TypeVar("T", bound="TrackedModel")
 
 
@@ -293,6 +295,7 @@ class PartialUpdateMixin:
         values = []
 
         for field_name, (_, new_value) in changes.items():
+            validate_field_name(field_name)
             update_parts.append(f"json_set(data, '$.{field_name}', json(?))")
             import json
 
@@ -337,6 +340,7 @@ class PartialUpdateMixin:
 
         data_expr = "data"
         for field_name, (_, new_value) in changes.items():
+            validate_field_name(field_name)
             data_expr = f"json_set({data_expr}, '$.{field_name}', json(?))"
             import json
 

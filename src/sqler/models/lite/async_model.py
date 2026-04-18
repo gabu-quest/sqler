@@ -84,7 +84,9 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         )
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
-        chosen = table or explicit or _default_table_name(cls.__name__)
+        chosen = validate_table_name(
+            table or explicit or _default_table_name(cls.__name__)
+        )
         cls._table = chosen
         cls.__tablename__ = chosen  # type: ignore[attr-defined]
         registry.register(cls._table, cls)
@@ -92,7 +94,16 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
     @classmethod
     def bind(cls, db: "AsyncSQLerDB", table: Optional[str] = None) -> None:
         """Alias for set_db() (deprecated)."""
-        cls.set_db(db, table)
+        warnings.warn(
+            f"{cls.__name__}.bind() is deprecated. "
+            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            "bind() will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cls.set_db(db, table)
 
     @classmethod
     def using(cls: Type[TAModel], db: "AsyncSQLerDB") -> "AsyncSQLerQuerySet[TAModel]":

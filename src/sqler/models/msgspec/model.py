@@ -18,6 +18,7 @@ from typing import (
 
 from sqler import registry
 from sqler.exceptions import NotBoundError
+from sqler.models._table_names import _default_table_name, _pluralize  # noqa: F401
 from sqler.models.msgspec.base import SQLerMsgspecModelBase, _mixin_field_names, _public_fields
 from sqler.utils import validate_field_name, validate_table_name
 
@@ -26,27 +27,6 @@ if TYPE_CHECKING:
     from sqler.models.queryset import SQLerQuerySet
 
 T = TypeVar("T", bound="SQLerMsgspecModel")
-
-
-def _pluralize(word: str) -> str:
-    """Pluralize a word using common English rules."""
-    w = word.lower()
-    if w.endswith("s"):
-        return w
-    if w.endswith("y") and len(w) > 1 and w[-2] not in "aeiou":
-        return w[:-1] + "ies"
-    if w.endswith(("s", "x", "z", "ch", "sh")):
-        return w + "es"
-    return w + "s"
-
-
-def _default_table_name(name: str) -> str:
-    """Generate default table name from class name."""
-    lower = name.lower()
-    reserved = {"a", "as", "by", "and", "or", "not", "null", "index", "table"}
-    if lower in reserved:
-        return lower + "_tbl"
-    return _pluralize(name)
 
 
 class SQLerMsgspecModel(SQLerMsgspecModelBase):
@@ -117,7 +97,17 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
     @classmethod
     def bind(cls: Type[T], db: "SQLerDB", table: Optional[str] = None) -> None:
         """Alias for set_db() (deprecated)."""
-        cls.set_db(db, table)
+        warnings.warn(
+            f"{cls.__name__}.bind() is deprecated. "
+            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            "bind() will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        with warnings.catch_warnings():
+            # bind() already emitted its own deprecation; suppress the inner set_db() one
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cls.set_db(db, table)
 
     @classmethod
     def using(cls: Type[T], db: "SQLerDB") -> "SQLerQuerySet[T]":

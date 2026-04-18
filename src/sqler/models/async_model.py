@@ -64,7 +64,9 @@ class AsyncSQLerModel(BaseModel):
         )
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
-        chosen = table or explicit or _default_table_name(cls.__name__)
+        chosen = validate_table_name(
+            table or explicit or _default_table_name(cls.__name__)
+        )
         cls._table = chosen
         cls.__tablename__ = chosen
         # Note: promoted table creation is deferred to first use since we can't await here.

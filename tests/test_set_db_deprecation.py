@@ -177,9 +177,11 @@ class TestLiteBindDeprecation:
     """bind() is an alias for set_db(), so it triggers the same warning."""
 
     def test_lite_bind_emits_warning(self, sync_db):
-        with pytest.warns(DeprecationWarning, match="LiteItem.set_db.*deprecated"):
+        # bind() now emits its own dedicated DeprecationWarning naming bind(),
+        # rather than leaking the inner set_db() warning to the caller.
+        with pytest.warns(DeprecationWarning, match="LiteItem.bind.*deprecated"):
             LiteItem.bind(sync_db)
 
     def test_async_lite_bind_emits_warning(self, async_db):
-        with pytest.warns(DeprecationWarning, match="AsyncLiteItem.set_db.*deprecated"):
+        with pytest.warns(DeprecationWarning, match="AsyncLiteItem.bind.*deprecated"):
             AsyncLiteItem.bind(async_db)

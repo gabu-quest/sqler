@@ -97,7 +97,11 @@ def _serialize_value(value: Any, for_csv: bool = False) -> Any:
 
     Args:
         value: Value to serialize
-        for_csv: If True, serialize lists/dicts to JSON strings (for CSV)
+        for_csv: If True, serialize lists/dicts to JSON strings AND escape
+            CSV formula-injection prefixes (``=``, ``+``, ``-``, ``@``) by
+            prepending a single quote. The single quote is the standard
+            spreadsheet escape and is stripped on display in Excel/Sheets,
+            while preventing arbitrary formula execution.
     """
     if isinstance(value, datetime):
         return value.isoformat()
@@ -105,6 +109,8 @@ def _serialize_value(value: Any, for_csv: bool = False) -> Any:
         return value.isoformat()
     if for_csv and isinstance(value, (list, dict)):
         return json.dumps(value)
+    if for_csv and isinstance(value, str) and value and value[0] in ("=", "+", "-", "@"):
+        return "'" + value
     return value
 
 
