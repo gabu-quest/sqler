@@ -12,6 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 - **Async adapter: a task that ends holding a pooled connection no longer keeps it.** A task cancelled between a statement and its commit (an outer `cancel()`, a `wait_for` timeout) used to end with its connection out of the pool and its write transaction open, so every other writer waited out the busy timeout and failed with "database is locked". When the last task using a connection ends without releasing it, the connection is now rolled back and returned to the pool, once. `close()` waits for any such rollback first.
 - **Async adapter: a task created while its parent held a connection no longer returns that connection twice.** The child inherits the pin; the connection now goes back to the pool when the last task using it releases it or ends, and a child whose inherited pin was already returned takes a fresh connection instead of sharing one that is back in the pool.
+- **Async adapter: a failed rollback no longer shrinks the pool.** If rolling back a reclaimed connection fails while the adapter is open, a warning is logged, that connection is closed and a fresh one is put in the pool.
+- **Async adapter: `adapter.connection` is `None` for a task whose inherited connection was already returned.**
 
 ## [1.2026.4.2] - 2026-04-18
 

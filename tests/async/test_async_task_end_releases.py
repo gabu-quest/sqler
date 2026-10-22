@@ -13,7 +13,9 @@ test depends on timing luck. Every wait has an upper bound well inside the
 """
 
 import asyncio
+import logging
 import os
+import sqlite3
 import tempfile
 
 import aiosqlite
@@ -157,21 +159,34 @@ async def test_task_cancelled_inside_explicit_transaction_rolls_back(
 @pytest.mark.asyncio
 async def test_task_that_released_normally_then_ends_is_not_returned_twice(disk_adapter):
     adapter = disk_adapter
+    loop = asyncio.get_running_loop()
+    errors: list[dict] = []  # a second put on a full pool raises QueueFull inside the loop
+    old_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: errors.append(ctx))
 
     async def many_writes():
         for i in range(50):  # one long-lived task, many checkouts
             await _write(adapter, str(i))
 
-    await asyncio.wait_for(asyncio.ensure_future(many_writes()), BOUND_S)
-    await _settle()
+    try:
+        await asyncio.wait_for(asyncio.ensure_future(many_writes()), BOUND_S)
+        await _settle()
+        await _pool_full(adapter)
+        # another task's write still succeeds, and no put hit a full pool
+        await asyncio.wait_for(asyncio.ensure_future(_write(adapter, "after")), BOUND_S)
+        await _settle()
+    finally:
+        loop.set_exception_handler(old_handler)
+    assert errors == []
     assert adapter._pool.qsize() == adapter._pool_size
-    assert adapter._leases == set()
-    assert adapter._reclaims == set()
     # The pool still holds exactly pool_size distinct connections.
     conns = [adapter._pool.get_nowait() for _ in range(adapter._pool_size)]
     assert len({id(c) for c in conns}) == adapter._pool_size
     for c in conns:
         adapter._pool.put_nowait(c)
+    # internals
+    assert adapter._leases == set()
+    assert adapter._reclaims == set()
 
 
 @pytest.mark.asyncio
@@ -196,12 +211,17 @@ async def test_child_task_keeps_the_connection_when_its_parent_ends_first(disk_a
 
     await asyncio.wait_for(asyncio.ensure_future(parent()), BOUND_S)
     await _settle()
-    assert adapter._reclaims == set()  # no rollback under the child
-    assert adapter._pool.qsize() == adapter._pool_size - 1
+    reclaims_while_child_runs = set(adapter._reclaims)
+    qsize_while_child_runs = adapter._pool.qsize()
     go_on.set()
     await asyncio.wait_for(holder["child"], BOUND_S)
     await _pool_full(adapter)
+    # behaviour: nothing was rolled back under the child, the connection is back once
     assert await _values(adapter) == ["parent", "child-1", "child-2"]
+    assert adapter._pool.qsize() == adapter._pool_size
+    # internals, as seen while the child was running
+    assert reclaims_while_child_runs == set()
+    assert qsize_while_child_runs == adapter._pool_size - 1
 
 
 @pytest.mark.asyncio
@@ -237,36 +257,129 @@ async def test_close_with_a_reclaim_pending_raises_and_warns_nothing(recwarn):
         with tempfile.TemporaryDirectory() as tmpdir:
             adapter = AsyncSQLiteAdapter.on_disk(os.path.join(tmpdir, "t.db"))
             await adapter.connect()
-            acquired = asyncio.Event()
+            try:
+                acquired = asyncio.Event()
 
-            async def hold():
-                await adapter.execute("CREATE TABLE IF NOT EXISTS t (v TEXT)")
-                acquired.set()
-                await asyncio.sleep(60)
+                async def hold():
+                    await adapter.execute("CREATE TABLE IF NOT EXISTS t (v TEXT)")
+                    acquired.set()
+                    await asyncio.sleep(60)
 
-            # 1. the owner ends, its reclaim is scheduled, close() runs before it does
-            task = asyncio.ensure_future(hold())
-            await asyncio.wait_for(acquired.wait(), BOUND_S)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            assert len(adapter._reclaims) == 1
-            await asyncio.wait_for(adapter.close(), BOUND_S)
-            assert adapter._reclaims == set()
+                # 1. the owner ends, its reclaim is scheduled, close() runs before it does
+                task = asyncio.ensure_future(hold())
+                await asyncio.wait_for(acquired.wait(), BOUND_S)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                pending_before_close = len(adapter._reclaims)
+                await asyncio.wait_for(adapter.close(), BOUND_S)
+                reclaims_after_first_close = set(adapter._reclaims)
 
-            # 2. the adapter closes first, the owner ends afterwards
-            await adapter.connect()
-            acquired.clear()
-            task = asyncio.ensure_future(hold())
-            await asyncio.wait_for(acquired.wait(), BOUND_S)
-            await asyncio.wait_for(adapter.close(), BOUND_S)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            await _settle()
-            assert adapter._reclaims == set()
-            assert adapter._pool.qsize() == 0
+                # 2. the adapter closes first, the owner ends afterwards
+                await adapter.connect()
+                acquired.clear()
+                task = asyncio.ensure_future(hold())
+                await asyncio.wait_for(acquired.wait(), BOUND_S)
+                await asyncio.wait_for(adapter.close(), BOUND_S)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                await _settle()
+                qsize_after_second_close = adapter._pool.qsize()
+                reclaims_after_second_close = set(adapter._reclaims)
+            finally:
+                await adapter.close()  # a failed assertion must not leave aiosqlite threads running
     finally:
         loop.set_exception_handler(old_handler)
+    # behaviour: no exception reached the loop, no warning was raised, nothing is in the pool
     assert errors == []
     assert [str(w.message) for w in recwarn] == []
+    assert qsize_after_second_close == 0
+    # internals
+    assert pending_before_close == 1
+    assert reclaims_after_first_close == set()
+    assert reclaims_after_second_close == set()
+
+
+@pytest.fixture
+def warnings_log(caplog):
+    caplog.set_level(logging.WARNING, logger="sqler.adapter.asynchronous")
+    return caplog
+
+
+async def _leave_a_connection_behind(adapter: AsyncSQLiteAdapter) -> None:
+    acquired = asyncio.Event()
+
+    async def hold():
+        await adapter.execute("INSERT INTO t (v) VALUES ('lost')")
+        acquired.set()
+        await asyncio.sleep(60)
+
+    task = asyncio.ensure_future(hold())
+    await asyncio.wait_for(acquired.wait(), BOUND_S)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_failed_rollback_replaces_the_connection_and_keeps_the_pool_size(
+    disk_adapter, warnings_log, monkeypatch
+):
+    adapter = disk_adapter
+    before = list(adapter._all_conns)
+
+    real = aiosqlite.Connection.rollback
+    failed: list[aiosqlite.Connection] = []
+
+    async def rollback(self):
+        if not failed:
+            failed.append(self)
+            raise sqlite3.OperationalError("disk I/O error")
+        return await real(self)
+
+    monkeypatch.setattr(aiosqlite.Connection, "rollback", rollback)
+    await _leave_a_connection_behind(adapter)
+    await _pool_full(adapter)
+
+    assert adapter._pool.qsize() == adapter._pool_size
+    assert len(adapter._all_conns) == adapter._pool_size
+    assert failed[0] not in adapter._all_conns  # the broken one is gone, a fresh one took its place
+    assert len(set(adapter._all_conns) - set(before)) == 1
+    messages = [r.getMessage() for r in warnings_log.records if r.levelno == logging.WARNING]
+    assert len(messages) == 1
+    assert "disk I/O error" in messages[0]
+    # the pool works: every slot can be checked out and written through
+    await asyncio.wait_for(
+        asyncio.gather(*(asyncio.ensure_future(_write(adapter, str(i))) for i in range(4))), BOUND_S
+    )
+    await _pool_full(adapter)
+    assert sorted(await _values(adapter)) == ["0", "1", "2", "3"]  # 'lost' was not committed
+
+
+@pytest.mark.asyncio
+async def test_rollback_failing_because_the_adapter_closed_adds_no_connection_and_no_warning(
+    disk_adapter, warnings_log, monkeypatch
+):
+    adapter = disk_adapter
+    owned = list(adapter._all_conns)  # the fake close below forgets them; close them at the end
+
+    async def rollback(self):
+        adapter._all_conns.clear()  # the adapter closed while the rollback was running
+        raise ValueError("Connection closed")
+
+    monkeypatch.setattr(aiosqlite.Connection, "rollback", rollback)
+    await _leave_a_connection_behind(adapter)
+
+    async def rollback_ran():
+        while adapter._all_conns:  # emptied by the fake rollback
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(rollback_ran(), BOUND_S)
+    await _settle()
+
+    assert adapter._all_conns == []
+    assert adapter._pool.qsize() == adapter._pool_size - 1  # nothing put back, nothing opened
+    assert [r for r in warnings_log.records if r.levelno >= logging.WARNING] == []
+    for conn in owned:
+        await conn.close()

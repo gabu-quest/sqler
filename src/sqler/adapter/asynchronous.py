@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 import uuid
 from contextvars import ContextVar
@@ -10,6 +11,8 @@ import aiosqlite
 from sqler.logging import query_logger
 
 from .abstract import AsyncAdapterABC
+
+logger = logging.getLogger(__name__)
 
 
 class _Lease:
@@ -62,12 +65,16 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         self._connected = False
         self._connect_lock = asyncio.Lock()
 
+    async def _open(self) -> aiosqlite.Connection:
+        conn = await aiosqlite.connect(self.path, uri=True)
+        for pragma in self.pragmas:
+            await conn.execute(pragma)
+        await conn.commit()
+        return conn
+
     async def connect(self) -> None:
         for _ in range(self._pool_size):
-            conn = await aiosqlite.connect(self.path, uri=True)
-            for pragma in self.pragmas:
-                await conn.execute(pragma)
-            await conn.commit()
+            conn = await self._open()
             self._all_conns.append(conn)
             self._pool.put_nowait(conn)
         self._connected = True
@@ -110,12 +117,41 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         reclaim.add_done_callback(self._reclaims.discard)
 
     async def _reclaim(self, conn: aiosqlite.Connection) -> None:
+        """Roll back a connection left by an ended task and return it to the pool.
+
+        If the rollback fails while the adapter is open, the connection is closed and
+        a fresh one takes its place, so the pool keeps its size.
+        """
         try:
             await conn.rollback()
-        except Exception:  # closed under us: nothing to give back
+        except Exception as exc:
+            if conn not in self._all_conns:  # the adapter closed under us: nothing to give back
+                return
+            logger.warning(
+                "rollback of a reclaimed connection failed (%s: %s); replacing it", type(exc).__name__, exc
+            )
+            await self._replace(conn)
             return
         if conn in self._all_conns:  # not a connection from before a close()
             self._pool.put_nowait(conn)
+
+    async def _replace(self, bad: aiosqlite.Connection) -> None:
+        try:
+            await bad.close()
+        except Exception:
+            pass
+        try:
+            fresh = await self._open()
+        except Exception:
+            logger.warning("could not open a replacement connection; the pool is one smaller", exc_info=True)
+            if bad in self._all_conns:
+                self._all_conns.remove(bad)
+            return
+        if bad not in self._all_conns:  # the adapter closed while we were opening
+            await fresh.close()
+            return
+        self._all_conns[self._all_conns.index(bad)] = fresh
+        self._pool.put_nowait(fresh)
 
     async def _acquire(self) -> aiosqlite.Connection:
         """Return the task-pinned connection, or get one from the pool and pin it."""
