@@ -2,6 +2,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import weakref
 from typing import Any, Optional, Self
 
 from sqler.logging import query_logger
@@ -23,11 +24,45 @@ def _read_hit_missing_table(query: str, exc: BaseException) -> bool:
     return bool(words) and words[0].upper() in ("SELECT", "WITH")
 
 
+def _names_memory_database(path: str) -> bool:
+    """True for a ``file:`` URI that names an in-memory database: ``file::memory:``,
+    ``mode=memory`` or ``vfs=memdb`` (not the plain ``":memory:"``, which is one connection)."""
+    if not path.startswith("file:"):
+        return False
+    name, _, query = path[5:].partition("?")
+    options = query.partition("#")[0].split("&")
+    return name == ":memory:" or "mode=memory" in options or "vfs=memdb" in options
+
+
+class _ThreadConnection:
+    """Closes one thread's connection when the thread ends.
+
+    Only the thread's local storage holds it (the adapter's registry holds it
+    weakly). CPython drops a thread's local storage as the thread ends, before
+    ``join()`` returns, so the connection closes then: SQLite rolls back what the
+    thread left uncommitted and its lock is free.
+    """
+
+    __slots__ = ("conn", "__weakref__")
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def close(self) -> None:
+        try:
+            self.conn.close()
+        except sqlite3.Error:
+            pass  # Connection may already be closed
+
+    __del__ = close
+
+
 class SQLiteAdapter(AdapterABC):
     """Synchronous SQLite adapter with WAL and thread-local connections.
 
     Features:
-        - Thread-local connections for safe concurrent access
+        - Thread-local connections for safe concurrent access; a thread's
+          connection closes when the thread ends
         - WAL mode for improved concurrency
         - Configurable query timeout via busy_timeout pragma
         - Optional slow query logging
@@ -60,9 +95,13 @@ class SQLiteAdapter(AdapterABC):
         self.timeout_ms = timeout_ms
         self._local = threading.local()
         self._conns_lock = threading.RLock()
-        self._conns: set[sqlite3.Connection] = set()
+        self._conns: weakref.WeakSet[_ThreadConnection] = weakref.WeakSet()
         self._connected: bool = False
         self._single_conn: Optional[sqlite3.Connection] = None
+        # SQLite drops a shared-cache in-memory database when its last connection closes,
+        # and a thread's connection closes when the thread ends. This connection runs no
+        # statement; it keeps the database alive from connect() to close().
+        self._anchor: Optional[sqlite3.Connection] = None
         self._memory_singleton = path == ":memory:"
         # Depth of explicit transactions (see ``_txn_depth``); one number when
         # every thread shares the single ":memory:" connection.
@@ -105,6 +144,10 @@ class SQLiteAdapter(AdapterABC):
     def connect(self) -> None:
         # Ensure a connection for this thread
         self._connected = True
+        if self._anchor is None and _names_memory_database(self.path):
+            with self._conns_lock:
+                if self._anchor is None:
+                    self._anchor = sqlite3.connect(self.path, uri=True, check_same_thread=False)
         _ = self._conn()
 
     def _conn(self) -> sqlite3.Connection:
@@ -119,7 +162,8 @@ class SQLiteAdapter(AdapterABC):
                     cur.execute(pragma)
                 self._single_conn.commit()
             return self._single_conn
-        conn: Optional[sqlite3.Connection] = getattr(self._local, "conn", None)
+        local = self._local  # read once: close() on another thread replaces it
+        conn: Optional[sqlite3.Connection] = getattr(local, "conn", None)
         if conn is not None:
             return conn
         conn = sqlite3.connect(self.path, uri=True, check_same_thread=False)
@@ -128,19 +172,17 @@ class SQLiteAdapter(AdapterABC):
         for pragma in self.pragmas:
             cur.execute(pragma)
         conn.commit()
-        self._local.conn = conn
+        local.conn = conn  # what every statement reads
+        local.owner = owner = _ThreadConnection(conn)
         with self._conns_lock:
-            self._conns.add(conn)
+            self._conns.add(owner)
         return conn
 
     def close(self) -> None:
         self._connected = False
         with self._conns_lock:
-            for c in list(self._conns):
-                try:
-                    c.close()
-                except sqlite3.Error:
-                    pass  # Connection may already be closed
+            for owner in list(self._conns):
+                owner.close()
             self._conns.clear()
         if self._single_conn is not None:
             try:
@@ -148,8 +190,16 @@ class SQLiteAdapter(AdapterABC):
             except sqlite3.Error:
                 pass  # Connection may already be closed
             self._single_conn = None
-        if hasattr(self._local, "conn"):
-            delattr(self._local, "conn")
+        with self._conns_lock:
+            anchor, self._anchor = self._anchor, None
+        if anchor is not None:
+            try:
+                anchor.close()
+            except sqlite3.Error:
+                pass
+        # A fresh thread-local object: a thread that outlives close() holds nothing of the
+        # old one (connection, transaction depth) and opens a new connection on connect().
+        self._local = threading.local()
 
     def execute(self, query: str, params: Optional[list[Any]] = None) -> sqlite3.Cursor:
         """Execute a SQL query with optional parameters and return cursor.
