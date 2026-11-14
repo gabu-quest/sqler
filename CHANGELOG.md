@@ -58,6 +58,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`AuditLogMixin` and `AsyncAuditLogMixin` write a change and its audit row together.** Outside a transaction a save or delete whose audit row is refused leaves no saved change, and a refused delete leaves no audit row. After a failed save the instance keeps its earlier `_id` and `_version`.
 - **A safe model reached through a reference keeps its stored version**, so saving it does not raise `StaleVersionError` (never released; found while batching `from_id`).
 - **`from_ids` and `query().all()` no longer raise "no such table" when a referenced table is gone.** The reference reads as `None`, as `from_id` gives.
+- **A lite safe model reached through a reference no longer recreates a dropped table.** The reference reads as `None`.
 - **`set_db()` on the safe model classes reports its deprecation warning at your own line**, so Python's default warning filters show it.
 
 ### Changed
@@ -81,6 +82,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Lite models: a reference to a row that no longer exists stays the `{"_table", "_id"}` dict when it is read through a query.** Before, the field held a model built from those two keys alone, with every other field at its default.
 
 - **`from_id()` and `refresh()` read each referenced table with one query** instead of one query per reference (a row with 20 references: 2 queries, was 21), and a cycle of references is cut at the first row seen again, as `from_ids()` cuts it, instead of after about 160 levels.
+- **A `{"_table", "_id"}` dict that cannot be followed is left whole.** `from_id()`, `refresh()` and async `query().all()` no longer load references nested inside it.
+- **Async `query().all()` no longer walks each row twice** when no document holds a reference.
+- **Lite safe models: `is_dirty()` after `from_id()` or `refresh()` does not see a list or dict edited in place**, as on the other ways a lite model is loaded. `save()` writes the edit.
 - **One `NoAdapterError`.** The sync and the async query raise `sqler.NoAdapterError`. It is a `QueryError` and still a built-in `ConnectionError`, so `except ConnectionError` keeps working.
 - **`F('')` raises `InvalidFieldNameError`.**
 - **`FTSIndex` refuses a search field with a dot** (`meta.title`) with `InvalidIdentifierError` in the constructor and the `fields` setter; before, `create()` failed with an SQLite parse error.
