@@ -1,10 +1,12 @@
-"""metrics.disable() restores the query logger; the Prometheus output parses."""
+"""metrics.disable() restores the query logger; capture() gives the statements of its block;
+the Prometheus output parses."""
 
 import re
+from contextlib import ExitStack
 
 import pytest
 from sqler.db.sqler_db import SQLerDB
-from sqler.logging import query_logger
+from sqler.logging import QueryLogger, query_logger
 from sqler.metrics import MetricsCollector
 
 
@@ -44,6 +46,133 @@ def test_enable_twice_then_disable_still_restores():
     collector.enable()
     collector.disable()
     assert not query_logger.enabled
+
+
+def test_a_collector_enabled_inside_a_capture_block_still_counts_after_it():
+    """Inside capture() queries are logged, but nobody called enable(): the collector does."""
+    query_logger.disable()
+    collector = MetricsCollector()
+    db = SQLerDB.in_memory(shared=False)
+    try:
+        with query_logger.capture():
+            collector.enable()
+        db.adapter.execute("SELECT 1")
+        assert collector.get_metrics()["queries"]["total_queries"] == 1
+        collector.disable()
+        assert not query_logger.enabled
+    finally:
+        collector.disable()
+        db.close()
+
+
+# --- capture() gives the statements of its block -----------------------------
+
+
+def _fill(logger, count):
+    """Put ``count`` entries named old-0, old-1, ... into the log."""
+    logger.enable(log_to_logger=False)
+    for n in range(count):
+        logger.log(f"old-{n}", [], 0.1)
+    logger.disable()
+
+
+@pytest.mark.parametrize("already", [0, 995, 1000])
+def test_capture_gives_every_statement_of_its_block_however_full_the_log_is(already):
+    logger = QueryLogger()  # keeps 1000 entries
+    _fill(logger, already)
+    with logger.capture() as sent:
+        for n in range(10):
+            logger.log(f"new-{n}", [n], 0.1)
+    assert [entry.sql for entry in sent] == [f"new-{n}" for n in range(10)]
+    assert [entry.params for entry in sent] == [[n] for n in range(10)]
+
+
+def test_capture_on_the_full_global_log_gives_the_statement_a_database_sent():
+    _fill(query_logger, 1000)
+    db = SQLerDB.in_memory(shared=False)
+    try:
+        with query_logger.capture() as sent:
+            db.adapter.execute("SELECT 41 + 1")
+    finally:
+        db.close()
+    assert [entry.sql for entry in sent] == ["SELECT 41 + 1"]
+
+
+def test_capture_on_a_logger_that_keeps_no_entries_still_gives_its_block():
+    logger = QueryLogger(max_logs=0)
+    with logger.capture() as sent:
+        logger.log("a", [], 0.1)
+        logger.log("b", [], 0.1)
+    assert [entry.sql for entry in sent] == ["a", "b"]
+    assert logger.logs == []
+
+
+def test_a_capture_inside_a_capture_gives_each_block_its_own_statements():
+    logger = QueryLogger()
+    with logger.capture() as outer:
+        logger.log("a", [], 0.1)
+        with logger.capture() as inner:
+            logger.log("b", [], 0.1)
+        logger.log("c", [], 0.1)
+    assert [entry.sql for entry in outer] == ["a", "b", "c"]
+    assert [entry.sql for entry in inner] == ["b"]
+
+
+def test_a_capture_that_ends_first_does_not_end_one_that_is_still_open():
+    """Two blocks that overlap without nesting, as two threads' blocks do."""
+    logger = QueryLogger()
+    first, second = ExitStack(), ExitStack()
+    a = first.enter_context(logger.capture())
+    b = second.enter_context(logger.capture())
+    logger.log("both", [], 0.1)
+    first.close()
+    logger.log("second only", [], 0.1)
+    second.close()
+    assert [entry.sql for entry in a] == ["both"]
+    assert [entry.sql for entry in b] == ["both", "second only"]
+    assert not logger.enabled
+
+
+def test_disable_inside_a_capture_does_not_end_the_capture():
+    logger = QueryLogger()
+    with logger.capture() as sent:
+        logger.disable()
+        assert logger.enabled  # the adapters ask this before they time a statement
+        logger.log("a", [], 0.1)
+    assert [entry.sql for entry in sent] == ["a"]
+    assert not logger.enabled
+
+
+def test_enable_inside_a_capture_stays_on_after_it():
+    logger = QueryLogger()
+    with logger.capture() as sent:
+        logger.enable(log_to_logger=False)
+        logger.log("a", [], 0.1)
+    logger.log("after", [], 0.1)
+    assert [entry.sql for entry in sent] == ["a"]
+    assert logger.enabled
+    assert [entry.sql for entry in logger.logs] == ["a", "after"]
+
+
+def test_a_statement_after_the_block_is_not_captured_and_the_logger_is_off_again():
+    logger = QueryLogger()
+    with logger.capture() as sent:
+        logger.log("inside", [], 0.1)
+    logger.log("after", [], 0.1)
+    assert [entry.sql for entry in sent] == ["inside"]
+    assert not logger.enabled
+    assert [entry.sql for entry in logger.logs] == ["inside"]
+
+
+def test_a_block_that_raises_ends_its_capture():
+    logger = QueryLogger()
+    with pytest.raises(RuntimeError, match="stop"):
+        with logger.capture() as sent:
+            logger.log("inside", [], 0.1)
+            raise RuntimeError("stop")
+    logger.log("after", [], 0.1)
+    assert [entry.sql for entry in sent] == ["inside"]
+    assert not logger.enabled
 
 
 # --- Prometheus text format, parsed from the format's rules -----------------

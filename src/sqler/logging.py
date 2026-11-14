@@ -5,6 +5,7 @@ performance monitoring.
 """
 
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -63,6 +64,10 @@ class QueryLogger:
         self._logs: list[QueryLog] = []
         self._max_logs = max_logs
         self._callbacks: list[Callable[[QueryLog], None]] = []
+        # The lists of the open capture() blocks. A new tuple replaces it when a block
+        # opens or ends, so log() reads it once without the lock.
+        self._captures: tuple[list[QueryLog], ...] = ()
+        self._captures_lock = threading.Lock()
         self._log_to_logger = False
         self._log_level = logging.DEBUG
 
@@ -78,13 +83,13 @@ class QueryLogger:
         self._log_level = level
 
     def disable(self) -> None:
-        """Disable query logging."""
+        """Disable query logging. An open ``capture()`` block still gets its statements."""
         self._enabled = False
 
     @property
     def enabled(self) -> bool:
-        """Return True if logging is enabled."""
-        return self._enabled
+        """Return True if queries are being logged: after ``enable()``, or inside ``capture()``."""
+        return self._enabled or bool(self._captures)
 
     @property
     def logs(self) -> list[QueryLog]:
@@ -125,7 +130,8 @@ class QueryLogger:
             rows_affected: Number of rows affected (if known).
             error: Error message if query failed.
         """
-        if not self._enabled:
+        captures = self._captures
+        if not self._enabled and not captures:
             return
 
         log_entry = QueryLog(
@@ -140,6 +146,8 @@ class QueryLogger:
         self._logs.append(log_entry)
         if len(self._logs) > self._max_logs:
             self._logs.pop(0)
+        for captured in captures:
+            captured.append(log_entry)
 
         # Log to Python logger if enabled
         if self._log_to_logger:
@@ -197,6 +205,11 @@ class QueryLogger:
     def capture(self):
         """Context manager to capture queries within a scope.
 
+        The list holds every query logged while the block is open, by any thread or
+        task, however many entries the log itself keeps. Queries are logged inside
+        the block whether or not ``enable()`` was called, and ``enable()`` and
+        ``disable()`` keep what they set once the block ends.
+
         Usage::
 
             with query_logger.capture() as captured:
@@ -204,16 +217,15 @@ class QueryLogger:
                 db.find_document("users", 2)
             print(f"Captured {len(captured)} queries")
         """
-        start_idx = len(self._logs)
-        was_enabled = self._enabled
-        self._enabled = True
         captured: list[QueryLog] = []
+        with self._captures_lock:
+            self._captures = (*self._captures, captured)
         try:
             yield captured
         finally:
-            captured.extend(self._logs[start_idx:])
-            if not was_enabled:
-                self._enabled = False
+            with self._captures_lock:
+                # by identity: two blocks' lists can be equal
+                self._captures = tuple(c for c in self._captures if c is not captured)
 
 
 @contextmanager

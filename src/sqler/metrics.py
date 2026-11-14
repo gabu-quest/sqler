@@ -249,7 +249,8 @@ class MetricsCollector:
 
             # Hook into query logger
             query_logger.add_callback(self._on_query)
-            if query_logger.enabled:
+            # ``_enabled``, not ``enabled``: a capture() block logs too, and ends.
+            if query_logger._enabled:
                 self._logger_before = None  # the caller's own logging stays as it is
             else:
                 self._logger_before = (query_logger._log_to_logger, query_logger._log_level)
