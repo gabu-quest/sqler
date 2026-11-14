@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **A reference stored in a document is resolved only when it is well formed.** `{"_table": ..., "_id": ...}` found in a document was used to build a `SELECT` with the table name taken from the stored data. It is now resolved only when `_table` is a valid table name and `_id` is an integer that fits SQLite's 64-bit range; anything else is left as it is. A reference whose `_id` is a string or a float is no longer converted to an integer, and an `_id` too large for SQLite no longer raises `OverflowError` when the document is read.
 - **Field and key names used in queries are escaped.** A name with a quote could end the SQL string that held its JSON path, in `F("...")` comparisons and in `any()` on nested arrays. Names are now carried as data. A name with a backslash, a NUL, or whitespace other than single spaces raises `InvalidFieldNameError`.
 - **Names ending in a newline are rejected.** `validate_table_name`, `validate_field_name` and `validate_identifier` accepted `"users\n"`.
+- **Model field paths, the search index and the integrity helpers check what they put into SQL.** A key in a model field path (`any()` and filters on related models) is carried as data; the key `a'` no longer matches the key `a`, and an empty key raises `InvalidFieldNameError`. `FTSIndex` checks its fields, `tokenizer` and `index_table` when they are assigned as well as in the constructor, checks the model's table name, and `snippet()` raises `TypeError` for a `max_tokens` that is not an integer. `find_referrers`, `validate_references`, `set_null_referrers`, `cascade_delete` and their async versions raise `InvalidTableNameError` for a table name that is not a plain identifier, before any SQL runs.
 
 ### Fixed
 
@@ -32,6 +33,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`async_health_check` always returns a `HealthStatus`**, also when returning the connection fails (the status is then unhealthy and names the error).
 - **A migration runner first used inside a transaction that is rolled back** creates its version table again on the next call.
 
+- **Sync adapter: a statement that fails outside a transaction no longer keeps the lock.** Python's `sqlite3` opens a transaction before a write and left it open when the write failed, so the thread held the write lock until its next commit and other threads got "database is locked". The failed statement, or a failed commit, is now rolled back before the error reaches the caller; this also rolls back that thread's earlier uncommitted statements, a raw `BEGIN` included. Inside `db.transaction()` nothing changes.
+- **Sync adapter: `in_transaction` and `auto_commit()` are per thread.** A transaction open on one thread no longer stops other threads from committing. A plain `:memory:` database has one connection for all threads and still has one transaction.
+- **`upsert_with_version` and `upsert_with_version_promoted` end their `BEGIN IMMEDIATE`** when the update raises.
+- **A safe save gives up on a locked database in bounded time.** A save that found the database locked was retried like a version conflict, up to 128 times with a full busy timeout each, and could wait for minutes. Lock waits now count against `RebaseConfig.lock_timeout` (5 seconds by default); past it the save raises `LockTimeoutError`. On a file database the longest wait is that limit plus one busy timeout. A lock met while the save re-reads the row after a conflict is handled the same way instead of leaving the save as `sqlite3.OperationalError`. Applies to all four safe model bases.
+- **Sync adapter: `executemany` inside a transaction no longer commits it**, so a rollback removes its rows.
+
 ### Changed
 
 - **The PyPI publish workflow runs the linter and the test suite first**, and refuses a tag that does not match the version in `pyproject.toml`.
@@ -41,10 +48,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`adapter.executescript()` inside an async migration fails.** The migration now runs in a transaction and the adapter refuses a script there. Use one `adapter.execute()` per statement; the failed `MigrationResult.error` says so.
 - **`async_vacuum` inside a transaction raises `QueryError`** before it runs anything; the transaction stays usable.
 
+- **Sync adapter: `executescript` inside a transaction raises `QueryError`**, as the async adapter does.
+- **`RebaseConfig.max_retries` counts version conflicts only**, and a safe save sleeps at most 50 ms between two tries.
+- **`FTSIndex.fields` returns a copy.** Appending to it no longer changes the index; assign a new list instead.
+
 ### Added
 
 - **`AsyncSQLiteAdapter.pool_stats()` and `AsyncSQLerDB.pool_stats()`** return `PoolStats`: pool size, free and in-use connections, checkouts, timeouts, average and longest wait.
 - **`AsyncMigrationRunner.applied_migrations()`**, and `status()` returns `applied_count` and `applied` as the sync runner does.
+- **`RebaseConfig.lock_timeout`** (seconds, default 5), and `LockTimeoutError` can be imported from `sqler`.
 
 ## [1.2026.4.2] - 2026-04-18
 
