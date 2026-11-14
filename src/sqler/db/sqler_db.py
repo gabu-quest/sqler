@@ -15,6 +15,8 @@ from sqler.utils import (
     validate_table_name,
 )
 
+from ._missing_table import MissingAsEmpty, is_missing_table
+
 
 class SQLerDB:
     """Document store for JSON blobs on SQLite.
@@ -63,6 +65,10 @@ class SQLerDB:
         self._versioned_tables: set[str] = set()
         # promoted columns per table: table -> list of column names
         self._promoted_columns: dict[str, list[str]] = {}
+        # what each promoted table was created with: table -> (promoted, checks)
+        self._promoted_specs: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
+        # remembered tables a rollback may have removed: checked at the next call that trusts them
+        self._due_after_rollback: set[str] = set()
 
     def ensure_table(
         self,
@@ -183,6 +189,33 @@ class SQLerDB:
                 self.adapter.auto_commit()
 
             self._promoted_columns[table] = list(promoted.keys())
+            self._promoted_specs[table] = (dict(promoted), dict(checks))
+            self._due_after_rollback.discard(table)
+
+    def _check_remembered(self, table: str) -> None:
+        """Run the check a rollback left due for ``table``, on the connection this call uses anyway.
+
+        A table, or a promoted or ``_version`` column, created inside a transaction that
+        rolled back is gone: what is remembered about it is forgotten. What still exists
+        stays remembered. Creates nothing.
+        """
+        if table not in self._due_after_rollback:
+            return
+        rows = self.adapter.execute(f'PRAGMA table_info("{table}");').fetchall()
+        self._due_after_rollback.discard(table)
+        have = {row[1] for row in rows}
+        promoted = self._promoted_columns.get(table)
+        if promoted is not None and not set(promoted) <= have:
+            del self._promoted_columns[table]
+        if table in self._versioned_tables and "_version" not in have:
+            self._versioned_tables.discard(table)
+
+    def _promoted_ready(self, table: str) -> None:
+        """Before a promoted write: a promoted table a rollback removed is created again as it was."""
+        self._check_remembered(table)
+        spec = self._promoted_specs.get(table)
+        if table not in self._promoted_columns and spec is not None:
+            self._ensure_table_with_promoted(table, *spec)
 
     def upsert_document_promoted(
         self,
@@ -205,6 +238,7 @@ class SQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_column_name(field)
+        self._promoted_ready(table)
         # Split promoted from JSON
         promoted_vals = {}
         json_doc = {}
@@ -261,6 +295,7 @@ class SQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_column_name(field)
+        self._promoted_ready(table)
         if table not in self._versioned_tables:
             self._ensure_versioned_table(table)
 
@@ -379,6 +414,7 @@ class SQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
+        self._promoted_ready(table)
         cols = ["data"] + promoted_fields
         return self._insert_many_chunked(table, docs, cols=cols, versioned=False, promoted_fields=promoted_fields)
 
@@ -417,6 +453,7 @@ class SQLerDB:
             return []
         for field in promoted_fields:
             validate_identifier(field)
+        self._promoted_ready(table)
         self._ensure_versioned_table(table)
         cols = ["data"] + promoted_fields
         ids = self._insert_many_chunked(table, docs, cols=cols, versioned=True, promoted_fields=promoted_fields)
@@ -580,23 +617,23 @@ class SQLerDB:
             dict | None: Decoded document with ``_id`` merged in, or ``None``
             if not found.
         """
-        self._ensure_table(table)
+        table = validate_table_name(table)
+        self._check_remembered(table)
         promoted = self._promoted_columns.get(table, [])
-        if promoted:
-            extra_cols = ", ".join(promoted)
-            cur = self.adapter.execute(
-                f"SELECT _id, data, {extra_cols} FROM {table} WHERE _id = ?;", [_id]
-            )
-        else:
-            cur = self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
+        cols = ", ".join(["_id", "data", *promoted])
+        try:
+            cur = self.adapter.execute(f"SELECT {cols} FROM {table} WHERE _id = ?;", [_id])
+        except sqlite3.OperationalError as exc:
+            if is_missing_table(exc, table):
+                return None  # a read creates no table
+            raise
         row = cur.fetchone()
         if not row:
             return None
         obj = json.loads(row[1])
         obj["_id"] = row[0]
-        if promoted:
-            for i, col_name in enumerate(promoted):
-                obj[col_name] = row[2 + i]
+        for i, col_name in enumerate(promoted):
+            obj[col_name] = row[2 + i]
         return obj
 
     def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
@@ -614,12 +651,17 @@ class SQLerDB:
         """
         if not ids:
             return []
-        self._ensure_table(table)
+        table = validate_table_name(table)
         placeholders = ",".join("?" for _ in ids)
-        cur = self.adapter.execute(
-            f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
-            list(ids),
-        )
+        try:
+            cur = self.adapter.execute(
+                f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
+                list(ids),
+            )
+        except sqlite3.OperationalError as exc:
+            if is_missing_table(exc, table):
+                return []  # a read creates no table
+            raise
         rows = cur.fetchall()
         # Build lookup dict for ordering
         by_id: dict[int, dict[str, Any]] = {}
@@ -714,8 +756,12 @@ class SQLerDB:
         Returns:
             SQLerQuery: Query object you can chain and execute.
         """
-        self._ensure_table(table)
-        return SQLerQuery(table=table, adapter=self.adapter)
+        table = validate_table_name(table)
+        # a query of a missing table reads as an empty one; it creates no table
+        return SQLerQuery(
+            table=table,
+            adapter=MissingAsEmpty(self.adapter, table, self._promoted_columns),  # type: ignore[arg-type]
+        )
 
     def close(self):
         """Close the underlying adapter connection."""
@@ -738,7 +784,7 @@ class SQLerDB:
         Returns:
             Transaction: Context manager for transaction scope.
         """
-        return Transaction(self.adapter)
+        return Transaction(self.adapter, self._forget_rolled_back)
 
     def create_index(
         self,
@@ -848,8 +894,22 @@ class SQLerDB:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit context manager; commit or rollback."""
-        self.adapter.end_transaction(commit=(exc_type is None))
+        if exc_type is None:
+            self.adapter.end_transaction(commit=True)
+        else:
+            _rollback_keeping_callers_exception(self.adapter)
+            self._forget_rolled_back()
         return False
+
+    def _forget_rolled_back(self) -> None:
+        """After a rollback, mark what is remembered about tables as due for a check.
+
+        ``ensure_table`` remembers a table's promoted columns and its ``_version`` column; a
+        table (or column) created inside a transaction that rolled back is gone. The rollback
+        runs no statement and raises nothing: the check runs at the next call that trusts what
+        is remembered (``_check_remembered``), on the connection that call uses anyway.
+        """
+        self._due_after_rollback |= set(self._promoted_columns) | self._versioned_tables
 
     # ---- versioned (optimistic locking) helpers ----
 
@@ -954,6 +1014,8 @@ class SQLerDB:
             ValueError: If updating with ``_id`` but ``expected_version`` is None.
             RuntimeError: On stale version conflicts (no rows updated).
         """
+        table = validate_table_name(table)
+        self._check_remembered(table)
         if table not in self._versioned_tables:
             self._ensure_versioned_table(table)
         payload = json.dumps(doc)
@@ -991,15 +1053,27 @@ class SQLerDB:
         Returns:
             dict | None: Decoded document with ``_id`` and ``_version`` keys, or None.
         """
-        self._ensure_versioned_table(table)
+        table = validate_table_name(table)
+        self._check_remembered(table)
         promoted = self._promoted_columns.get(table, [])
         if promoted:
             extra_cols = ", " + ", ".join(promoted)
         else:
             extra_cols = ""
-        cur = self.adapter.execute(
-            f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;", [_id]
-        )
+        sql = f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;"
+        try:
+            try:
+                cur = self.adapter.execute(sql, [_id])
+            except sqlite3.OperationalError as exc:
+                if "no such column: _version" not in str(exc):
+                    raise
+                # a table made before versioning: it gets the column, as it always did
+                self._ensure_versioned_table(table)
+                cur = self.adapter.execute(sql, [_id])
+        except sqlite3.OperationalError as exc:
+            if is_missing_table(exc, table):
+                return None  # a read creates no table
+            raise
         row = cur.fetchone()
         if not row:
             return None
@@ -1020,6 +1094,15 @@ class SQLerDB:
         return obj
 
 
+def _rollback_keeping_callers_exception(adapter) -> None:
+    """Roll back while the caller's exception is on its way out: an error of the rollback's own
+    (the adapter closed inside the block, say) does not replace it."""
+    try:
+        adapter.end_transaction(commit=False)
+    except Exception:
+        pass
+
+
 class Transaction:
     """Context manager for explicit database transactions.
 
@@ -1028,9 +1111,15 @@ class Transaction:
     the context exits successfully, or rolls back on exception.
     """
 
-    def __init__(self, adapter):
+    def __init__(self, adapter, on_rollback=None):
         self.adapter = adapter
+        self._on_rollback = on_rollback
         self._active = False
+
+    def _end(self, commit: bool) -> None:
+        self.adapter.end_transaction(commit=commit)
+        if not commit and self._on_rollback is not None:
+            self._on_rollback()
 
     def __enter__(self):
         """Begin the transaction."""
@@ -1043,17 +1132,22 @@ class Transaction:
         if not self._active:
             return False
         self._active = False
-        self.adapter.end_transaction(commit=(exc_type is None))
+        if exc_type is None:
+            self._end(True)
+        else:
+            _rollback_keeping_callers_exception(self.adapter)
+            if self._on_rollback is not None:
+                self._on_rollback()
         return False
 
     def commit(self):
         """Explicitly commit the transaction."""
         if self._active:
-            self.adapter.end_transaction(commit=True)
+            self._end(True)
             self._active = False
 
     def rollback(self):
         """Explicitly rollback the transaction."""
         if self._active:
-            self.adapter.end_transaction(commit=False)
+            self._end(False)
             self._active = False

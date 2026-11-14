@@ -19,6 +19,7 @@ from sqler.logging import query_logger
 from sqler.pool import PoolStats
 
 from .abstract import AsyncAdapterABC
+from .synchronous import _read_hit_missing_table
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +34,82 @@ class _Lease:
     a pin whose lease has been returned is stale and is ignored.
     """
 
-    __slots__ = ("conn", "holders", "returned")
+    __slots__ = ("conn", "holders", "returned", "interrupted")
 
     def __init__(self, conn: aiosqlite.Connection):
         self.conn = conn
         self.holders: dict[asyncio.Task, Any] = {}  # task -> its done callback
         self.returned = False
+        # a statement of this lease was cancelled inside a transaction: it may still be
+        # running in the connection's thread, so a rollback would queue behind it
+        self.interrupted = False
+
+
+class _Cursor:
+    """The cursor ``execute`` returns: an ``aiosqlite`` cursor whose failed fetch gives its connection back.
+
+    Every attribute and method is the wrapped cursor's. A ``fetchone``, ``fetchall``,
+    ``fetchmany`` or iteration that raises (or is cancelled) ends the statement like a
+    failed ``execute`` does: outside a transaction the task stops holding the connection.
+    """
+
+    __slots__ = ("_cursor", "_adapter", "_lease")
+
+    def __init__(self, cursor: aiosqlite.Cursor, adapter: "AsyncSQLiteAdapter", lease: Optional[_Lease]):
+        object.__setattr__(self, "_cursor", cursor)
+        object.__setattr__(self, "_adapter", adapter)
+        object.__setattr__(self, "_lease", lease)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._cursor, name, value)
+
+    async def _failed(self, exc: BaseException) -> None:
+        # a pin that is not this statement's (already given back, or a later one) is not ours to drop
+        if self._lease is not None and self._adapter._task_lease.get(None) is self._lease:
+            await self._adapter._release_after_failure(exc)
+
+    async def fetchone(self):
+        try:
+            return await self._cursor.fetchone()
+        except BaseException as exc:
+            await self._failed(exc)
+            raise
+
+    async def fetchmany(self, size: Optional[int] = None):
+        try:
+            return await self._cursor.fetchmany(size)
+        except BaseException as exc:
+            await self._failed(exc)
+            raise
+
+    async def fetchall(self):
+        try:
+            return await self._cursor.fetchall()
+        except BaseException as exc:
+            await self._failed(exc)
+            raise
+
+    async def close(self) -> None:
+        await self._cursor.close()
+
+    async def __aiter__(self):
+        try:
+            async for row in self._cursor:
+                yield row
+        except GeneratorExit:
+            raise
+        except BaseException as exc:
+            await self._failed(exc)
+            raise
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self._cursor.close()
 
 
 class AsyncSQLiteAdapter(AsyncAdapterABC):
@@ -300,6 +371,10 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         and the reclaim returns the connection when the thread is done.
         """
         if self._txn_depth.get(0) > 0:
+            if not isinstance(exc, Exception):  # cancelled: the statement may still be running
+                lease = self._task_lease.get(None)
+                if lease is not None and not lease.returned:
+                    lease.interrupted = True
             return
         lease = self._drop_pin()
         if lease is None:
@@ -346,6 +421,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
 
     async def execute(self, query: str, params: Optional[List[Any]] = None) -> aiosqlite.Cursor:
         """Execute a SQL query with optional parameters and return cursor."""
+        was_pinned = self._pinned() is not None
         conn = await self._acquire()
         _logging = query_logger.enabled
         if _logging:
@@ -356,7 +432,11 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             cursor = await conn.execute(query, params or [])
         except BaseException as exc:  # a cancellation counts as a failure
             error_msg = str(exc) or type(exc).__name__
-            await self._release_after_failure(exc)
+            # a read of a missing table changed nothing: work this task left uncommitted
+            # on its pinned connection stays for the caller to commit; a pinned connection
+            # with nothing uncommitted is given back, as after any other failed statement
+            if not (was_pinned and conn.in_transaction and _read_hit_missing_table(query, exc)):
+                await self._release_after_failure(exc)
             converted = unique_violation_from(exc)
             if converted is not None:
                 raise converted from exc
@@ -371,7 +451,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
                     rows_affected=cursor.rowcount if cursor and cursor.rowcount >= 0 else None,
                     error=error_msg,
                 )
-        return cursor
+        return _Cursor(cursor, self, self._task_lease.get(None))  # type: ignore[return-value]
 
     async def executemany(self, query: str, param_list: List[List[Any]]) -> aiosqlite.Cursor:
         """Run ``query`` once per parameter list.
@@ -480,6 +560,16 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
                     await self._release_after_failure(exc)
                     raise
             else:
+                lease = self._task_lease.get(None)
+                if lease is not None and lease.interrupted:
+                    # a cancelled statement may still be running in the connection's thread and
+                    # the rollback would queue behind it (up to the busy timeout): the caller
+                    # goes on at once, and the reclaim rolls back and returns the connection
+                    # when the thread is done
+                    dropped = self._drop_pin()
+                    if dropped is not None:
+                        self._start_reclaim(dropped.conn)
+                    return
                 try:
                     await conn.rollback()
                 except BaseException as exc:

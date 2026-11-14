@@ -10,6 +10,19 @@ from ..exceptions import NotConnectedError, QueryError, unique_violation_from
 from .abstract import AdapterABC
 
 
+def _read_hit_missing_table(query: str, exc: BaseException) -> bool:
+    """True when ``query`` is a read and ``exc`` is SQLite's "no such table" for it.
+
+    A read opens no transaction and changes nothing, so its failure says nothing about
+    the thread's earlier uncommitted statements: they stay for the caller to commit.
+    Callers (a model read of a table nobody created) answer "empty" for it.
+    """
+    if not isinstance(exc, sqlite3.OperationalError) or not str(exc).startswith("no such table"):
+        return False
+    words = query.split(None, 1)
+    return bool(words) and words[0].upper() in ("SELECT", "WITH")
+
+
 class SQLiteAdapter(AdapterABC):
     """Synchronous SQLite adapter with WAL and thread-local connections.
 
@@ -158,7 +171,8 @@ class SQLiteAdapter(AdapterABC):
                 cursor.execute(query)
         except BaseException as exc:  # an interrupt counts as a failure
             error_msg = str(exc) or type(exc).__name__
-            self._end_failed_implicit_transaction(conn)
+            if not _read_hit_missing_table(query, exc):
+                self._end_failed_implicit_transaction(conn)
             converted = unique_violation_from(exc)
             if converted is not None:
                 raise converted from exc

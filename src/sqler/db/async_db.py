@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from typing import Any, Optional
 
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter
@@ -12,6 +13,8 @@ from sqler.utils import (
     validate_identifier,
     validate_table_name,
 )
+
+from ._missing_table import AsyncMissingAsEmpty, is_missing_table
 
 
 class AsyncSQLerDB:
@@ -43,6 +46,10 @@ class AsyncSQLerDB:
         self._versioned_tables: set[str] = set()
         # promoted columns per table: table -> list of column names
         self._promoted_columns: dict[str, list[str]] = {}
+        # what each promoted table was created with: table -> (promoted, checks)
+        self._promoted_specs: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
+        # remembered tables a rollback may have removed: checked at the next call that trusts them
+        self._due_after_rollback: set[str] = set()
 
     async def connect(self) -> None:
         await self.adapter.connect()
@@ -134,6 +141,32 @@ class AsyncSQLerDB:
             await self.adapter.auto_commit()
 
         self._promoted_columns[table] = list(promoted.keys())
+        self._promoted_specs[table] = (dict(promoted), dict(checks))
+        self._due_after_rollback.discard(table)
+
+    async def _check_remembered(self, table: str) -> None:
+        """The async twin of ``SQLerDB._check_remembered``: the check a rollback left due for ``table``."""
+        if table not in self._due_after_rollback:
+            return
+        cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
+        try:
+            rows = await cur.fetchall()
+        finally:
+            await cur.close()
+        self._due_after_rollback.discard(table)
+        have = {row[1] for row in rows}
+        promoted = self._promoted_columns.get(table)
+        if promoted is not None and not set(promoted) <= have:
+            del self._promoted_columns[table]
+        if table in self._versioned_tables and "_version" not in have:
+            self._versioned_tables.discard(table)
+
+    async def _promoted_ready(self, table: str) -> None:
+        """Before a promoted write: a promoted table a rollback removed is created again as it was."""
+        await self._check_remembered(table)
+        spec = self._promoted_specs.get(table)
+        if table not in self._promoted_columns and spec is not None:
+            await self._ensure_table_with_promoted(table, *spec)
 
     async def upsert_document_promoted(
         self,
@@ -146,6 +179,7 @@ class AsyncSQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_column_name(field)
+        await self._promoted_ready(table)
         promoted_vals = {}
         json_doc = {}
         for k, v in doc.items():
@@ -195,6 +229,7 @@ class AsyncSQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_column_name(field)
+        await self._promoted_ready(table)
         await self._ensure_versioned_table(table)
 
         promoted_vals = {}
@@ -270,15 +305,16 @@ class AsyncSQLerDB:
         return _id
 
     async def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
-        await self._ensure_table(table)
+        table = validate_table_name(table)
+        await self._check_remembered(table)
         promoted = self._promoted_columns.get(table, [])
-        if promoted:
-            extra_cols = ", ".join(promoted)
-            cur = await self.adapter.execute(
-                f"SELECT _id, data, {extra_cols} FROM {table} WHERE _id = ?;", [_id]
-            )
-        else:
-            cur = await self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
+        cols = ", ".join(["_id", "data", *promoted])
+        try:
+            cur = await self.adapter.execute(f"SELECT {cols} FROM {table} WHERE _id = ?;", [_id])
+        except sqlite3.OperationalError as exc:
+            if is_missing_table(exc, table):
+                return None  # a read creates no table
+            raise
         try:
             row = await cur.fetchone()
         finally:
@@ -288,9 +324,8 @@ class AsyncSQLerDB:
             return None
         obj = json.loads(row[1])
         obj["_id"] = row[0]
-        if promoted:
-            for i, col_name in enumerate(promoted):
-                obj[col_name] = row[2 + i]
+        for i, col_name in enumerate(promoted):
+            obj[col_name] = row[2 + i]
         return obj
 
     async def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
@@ -308,12 +343,17 @@ class AsyncSQLerDB:
         """
         if not ids:
             return []
-        await self._ensure_table(table)
+        table = validate_table_name(table)
         placeholders = ",".join("?" for _ in ids)
-        cur = await self.adapter.execute(
-            f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
-            list(ids),
-        )
+        try:
+            cur = await self.adapter.execute(
+                f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
+                list(ids),
+            )
+        except sqlite3.OperationalError as exc:
+            if is_missing_table(exc, table):
+                return []  # a read creates no table
+            raise
         try:
             rows = await cur.fetchall()
         finally:
@@ -380,6 +420,7 @@ class AsyncSQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
+        await self._promoted_ready(table)
         cols = ["data"] + promoted_fields
         return await self._insert_many_chunked(table, docs, cols=cols, versioned=False, promoted_fields=promoted_fields)
 
@@ -418,6 +459,7 @@ class AsyncSQLerDB:
             return []
         for field in promoted_fields:
             validate_identifier(field)
+        await self._promoted_ready(table)
         await self._ensure_versioned_table(table)
         cols = ["data"] + promoted_fields
         ids = await self._insert_many_chunked(table, docs, cols=cols, versioned=True, promoted_fields=promoted_fields)
@@ -729,6 +771,7 @@ class AsyncSQLerDB:
             table: Table name.
         """
         table = validate_table_name(table)
+        await self._check_remembered(table)
         # Fast path: check cache first
         if table in self._versioned_tables:
             return
@@ -783,16 +826,28 @@ class AsyncSQLerDB:
         return _id, expected_version + 1
 
     async def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
-        await self._ensure_versioned_table(table)
+        table = validate_table_name(table)
+        await self._check_remembered(table)
         promoted = self._promoted_columns.get(table, [])
         if promoted:
             extra_cols = ", " + ", ".join(promoted)
         else:
             extra_cols = ""
-        cur = await self.adapter.execute(
-            f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;",
-            [_id],
-        )
+        sql = f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;"
+        try:
+            try:
+                cur = await self.adapter.execute(sql, [_id])
+            except sqlite3.OperationalError as exc:
+                if "no such column: _version" not in str(exc):
+                    raise
+                # a table made before versioning: it gets the column, as it always did
+                self._versioned_tables.discard(table)
+                await self._ensure_versioned_table(table)
+                cur = await self.adapter.execute(sql, [_id])
+        except sqlite3.OperationalError as exc:
+            if is_missing_table(exc, table):
+                return None  # a read creates no table
+            raise
         try:
             row = await cur.fetchone()
         finally:
@@ -812,8 +867,12 @@ class AsyncSQLerDB:
         """Convenience: return an AsyncSQLerQuery bound to this adapter."""
         from sqler.query.async_query import AsyncSQLerQuery
 
-        await self._ensure_table(table)
-        return AsyncSQLerQuery(table=table, adapter=self.adapter)
+        table = validate_table_name(table)
+        # a query of a missing table reads as an empty one; it creates no table
+        return AsyncSQLerQuery(
+            table=table,
+            adapter=AsyncMissingAsEmpty(self.adapter, table, self._promoted_columns),  # type: ignore[arg-type]
+        )
 
     def transaction(self) -> "AsyncTransaction":
         """Return a context manager for explicit transactions.
@@ -828,7 +887,7 @@ class AsyncSQLerDB:
         Returns:
             AsyncTransaction: Async context manager for transaction scope.
         """
-        return AsyncTransaction(self.adapter)
+        return AsyncTransaction(self.adapter, self._forget_rolled_back)
 
     async def __aenter__(self):
         """Enter async context manager; begin transaction."""
@@ -837,8 +896,29 @@ class AsyncSQLerDB:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Exit async context manager; commit or rollback."""
-        await self.adapter.end_transaction(commit=(exc_type is None))
+        if exc_type is None:
+            await self.adapter.end_transaction(commit=True)
+        else:
+            await _rollback_keeping_callers_exception(self.adapter)
+            self._forget_rolled_back()
         return False
+
+    def _forget_rolled_back(self) -> None:
+        """After a rollback, mark what is remembered about tables as due for a check.
+
+        The async twin of ``SQLerDB._forget_rolled_back``: no statement, nothing raised, no
+        connection needed (the only one may still be busy with a cancelled statement).
+        """
+        self._due_after_rollback |= set(self._promoted_columns) | self._versioned_tables
+
+
+async def _rollback_keeping_callers_exception(adapter) -> None:
+    """Roll back while the caller's exception is on its way out: an error of the rollback's own
+    does not replace it."""
+    try:
+        await adapter.end_transaction(commit=False)
+    except Exception:
+        pass
 
 
 class AsyncTransaction:
@@ -848,9 +928,15 @@ class AsyncTransaction:
     (like model.save()) respect the transaction boundary and don't auto-commit.
     """
 
-    def __init__(self, adapter):
+    def __init__(self, adapter, on_rollback=None):
         self.adapter = adapter
+        self._on_rollback = on_rollback
         self._active = False
+
+    async def _end(self, commit: bool) -> None:
+        await self.adapter.end_transaction(commit=commit)
+        if not commit and self._on_rollback is not None:
+            self._on_rollback()
 
     async def __aenter__(self):
         """Begin the transaction."""
@@ -863,17 +949,22 @@ class AsyncTransaction:
         if not self._active:
             return False
         self._active = False
-        await self.adapter.end_transaction(commit=(exc_type is None))
+        if exc_type is None:
+            await self._end(True)
+        else:
+            await _rollback_keeping_callers_exception(self.adapter)
+            if self._on_rollback is not None:
+                self._on_rollback()
         return False
 
     async def commit(self):
         """Explicitly commit the transaction."""
         if self._active:
-            await self.adapter.end_transaction(commit=True)
+            await self._end(True)
             self._active = False
 
     async def rollback(self):
         """Explicitly rollback the transaction."""
         if self._active:
-            await self.adapter.end_transaction(commit=False)
+            await self._end(False)
             self._active = False
