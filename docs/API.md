@@ -1667,7 +1667,7 @@ SQLer provides a unified exception hierarchy under `sqler.exceptions`:
   - `NotBoundError` — model not bound to database
   - `NotFoundError` — model instance not found
   - `ValidationError` — model validation failed
-  - `UnstorableValueError` — a value has no stored form (a kind sqler does not store, or a `Decimal` no number holds exactly); `value` is the value and `field` its place in the document, where known; also a `TypeError`
+  - `UnstorableValueError` — a value has no stored form (a kind sqler does not store; a `Decimal` or `timedelta` no number holds exactly, a `timedelta` being stored as its number of seconds; or `bytes` in a JSON document: promote the field to a `BLOB` column, or store text); `value` is the value and `field` its place in the document, where known; also a `TypeError`
 - **Hook errors**
   - `BeforeSaveError`, `AfterSaveError` — save hook failures
   - `BeforeDeleteError`, `AfterDeleteError` — delete hook failures

@@ -10,13 +10,17 @@ and every filter gets it here, so a value is found by the form it was written in
 - a tuple is a list;
 - a ``Decimal`` is the number it equals: an integer when it is whole, else a float, and only if
   reading that number back gives the same value (anything else is refused);
+- a ``timedelta`` is its number of seconds: an integer when whole, else a float, and only if
+  ``timedelta(seconds=<that number>)`` equals it (anything else is refused);
 - a pydantic model is its fields (``model_dump()``), each in stored form;
 - a model that is a row of its own is the reference to that row, where the caller names
   the model classes it stores that way;
 
 the same at every depth of a list or dict. ``str``, ``int``, ``float``, ``bool`` and ``None``
 are stored as they are. Any other value has no stored form and is passed on as it is: a
-document that holds one is refused by ``json``.
+document that holds one is refused by ``json``. ``bytes``, ``bytearray`` and ``memoryview`` are
+refused in a document (JSON has no binary value): promote the field to a ``BLOB`` column, or
+store text. A promoted ``BLOB`` column takes them as they are.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from __future__ import annotations
 import inspect
 import json
 import sys
-from datetime import date, time
+from datetime import date, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import PurePath
@@ -34,6 +38,7 @@ from uuid import UUID
 from sqler.exceptions import UnstorableValueError
 
 _AS_IS = frozenset({str, int, float, bool, type(None)})
+_BINARY = (bytes, bytearray, memoryview)
 
 
 def stored(value: Any, models: Any = ()) -> Any:
@@ -71,7 +76,9 @@ def json_arg(value: Any) -> tuple[str, Any]:
     would be stored as the integer 1 or 0), anything else bound as it is."""
     value = stored(value)
     if isinstance(value, (dict, list, bool)):
-        return "json(?)", json.dumps(value)
+        return "json(?)", dumps(value)
+    if isinstance(value, _BINARY):
+        _refuse_binary(value)
     return "?", value
 
 
@@ -79,7 +86,7 @@ def column_arg(value: Any) -> Any:
     """The parameter that puts the stored form of ``value`` into a column of its own: a list
     or dict as JSON text, anything else bound as it is."""
     value = stored(value)
-    return json.dumps(value) if isinstance(value, (dict, list)) else value
+    return dumps(value) if isinstance(value, (dict, list)) else value
 
 
 def _plain(value: Any) -> Any:
@@ -98,6 +105,8 @@ def _plain(value: Any) -> Any:
             return sorted(value, key=lambda v: (type(v).__name__, repr(v)))
     if isinstance(value, Decimal):
         return _number(value)
+    if isinstance(value, timedelta):
+        return _seconds(value)
     pydantic = sys.modules.get("pydantic")  # never imported here: the lite bases run without it
     if pydantic is not None and isinstance(value, pydantic.BaseModel):
         return value.model_dump()
@@ -116,6 +125,19 @@ def _number(value: Decimal) -> int | float:
             if Decimal(repr(number)) == value:
                 return number
     raise UnstorableValueError(f"Decimal {value} cannot be stored: a number cannot hold it", value=value)
+
+
+def _seconds(value: timedelta) -> int | float:
+    """The JSON number of seconds ``value`` equals; refused when no number holds it exactly."""
+    if value.microseconds == 0:
+        return value.days * 86400 + value.seconds
+    number = value.total_seconds()
+    try:
+        if timedelta(seconds=number) == value:
+            return number
+    except OverflowError:
+        pass
+    raise UnstorableValueError(f"timedelta {value} cannot be stored: a number of seconds cannot hold it", value=value)
 
 
 def _locate(value: Any, path: str = "") -> str | None:
@@ -144,9 +166,18 @@ def _locate(value: Any, path: str = "") -> str | None:
     return path if plain is value else _locate(plain, path)
 
 
+def _refuse_binary(value: Any) -> None:
+    raise UnstorableValueError(
+        "bytes cannot be stored in a JSON document: promote the field to a BLOB column, or store text",
+        value=value,
+    )
+
+
 def _default(value: Any) -> Any:
     plain = _plain(value)
     if plain is value:
+        if isinstance(value, _BINARY):
+            _refuse_binary(value)
         raise UnstorableValueError(
             f"Object of type {type(value).__name__} is not JSON serializable", value=value
         )

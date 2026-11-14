@@ -75,6 +75,10 @@ class Priced(pydantic.BaseModel):
     price: Decimal
 
 
+class Lasted(pydantic.BaseModel):
+    took: timedelta
+
+
 class Slot(pydantic.BaseModel):
     at: datetime
     tags: set[str] = set()
@@ -123,6 +127,14 @@ KINDS = [
     Kind("set_of_decimal", set[Decimal], {Decimal("2.5"), Decimal("1.1")}, [1.1, 2.5], {Decimal("4")}),
     Kind("tuple_of_decimal", None, (Decimal("1.1"), Decimal("2")), [1.1, 2], ()),
     Kind("nested_model_decimal", Priced, Priced(price=Decimal("1.1")), {"price": 1.1}, Priced(price=Decimal("2"))),
+    Kind("timedelta", timedelta, timedelta(minutes=90), 5400, timedelta(minutes=91)),
+    Kind("timedelta_fraction", timedelta, timedelta(minutes=90, microseconds=1), 5400.000001, timedelta(seconds=1)),
+    Kind("timedelta_negative", timedelta, -timedelta(seconds=2), -2, timedelta(seconds=2)),
+    Kind("list_of_timedelta", list[timedelta], [timedelta(hours=1)], [3600], [timedelta(hours=2)]),
+    Kind("dict_of_timedelta", dict[str, timedelta], {"t": timedelta(hours=1)}, {"t": 3600}, {"t": timedelta(hours=2)}),
+    Kind("set_of_timedelta", set[timedelta], {timedelta(hours=2), timedelta(hours=1)}, [3600, 7200], {timedelta(hours=3)}),
+    Kind("tuple_of_timedelta", None, (timedelta(hours=1), timedelta(seconds=1)), [3600, 1], ()),
+    Kind("nested_model_timedelta", Lasted, Lasted(took=timedelta(hours=1)), {"took": 3600}, Lasted(took=timedelta(hours=2))),
     Kind(
         "nested_model_deep",
         Slot,
@@ -257,8 +269,8 @@ def test_save_many_stores_the_same_form(base, kind):
 @pytest.mark.parametrize("base", list(BASES))
 @pytest.mark.parametrize(
     "value, kind_name",
-    [(timedelta(hours=2), "timedelta"), (b"ab", "bytes")],
-    ids=["timedelta", "bytes"],
+    [(object(), "object"), (range(2), "range")],
+    ids=["object", "range"],
 )
 def test_a_kind_with_no_stored_form_is_refused_naming_the_field(base, value, kind_name):
     spec = BASES[base]
@@ -474,8 +486,8 @@ def test_a_filter_on_a_plain_value_binds_it_as_it_is(value):
 
 
 def test_a_filter_on_a_kind_with_no_stored_form_is_refused_as_before(events):
-    with pytest.raises(sqlite3.ProgrammingError, match="type 'datetime.timedelta' is not supported"):
-        SvEvent.query().filter(F("extra") == timedelta(hours=2)).count()
+    with pytest.raises(sqlite3.ProgrammingError, match="type 'object' is not supported"):
+        SvEvent.query().filter(F("extra") == object()).count()
 
 
 def test_an_async_filter_finds_what_save_stored():
@@ -519,6 +531,8 @@ _UPDATE_VALUES = [
     ("int", 5, 5, "integer"),
     ("decimal", Decimal("1.1"), 1.1, "real"),
     ("decimal_whole", Decimal("5.00"), 5, "integer"),
+    ("timedelta_whole", timedelta(minutes=90), 5400, "integer"),
+    ("timedelta_fraction", timedelta(seconds=1, microseconds=500000), 1.5, "real"),
     ("true", True, 1, "true"),  # json_extract gives 1 for a JSON true; the type tells them apart
     ("false", False, 0, "false"),
 ]
@@ -664,8 +678,8 @@ def test_a_raw_document_write_stores_the_form_save_stores(is_async, write):
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
 def test_a_raw_write_of_a_kind_with_no_stored_form_is_refused_naming_the_place(is_async):
     async def steps(rows):
-        doc = {"lines": [{"d": 1}, {"d": 2}, {"d": timedelta(hours=2)}]}
-        with pytest.raises(TypeError, match=r"^Object of type timedelta is not JSON serializable \(at lines\[2\]\.d\)$"):
+        doc = {"lines": [{"d": 1}, {"d": 2}, {"d": object()}]}
+        with pytest.raises(TypeError, match=r"^Object of type object is not JSON serializable \(at lines\[2\]\.d\)$"):
             await _aw(rows.db.insert_document("raw", doc))
         return await rows.sql("SELECT count(*) FROM raw")
 
@@ -1088,7 +1102,7 @@ def test_a_refused_dict_key_is_not_given_the_place_of_another_value():
 
     async def steps(rows):
         with pytest.raises(TypeError) as err:
-            await _aw(rows.db.insert_document("raw", {"d": {Decimal("1.1"): 1}, "x": timedelta(days=1)}))
+            await _aw(rows.db.insert_document("raw", {"d": {Decimal("1.1"): 1}, "x": object()}))
         return str(err.value), await rows.sql("SELECT count(*) FROM raw")
 
     message, count = _run(steps, False)
@@ -1159,3 +1173,361 @@ def test_a_decimal_counter_field_behaves_as_a_float_one_does(base, number):
         return "saved"
 
     assert _run(steps, spec.is_async) == "StaleVersionError"
+
+
+# ---- timedelta --------------------------------------------------------------------------
+# A timedelta is stored as its number of seconds; one a number cannot hold exactly is refused.
+
+_TD_REFUSED = [timedelta.max, timedelta.min + timedelta(microseconds=1), timedelta(days=999999999, microseconds=1)]
+
+
+class SubDelta(timedelta):
+    pass
+
+
+@pytest.mark.parametrize(
+    "given, text",
+    [
+        (timedelta(0), "0"),
+        (-timedelta(microseconds=1), "-1e-06"),
+        (timedelta(microseconds=1), "1e-06"),
+        (timedelta(days=999999999), "86399999913600"),
+        (timedelta.min, "-86399999913600"),
+        (SubDelta(seconds=90), "90"),
+    ],
+    ids=["zero", "negative_microsecond", "microsecond", "days_999999999", "min", "subclass"],
+)
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_timedelta_in_a_document_write_is_a_number_in_the_row_text(is_async, given, text):
+    async def steps(rows):
+        await _aw(rows.db.insert_document("raw", {"v": given, "xs": [given]}))
+        return await rows.sql("SELECT data FROM raw")
+
+    [(data,)] = _run(steps, is_async)
+    assert data.count(text) == 2
+
+
+@pytest.mark.parametrize("given", _TD_REFUSED, ids=["max", "min_plus_one", "days_and_microsecond"])
+@pytest.mark.parametrize("base", list(BASES))
+def test_a_timedelta_no_number_holds_is_refused_on_save(base, given):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, None)
+        cls.set_db(rows.db, "t")
+        await _aw(cls(v=1).save())
+        with pytest.raises(UnstorableValueError, match=rf"^timedelta {re.escape(str(given))} cannot be stored: a number of seconds cannot hold it$"):
+            await _aw(cls(v=given).save())
+        return await rows.sql("SELECT count(*) FROM t")
+
+    assert _run(steps, spec.is_async) == [(1,)]
+
+
+@pytest.mark.parametrize("given", _TD_REFUSED, ids=["max", "min_plus_one", "days_and_microsecond"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_timedelta_no_number_holds_is_refused_in_a_document_and_names_the_place(is_async, given):
+    async def steps(rows):
+        with pytest.raises(UnstorableValueError, match=r"a number of seconds cannot hold it \(at lines\[1\]\.took\)$"):
+            await _aw(rows.db.insert_document("raw", {"lines": [{"took": 1}, {"took": given}]}))
+        return await rows.sql("SELECT count(*) FROM raw")
+
+    assert _run(steps, is_async) == [(0,)]
+
+
+@pytest.mark.parametrize("given", _TD_REFUSED, ids=["max", "min_plus_one", "days_and_microsecond"])
+@pytest.mark.parametrize("call", list(_UPDATES))
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_timedelta_no_number_holds_is_refused_in_an_update(is_async, call, given):
+    model = SvAsyncEvent if is_async else SvEvent
+
+    async def steps(rows):
+        model.set_db(rows.db, _TABLE[model])
+        await _aw(model(name="a").save())
+        with pytest.raises(UnstorableValueError, match="a number of seconds cannot hold it"):
+            await _aw(_UPDATES[call](model.query().filter(F("name") == "a"), extra=given))
+        return await rows.stored(_TABLE[model], "extra")
+
+    assert _run(steps, is_async) == [None]
+
+
+@pytest.mark.parametrize("given", _TD_REFUSED, ids=["max", "min_plus_one", "days_and_microsecond"])
+def test_a_filter_by_a_timedelta_no_number_holds_raises_the_sqler_error(events, given):
+    for expression in (
+        lambda: F("extra") == given,
+        lambda: F("extra") < given,
+        lambda: F("extra").between(timedelta(0), given),
+        lambda: F("extra").isin([timedelta(0), given]),
+        lambda: F("extra").in_list([given]),
+    ):
+        with pytest.raises(UnstorableValueError, match="a number of seconds cannot hold it"):
+            expression()
+
+
+@pytest.fixture
+def took():
+    db = SQLerDB.in_memory(shared=False)
+    SvEvent.set_db(db, "sv_events")
+    for name, delta in (("three", timedelta(minutes=3)), ("ninety", timedelta(minutes=90)), ("day", timedelta(days=1))):
+        SvEvent(name=name, extra=delta).save()
+    yield db
+    db.close()
+
+
+def test_a_filter_by_a_timedelta_compares_the_seconds(took):
+    five = timedelta(minutes=5)
+    assert _priced(F("extra") > five) == ["day", "ninety"]
+    assert _priced(F("extra") >= timedelta(minutes=3)) == ["day", "ninety", "three"]
+    assert _priced(F("extra") < five) == ["three"]
+    assert _priced(F("extra") == timedelta(seconds=5400)) == ["ninety"]
+    assert _priced(F("extra") != timedelta(seconds=5400)) == ["day", "three"]
+    assert _priced(F("extra").between(five, timedelta(hours=2))) == ["ninety"]
+    assert _priced(F("extra").isin([timedelta(minutes=3), timedelta(days=1), timedelta(0)])) == ["day", "three"]
+    assert _priced(F("extra").in_list([timedelta(minutes=90)])) == ["ninety"]
+    assert SvEvent.query().filter(F("extra") > five).order_by("extra", desc=True).first().name == "day"
+
+
+def test_a_timedelta_sum_and_average_are_numbers(took):
+    seconds = 180 + 5400 + 86400
+    assert SvEvent.query().sum("extra") == seconds
+    assert SvEvent.query().avg("extra") == seconds / 3
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_an_async_filter_by_a_timedelta_finds_the_row(is_async):
+    model = SvAsyncEvent if is_async else SvEvent
+
+    async def steps(rows):
+        model.set_db(rows.db, _TABLE[model])
+        for name, minutes in (("a", 3), ("b", 90)):
+            await _aw(model(name=name, extra=timedelta(minutes=minutes)).save())
+        found = await _aw(model.query().filter(F("extra") > timedelta(minutes=5)).all())
+        return [r.name for r in found]
+
+    assert _run(steps, is_async) == ["b"]
+
+
+@pytest.mark.parametrize("base", ["pydantic", "safe", "msgspec", "async", "async-safe"])
+@pytest.mark.parametrize(
+    "given",
+    [timedelta(minutes=90, microseconds=1), timedelta(0), -timedelta(microseconds=1), timedelta(days=999999999)],
+    ids=["fraction", "zero", "negative_microsecond", "days_999999999"],
+)
+def test_a_timedelta_field_loads_as_the_timedelta_saved(base, given):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = _typed(spec.cls, v=Optional[timedelta])
+        cls.set_db(rows.db, "t")
+        saved = await _aw(cls(v=given).save())
+        loaded = await _aw(cls.from_id(saved._id))
+        return loaded.v, type(loaded.v)
+
+    assert _run(steps, spec.is_async) == (given, timedelta)
+
+
+@pytest.mark.parametrize("base", ["pydantic", "safe", "lite", "lite-safe", "msgspec"])
+def test_a_timedelta_model_is_clean_after_load_and_saves_the_same_bytes(base):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, timedelta)
+        cls.set_db(rows.db, "t")
+        saved = await _aw(cls(v=timedelta(minutes=90, microseconds=1)).save())
+        before = await rows.documents("t")
+        loaded = await _aw(cls.from_id(saved._id))
+        clean = loaded.is_dirty()
+        await _aw(loaded.save())
+        after = await rows.documents("t")
+        for doc in (before[0], after[0]):
+            doc.pop("_version", None)
+        return clean, before == after
+
+    assert _run(steps, spec.is_async) == (False, True)
+
+
+@pytest.mark.parametrize("base", ["lite", "lite-safe", "async-lite", "async-lite-safe"])
+def test_a_lite_base_loads_a_timedelta_as_the_number_stored(base):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, timedelta)
+        cls.set_db(rows.db, "t")
+        saved = await _aw(cls(v=timedelta(minutes=90)).save())
+        loaded = await _aw(cls.from_id(saved._id))
+        return loaded.v, type(loaded.v)
+
+    assert _run(steps, spec.is_async) == (5400, int)
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_timedelta_in_a_promoted_column_is_a_number(is_async):
+    async def steps(rows):
+        await _aw(rows.db.ensure_table("raw", promoted={"took": "REAL"}))
+        await _aw(rows.db.upsert_document_promoted("raw", None, {"took": timedelta(seconds=90), "n": 1}, ["took"]))
+        with pytest.raises(UnstorableValueError, match="a number of seconds cannot hold it"):
+            await _aw(rows.db.upsert_document_promoted("raw", None, {"took": timedelta.max}, ["took"]))
+        return await rows.sql("SELECT took, typeof(took) FROM raw")
+
+    assert _run(steps, is_async) == [(90.0, "real")]
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_timedelta_as_a_dict_key_is_refused_as_any_non_text_key_is(is_async):
+    async def steps(rows):
+        with pytest.raises(TypeError, match="keys must be str, int, float, bool or None, not datetime.timedelta"):
+            await _aw(rows.db.insert_document("raw", {"d": {timedelta(1): 1}}))
+        return await rows.sql("SELECT count(*) FROM raw")
+
+    assert _run(steps, is_async) == [(0,)]
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_timedelta_in_a_set_beside_a_decimal_is_stored_in_one_order(is_async):
+    async def steps(rows):
+        await _aw(rows.db.insert_document("raw", {"v": {timedelta(seconds=5), Decimal("1.5")}}))
+        return await rows.documents("raw")
+
+    assert [doc["v"] for doc in _run(steps, is_async)] == [[1.5, 5]]
+
+
+# ---- bytes ------------------------------------------------------------------------------
+# JSON has no binary value, so a document refuses bytes; a promoted BLOB column holds them.
+
+BLOB = b"\x00\xffhi"
+_BYTES_MESSAGE = "bytes cannot be stored in a JSON document: promote the field to a BLOB column, or store text"
+
+
+class SubBytes(bytes):
+    pass
+
+
+@pytest.mark.parametrize(
+    "value",
+    [b"", b"ab", bytearray(b"ab"), memoryview(b"ab"), SubBytes(b"ab")],
+    ids=["empty", "bytes", "bytearray", "memoryview", "subclass"],
+)
+@pytest.mark.parametrize("base", list(BASES))
+def test_bytes_in_a_document_are_refused_saying_where_they_go(base, value):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, None)
+        cls.set_db(rows.db, "t")
+        with pytest.raises(UnstorableValueError) as err:
+            await _aw(cls(v=value).save())
+        return str(err.value), await rows.sql("SELECT count(*) FROM t")
+
+    assert _run(steps, spec.is_async) == (f"{_BYTES_MESSAGE} (at v)", [(0,)])
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_bytes_nested_in_a_document_name_their_place(is_async):
+    async def steps(rows):
+        with pytest.raises(UnstorableValueError) as err:
+            await _aw(rows.db.insert_document("raw", {"lines": [{"raw": 1}, {"raw": b"hi"}]}))
+        return str(err.value), err.value.field, err.value.value
+
+    assert _run(steps, is_async) == (f"{_BYTES_MESSAGE} (at lines[1].raw)", "lines[1].raw", b"hi")
+
+
+@pytest.mark.parametrize("call", list(_UPDATES))
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_bytes_in_an_update_of_a_document_field_are_refused(is_async, call):
+    model = SvAsyncEvent if is_async else SvEvent
+
+    async def steps(rows):
+        model.set_db(rows.db, _TABLE[model])
+        await _aw(model(name="a").save())
+        with pytest.raises(UnstorableValueError, match="^bytes cannot be stored in a JSON document"):
+            await _aw(_UPDATES[call](model.query().filter(F("name") == "a"), extra=b"hi"))
+        return await rows.stored(_TABLE[model], "extra")
+
+    assert _run(steps, is_async) == [None]
+
+
+class BlobRow(SQLerModel):
+    __promoted__ = {"blob": "BLOB"}
+    name: str = ""
+    blob: Optional[bytes] = None
+
+
+class BlobSafeRow(SQLerSafeModel):
+    __promoted__ = {"blob": "BLOB"}
+    name: str = ""
+    blob: Optional[bytes] = None
+
+
+class BlobAsyncRow(AsyncSQLerModel):
+    __promoted__ = {"blob": "BLOB"}
+    name: str = ""
+    blob: Optional[bytes] = None
+
+
+class BlobAsyncSafeRow(AsyncSQLerSafeModel):
+    __promoted__ = {"blob": "BLOB"}
+    name: str = ""
+    blob: Optional[bytes] = None
+
+
+_BLOB_MODELS = {
+    "pydantic": (BlobRow, False),
+    "safe": (BlobSafeRow, False),
+    "async": (BlobAsyncRow, True),
+    "async-safe": (BlobAsyncSafeRow, True),
+}
+
+
+@pytest.mark.parametrize("call", list(_UPDATES))
+@pytest.mark.parametrize("base", list(_BLOB_MODELS))
+def test_a_promoted_blob_field_keeps_the_exact_bytes(base, call):
+    model, is_async = _BLOB_MODELS[base]
+
+    async def steps(rows):
+        model.set_db(rows.db, "blobs")
+        row = await _aw(model(name="a", blob=BLOB).save())
+        loaded = await _aw(model.from_id(row._id))
+        found = await _aw(model.query().filter(F("blob") == BLOB).all())
+        await _aw(_UPDATES[call](model.query().filter(F("name") == "a"), blob=b"\x01\x00"))
+        after = await _aw(model.from_id(row._id))
+        column = await rows.sql("SELECT blob, typeof(blob) FROM blobs")
+        return loaded.blob, [r.name for r in found], after.blob, column
+
+    assert _run(steps, is_async) == (BLOB, ["a"], b"\x01\x00", [(b"\x01\x00", "blob")])
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_promoted_blob_column_takes_bytes_in_a_document_write(is_async):
+    async def steps(rows):
+        await _aw(rows.db.ensure_table("raw", promoted={"blob": "BLOB"}))
+        await _aw(rows.db.upsert_document_promoted("raw", None, {"blob": BLOB, "n": 1}, ["blob"]))
+        return await rows.sql("SELECT blob, typeof(blob) FROM raw")
+
+    assert _run(steps, is_async) == [(BLOB, "blob")]
+
+
+class TagRow(SQLerModel):
+    __promoted__ = {"tags": "TEXT"}
+    name: str = ""
+    tags: Optional[list] = None
+
+
+class TagAsyncRow(AsyncSQLerModel):
+    __promoted__ = {"tags": "TEXT"}
+    name: str = ""
+    tags: Optional[list] = None
+
+
+@pytest.mark.parametrize("call", list(_UPDATES))
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_bytes_in_a_list_for_a_promoted_text_column_are_refused_by_an_update(is_async, call):
+    """An update writes a list into a column as JSON text, so it refuses bytes as a document does."""
+    model = TagAsyncRow if is_async else TagRow
+
+    async def steps(rows):
+        model.set_db(rows.db, "tagged")
+        await _aw(model(name="a").save())
+        with pytest.raises(UnstorableValueError, match="^bytes cannot be stored in a JSON document") as err:
+            await _aw(_UPDATES[call](model.query().filter(F("name") == "a"), tags=["x", b"hi"]))
+        return err.value.value, await rows.sql("SELECT json_extract(data, '$.name'), tags FROM tagged")
+
+    assert _run(steps, is_async) == (b"hi", [("a", None)])
