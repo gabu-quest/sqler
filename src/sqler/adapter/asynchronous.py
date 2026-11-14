@@ -11,6 +11,7 @@ import aiosqlite
 
 from sqler.exceptions import (
     ConnectionPoolExhaustedError,
+    LockTimeoutError,
     NotConnectedError,
     QueryError,
     unique_violation_from,
@@ -34,7 +35,7 @@ class _Lease:
     a pin whose lease has been returned is stale and is ignored.
     """
 
-    __slots__ = ("conn", "holders", "returned", "interrupted")
+    __slots__ = ("conn", "holders", "returned", "interrupted", "savepoints", "turns")
 
     def __init__(self, conn: aiosqlite.Connection):
         self.conn = conn
@@ -43,6 +44,11 @@ class _Lease:
         # a statement of this lease was cancelled inside a transaction: it may still be
         # running in the connection's thread, so a rollback would queue behind it
         self.interrupted = False
+        # the connection's open savepoints, innermost last, one token each
+        self.savepoints: list[object] = []
+        # nested transactions waiting for their turn, in the order they asked:
+        # (the savepoint they are inside, or None, and the future that hands them theirs)
+        self.turns: list[tuple[Optional[object], asyncio.Future]] = []
 
 
 class _Cursor:
@@ -153,6 +159,8 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         )
         self._task_lease: ContextVar[Optional[_Lease]] = ContextVar("task_lease", default=None)
         self._txn_depth: ContextVar[int] = ContextVar("txn_depth", default=0)
+        # the savepoints this context opened or was started inside, innermost last
+        self._txn_savepoints: ContextVar[tuple[object, ...]] = ContextVar("txn_savepoints", default=())
         self._leases: set[_Lease] = set()  # checked out, not yet returned
         self._reclaims: set[asyncio.Task] = set()  # rollbacks of connections left by ended tasks
         self._connected = False
@@ -204,6 +212,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     def _give_back(self, lease: _Lease) -> None:
         lease.returned = True
         self._leases.discard(lease)
+        for _, turn in lease.turns:  # close(): a nested transaction waiting here gets no turn
+            turn.set_result(None)
+        lease.turns.clear()
         for task in list(lease.holders):
             self._unhold(lease, task)
 
@@ -525,18 +536,81 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         Uses BEGIN IMMEDIATE to acquire a write lock immediately,
         preventing SQLITE_BUSY errors during the transaction.
         Uses SAVEPOINTs for nested transactions to allow proper inner rollback.
+
+        Tasks started inside a transaction share its connection, and a connection has
+        one stack of savepoints. A nested transaction opens only on top of the savepoint
+        its task is inside: while a sibling task's nested transaction is open, it waits
+        (in the order asked, at most ``acquire_timeout`` seconds) until that one ends.
         """
         conn = await self._acquire()
         depth = self._txn_depth.get(0)
+        if depth > 0:
+            lease = self._task_lease.get()
+            inside = self._txn_savepoints.get()
+            savepoint = await self._take_turn(lease, inside[-1] if inside else None)
         try:
             if depth == 0:
                 await conn.execute("BEGIN IMMEDIATE")
             else:
                 await conn.execute(f"SAVEPOINT sp_{depth}")
         except BaseException as exc:
+            if depth > 0:
+                self._close_savepoint(lease, savepoint)
             await self._release_after_failure(exc)  # a failed BEGIN leaves no transaction to end
             raise
         self._txn_depth.set(depth + 1)
+        if depth > 0:
+            self._txn_savepoints.set((*inside, savepoint))
+
+    async def _take_turn(self, lease: _Lease, inside: Optional[object]) -> object:
+        """Put a new savepoint on top of ``lease``'s stack once ``inside`` is the top, and return it.
+
+        ``inside`` is the savepoint the caller's context is in (None: directly in the
+        transaction). A caller inside a savepoint that is no longer open goes on at once.
+        """
+        if self._turn(lease, inside):
+            lease.savepoints.append(savepoint := object())
+            return savepoint
+        turn = asyncio.get_running_loop().create_future()
+        entry = (inside, turn)
+        lease.turns.append(entry)
+        try:
+            await asyncio.wait({turn}, timeout=self.acquire_timeout)
+        except BaseException:  # cancelled while waiting
+            if turn.done():  # handed a savepoint it will not open: the next waiter gets its turn
+                self._close_savepoint(lease, turn.result())
+            else:
+                lease.turns.remove(entry)
+            raise
+        if not turn.done():
+            lease.turns.remove(entry)
+            raise LockTimeoutError(
+                f"a nested transaction waited {self.acquire_timeout:g} s for one of a sibling task "
+                "on the same connection to end; if a task inside that one awaits this task, "
+                "it can never end"
+            )
+        savepoint = turn.result()
+        if savepoint is None:
+            raise NotConnectedError("the adapter was closed while a nested transaction waited")
+        return savepoint
+
+    @staticmethod
+    def _turn(lease: _Lease, inside: Optional[object]) -> bool:
+        stack = lease.savepoints
+        return (stack[-1] if stack else None) is inside or (inside is not None and inside not in stack)
+
+    def _close_savepoint(self, lease: _Lease, savepoint: object) -> None:
+        """``savepoint`` and any opened after it are gone; hand the next waiter whose turn it is its own."""
+        stack = lease.savepoints
+        if savepoint not in stack:
+            return
+        del stack[stack.index(savepoint):]
+        for entry in lease.turns:
+            if self._turn(lease, entry[0]):
+                lease.turns.remove(entry)
+                stack.append(savepoint := object())
+                entry[1].set_result(savepoint)
+                return
 
     async def end_transaction(self, *, commit: bool = True) -> None:
         """End an explicit transaction (decrements per-task depth counter)."""
@@ -545,6 +619,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             return
         depth -= 1
         self._txn_depth.set(depth)
+        if depth > 0:
+            inside = self._txn_savepoints.get()
+            self._txn_savepoints.set(inside[:-1])
 
         conn = self._pinned()
         if conn is None:
@@ -591,6 +668,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
                     await conn.execute(f"RELEASE SAVEPOINT {sp}")
             except Exception:
                 pass
+            finally:  # also when cancelled: a waiter's SAVEPOINT queues behind these statements
+                if inside:
+                    self._close_savepoint(self._task_lease.get(), inside[-1])
 
     async def __aenter__(self) -> "AsyncSQLiteAdapter":
         await self._acquire()
