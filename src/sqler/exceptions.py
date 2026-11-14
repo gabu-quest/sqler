@@ -4,6 +4,7 @@ This module provides a consistent set of exceptions for all SQLer operations,
 making error handling more predictable and informative.
 """
 
+import builtins
 import re
 import sqlite3
 from typing import Any, Optional
@@ -62,10 +63,20 @@ class QueryError(SQLerError):
         self.params = params
 
 
-class NoAdapterError(QueryError):
-    """Raised when attempting to execute a query without an adapter."""
+class NoAdapterError(QueryError, builtins.ConnectionError):
+    """Raised when attempting to execute a query without an adapter.
 
-    pass
+    The one error for a sync and an async query. It is a ``SQLerError`` and also
+    Python's built-in ``ConnectionError``, which the sync query's own class used to
+    be, so ``except ConnectionError`` around a sync query keeps working.
+    """
+
+    def __reduce__(self):
+        return (_rebuild_no_adapter_error, (self.message, self.sql, self.params, self.details))
+
+
+def _rebuild_no_adapter_error(message, sql, params, details):
+    return NoAdapterError(message, sql=sql, params=params, details=details)
 
 
 class QueryTimeoutError(QueryError):

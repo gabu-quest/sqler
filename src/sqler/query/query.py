@@ -2,6 +2,7 @@ import re
 from typing import Any, Iterator, Optional, Self
 
 from sqler.adapter.abstract import AdapterABC
+from sqler.exceptions import NoAdapterError
 from sqler.query import SQLerExpression
 from sqler.utils import validate_field_name
 
@@ -26,12 +27,6 @@ _META_COLUMNS = ["_id", "_version"]
 
 class QueryError(Exception):
     """Base exception for query errors."""
-
-    pass
-
-
-class NoAdapterError(ConnectionError):
-    """Raised when attempting to execute operations without an adapter set."""
 
     pass
 
