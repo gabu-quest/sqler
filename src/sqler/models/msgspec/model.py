@@ -143,7 +143,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return SQLerQuerySet[T](cls, q)
+        return SQLerQuerySet[T](cls, q, db)
 
     @classmethod
     def db(cls: Type[T]) -> "SQLerDB":
@@ -237,7 +237,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             q = q._clone(promoted_fields=list(promoted.keys()))
         from sqler.models.queryset import SQLerQuerySet
 
-        return SQLerQuerySet[T](cls, q)
+        return SQLerQuerySet[T](cls, q, db)
 
     @classmethod
     def filter(cls: Type[T], expression: Any) -> "SQLerQuerySet[T]":

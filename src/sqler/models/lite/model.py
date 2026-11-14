@@ -75,6 +75,8 @@ class SQLerLiteModel(SQLerLiteModelBase):
     # Class-level database binding (not dataclass fields)
     _db: ClassVar[Optional["SQLerDB"]] = None
     _table: ClassVar[Optional[str]] = None
+    # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
+    _versioned_rows: ClassVar[bool] = False
 
     # ----- class methods -----
     @classmethod
@@ -148,7 +150,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return SQLerQuerySet[T](cls, q)
+        return SQLerQuerySet[T](cls, q, db)
 
     @classmethod
     def db(cls: Type[T]) -> "SQLerDB":
@@ -214,7 +216,8 @@ class SQLerLiteModel(SQLerLiteModelBase):
             return []
         given = db
         db, table = cls._resolve_binding(db)
-        docs = _read_documents(db, table, ids)
+        read = _refs.read_versioned if cls._versioned_rows else _read_documents
+        docs = read(db, table, ids)
         if not docs:
             return []
         # Use queryset's batch resolution
@@ -224,6 +227,8 @@ class SQLerLiteModel(SQLerLiteModelBase):
         for doc in docs:
             inst = cls.model_validate(doc)
             object.__setattr__(inst, "_id", doc.get("_id"))
+            if cls._versioned_rows:
+                object.__setattr__(inst, "_version", doc["_version"])
             object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
             instances.append(inst)
         return instances
@@ -243,7 +248,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
             q = q._clone(promoted_fields=list(promoted.keys()))
         from sqler.models.queryset import SQLerQuerySet
 
-        return SQLerQuerySet[T](cls, q)
+        return SQLerQuerySet[T](cls, q, db)
 
     @classmethod
     def filter(cls: Type[T], expression: Any) -> "SQLerQuerySet[T]":

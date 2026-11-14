@@ -59,6 +59,8 @@ class SQLerModel(BaseModel):
     # class-bound db + table metadata
     _db: ClassVar[Optional[SQLerDB]] = None
     _table: ClassVar[Optional[str]] = None
+    # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
+    _versioned_rows: ClassVar[bool] = False
 
     # ----- class config -----
     model_config = {
@@ -202,7 +204,8 @@ class SQLerModel(BaseModel):
             return []
         given = db
         db, table = cls._resolve_binding(db)
-        docs = _read_documents(db, table, ids)
+        read = _refs.read_versioned if cls._versioned_rows else _read_documents
+        docs = read(db, table, ids)
         if not docs:
             return []
         # Use queryset's batch resolution for efficient nested ref loading
@@ -212,6 +215,8 @@ class SQLerModel(BaseModel):
         for doc in docs:
             inst = cls.model_validate(doc)
             inst._id = doc.get("_id")
+            if cls._versioned_rows:
+                inst._version = doc["_version"]
             instances.append(inst)
         return instances
 
@@ -231,7 +236,7 @@ class SQLerModel(BaseModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return SQLerQuerySet[TModel](cls, q)
+        return SQLerQuerySet[TModel](cls, q, db)
 
     @classmethod
     def all(cls: Type[TModel]) -> list[TModel]:
@@ -265,7 +270,7 @@ class SQLerModel(BaseModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return SQLerQuerySet[TModel](cls, q)
+        return SQLerQuerySet[TModel](cls, q, db)
 
     @classmethod
     def filter(cls: Type[TModel], expression: SQLerExpression) -> SQLerQuerySet[TModel]:

@@ -76,6 +76,8 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
 
     # Configurable intent rebasing
     _rebase_config: ClassVar[RebaseConfig] = DEFAULT_REBASE_CONFIG
+    # from_ids reads each row with its version, as from_id does
+    _versioned_rows: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
         """Initialize private attributes after dataclass __init__."""
@@ -93,7 +95,7 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TASafe](cls, q)
+        return AsyncSQLerQuerySet[TASafe](cls, q, db)
 
     @classmethod
     async def _aload_refs(cls, ids: list, seen: frozenset) -> dict:
@@ -134,41 +136,6 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         object.__setattr__(inst, "_version", doc.get("_version", 0))
         object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
         return inst
-
-    @classmethod
-    async def from_ids(cls: Type[TASafe], ids: list[int], *, db=None) -> list[TASafe]:
-        """Hydrate multiple instances by id list with versions.
-
-        Args:
-            ids: List of row ids to load.
-            db: Optional database (overrides class-level binding).
-
-        Returns:
-            List of model instances. Missing ids are omitted.
-        """
-        if not ids:
-            return []
-        given = db
-        db, table = cls._resolve_binding(db)
-        # Use versioned query for each
-        docs = []
-        for id_ in ids:
-            doc = await db.find_document_with_version(table, id_)
-            if doc is not None:
-                docs.append(doc)
-        if not docs:
-            return []
-        # Batch resolve
-        qs = cls.using(given) if given is not None else cls.query()
-        docs = await qs._abatch_resolve(docs)
-        instances = []
-        for doc in docs:
-            inst = cls.model_validate(doc)
-            object.__setattr__(inst, "_id", doc.get("_id"))
-            object.__setattr__(inst, "_version", doc.get("_version", 0))
-            object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
-            instances.append(inst)
-        return instances
 
     @classmethod
     async def asave_many(cls: Type[TASafe], instances: list[TASafe], *, db=None) -> list[TASafe]:  # type: ignore[override]

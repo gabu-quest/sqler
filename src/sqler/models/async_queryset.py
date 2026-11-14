@@ -16,49 +16,60 @@ logger = logging.getLogger("sqler.async_queryset")
 class AsyncSQLerQuerySet(Generic[T]):
     """Async queryset that materializes model instances."""
 
-    def __init__(self, model_cls: Type[T], query: AsyncSQLerQuery) -> None:
+    def __init__(self, model_cls: Type[T], query: AsyncSQLerQuery, db: Any = None) -> None:
+        """``db``: the database ``query`` reads, which reads the rows references point at
+        (optional: without it they are read as ``_id`` and ``data`` through the query's
+        adapter)."""
         self._model_cls = model_cls
         self._query = query
+        self._db = db
         self._resolve = True
 
+    def _copy(self, query: AsyncSQLerQuery) -> "AsyncSQLerQuerySet[T]":
+        """A queryset on ``query`` holding everything this one holds but its query."""
+        clone = self.__class__(self._model_cls, query, self._db)
+        clone._resolve = self._resolve
+        return clone
+
     def resolve(self, flag: bool) -> "AsyncSQLerQuerySet[T]":
-        clone = self.__class__(self._model_cls, self._query)
+        """Toggle relation hydration on result materialization (default True)."""
+        clone = self._copy(self._query)
         clone._resolve = flag
         return clone
 
     # chaining
     def filter(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
-        return self.__class__(self._model_cls, self._query.filter(expression))
+        return self._copy(self._query.filter(expression))
 
     def exclude(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
-        return self.__class__(self._model_cls, self._query.exclude(expression))
+        return self._copy(self._query.exclude(expression))
 
     def or_filter(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with the expression OR-ed in."""
-        return self.__class__(self._model_cls, self._query.or_filter(expression))
+        return self._copy(self._query.or_filter(expression))
 
     def distinct(self) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with DISTINCT results."""
-        return self.__class__(self._model_cls, self._query.distinct())
+        return self._copy(self._query.distinct())
 
     def select(self, *fields: str) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset that only retrieves specified fields."""
-        return self.__class__(self._model_cls, self._query.select(*fields))
+        return self._copy(self._query.select(*fields))
 
     def order_by(self, *fields: str, desc: bool = False) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset ordered by the given JSON field(s)."""
-        return self.__class__(self._model_cls, self._query.order_by(*fields, desc=desc))
+        return self._copy(self._query.order_by(*fields, desc=desc))
 
     def limit(self, n: int) -> "AsyncSQLerQuerySet[T]":
-        return self.__class__(self._model_cls, self._query.limit(n))
+        return self._copy(self._query.limit(n))
 
     def group_by(self, *fields: str) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset grouped by the given field(s)."""
-        return self.__class__(self._model_cls, self._query.group_by(*fields))
+        return self._copy(self._query.group_by(*fields))
 
     def having(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with a HAVING clause (requires group_by)."""
-        return self.__class__(self._model_cls, self._query.having(expression))
+        return self._copy(self._query.having(expression))
 
     # execution
     async def all(self) -> list[T]:
@@ -249,7 +260,7 @@ class AsyncSQLerQuerySet(Generic[T]):
 
     def offset(self, n: int) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""
-        return self.__class__(self._model_cls, self._query.offset(n))
+        return self._copy(self._query.offset(n))
 
     # inspection
     def sql(self) -> str:
@@ -291,6 +302,6 @@ class AsyncSQLerQuerySet(Generic[T]):
         try:
             want = next(walk)
             while True:
-                want = walk.send(await _refs.aread_rows(adapter, *want))
+                want = walk.send(await _refs.aread_rows(adapter, *want, self._db))
         except StopIteration as done:
             return done.value

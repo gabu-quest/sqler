@@ -58,6 +58,8 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
 
     # Configurable intent rebasing (can be overridden in subclasses)
     _rebase_config: ClassVar[RebaseConfig] = DEFAULT_REBASE_CONFIG
+    # from_ids reads each row with its version, as from_id does
+    _versioned_rows: ClassVar[bool] = True
 
     @classmethod
     def query(cls: Type[TASafe]) -> AsyncSQLerQuerySet[TASafe]:  # type: ignore[override]
@@ -66,7 +68,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TASafe](cls, q)
+        return AsyncSQLerQuerySet[TASafe](cls, q, db)
 
     @classmethod
     def set_db(cls, db, table: Optional[str] = None) -> None:  # type: ignore[override]

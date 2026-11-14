@@ -74,6 +74,8 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
     # Class-level database binding (not dataclass fields)
     _db: ClassVar[Optional["AsyncSQLerDB"]] = None
     _table: ClassVar[Optional[str]] = None
+    # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
+    _versioned_rows: ClassVar[bool] = False
 
     @classmethod
     def set_db(cls, db: "AsyncSQLerDB", table: Optional[str] = None) -> None:
@@ -144,7 +146,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TAModel](cls, q)
+        return AsyncSQLerQuerySet[TAModel](cls, q, db)
 
     @classmethod
     def _require_binding(cls) -> tuple["AsyncSQLerDB", str]:
@@ -205,7 +207,8 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             return []
         given = db
         db, table = cls._resolve_binding(db)
-        docs = await _aread_documents(db, table, ids)
+        read = _refs.aread_versioned if cls._versioned_rows else _aread_documents
+        docs = await read(db, table, ids)
         if not docs:
             return []
         # Use queryset's batch resolution
@@ -215,6 +218,8 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         for doc in docs:
             inst = cls.model_validate(doc)
             object.__setattr__(inst, "_id", doc.get("_id"))
+            if cls._versioned_rows:
+                object.__setattr__(inst, "_version", doc["_version"])
             object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
             instances.append(inst)
         return instances
