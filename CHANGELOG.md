@@ -83,6 +83,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   - `update(tags=[...])` and `update(meta={...})` stored a string of JSON text instead of a list or an object; a pydantic model could not load the row afterwards, and `contains()` found nothing in it.
   - `update(flag=True)` stored the integer 1 where `save()` stores `true`.
   - `is_dirty()` was True straight after loading a model with a tuple field.
+- **A model with `AuditLogMixin` or `AsyncAuditLogMixin` can hold a `datetime`, a `date` or a reference.** Creating one with a `date` or a reference field raised `TypeError`, and so did updating one with a `datetime` field, `TimestampMixin`'s included. The audit row now compares the row before the save with the document the save wrote, so `changes` names the fields that changed and no others, and `changes` and `snapshot` hold values as they are stored: a datetime as its ISO text, a reference as `{"_table", "_id"}`.
 
 ### Changed
 
@@ -119,6 +120,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   ```
 
   The second statement also turns a field that is meant to hold a string of JSON text into the list or object; leave such a field out.
+- **The audit log reports what changed in the stored row.** A key of the row that the model class has no field for is listed in `changes` with `new` null, because `save()` drops it. A save that stores nothing, because the row was deleted in the meantime, writes no audit row.
 - **A `Decimal`, a `timedelta` and `bytes` are still refused** by `save()` with `TypeError`; they have no stored form yet.
 - **`is_dirty()` answers what `save()` would change in the stored row.** Two cases now read dirty where they did not. A typed reference whose row is gone and reads `None`: `save()` would write null over the reference. On the lite model bases, a field without a model type that holds a `{"_table", "_id"}` reference, after `query().all()`: the field holds the referenced row's document, and `save()` would write that document over the reference.
 - **One `NoAdapterError`.** The sync and the async query raise `sqler.NoAdapterError`. It is a `QueryError` and still a built-in `ConnectionError`, so `except ConnectionError` keeps working.
