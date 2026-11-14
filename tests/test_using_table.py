@@ -353,6 +353,54 @@ async def test_async_queryset_run_again_after_the_class_was_rebound_still_writes
     assert other == 0
 
 
+@pytest.mark.parametrize("run", ["all", "first", "iter"])
+def test_queryset_run_again_after_rebind_reports_its_own_source_table(db, run):
+    class UtSrc(SQLerModel):
+        __tablename__ = "ut_src"
+        name: str = ""
+
+    UtSrc(name="one").save(db=db)
+    db.ensure_table("ut_src_other")
+    qs = UtSrc.using(db)
+    reads = {
+        "all": lambda: qs.all()[0],
+        "first": lambda: qs.first(),
+        "iter": lambda: next(qs.iter()),
+    }
+    assert reads[run]()._source_table is None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        UtSrc.set_db(db, "ut_src_other")
+
+    assert reads[run]()._source_table == "ut_src"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run", ["all", "first"])
+async def test_async_queryset_run_again_after_rebind_reports_its_own_source_table(adb, run):
+    class UtAsSrc(AsyncSQLerModel):
+        __tablename__ = "ut_as_src"
+        name: str = ""
+
+    await UtAsSrc(name="one").save(db=adb)
+    await adb.ensure_table("ut_as_src_other")
+    qs = UtAsSrc.using(adb)
+
+    async def read():
+        if run == "all":
+            return (await qs.all())[0]
+        return await qs.first()
+
+    assert (await read())._source_table is None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        UtAsSrc.set_db(adb, "ut_as_src_other")
+
+    assert (await read())._source_table == "ut_as_src"
+
+
 # --- a copy of a row read from another table -------------------------------------
 
 

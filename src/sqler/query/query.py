@@ -1,4 +1,5 @@
 import re
+import sqlite3
 from typing import Any, Iterator, Optional, Self
 
 from sqler.adapter.abstract import AdapterABC
@@ -23,6 +24,16 @@ def _rewrite_promoted_refs(sql: str, promoted_fields: list[str]) -> str:
 # Queries using F("_id") or F("_version") must hit the real column, not
 # json_extract(data, '$._id') which always returns NULL.
 _META_COLUMNS = ["_id", "_version"]
+
+
+def is_missing_table(exc: BaseException, table: str) -> bool:
+    """True when ``exc`` is SQLite's "no such table" for ``table`` itself.
+
+    "no such table" for any other table (a join, a subquery) and every other error are not this.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    return str(exc) in (f"no such table: {table}", f"no such table: main.{table}")
 
 
 class QueryError(Exception):
@@ -93,6 +104,40 @@ class SQLerQuery:
             group_by_fields=kwargs.get("group_by_fields", self._group_by_fields),
             having=kwargs.get("having", self._having),
         )
+
+    def _execute(self, sql: str, params: list[Any]):
+        """Run one statement on the query's own table; ``None`` when that table does not exist.
+
+        A missing table reads as an empty one and is not created: each caller returns what its
+        statement gives on a table with no rows, and runs nothing more.
+        """
+        try:
+            return self._adapter.execute(sql, params)
+        except sqlite3.OperationalError as exc:
+            if is_missing_table(exc, self._table):
+                return None
+            raise
+
+    def _rows(self, *, include_id: bool = False) -> list[tuple]:
+        """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        sql, params = self._build_query(include_id=include_id, include_version=False)
+        cur = self._execute(sql, params)
+        return [] if cur is None else cur.fetchall()
+
+    def _iter_rows(self, *, include_id: bool = False) -> Iterator[tuple]:
+        """Yield this query's rows one at a time; nothing when its table is missing."""
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        sql, params = self._build_query(include_id=include_id, include_version=False)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return
+        try:
+            yield from cur
+        finally:
+            cur.close()
 
     def filter(self, expression: SQLerExpression) -> Self:
         """Return a new query with the expression AND-ed in.
@@ -325,7 +370,9 @@ class SQLerQuery:
     ) -> list[dict[str, Any]]:
         """Execute a grouped aggregate and return list[dict]."""
         sql, params = self._build_grouped_aggregate_query(func, field)
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return []
         rows = cur.fetchall()
         agg_key = func.lower()
         results: list[dict[str, Any]] = []
@@ -459,7 +506,9 @@ class SQLerQuery:
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
         sql, params = self._build_query()
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return []
         return [row[0] for row in cur.fetchall()]
 
     def first(self) -> Optional[dict[str, Any]]:
@@ -490,7 +539,9 @@ class SQLerQuery:
         if self._group_by_fields:
             return self._execute_grouped_aggregate("COUNT")
         sql, params = self._build_aggregate_query("COUNT")
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return 0
         row = cur.fetchone()
         return int(row[0]) if row else 0
 
@@ -511,7 +562,9 @@ class SQLerQuery:
         if self._group_by_fields:
             return self._execute_grouped_aggregate("SUM", field)
         sql, params = self._build_aggregate_query("SUM", field)
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return None
         row = cur.fetchone()
         return float(row[0]) if row and row[0] is not None else None
 
@@ -532,7 +585,9 @@ class SQLerQuery:
         if self._group_by_fields:
             return self._execute_grouped_aggregate("AVG", field)
         sql, params = self._build_aggregate_query("AVG", field)
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return None
         row = cur.fetchone()
         return float(row[0]) if row and row[0] is not None else None
 
@@ -553,7 +608,9 @@ class SQLerQuery:
         if self._group_by_fields:
             return self._execute_grouped_aggregate("MIN", field)
         sql, params = self._build_aggregate_query("MIN", field)
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return None
         row = cur.fetchone()
         return row[0] if row else None
 
@@ -574,7 +631,9 @@ class SQLerQuery:
         if self._group_by_fields:
             return self._execute_grouped_aggregate("MAX", field)
         sql, params = self._build_aggregate_query("MAX", field)
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return None
         row = cur.fetchone()
         return row[0] if row else None
 
@@ -613,7 +672,9 @@ class SQLerQuery:
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return []
         return [row[0] for row in cur.fetchall() if row[0] is not None]
 
     def paginate(self, page: int, per_page: int = 20) -> "PaginatedResult":
@@ -640,7 +701,7 @@ class SQLerQuery:
         total = self.count()
         total_pages = (total + per_page - 1) // per_page if total > 0 else 0
         offset = (page - 1) * per_page
-        items = self.offset(offset).limit(per_page).all_dicts()
+        items = self.offset(offset).limit(per_page).all_dicts() if total else []
 
         return PaginatedResult(
             items=items,
@@ -664,7 +725,9 @@ class SQLerQuery:
         import json
 
         sql, params = self._build_query(include_id=True, include_version=False)
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return []
         rows = cur.fetchall()
         # Calculate where promoted columns appear in the row tuple
         # Layout: _id(0), data(1), [_version(2)], [promoted...]
@@ -734,7 +797,9 @@ class SQLerQuery:
         import json
 
         sql, params = self._build_query(include_id=True, include_version=False)
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return
         ver_offset = 1 if self._include_version else 0
         promoted_start = 2 + ver_offset
 
@@ -845,7 +910,9 @@ class SQLerQuery:
         sql = f"UPDATE {self._table} SET {', '.join(set_clauses)} {where}".strip()
         sql = " ".join(sql.split())
 
-        cur = self._adapter.execute(sql, all_set_params + where_params)
+        cur = self._execute(sql, all_set_params + where_params)
+        if cur is None:
+            return 0
         self._adapter.commit()
         return getattr(cur, "rowcount", 0)
 
@@ -966,7 +1033,9 @@ class SQLerQuery:
         sql = " ".join(sql.split())
 
         all_params = all_set_params + inner_where_params
-        cur = self._adapter.execute(sql, all_params)
+        cur = self._execute(sql, all_params)
+        if cur is None:
+            return None
         row = cur.fetchone()
         self._adapter.commit()
 
@@ -1098,7 +1167,9 @@ class SQLerQuery:
         sql = " ".join(sql.split())
 
         all_params = all_set_params + inner_where_params
-        cur = self._adapter.execute(sql, all_params)
+        cur = self._execute(sql, all_params)
+        if cur is None:
+            return []
         rows = cur.fetchall()
         self._adapter.commit()
 
@@ -1143,7 +1214,9 @@ class SQLerQuery:
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
 
-        cur = self._adapter.execute(sql, params)
+        cur = self._execute(sql, params)
+        if cur is None:
+            return 0
         self._adapter.commit()
         return getattr(cur, "rowcount", 0)
 

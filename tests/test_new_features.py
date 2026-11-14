@@ -829,3 +829,76 @@ class TestFeatureIntegration:
         # Cache still has old version (by design)
         cached = cache.get("item:1")
         assert cached.name == "Modified"  # Same object reference
+
+
+# =============================================================================
+# Export of a bound model whose table was dropped
+# =============================================================================
+
+
+from sqler.export import export_jsonl_string  # noqa: E402
+
+
+def _export_to_file(fn):
+    def run(model, tmp_path, kwargs):
+        out = tmp_path / "out.txt"
+        res = fn(model, str(out), **kwargs)
+        return (res.count, res.format, out.read_text(encoding="utf-8"))
+
+    return run
+
+
+def _export_to_string(fn):
+    return lambda model, tmp_path, kwargs: fn(model, **kwargs)
+
+
+EXPORTS = {
+    "export_csv": _export_to_file(export_csv),
+    "export_csv_string": _export_to_string(export_csv_string),
+    "export_json": _export_to_file(export_json),
+    "export_json_string": _export_to_string(export_json_string),
+    "export_jsonl": _export_to_file(export_jsonl),
+    "export_jsonl_string": _export_to_string(export_jsonl_string),
+    "stream_jsonl": lambda model, tmp_path, kwargs: list(stream_jsonl(model, **kwargs)),
+}
+
+EXPORT_KWARGS = {
+    "defaults": {},
+    "no_id": {"include_id": False},
+    "fields_no_id": {"include_id": False, "fields": ["name"]},
+    "fields_with_id": {"fields": ["name"]},
+}
+
+
+def _export_tables(db):
+    cur = db.adapter.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    return {r[0] for r in cur.fetchall()}
+
+
+@pytest.mark.parametrize("kwargs_name", list(EXPORT_KWARGS))
+@pytest.mark.parametrize("name", list(EXPORTS))
+def test_export_of_a_dropped_table_gives_what_an_empty_table_gives(name, kwargs_name, tmp_path):
+    kwargs = EXPORT_KWARGS[kwargs_name]
+    if name.startswith("export_csv") and not kwargs.get("fields"):
+        kwargs = {**kwargs, "fields": ["name"]}
+    db = SQLerDB.in_memory()
+    try:
+
+        class Kept(SQLerModel):
+            name: str = ""
+
+        class Gone(SQLerModel):
+            name: str = ""
+
+        Kept.set_db(db, "kept_empty")
+        Gone.set_db(db, "gone_table")
+        Gone(name="a").save()
+        db.adapter.execute("DROP TABLE gone_table")
+        db.adapter.commit()
+
+        reference = EXPORTS[name](Kept, tmp_path, kwargs)
+        result = EXPORTS[name](Gone, tmp_path, kwargs)
+        assert result == reference
+        assert "gone_table" not in _export_tables(db)
+    finally:
+        db.close()

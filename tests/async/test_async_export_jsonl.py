@@ -500,3 +500,38 @@ async def test_import_ignores_exported_version_rows(pair, adb, sdb, tmp_path):
     assert (ares.succeeded, ares.failed) == (1, 0)
     assert _result_tuple(ares) == _result_tuple(sres)
     assert await _arows(A) == _srows(S) == [(1, "b", 2)]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"include_id": False}, {"include_id": False, "fields": ["name"]}, {"fields": ["name"]}],
+    ids=["defaults", "no_id", "fields_no_id", "fields_with_id"],
+)
+async def test_export_of_a_dropped_table_gives_what_an_empty_table_gives(adb, tmp_path, kwargs):
+    class AKept(AsyncSQLerModel):
+        name: str = ""
+
+    class AGone(AsyncSQLerModel):
+        name: str = ""
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        AKept.set_db(adb, "akept_empty")
+        AGone.set_db(adb, "agone_table")
+    await adb.ensure_table("akept_empty")
+    await adb.ensure_table("agone_table")
+    await AGone(name="a").save()
+    await adb.adapter.execute("DROP TABLE agone_table")
+    await adb.adapter.commit()
+
+    ref_path, out_path = tmp_path / "ref.jsonl", tmp_path / "out.jsonl"
+    reference = await async_export_jsonl(AKept, ref_path, **kwargs)
+    result = await async_export_jsonl(AGone, out_path, **kwargs)
+
+    assert (result.count, result.format, out_path.read_text()) == (
+        reference.count,
+        reference.format,
+        ref_path.read_text(),
+    )
+    cur = await adb.adapter.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    assert "agone_table" not in {r[0] for r in await cur.fetchall()}

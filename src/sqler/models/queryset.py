@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import itertools
 import logging
 import sqlite3
-from typing import Any, Callable, Generic, Iterator, Optional, Type, TypeVar
+from typing import Any, Generic, Iterator, Optional, Type, TypeVar
 
 from sqler.exceptions import InvalidTableNameError
 from sqler.models import _refs
 from sqler.models._table_names import _is_missing_table, _unchecked_table_name
 from sqler.query import SQLerExpression, SQLerQuery
-from sqler.query.query import PaginatedResult
 from sqler.utils import validate_table_name
 
 T = TypeVar("T")
@@ -104,30 +102,10 @@ class SQLerQuerySet(Generic[T]):
         """Return a new queryset with a HAVING clause (requires group_by)."""
         return self.__class__(self._model_cls, self._query.having(expression))
 
-    def _or_empty(self, statement: Callable[[], Any], empty: Any) -> Any:
-        """Run one statement of this queryset; a missing queried table reads as ``empty``.
-
-        The one place that decides it: no read creates a table, and the extra work
-        happens only after the statement failed. "no such table" for any other table
-        (a join, a subquery) and every other error still raise.
-        """
-        # each run asks again whether it reads another table: the class may have been rebound
-        self.__dict__.pop("_other_table", None)
-        try:
-            return statement()
-        except sqlite3.OperationalError as exc:
-            if not _is_missing_table(exc, self._query._table):
-                raise
-            return empty
-
-    def _empty_aggregate(self, scalar: Any) -> Any:
-        """What an aggregate gives on an empty table: no groups, else ``scalar``."""
-        return [] if self._query._group_by_fields else scalar
-
     # execution
     def all(self) -> list[T]:
         """Execute and return a list of model instances."""
-        docs = self._or_empty(self._query.all_dicts, [])
+        docs = self._query.all_dicts()
         if self._resolve:
             try:
                 docs = self._batch_resolve(docs)
@@ -141,10 +119,11 @@ class SQLerQuerySet(Generic[T]):
                     f"{self._model_cls.__name__}. Returning partially resolved documents."
                 )
         results: list[T] = []
+        other_table = self._reads_other_table()
         for d in docs:
             inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
             # attach db id if present but excluded from schema
-            self._attach_metadata(inst, d)
+            self._attach_metadata(inst, d, other_table)
             results.append(inst)
         return results
 
@@ -155,7 +134,7 @@ class SQLerQuerySet(Generic[T]):
         limits, and ``.select()`` field projection — but skips model
         validation, type coercion, computed fields, and relation resolution.
         """
-        return self._or_empty(self._query.all_dicts, [])
+        return self._query.all_dicts()
 
     def iter(self) -> Iterator[T]:
         """Yield model instances one at a time (memory-efficient streaming).
@@ -167,18 +146,15 @@ class SQLerQuerySet(Generic[T]):
         Yields:
             T: Model instances.
         """
-        rows = self._query.iter_dicts()
-        first = self._or_empty(lambda: next(rows, None), None)
-        if first is None:
-            return
-        for doc in itertools.chain([first], rows):
+        other_table = self._reads_other_table()
+        for doc in self._query.iter_dicts():
             inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-            self._attach_metadata(inst, doc)
+            self._attach_metadata(inst, doc, other_table)
             yield inst
 
     def first(self) -> Optional[T]:
         """Execute with LIMIT 1 and return the first model instance, if any."""
-        d = self._or_empty(self._query.first_dict, None)
+        d = self._query.first_dict()
         if d is None:
             return None
         if self._resolve:
@@ -192,30 +168,26 @@ class SQLerQuerySet(Generic[T]):
                     f"{self._model_cls.__name__}. Returning partially resolved document."
                 )
         inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
-        self._attach_metadata(inst, d)
+        self._attach_metadata(inst, d, self._reads_other_table())
         return inst
 
     def _reads_other_table(self) -> bool:
         """True when this queryset reads a table other than its class's own.
 
-        Worked out at the first row of each run and kept for that run: it is asked once
-        per row read, and the class lookup behind it is slow on a pydantic class.
+        Each run that makes instances asks once and hands the answer to ``_attach_metadata``:
+        the class lookup behind it is slow on a pydantic class, and the class may have been
+        rebound since the queryset was built.
         """
-        try:
-            return self._other_table  # type: ignore[has-type]
-        except AttributeError:
-            table = self._query._table
-            self._other_table = table is not None and table != _unchecked_table_name(
-                self._model_cls
-            )
-            return self._other_table
+        table = self._query._table
+        return table is not None and table != _unchecked_table_name(self._model_cls)
 
-    def _attach_metadata(self, inst: T, doc: dict) -> None:
+    def _attach_metadata(self, inst: T, doc: dict, other_table: bool) -> None:
         """Attach database metadata (_id, _version, _snapshot) to an instance.
 
         Args:
             inst: The model instance to attach metadata to.
             doc: The document dictionary containing the metadata.
+            other_table: The run's ``_reads_other_table()`` answer.
         """
         try:
             inst._id = doc.get("_id")  # type: ignore[attr-defined]
@@ -224,7 +196,7 @@ class SQLerQuerySet(Generic[T]):
             # capture snapshot of loaded state (excluding private keys)
             snap = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
             inst._snapshot = snap  # type: ignore[attr-defined]
-            if self._reads_other_table():
+            if other_table:
                 inst._source_table = self._query._table  # type: ignore[attr-defined]
         except AttributeError as e:
             # This indicates a model configuration issue - worth logging
@@ -232,36 +204,35 @@ class SQLerQuerySet(Generic[T]):
 
     def count(self) -> int:
         """Return the count of matching rows."""
-        return self._or_empty(self._query.count, self._empty_aggregate(0))
+        return self._query.count()
 
     def sum(self, field: str) -> Optional[float]:
         """Return the sum of values for the specified field."""
-        return self._or_empty(lambda: self._query.sum(field), self._empty_aggregate(None))
+        return self._query.sum(field)
 
     def avg(self, field: str) -> Optional[float]:
         """Return the average of values for the specified field."""
-        return self._or_empty(lambda: self._query.avg(field), self._empty_aggregate(None))
+        return self._query.avg(field)
 
     def min(self, field: str) -> Optional[Any]:
         """Return the minimum value for the specified field."""
-        return self._or_empty(lambda: self._query.min(field), self._empty_aggregate(None))
+        return self._query.min(field)
 
     def max(self, field: str) -> Optional[Any]:
         """Return the maximum value for the specified field."""
-        return self._or_empty(lambda: self._query.max(field), self._empty_aggregate(None))
+        return self._query.max(field)
 
     def exists(self) -> bool:
         """Check if any rows match the query."""
-        return self._or_empty(self._query.exists, False)
+        return self._query.exists()
 
     def distinct_values(self, field: str) -> list[Any]:
         """Return distinct values for a JSON field."""
-        return self._or_empty(lambda: self._query.distinct_values(field), [])
+        return self._query.distinct_values(field)
 
     def paginate(self, page: int, per_page: int = 20):
         """Return a paginated result set."""
-        empty = PaginatedResult(items=[], page=page, per_page=per_page, total=0, total_pages=0)
-        return self._or_empty(lambda: self._query.paginate(page, per_page), empty)
+        return self._query.paginate(page, per_page)
 
     def update(self, **fields) -> int:
         """Update matching rows with the given field values.
@@ -272,7 +243,7 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             int: Number of rows updated.
         """
-        return self._or_empty(lambda: self._query.update(**fields), 0)
+        return self._query.update(**fields)
 
     def update_one(self, **fields) -> Optional[T]:
         """Atomically update one matching row and return it as a model instance.
@@ -286,11 +257,11 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             Model instance or None if no row matched.
         """
-        doc = self._or_empty(lambda: self._query.update_one(**fields), None)
+        doc = self._query.update_one(**fields)
         if doc is None:
             return None
         inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-        self._attach_metadata(inst, doc)
+        self._attach_metadata(inst, doc, self._reads_other_table())
         return inst
 
     def update_n(self, n: int, **fields) -> list[T]:
@@ -303,11 +274,12 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             list: Model instances, or empty list if no rows matched.
         """
-        docs = self._or_empty(lambda: self._query.update_n(n, **fields), [])
+        docs = self._query.update_n(n, **fields)
         results: list[T] = []
+        other_table = self._reads_other_table()
         for doc in docs:
             inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-            self._attach_metadata(inst, doc)
+            self._attach_metadata(inst, doc, other_table)
             results.append(inst)
         return results
 
@@ -320,7 +292,7 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             int: Number of rows deleted.
         """
-        return self._or_empty(self._query.delete, 0)
+        return self._query.delete()
 
     def offset(self, n: int) -> "SQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""
