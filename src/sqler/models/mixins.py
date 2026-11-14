@@ -4,6 +4,7 @@ This module provides reusable mixins for timestamps, soft delete,
 and lifecycle hooks.
 """
 
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Optional, Self
@@ -657,6 +658,47 @@ class AsyncAuditMixin:
         return await super().save(db=db)  # type: ignore[misc, return-value]
 
 
+_NO_VALUE = object()
+
+
+def _remember_identity(obj) -> dict:
+    """What a failed save must put back: ``_id`` and, where the model has one, ``_version``."""
+    kept = {"_id": getattr(obj, "_id", None)}
+    version = getattr(obj, "_version", _NO_VALUE)
+    if version is not _NO_VALUE:
+        kept["_version"] = version
+    kept["_pre_save_snapshot"] = obj.__dict__.get("_pre_save_snapshot")
+    return kept
+
+
+def _restore_identity(obj, kept: dict) -> None:
+    for name, value in kept.items():
+        if name == "_pre_save_snapshot":
+            obj.__dict__["_pre_save_snapshot"] = value
+        else:
+            setattr(obj, name, value)
+
+
+@asynccontextmanager
+async def _aatomic(db):
+    """Async twin of ``_atomic``."""
+    if db.adapter.in_transaction:
+        yield
+    else:
+        async with db.transaction():
+            yield
+
+
+@contextmanager
+def _atomic(db):
+    """One transaction around several statements, unless the caller already has one."""
+    if db.adapter.in_transaction:
+        yield
+    else:
+        with db.transaction():
+            yield
+
+
 class AuditLogMixin:
     """Mixin that logs all changes to a separate audit log table.
 
@@ -812,7 +854,24 @@ class AuditLogMixin:
         return logs
 
     def save(self, *, db=None) -> Self:
-        """Save with automatic audit logging."""
+        """Save with automatic audit logging.
+
+        Outside a transaction the save and its audit row share one transaction: both
+        are there or neither is. Inside the caller's transaction both follow its
+        commit or rollback.
+        """
+        db, _ = _instance_binding(self, db)
+        kept = _remember_identity(self)
+        try:
+            with _atomic(db):
+                return self._save_and_log(db)
+        except BaseException:
+            # the save was rolled back (or the caller's transaction will be): the
+            # instance goes back to what it was, so a second save() starts from there
+            _restore_identity(self, kept)
+            raise
+
+    def _save_and_log(self, db) -> Self:
         is_new = getattr(self, "_id", None) is None
 
         # For updates, fetch current DB state to compare against
@@ -840,9 +899,11 @@ class AuditLogMixin:
         return result  # type: ignore[return-value]
 
     def delete(self, *, db=None) -> None:
-        """Delete with audit logging."""
-        self._log_audit("delete", db=db)
-        super().delete(db=db)  # type: ignore[misc]
+        """Delete with audit logging (the row and its audit entry go together)."""
+        db, _ = _instance_binding(self, db)
+        with _atomic(db):
+            self._log_audit("delete", db=db)
+            super().delete(db=db)  # type: ignore[misc]
 
 
 class AsyncAuditLogMixin:
@@ -978,7 +1039,22 @@ class AsyncAuditLogMixin:
         return logs
 
     async def save(self, *, db=None) -> Self:
-        """Save with automatic audit logging (async)."""
+        """Save with automatic audit logging (async).
+
+        Outside a transaction the save and its audit row share one transaction: both
+        are there or neither is. Inside the caller's transaction both follow its
+        commit or rollback. A failed save leaves ``_id`` as it was.
+        """
+        db, _ = _instance_binding(self, db)
+        kept = _remember_identity(self)
+        try:
+            async with _aatomic(db):
+                return await self._save_and_log(db)
+        except BaseException:
+            _restore_identity(self, kept)
+            raise
+
+    async def _save_and_log(self, db) -> Self:
         is_new = getattr(self, "_id", None) is None
 
         # For updates, fetch current DB state to compare against
@@ -1006,6 +1082,8 @@ class AsyncAuditLogMixin:
         return result  # type: ignore[return-value]
 
     async def delete(self, *, db=None) -> None:
-        """Delete with audit logging (async)."""
-        await self._log_audit("delete", db=db)
-        await super().delete(db=db)  # type: ignore[misc]
+        """Delete with audit logging (the row and its audit entry go together)."""
+        db, _ = _instance_binding(self, db)
+        async with _aatomic(db):
+            await self._log_audit("delete", db=db)
+            await super().delete(db=db)  # type: ignore[misc]

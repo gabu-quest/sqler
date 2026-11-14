@@ -82,6 +82,16 @@ class FTSStats:
     fields: list[str]
 
 
+def _check_search_field(name: str) -> None:
+    """A search field is a column of the index table: a plain name, never a dotted path.
+
+    A malformed name raises InvalidFieldNameError; a well-formed dotted one
+    (``meta.title``) raises InvalidIdentifierError, as ``create()`` does.
+    """
+    validate_field_name(name)
+    validate_identifier(name)
+
+
 class FTSIndex:
     """Full-Text Search index for a SQLer model.
 
@@ -135,7 +145,7 @@ class FTSIndex:
         """
         # Validate all inputs that will be interpolated into SQL
         for f in fields:
-            validate_field_name(f)
+            _check_search_field(f)
         if index_name is not None:
             validate_identifier(index_name)
         _check_tokenizer(tokenizer)
@@ -171,7 +181,7 @@ class FTSIndex:
         """Set the indexed field names (checked like the constructor's ``fields``)."""
         names = list(value)
         for f in names:
-            validate_field_name(f)
+            _check_search_field(f)
         self._fields = tuple(names)
 
     @property
@@ -219,6 +229,11 @@ class FTSIndex:
             self._db = db
 
         db = self._get_db()
+
+        # A field is a column name of the index table: a dotted (nested) field is not one.
+        # index() reads the attribute of that name, so it could never be filled either.
+        for f in self.fields:
+            validate_identifier(f)
 
         # Build column list
         columns = ", ".join(self.fields)

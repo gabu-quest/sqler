@@ -10,6 +10,17 @@ _PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _UNCARRIABLE_KEY = re.compile(r"[\\\x00]|[^\S ]|  ")
 
 
+def _check_not_empty(segment: str) -> None:
+    """An empty key is refused. A string is one key, so ``a..b``, ``a.`` and ``.a`` are keys."""
+    from sqler.exceptions import InvalidFieldNameError
+
+    if segment == "":
+        raise InvalidFieldNameError(
+            f"Invalid field name: {segment!r}. A field name cannot be empty.",
+            field=segment,
+        )
+
+
 def _json_path_text(path: "list[Union[str, int]]") -> str:
     """Render keys/indexes as a SQLite JSON path, e.g. ['a', 1, 'b c'] -> $.a[1]."b c".
 
@@ -28,6 +39,7 @@ def _json_path_text(path: "list[Union[str, int]]") -> str:
         if isinstance(segment, int):
             parts.append(f"[{segment}]")
         elif isinstance(segment, str):
+            _check_not_empty(segment)
             if _UNCARRIABLE_KEY.search(segment):
                 raise InvalidFieldNameError(
                     f"Invalid field name: {segment!r}. A name with a backslash, NUL, tab, "
@@ -125,6 +137,9 @@ class SQLerField:
             self.path: list[Union[str, int]] = [path]
         else:
             self.path = list(path)
+        for segment in self.path:
+            if isinstance(segment, str):
+                _check_not_empty(segment)
         self.alias_stack: list[
             Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]
         ] = alias_stack or []

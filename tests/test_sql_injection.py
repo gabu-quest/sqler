@@ -742,7 +742,9 @@ LITERAL_NAMES = [
     "it's",
     'a"b',
     "'; DROP TABLE users; --",
-    "",
+    "a..b",
+    "a.",
+    ".a",
     "n" * 10000,
     "名前",
     "two words"
