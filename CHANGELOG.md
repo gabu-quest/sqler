@@ -40,6 +40,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **A safe save gives up on a locked database in bounded time.** A save that found the database locked was retried like a version conflict, up to 128 times with a full busy timeout each, and could wait for minutes. Lock waits now count against `RebaseConfig.lock_timeout` (5 seconds by default); past it the save raises `LockTimeoutError`. On a file database the longest wait is that limit plus one busy timeout. A lock met while the save re-reads the row after a conflict is handled the same way instead of leaving the save as `sqlite3.OperationalError`. Applies to all four safe model bases.
 - **Sync adapter: `executemany` inside a transaction no longer commits it**, so a rollback removes its rows.
 
+- **A model saved with `save(db=db)` and never bound with `set_db()` can be referenced and searched.** A model holding it stored a reference with no table, or raised "model must be bound"; its search index read the table `article` while the rows were in `articles`. Such a model is now stored as a reference, read back through `using(db)` with the related model in place, and found by `FTSIndex(Model, fields, db=db)`.
+- **`first_or_create` under a unique index no longer fails when two callers race.** The caller whose insert is refused gets the other's row with `created` false. A refusal from a unique index on a field that is not in the lookup still raises `UniqueConstraintError`.
+- **`save(db=db)` on a model with promoted columns creates its table** on a fresh database instead of raising "no such table" (sync bases).
+
 ### Changed
 
 - **The PyPI publish workflow runs the linter and the test suite first**, and refuses a tag that does not match the version in `pyproject.toml`.
@@ -54,6 +58,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`FTSIndex.fields` returns a copy.** Appending to it no longer changes the index; assign a new list instead.
 - **A violated unique index or primary key raises `UniqueConstraintError`**, sync and async, from every write path including a raw `adapter.execute`. It names the table and columns SQLite reported (or the index, for an index on an expression) and has the driver error as its cause. It is still a `sqlite3.IntegrityError`, so `except sqlite3.IntegrityError` keeps working; NOT NULL, CHECK and FOREIGN KEY errors are unchanged.
 
+- **Every route uses one rule for a model's table**: the table bound with `set_db()`, else `__tablename__`, else the plural of the class name. For a class that was never bound, `FTSIndex` now reads `articles` instead of `article`, so its default index name changes from `article_fts` to `articles_fts`.
+- **A read through a model creates no table.** `using(db)`, async `query()`, `from_id`, `from_ids` and `refresh` on a table that does not exist give the empty answer (`[]`, `None`, 0, false; a queryset `update()` or `delete()` changes 0 rows) instead of creating the table or raising "no such table". "no such table" for another table in the query still raises. Sync `query()` on a bound class still creates its table.
+- **Model classes are registered when they are defined**, so `sqler.registry.tables()` lists classes that were never bound, and the integrity scans look at their tables. A class bound with `set_db()` is never replaced by a class that is only defined.
+- **`as_ref()` on an unsaved model** now says "model must be saved"; a saved model no longer has to be bound.
+- **Lite models: a reference to a row that no longer exists stays the `{"_table", "_id"}` dict when it is read through a query.** Before, the field held a model built from those two keys alone, with every other field at its default.
+
 ### Added
 
 - **`AsyncSQLiteAdapter.pool_stats()` and `AsyncSQLerDB.pool_stats()`** return `PoolStats`: pool size, free and in-use connections, checkouts, timeouts, average and longest wait.
@@ -63,6 +73,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`AsyncSQLerDB.in_memory()` and `on_disk()` take `acquire_timeout`**, how long to wait for a free connection.
 - **`AsyncAdapterABC.pool_stats()`** is part of the adapter interface; an adapter without a pool need not define it.
 - **`docs/STORAGE.md`** describes how sqler lays out its tables on disk, for code that reads a database with plain SQL.
+- **`Model.using(db, table)`** reads another table for one query without rebinding the class, on all model bases. The name is checked before any SQL. A row read this way saves, deletes and refreshes against the table it came from, and `as_ref()` names it. A copy of such a row made with `dataclasses.replace()` or `msgspec.structs.replace()` does not keep that table.
+- **`FTSIndex(Model, fields, db=db)`** takes the database, for classes that were never bound.
+- **`from_ids(ids, db=db)`** reads from a given database, on all model bases.
 
 ## [1.2026.4.2] - 2026-04-18
 
