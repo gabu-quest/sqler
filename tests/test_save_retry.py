@@ -10,10 +10,13 @@ two real-lock tests which hold a write lock from a raw sqlite3 connection.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
+from typing import Optional
 
 import pytest
 from sqler import AsyncSQLerDB, SQLerDB
@@ -21,9 +24,13 @@ from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.adapter.synchronous import SQLiteAdapter
 from sqler.exceptions import LockTimeoutError, StaleVersionError
 from sqler.models import save_retry
+from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.async_safe import AsyncSQLerSafeModel
+from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
+from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
+from sqler.models.model import SQLerModel
 from sqler.models.safe import SQLerSafeModel
 from sqler.models.utils import NO_REBASE_CONFIG, RebaseConfig
 
@@ -529,3 +536,550 @@ def test_lock_on_reread_until_limit_raises_lock_timeout(kind, sleeps):
     err = asyncio.run(scenario())
     assert err.details["waited_s"] >= 0.3
     assert max(sleeps) <= save_retry.MAX_SLEEP_S
+
+
+# ---- a rebased save: what it writes, and what the model holds afterwards ---------------
+#
+# Two instances of one row, loaded through from_id: "theirs" saves first, "mine" saves on
+# the stale version and is rebased. The rows hold title, count, hits, tags and a typed
+# reference to a child; seeded as ("first", 10, 0, ["a"], child 1).
+
+
+class RbChild(SQLerModel):
+    __tablename__ = "rb_child"
+    label: str = ""
+
+
+class RbDoc(SQLerSafeModel):
+    __tablename__ = "rb_doc"
+    title: str = ""
+    count: int = 0
+    hits: int = 0
+    tags: list[str] = []
+    child: Optional[RbChild] = None
+    kids: list[RbChild] = []
+    meta: dict = {}
+    when: Optional[date] = None
+
+
+class RbPromoted(SQLerSafeModel):
+    __tablename__ = "rb_promoted"
+    __promoted__ = {"status": "TEXT"}
+    status: str = ""
+    count: int = 0
+
+
+class ARbChild(AsyncSQLerModel):
+    __tablename__ = "rb_child"
+    label: str = ""
+
+
+class ARbDoc(AsyncSQLerSafeModel):
+    __tablename__ = "rb_doc"
+    title: str = ""
+    count: int = 0
+    hits: int = 0
+    tags: list[str] = []
+    child: Optional[ARbChild] = None
+    kids: list[ARbChild] = []
+    meta: dict = {}
+    when: Optional[date] = None
+
+
+class ARbPromoted(AsyncSQLerSafeModel):
+    __tablename__ = "rb_promoted"
+    __promoted__ = {"status": "TEXT"}
+    status: str = ""
+    count: int = 0
+
+
+@dataclass
+class LRbChild(SQLerLiteModel):
+    __tablename__ = "rb_child"
+    label: str = ""
+
+
+@dataclass
+class LRbDoc(SQLerLiteSafeModel):
+    __tablename__ = "rb_doc"
+    title: str = ""
+    count: int = 0
+    hits: int = 0
+    tags: list[str] = field(default_factory=list)
+    child: Optional[LRbChild] = None
+    kids: list[LRbChild] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
+    when: Optional[date] = None
+
+
+@dataclass
+class LRbPromoted(SQLerLiteSafeModel):
+    __tablename__ = "rb_promoted"
+    __promoted__ = {"status": "TEXT"}
+    status: str = ""
+    count: int = 0
+
+
+@dataclass
+class ALRbChild(AsyncSQLerLiteModel):
+    __tablename__ = "rb_child"
+    label: str = ""
+
+
+@dataclass
+class ALRbDoc(AsyncSQLerLiteSafeModel):
+    __tablename__ = "rb_doc"
+    title: str = ""
+    count: int = 0
+    hits: int = 0
+    tags: list[str] = field(default_factory=list)
+    child: Optional[ALRbChild] = None
+    kids: list[ALRbChild] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
+    when: Optional[date] = None
+
+
+@dataclass
+class ALRbPromoted(AsyncSQLerLiteSafeModel):
+    __tablename__ = "rb_promoted"
+    __promoted__ = {"status": "TEXT"}
+    status: str = ""
+    count: int = 0
+
+
+REBASE_CLASSES = {
+    "sync": (RbChild, RbDoc, RbPromoted),
+    "async": (ARbChild, ARbDoc, ARbPromoted),
+    "lite_sync": (LRbChild, LRbDoc, LRbPromoted),
+    "lite_async": (ALRbChild, ALRbDoc, ALRbPromoted),
+}
+
+
+async def _aw(value):
+    return await value if inspect.isawaitable(value) else value
+
+
+class Rows:
+    """A fresh database with two children and one seeded doc, for one kind of base."""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.child_cls, self.doc_cls, self.promoted_cls = REBASE_CLASSES[kind]
+        is_async = kind in ("async", "lite_async")
+        self.db = AsyncSQLerDB.in_memory() if is_async else SQLerDB.in_memory()
+
+    async def open(self):
+        await _aw(self.db.connect()) if hasattr(self.db, "connect") else None
+        for cls in (self.child_cls, self.doc_cls, self.promoted_cls):
+            cls.set_db(self.db)
+        self.c1 = await _aw(self.child_cls(label="one").save())
+        self.c2 = await _aw(self.child_cls(label="two").save())
+        doc = self.doc_cls(title="first", count=10, tags=["a"], child=self.c1)
+        await _aw(doc.save())
+        await _aw(self.promoted_cls(status="new", count=10).save())
+        return self
+
+    async def load(self, cls=None):
+        return await _aw((cls or self.doc_cls).from_id(1))
+
+    async def row(self, table="rb_doc"):
+        return await _aw(self.db.find_document(table, 1))
+
+    async def close(self):
+        await _aw(self.db.close())
+
+
+def _held(doc) -> tuple:
+    child = doc.child
+    return (doc.title, doc.count, doc.hits, list(doc.tags), None if child is None else child._id)
+
+
+def _flat(doc) -> tuple:
+    return (*_held(doc), dict(doc.meta), [k._id for k in doc.kids], doc.when)
+
+
+def _stored(row) -> tuple:
+    child = row["child"]
+    return (row["title"], row["count"], row["hits"], row["tags"], None if child is None else child["_id"])
+
+
+def _rebase(kind, steps):
+    """Run ``steps(rows, mine, theirs)`` on a fresh database; returns what it returns."""
+
+    async def scenario():
+        rows = await Rows(kind).open()
+        mine, theirs = await rows.load(), await rows.load()
+        try:
+            return await steps(rows, mine, theirs)
+        finally:
+            await rows.close()
+
+    return asyncio.run(scenario())
+
+
+def _sets_a_date(rows, doc):
+    doc.when = date(2026, 11, 14)
+
+
+_THEIR_EDITS = [
+    ("title", lambda r, d: setattr(d, "title", "theirs"), ("theirs", 11, 0, ["a"], 1, {}, [], None)),
+    ("dict-key", lambda r, d: d.meta.update(k="v"), ("first", 11, 0, ["a"], 1, {"k": "v"}, [], None)),
+    ("typed-list", lambda r, d: setattr(d, "kids", [r.c2, r.c1]), ("first", 11, 0, ["a"], 1, {}, [2, 1], None)),
+    ("none", lambda r, d: setattr(d, "child", None), ("first", 11, 0, ["a"], None, {}, [], None)),
+]
+_THEIR_EDIT_CASES = [
+    pytest.param(kind, edit, expect, id=f"{name}-{kind}")
+    for name, edit, expect in _THEIR_EDITS
+    for kind in KINDS
+] + [
+    # a date field: the pydantic base gives a date back, the lite bases the stored string;
+    # the async pydantic bases cannot save one at all, so there is no case for them
+    pytest.param("sync", _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], date(2026, 11, 14)), id="date-sync"),
+    pytest.param("lite_sync", _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], "2026-11-14"), id="date-lite_sync"),
+    pytest.param("lite_async", _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], "2026-11-14"), id="date-lite_async"),
+]
+
+
+@pytest.mark.parametrize("kind, edit, expect", _THEIR_EDIT_CASES)
+def test_rebase_keeps_the_field_the_other_writer_changed(kind, edit, expect):
+    async def steps(rows, mine, theirs):
+        edit(rows, theirs)
+        await _aw(theirs.save())
+        mine.count += 1
+        await _aw(mine.save())
+        fresh = await rows.load()
+        stored = await rows.row()
+        return _flat(mine), _flat(fresh), stored["count"], stored["_version"]
+
+    held, fresh, count, version = _rebase(kind, steps)
+    assert held == expect
+    assert fresh == expect
+    assert (count, version) == (11, 2)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebase_where_both_changed_a_field_keeps_this_writers_value(kind):
+    # Whether this should raise is the user's question; pinned as it is.
+    async def steps(rows, mine, theirs):
+        theirs.title = "theirs"
+        await _aw(theirs.save())
+        mine.title = "mine"
+        mine.count += 1
+        await _aw(mine.save())
+        return _stored(await rows.row()), _held(mine)
+
+    assert _rebase(kind, steps) == (("mine", 11, 0, ["a"], 1), ("mine", 11, 0, ["a"], 1))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_two_writers_adding_one_in_turn_keep_every_increment(kind):
+    async def steps(rows, one, two):
+        saved = 0
+        for _ in range(5):
+            for writer in (one, two):
+                writer.count += 1
+                try:
+                    await _aw(writer.save())
+                    saved += 1
+                except StaleVersionError:
+                    pass
+        return saved, (await rows.row())["count"], (one.count, two.count)
+
+    assert _rebase(kind, steps) == (10, 20, (19, 20))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebased_model_holds_what_was_written_and_a_second_save_keeps_it(kind, monkeypatch):
+    async def steps(rows, mine, theirs):
+        monkeypatch.setattr(
+            rows.doc_cls, "_rebase_config", RebaseConfig(allowed_fields={"hits"}, max_delta=5)
+        )
+        seed = await rows.load()
+        seed.hits = 10
+        await _aw(seed.save())  # the row holds 10
+        mine, theirs = await rows.load(), await rows.load()
+        theirs.hits = 15
+        await _aw(theirs.save())  # the row holds 15
+        mine.hits = 13
+        await _aw(mine.save())
+        first = (await rows.row())["hits"]
+        held = mine.hits
+        await _aw(mine.save())
+        return first, held, (await rows.row())["hits"]
+
+    assert _rebase(kind, steps) == (18, 18, 18)
+
+
+@pytest.mark.parametrize("kind", ["sync", "lite_sync", "lite_async"])
+def test_rebased_model_is_not_dirty(kind):
+    async def steps(rows, mine, theirs):
+        theirs.title = "theirs"
+        theirs.count += 1
+        await _aw(theirs.save())
+        mine.count += 1
+        await _aw(mine.save())
+        return mine.is_dirty(), mine.get_dirty_fields()
+
+    assert _rebase(kind, steps) == (False, set())
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebase_keeps_a_list_the_other_writer_changed_in_place(kind):
+    async def steps(rows, mine, theirs):
+        theirs.tags.append("b")
+        await _aw(theirs.save())
+        mine.count += 1
+        await _aw(mine.save())
+        return _stored(await rows.row()), _held(mine)
+
+    assert _rebase(kind, steps) == (("first", 11, 0, ["a", "b"], 1), ("first", 11, 0, ["a", "b"], 1))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebase_keeps_a_reference_the_other_writer_set(kind):
+    async def steps(rows, mine, theirs):
+        theirs.child = rows.c2
+        await _aw(theirs.save())
+        mine.count += 1
+        await _aw(mine.save())
+        child = mine.child
+        return (
+            _stored(await rows.row()),
+            _held(mine),
+            type(child) is rows.child_cls,
+            child.label,
+            child._id,
+        )
+
+    assert _rebase(kind, steps) == (("first", 11, 0, ["a"], 2), ("first", 11, 0, ["a"], 2), True, "two", 2)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebase_keeps_a_promoted_column_the_other_writer_changed(kind):
+    async def steps(rows, mine, theirs):
+        mine, theirs = await rows.load(rows.promoted_cls), await rows.load(rows.promoted_cls)
+        theirs.status = "done"
+        await _aw(theirs.save())
+        mine.count += 1
+        await _aw(mine.save())
+        row = await rows.row("rb_promoted")
+        fresh = await rows.load(rows.promoted_cls)
+        return (row["status"], row["count"]), (mine.status, mine.count), (fresh.status, fresh.count)
+
+    assert _rebase(kind, steps) == (("done", 11), ("done", 11), ("done", 11))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebase_of_a_deleted_row_raises_stale(kind):
+    async def steps(rows, mine, theirs):
+        theirs.title = "theirs"
+        await _aw(theirs.save())
+        await _aw(theirs.delete())
+        mine.count += 1
+        with pytest.raises(StaleVersionError):
+            await _aw(mine.save())
+        return await rows.row(), _held(mine)
+
+    assert _rebase(kind, steps) == (None, ("first", 11, 0, ["a"], 1))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda d: setattr(d, "count", d.count + 2), id="delta-above-max"),
+        pytest.param(lambda d: (setattr(d, "count", d.count + 1), setattr(d, "hits", 1)), id="two-counters"),
+    ],
+)
+def test_change_that_does_not_qualify_raises_and_touches_nothing(kind, edit, monkeypatch):
+    async def steps(rows, mine, theirs):
+        monkeypatch.setattr(rows.doc_cls, "_rebase_config", RebaseConfig(allowed_fields=None))
+        theirs.title = "theirs"
+        await _aw(theirs.save())
+        edit(mine)
+        held, snap = _held(mine), dict(mine._snapshot)
+        with pytest.raises(StaleVersionError):
+            await _aw(mine.save())
+        return (
+            _stored(await rows.row()),
+            _held(mine) == held,
+            mine._snapshot == snap,
+            mine._version,
+        )
+
+    assert _rebase(kind, steps) == (("theirs", 10, 0, ["a"], 1), True, True, 0)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_three_rebases_in_a_row_keep_every_increment(kind):
+    async def steps(rows, mine, theirs):
+        for _ in range(3):
+            other = await rows.load()
+            other.count += 1
+            await _aw(other.save())
+            mine.count += 1
+            await _aw(mine.save())
+        return (await rows.row())["count"], mine.count
+
+    assert _rebase(kind, steps) == (16, 16)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_save_that_is_not_rebased_assigns_no_field(kind):
+    async def steps(rows, mine, theirs):
+        tags, child = mine.tags, mine.child
+        mine.count += 1
+        await _aw(mine.save())
+        return mine.tags is tags, mine.child is child, _stored(await rows.row())
+
+    assert _rebase(kind, steps) == (True, True, ("first", 11, 0, ["a"], 1))
+
+
+# ---- the model of the merged row is built before anything is written --------------------
+
+
+_full = _flat
+
+
+async def _drop_child(rows, id_):
+    await _aw(rows.db.adapter.execute("DELETE FROM rb_child WHERE _id = ?", [id_]))
+    await _aw(rows.db.adapter.commit())
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebase_onto_a_row_naming_a_deleted_child(kind):
+    # p23: the other writer saved a list naming child 2; child 2 is deleted with SQL.
+    async def scenario():
+        rows = await Rows(kind).open()
+        try:
+            mine, theirs = await rows.load(), await rows.load()
+            theirs.kids = [rows.c2]
+            await _aw(theirs.save())
+            await _drop_child(rows, 2)
+            mine.count += 1
+            error = None
+            try:
+                await _aw(mine.save())
+            except Exception as exc:  # noqa: BLE001 - the type is the assertion below
+                error = exc
+            row = await rows.row()
+            return (
+                None if error is None else (type(error).__name__, type(error.__cause__).__name__),
+                row["count"],
+                [k["_id"] for k in row["kids"]],
+                row["_version"],
+                mine.count,
+                [getattr(k, "_id", None) for k in mine.kids],
+                mine._version,
+            )
+        finally:
+            await rows.close()
+
+    got = asyncio.run(scenario())
+    if kind in ("sync", "async"):
+        assert got == (("StaleVersionError", "ValidationError"), 10, [2], 1, 11, [], 0)
+    else:
+        assert got == (None, 11, [2], 2, 11, [None], 2)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_two_rebases_inside_one_save_keep_both_foreign_saves(kind):
+    async def steps(rows, mine, theirs):
+        theirs.title = "theirs"
+        await _aw(theirs.save())
+        db = rows.db
+        real = db.upsert_with_version
+        left = [2]
+
+        def bump(n):
+            return (
+                f"UPDATE rb_doc SET data = json_set(data, '$.meta.k{n}', {n}, "
+                f"'$._version', _version + 1), _version = _version + 1 WHERE _id = 1;"
+            )
+
+        async def wrapped(table, _id, payload, version):
+            if left[0] and table == "rb_doc":
+                left[0] -= 1
+                await _aw(db.adapter.execute(bump(2 - left[0])))
+                await _aw(db.adapter.commit())
+            return await _aw(real(table, _id, payload, version))
+
+        if rows.kind in ("async", "lite_async"):
+            db.upsert_with_version = wrapped
+        else:
+
+            def sync_wrapped(table, _id, payload, version):
+                if left[0] and table == "rb_doc":
+                    left[0] -= 1
+                    db.adapter.execute(bump(2 - left[0]))
+                    db.adapter.commit()
+                return real(table, _id, payload, version)
+
+            db.upsert_with_version = sync_wrapped
+        mine.count += 1
+        await _aw(mine.save())
+        del db.upsert_with_version
+        row = await rows.row()
+        return (
+            (row["count"], row["meta"], row["title"], row["_version"]),
+            _full(mine) == _full(await rows.load()),
+            dict(mine.meta),
+        )
+
+    assert _rebase(kind, steps) == ((11, {"k1": 1, "k2": 2}, "theirs", 4), True, {"k1": 1, "k2": 2})
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_lock_on_the_reference_read_of_the_merged_row_writes_it_once(kind, sleeps):
+    async def steps(rows, mine, theirs):
+        db = rows.db
+        real = db._read_rows
+        locked = [1]
+        reads = [0]
+
+        def pick():
+            reads[0] += 1
+            if locked[0]:
+                locked[0] -= 1
+                raise sqlite3.OperationalError(TABLE_LOCKED)
+
+        if kind in ("async", "lite_async"):
+
+            async def wrapped(*args, **kwargs):
+                pick()
+                return await real(*args, **kwargs)
+
+        else:
+
+            def wrapped(*args, **kwargs):
+                pick()
+                return real(*args, **kwargs)
+
+        writes = [0]
+        real_write = db.upsert_with_version
+
+        if kind in ("async", "lite_async"):
+
+            async def counted(*args):
+                writes[0] += 1
+                return await real_write(*args)
+
+        else:
+
+            def counted(*args):
+                writes[0] += 1
+                return real_write(*args)
+
+        theirs.child = rows.c2
+        await _aw(theirs.save())
+        db._read_rows = wrapped
+        db.upsert_with_version = counted
+        mine.count += 1
+        await _aw(mine.save())
+        del db._read_rows
+        del db.upsert_with_version
+        row = await rows.row()
+        # the first write is refused as stale; the second is the only one that lands
+        return row["count"], row["_version"], row["child"]["_id"], mine.child._id, locked[0], writes[0]
+
+    assert _rebase(kind, steps) == (11, 2, 2, 2, 0, 2)

@@ -15,7 +15,6 @@ from .queryset import SQLerQuerySet
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     RebaseConfig,
-    apply_numeric_scalar_deltas,
     can_rebase_deltas,
     compute_numeric_scalar_deltas,
 )
@@ -171,22 +170,19 @@ class SQLerSafeModel(SQLerModel):
         # Get the rebase configuration for this model class
         rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
 
-        # Capture initial intent as numeric scalar deltas from snapshot → target
+        # The caller's intent: the counter deltas from its snapshot to its payload
         snap = getattr(self, "_snapshot", None)
-        has_snapshot = isinstance(snap, dict) and len(snap) > 0
-        orig = {k: v for k, v in snap.items() if k != "_version"} if has_snapshot else None
-        target_payload = self._dump_with_relations()
-        delta = compute_numeric_scalar_deltas(orig or {}, target_payload) if has_snapshot else None
-
-        # Use the configurable rebase checker
-        can_rebase = has_snapshot and can_rebase_deltas(delta, rebase_config) if delta else False
+        held = self._dump_with_relations()
+        delta = compute_numeric_scalar_deltas(snap, held) if snap else None
+        can_rebase = bool(delta) and can_rebase_deltas(delta, rebase_config)
 
         retry = _retry.SaveRetry(rebase_config)
 
+        payload, written = held, None
         while True:
             retry.begin_try()
             try:
-                attempt_payload = dict(target_payload)
+                attempt_payload = dict(payload)
                 attempt_payload["_version"] = 0 if self._id is None else self._version + 1
                 promoted = getattr(cls, "__promoted__", None)
                 if promoted:
@@ -201,14 +197,15 @@ class SQLerSafeModel(SQLerModel):
                     )
                 self._id = new_id
                 self._version = new_version
-                target_payload = attempt_payload
-                self._snapshot = _dirty.snapshot(target_payload)
+                self._snapshot = _dirty.snapshot(attempt_payload)
+                if written is not None:  # rebased: the row holds the other writer's work too
+                    _retry.settle(self, held, written)
                 return self
             except sqlite3.OperationalError as e:
                 if not _retry.is_lock_error(e):
                     raise
                 delay = retry.after_lock(e)
-            except StaleVersionError:
+            except StaleVersionError as stale:
                 # Stale version: only rebase intent for simple counter deltas
                 if not can_rebase:
                     raise
@@ -218,16 +215,10 @@ class SQLerSafeModel(SQLerModel):
                 latest_doc = retry.reread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
-                latest_payload = {k: v for k, v in latest_doc.items() if k not in ("_id", "_version")}
-                rebased = {**latest_payload}
-                # Apply our non-numeric desired fields from current target
-                for k, v in target_payload.items():
-                    if delta is None or k not in delta:
-                        rebased[k] = v
-                # Apply numeric deltas on top
-                if delta is not None:
-                    rebased = apply_numeric_scalar_deltas(rebased, delta)
-                target_payload = rebased
+                payload = _retry.rebase(latest_doc, held, snap, delta)
+                written = retry.build(
+                    stale, lambda: cls.model_validate(_refs.resolve(payload, db, frozenset(), _refs.typed_fields(cls)))
+                )
                 self._version = latest_doc.get("_version", 0)
                 self._snapshot = _dirty.snapshot(latest_doc)
 

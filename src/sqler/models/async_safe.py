@@ -16,7 +16,6 @@ from .async_queryset import AsyncSQLerQuerySet
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     RebaseConfig,
-    apply_numeric_scalar_deltas,
     can_rebase_deltas,
     compute_numeric_scalar_deltas,
 )
@@ -172,22 +171,19 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         # Get the rebase configuration for this model class
         rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
 
-        # Capture initial intent as numeric scalar deltas from snapshot → target
+        # The caller's intent: the counter deltas from its snapshot to its payload
         snap = getattr(self, "_snapshot", None)
-        has_snapshot = isinstance(snap, dict) and len(snap) > 0
-        orig = {k: v for k, v in snap.items() if k != "_version"} if has_snapshot else None
-        target_payload = await self._adump_with_relations()
-        delta = compute_numeric_scalar_deltas(orig or {}, target_payload) if has_snapshot else None
-
-        # Use the configurable rebase checker
-        can_rebase = has_snapshot and can_rebase_deltas(delta, rebase_config) if delta else False
+        held = await self._adump_with_relations()
+        delta = compute_numeric_scalar_deltas(snap, held) if snap else None
+        can_rebase = bool(delta) and can_rebase_deltas(delta, rebase_config)
 
         retry = _retry.SaveRetry(rebase_config)
 
+        payload, written = held, None
         while True:
             retry.begin_try()
             try:
-                attempt_payload = dict(target_payload)
+                attempt_payload = dict(payload)
                 attempt_payload["_version"] = 0 if self._id is None else self._version + 1
                 promoted = getattr(cls, "__promoted__", None)
                 if promoted:
@@ -202,10 +198,11 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     )
                 self._id = new_id
                 self._version = new_version
-                target_payload = attempt_payload
-                self._snapshot = _dirty.snapshot(target_payload)
+                self._snapshot = _dirty.snapshot(attempt_payload)
+                if written is not None:  # rebased: the row holds the other writer's work too
+                    _retry.settle(self, held, written)
                 return self
-            except StaleVersionError:
+            except StaleVersionError as stale:
                 if not can_rebase:
                     raise
                 if self._id is None:
@@ -214,14 +211,11 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                 latest_doc = await retry.areread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
-                latest_payload = {k: v for k, v in latest_doc.items() if k not in ("_id", "_version")}
-                rebased = {**latest_payload}
-                for k, v in target_payload.items():
-                    if delta is None or k not in delta:
-                        rebased[k] = v
-                if delta is not None:
-                    rebased = apply_numeric_scalar_deltas(rebased, delta)
-                target_payload = rebased
+                payload = _retry.rebase(latest_doc, held, snap, delta)
+                async def build():
+                    return cls.model_validate(await _refs.aresolve(payload, db, frozenset(), _refs.typed_fields(cls)))
+
+                written = await retry.abuild(stale, build)
                 self._version = latest_doc.get("_version", 0)
                 self._snapshot = _dirty.snapshot(latest_doc)
             except sqlite3.OperationalError as e:

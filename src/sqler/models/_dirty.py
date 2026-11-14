@@ -52,6 +52,12 @@ def get_dirty_fields(self: Any) -> set[str]:
         now = self._dump_with_relations()
     except ValueError:  # it holds a related model never saved, which no row can hold
         return set(type(self).model_fields)
+    return changed_fields(snap, now)
+
+
+def changed_fields(snap: dict, now: dict) -> set[str]:
+    """Names of the keys whose value in the payload ``now`` differs from the snapshot
+    ``snap``, and the keys of ``snap`` that ``now`` does not have."""
     # ``is`` first, as a list or dict compares its items: a NaN kept is not a change
     changed = {k for k, v in now.items() if k not in snap or not (snap[k] is v or snap[k] == v)}
     return changed | (snap.keys() - now.keys())
