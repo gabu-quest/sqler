@@ -1355,8 +1355,7 @@ Article.set_db(db)
 
 # Create FTS index on specific fields
 fts = FTSIndex(Article, fields=["title", "content"])
-fts.create(db)
-fts.rebuild()  # Index existing records
+fts.create(db)  # also indexes the rows already in the table
 
 # Search
 results = fts.search("Python")
@@ -1371,10 +1370,69 @@ for result in ranked:
 # Count matches
 count = fts.count("Python")
 
-# Index a new document
+# Text from a user: words to find, not a query
+results = fts.search("C++ it's foo-bar", plain=True)
+
+# A new row is indexed by the triggers create() added
 new_article = Article(title="New", content="content").save()
-fts.index(new_article)
+assert fts.count("New") == 1
 ```
+
+**The search string** given to `search()`, `search_ranked()`, `search_with_highlights()`,
+`snippet()` and `count()` (and to the mixin's `search()`, `search_ranked()` and
+`search_count()`) is an [FTS5 query](https://sqlite.org/fts5.html#full_text_query_syntax):
+`python tutorial` (both words), `python OR rust`, `python NOT java`, `"exact phrase"`,
+`pyth*`, `title:python`. A string SQLite refuses as a query (`C++`, `it's`, `foo-bar`, an
+empty string) raises `SearchQueryError`, a `QueryError` whose message names the query and
+SQLite's reason; the `sqlite3` error is its `__cause__`.
+
+**`plain=True`** reads the text as words to find: a row matches when it has every word,
+where a word is what the index's tokenizer makes of the text between spaces. No character
+is syntax, so `C++`, `it's`, `foo-bar`, `AT&T` and `100%` work, `OR` and `NOT` are words,
+and the pieces of `foo-bar` must stand next to each other. Text with no word in it (empty,
+spaces, `*`) finds nothing. It never raises `SearchQueryError`.
+
+**`content_sync=True`** (the default): `create()` creates the model's table if it is
+missing and adds three triggers (`<index>_ai`, `<index>_au`, `<index>_ad`) that update the
+index on every insert, update and delete of the table, whoever writes: `save()`,
+`update()`, `bulk_upsert()`, the document methods, raw SQL, another connection. The index
+change commits or rolls back with the write. `index()` and `remove()` change nothing then:
+an entry leaves only with its row. **`content_sync=False`** adds no trigger: the index
+changes only through `index()`, `remove()`, `rebuild()` and the mixin's `save()` and
+`delete()`.
+
+**What a trigger costs:** each insert and delete of a row writes its index row as well;
+an update writes it only when the row id or the stored value of an indexed field changed,
+so an update of other fields costs one comparison of the indexed values per row.
+
+**`create()`** makes the index what its definition (fields, their order, tokenizer,
+`content_sync`) says, or refuses, in one transaction:
+
+- No index table: it is created; with `content_sync=True` the triggers are added and the
+  index is filled from the rows already in the table.
+- An index table with the same fields in the same order and the same tokenizer is kept,
+  however its statement is spelled (an index made by an older sqler is the same index).
+- An index table with other fields, another order or another tokenizer: `create()` raises
+  `SchemaError`, naming the index, what it has and what was asked, and changes nothing.
+  To change an index, call `drop()` then `create()`.
+- With `content_sync=True`, a trigger that is missing or is not the one the definition
+  writes now (a field promoted to a column since, an older sqler) is replaced, and the
+  index is filled again from the table. So an index made by an older sqler, without
+  triggers, gets them and its missing rows on the first `create()` after the upgrade.
+- With `content_sync=False`, triggers of the index are dropped.
+
+A `create()` that fails leaves the index and its triggers as they were; one that finds
+everything as defined writes nothing (it does not wait for another writer's lock).
+`drop()` removes the triggers with the index. A raw `DROP TABLE` of the index leaves its
+triggers, and every later write to the table then fails; `drop()` removes both, and
+`create()` repairs them.
+
+Every way in indexes a field as it is stored: a promoted column from its column, any other
+field from `data` (a list or dict as its JSON text, a number as the number, `None` as
+nothing). `index(model)` reads the saved row, not the instance's unsaved values.
+
+A search index works on a `SQLerDB`: given an `AsyncSQLerDB` (through `db=` or the
+model's binding), every method raises `TypeError` before it sends anything.
 
 ```python
 from sqler import SearchableMixin
@@ -1391,13 +1449,13 @@ Post.set_db(db)
 # Create index once
 Post.create_search_index(db)
 
-# Add posts
+# Add posts: the index follows
 Post(title="Python Tips", body="Learn Python").save()
-Post.rebuild_search_index()
 
 # Search
 results = Post.search("Python")
 count = Post.search_count("Python")
+results = Post.search("C++", plain=True)
 ```
 
 ### [C42] Connection pooling

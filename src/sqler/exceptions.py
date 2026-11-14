@@ -85,6 +85,16 @@ class QueryTimeoutError(QueryError):
     pass
 
 
+class SearchQueryError(QueryError):
+    """Raised when SQLite refuses a full-text search string as an FTS5 query.
+
+    The message names the query and SQLite's reason; the ``sqlite3`` error is the
+    ``__cause__``. ``search(text, plain=True)`` reads text as words and never raises it.
+    """
+
+    pass
+
+
 class InvariantViolationError(QueryError):
     """Raised when data violates expected invariants (e.g., NULL JSON)."""
 

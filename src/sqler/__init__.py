@@ -30,6 +30,7 @@ from .exceptions import (
     QueryTimeoutError,
     ResolutionError,
     SchemaError,
+    SearchQueryError,
     SQLerError,
     StaleVersionError,
     UniqueConstraintError,
@@ -279,6 +280,7 @@ __all__ = [
     # Errors - Query
     "QueryError",
     "QueryTimeoutError",
+    "SearchQueryError",
     # Errors - Model
     "ModelError",
     "NotFoundError",
