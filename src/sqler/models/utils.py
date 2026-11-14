@@ -24,9 +24,18 @@ class RebaseConfig:
         allowed_fields: Set of field names eligible for rebasing.
             If None, all integer fields with delta ±1 are eligible.
         max_delta: Maximum absolute delta value allowed for rebasing.
-        max_retries: Maximum number of rebase attempts before giving up.
+        max_retries: Maximum number of version conflicts a save rebases before
+            raising ``StaleVersionError("save retries exhausted")``.
         custom_validator: Optional function to validate if a delta can be rebased.
             Receives (field_name, delta_value) and returns bool.
+        lock_timeout: Seconds a save keeps retrying while the database is
+            locked by another writer, measured on a monotonic clock; then it
+            raises ``LockTimeoutError``. ``0`` means one try only. The limit
+            is looked at between tries, and one try can itself block inside
+            SQLite for up to the connection's ``busy_timeout`` (5 s for
+            ``SQLerDB.on_disk``), so the longest a save waits is
+            ``lock_timeout`` plus one ``busy_timeout``: about 10 s with the
+            defaults on a file database.
     """
 
     enabled: bool = True
@@ -34,6 +43,7 @@ class RebaseConfig:
     max_delta: int = 1
     max_retries: int = 128
     custom_validator: Optional[Callable[[str, int], bool]] = None
+    lock_timeout: float = 5.0
 
     def can_rebase(self, field_name: str, delta: int) -> bool:
         """Check if a specific field delta can be rebased.

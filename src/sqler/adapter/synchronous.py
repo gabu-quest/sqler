@@ -6,7 +6,7 @@ from typing import Any, Optional, Self
 
 from sqler.logging import query_logger
 
-from ..exceptions import NotConnectedError
+from ..exceptions import NotConnectedError, QueryError
 from .abstract import AdapterABC
 
 
@@ -19,6 +19,9 @@ class SQLiteAdapter(AdapterABC):
         - Configurable query timeout via busy_timeout pragma
         - Optional slow query logging
         - Transaction-aware auto-commit (respects explicit transactions)
+        - A statement or commit that fails outside an explicit transaction
+          rolls back the transaction Python's ``sqlite3`` opened for it, so the
+          thread's connection keeps no lock
 
     Args:
         path: Path to the database file, or ":memory:" for in-memory.
@@ -48,8 +51,43 @@ class SQLiteAdapter(AdapterABC):
         self._connected: bool = False
         self._single_conn: Optional[sqlite3.Connection] = None
         self._memory_singleton = path == ":memory:"
-        # Track transaction depth per-thread for nested transaction support
-        self._txn_depth: int = 0
+        # Depth of explicit transactions (see ``_txn_depth``); one number when
+        # every thread shares the single ":memory:" connection.
+        self._shared_txn_depth: int = 0
+
+    @property
+    def _txn_depth(self) -> int:
+        """Depth of this thread's explicit transactions (0 = none).
+
+        Each thread has its own connection, so each thread has its own depth.
+        A plain ``":memory:"`` adapter has one connection for every thread; a
+        transaction on it is everyone's, so the depth is shared too.
+        """
+        if self._memory_singleton:
+            return self._shared_txn_depth
+        return getattr(self._local, "txn_depth", 0)
+
+    @_txn_depth.setter
+    def _txn_depth(self, value: int) -> None:
+        if self._memory_singleton:
+            self._shared_txn_depth = value
+        else:
+            self._local.txn_depth = value
+
+    def _end_failed_implicit_transaction(self, conn: sqlite3.Connection) -> None:
+        """A statement or commit on ``conn`` failed: outside an explicit transaction, roll back.
+
+        Python's ``sqlite3`` opens a transaction before a write and keeps it open
+        when the write fails; left open it holds the write lock (or a shared-cache
+        table lock) until this thread's next commit. Inside an explicit
+        transaction nothing changes: the caller ends the transaction.
+        """
+        if self._txn_depth > 0 or not conn.in_transaction:
+            return
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass  # the caller sees the original error
 
     def connect(self) -> None:
         # Ensure a connection for this thread
@@ -118,8 +156,9 @@ class SQLiteAdapter(AdapterABC):
                 cursor.execute(query, params)
             else:
                 cursor.execute(query)
-        except Exception as e:
-            error_msg = str(e)
+        except BaseException as e:  # an interrupt counts as a failure
+            error_msg = str(e) or type(e).__name__
+            self._end_failed_implicit_transaction(conn)
             raise
         finally:
             if _logging:
@@ -134,25 +173,57 @@ class SQLiteAdapter(AdapterABC):
         return cursor
 
     def executemany(self, query: str, param_list: Optional[list[Any]]) -> sqlite3.Cursor:
-        """Execute a param query multiple times with different parameter sets"""
+        """Execute a param query multiple times with different parameter sets.
+
+        Inside an explicit transaction the rows are part of it (a rollback
+        removes them); outside one they are committed, and a failure stores
+        none of the rows.
+        """
         conn = self._conn()  # Raises NotConnectedError if not connected
         cursor = conn.cursor()
-        cursor.executemany(query, param_list or [])
-        conn.commit()
+        try:
+            cursor.executemany(query, param_list or [])
+            if self._txn_depth == 0:
+                conn.commit()
+        except BaseException:
+            self._end_failed_implicit_transaction(conn)
+            raise
         return cursor
 
     def executescript(self, script: str) -> sqlite3.Cursor:
-        """Execute multiple statements from a script in a single action"""
+        """Run a script of statements and commit.
+
+        Raises ``QueryError`` inside an explicit transaction: SQLite's driver commits
+        the open transaction before it runs a script, which would end it unseen.
+        """
+        if self._txn_depth > 0:
+            raise QueryError(
+                "executescript cannot run inside a transaction: "
+                "SQLite commits the open transaction before it runs a script",
+                sql=script,
+            )
         conn = self._conn()  # Raises NotConnectedError if not connected
         cursor = conn.cursor()
-        cursor.executescript(script)
-        conn.commit()
+        try:
+            cursor.executescript(script)
+            conn.commit()
+        except BaseException:
+            self._end_failed_implicit_transaction(conn)
+            raise
         return cursor
 
     def commit(self) -> None:
-        """Commit the current transaction."""
+        """Commit the current transaction.
+
+        Outside an explicit transaction a commit that fails (a deferred
+        constraint, a lock) rolls the transaction back before the error is raised.
+        """
         conn = self._conn()  # Raises NotConnectedError if not connected
-        conn.commit()
+        try:
+            conn.commit()
+        except BaseException:
+            self._end_failed_implicit_transaction(conn)
+            raise
 
     def auto_commit(self) -> None:
         """Commit only if NOT inside an explicit transaction.
@@ -194,7 +265,12 @@ class SQLiteAdapter(AdapterABC):
         if self._txn_depth == 0:
             # Outermost: commit or rollback entire transaction
             if commit:
-                conn.commit()
+                try:
+                    conn.commit()
+                except BaseException:
+                    # depth is 0 now: the failed commit must not leave the transaction open
+                    self._end_failed_implicit_transaction(conn)
+                    raise
             else:
                 try:
                     conn.rollback()
