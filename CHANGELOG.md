@@ -14,6 +14,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Async adapter: a task created while its parent held a connection no longer returns that connection twice.** The child inherits the pin; the connection now goes back to the pool when the last task using it releases it or ends, and a child whose inherited pin was already returned takes a fresh connection instead of sharing one that is back in the pool.
 - **Async adapter: a failed rollback no longer shrinks the pool.** If rolling back a reclaimed connection fails while the adapter is open, a warning is logged, that connection is closed and a fresh one is put in the pool.
 - **Async adapter: `adapter.connection` is `None` for a task whose inherited connection was already returned.**
+- **Async adapter: a statement that fails outside a transaction no longer keeps its pooled connection.** A syntax error, a constraint violation, a wrong parameter count, a failed commit or a failed `BEGIN` used to leave the task holding the connection, with any write it had started, until the task ended. The connection is now rolled back and returned before the error reaches the caller; this also rolls back earlier statements of the same task that were not yet committed on it. Inside a transaction the connection stays until the transaction ends, and ending it returns the connection whether the commit or rollback succeeds.
+- **Async adapter: a cancelled statement returns its connection by itself.** A `wait_for` timeout or `task.cancel()` reaches the caller at once, also while the statement waits on a lock held by another connection. The connection goes back to the pool once SQLite has finished with it, and a cancelled write is rolled back. A commit or `executescript` that SQLite had already started when it was cancelled still completes.
+- **Async adapter: `executemany` inside a transaction no longer commits it**, so a rollback removes its rows. Outside a transaction `executemany` and `executescript` commit and return the connection.
+
+### Changed
+
+- **Async adapter: `executescript` inside a transaction raises `QueryError`**, because SQLite commits the open transaction before it runs a script.
+- **Async adapter: waiting for a pooled connection times out.** `acquire_timeout` (seconds, default 30, `None` waits forever) on `AsyncSQLiteAdapter`, `on_disk()` and `in_memory()`; a wait that runs out raises `ConnectionPoolExhaustedError`. Tasks waiting when `close()` is called raise `NotConnectedError`.
+
+### Added
+
+- **`AsyncSQLiteAdapter.pool_stats()` and `AsyncSQLerDB.pool_stats()`** return `PoolStats`: pool size, free and in-use connections, checkouts, timeouts, average and longest wait.
 
 ## [1.2026.4.2] - 2026-04-18
 

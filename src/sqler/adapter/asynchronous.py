@@ -3,16 +3,21 @@ import logging
 import time
 import uuid
 from contextvars import ContextVar
+from datetime import datetime
 from functools import partial
 from typing import Any, List, Optional, Self
 
 import aiosqlite
 
+from sqler.exceptions import ConnectionPoolExhaustedError, NotConnectedError, QueryError
 from sqler.logging import query_logger
+from sqler.pool import PoolStats
 
 from .abstract import AsyncAdapterABC
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_ACQUIRE_TIMEOUT_S: Optional[float] = 30.0
 
 
 class _Lease:
@@ -41,6 +46,16 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     A task that ends without releasing its connection (cancelled between a
     statement and its commit, say) does not keep it: when the last task using
     the connection is done, the connection is rolled back and returned to the pool.
+
+    A statement that fails outside an explicit transaction (an SQLite error, a
+    cancellation, a failed commit or ``BEGIN``) also rolls the connection back and
+    returns it. Inside an explicit transaction the connection stays pinned until
+    the transaction ends, and its end returns it whether the commit or rollback
+    works.
+
+    ``acquire_timeout`` bounds the wait for a free connection, in seconds
+    (``None`` waits forever); a wait that runs out raises
+    ``ConnectionPoolExhaustedError``.
     """
 
     def __init__(
@@ -48,9 +63,11 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         path: str = "sqler.db",
         pragmas: Optional[list[str]] = None,
         pool_size: int = 1,
+        acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S,
     ):
         self.path = path
         self.pragmas = pragmas or []
+        self.acquire_timeout = acquire_timeout
         self._pool_size = pool_size
         self._pool: asyncio.Queue[aiosqlite.Connection] = asyncio.Queue(maxsize=pool_size)
         self._all_conns: list[aiosqlite.Connection] = []
@@ -64,6 +81,14 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         self._reclaims: set[asyncio.Task] = set()  # rollbacks of connections left by ended tasks
         self._connected = False
         self._connect_lock = asyncio.Lock()
+        self._closing = asyncio.Event()  # set (and replaced) by close(), to wake waiting tasks
+        # pool statistics
+        self._created_at = datetime.now()
+        self._checkouts = 0
+        self._timeouts = 0
+        self._wait_total_ms = 0.0
+        self._wait_max_ms = 0.0
+        self._waiting = 0  # tasks waiting for a free connection right now (private, for tests)
 
     async def _open(self) -> aiosqlite.Connection:
         conn = await aiosqlite.connect(self.path, uri=True)
@@ -106,15 +131,28 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         for task in list(lease.holders):
             self._unhold(lease, task)
 
+    def _leave(self, lease: Optional[_Lease], task: Optional[asyncio.Task]) -> bool:
+        """``task`` stops using ``lease``. True if it was the last holder: the lease is given back
+        and the caller now owns returning the connection."""
+        if lease is None or lease.returned:
+            return False
+        self._unhold(lease, task)
+        if lease.holders:  # a task that shares it returns it when it is done
+            return False
+        self._give_back(lease)
+        return True
+
+    def _drop_pin(self) -> Optional[_Lease]:
+        """Unpin this context's connection; return its lease if this task was the last holder."""
+        lease = self._task_lease.get(None)
+        self._task_conn.set(None)
+        self._task_lease.set(None)
+        return lease if self._leave(lease, asyncio.current_task()) else None
+
     def _holder_done(self, lease: _Lease, task: asyncio.Task) -> None:
         """A task using ``lease`` ended; if it was the last one, roll back and return the connection."""
-        lease.holders.pop(task, None)
-        if lease.returned or lease.holders:
-            return
-        self._give_back(lease)
-        reclaim = asyncio.get_running_loop().create_task(self._reclaim(lease.conn))
-        self._reclaims.add(reclaim)
-        reclaim.add_done_callback(self._reclaims.discard)
+        if self._leave(lease, task):
+            self._start_reclaim(lease.conn)
 
     async def _reclaim(self, conn: aiosqlite.Connection) -> None:
         """Roll back a connection left by an ended task and return it to the pool.
@@ -163,7 +201,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             async with self._connect_lock:
                 if not self._connected:
                     await self.connect()
-        conn = await self._pool.get()
+        conn = await self._checkout()
         lease = _Lease(conn)
         self._leases.add(lease)
         self._task_conn.set(conn)
@@ -171,21 +209,118 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         self._hold(lease)
         return conn
 
+    async def _checkout(self) -> aiosqlite.Connection:
+        """Take a connection from the pool, waiting at most ``acquire_timeout`` seconds."""
+        start = time.perf_counter()
+        try:
+            conn = self._pool.get_nowait()
+        except asyncio.QueueEmpty:
+            conn = await self._wait_for_connection()
+        waited_ms = (time.perf_counter() - start) * 1000
+        self._checkouts += 1
+        self._wait_total_ms += waited_ms
+        self._wait_max_ms = max(self._wait_max_ms, waited_ms)
+        return conn
+
+    async def _wait_for_connection(self) -> aiosqlite.Connection:
+        closing = self._closing
+        get = asyncio.ensure_future(self._pool.get())
+        closed = asyncio.ensure_future(closing.wait())
+        self._waiting += 1
+        try:
+            done, _ = await asyncio.wait(
+                {get, closed}, timeout=self.acquire_timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+        except BaseException:  # the waiting task was cancelled
+            self._abandon(get)
+            closed.cancel()
+            raise
+        finally:
+            self._waiting -= 1
+        closed.cancel()
+        if get in done:
+            return get.result()
+        self._abandon(get)
+        if closing.is_set():
+            raise NotConnectedError("the adapter was closed while waiting for a pooled connection")
+        self._timeouts += 1
+        raise ConnectionPoolExhaustedError(
+            f"no pooled connection became free within {self.acquire_timeout:g} s "
+            f"(pool size {self._pool_size})",
+            details={"pool_size": self._pool_size, "acquire_timeout": self.acquire_timeout},
+        )
+
+    def _abandon(self, get: asyncio.Future) -> None:
+        """Stop waiting on ``get``; a connection it took already goes back to the pool."""
+        if not get.done():
+            get.cancel()  # Queue.get leaves the item in the queue when it is cancelled
+            return
+        if not get.cancelled() and get.exception() is None:
+            conn = get.result()
+            if conn in self._all_conns:
+                self._pool.put_nowait(conn)
+
+    def pool_stats(self) -> PoolStats:
+        """Return the pool's size, free and in-use connections, checkouts, timeouts and wait times.
+
+        Synchronous and cheap; safe to call from any task. A connection being rolled
+        back after its task ended counts as in use until it is back in the pool.
+        """
+        total = len(self._all_conns)
+        available = self._pool.qsize()
+        return PoolStats(
+            total_connections=total,
+            available_connections=available,
+            in_use_connections=max(total - available, 0),
+            max_connections=self._pool_size,
+            total_checkouts=self._checkouts,
+            total_timeouts=self._timeouts,
+            avg_wait_time_ms=self._wait_total_ms / self._checkouts if self._checkouts else 0.0,
+            max_wait_time_ms=self._wait_max_ms,
+            created_at=self._created_at,
+        )
+
+    async def _release_after_failure(self, exc: BaseException) -> None:
+        """A statement, commit or rollback ended with ``exc``: outside a transaction, give the connection up.
+
+        The current task stops holding it; if no other task shares it, it is rolled
+        back and returned to the pool (or replaced if the rollback fails). Inside an
+        explicit transaction nothing changes: the caller ends the transaction.
+
+        An error from SQLite means the call has finished in the connection's thread, so
+        the rollback runs at once and is awaited: the pool is whole when the caller sees
+        the error. A cancellation (or another ``BaseException``) may arrive while the call
+        is still running in that thread, and the rollback queues behind it (up to the
+        busy timeout); it is not awaited, so the cancellation reaches the caller at once
+        and the reclaim returns the connection when the thread is done.
+        """
+        if self._txn_depth.get(0) > 0:
+            return
+        lease = self._drop_pin()
+        if lease is None:
+            return
+        reclaim = self._start_reclaim(lease.conn)
+        if isinstance(exc, Exception):
+            # shielded: a cancellation of this task while it waits must not stop the return
+            await asyncio.shield(reclaim)
+
+    def _start_reclaim(self, conn: aiosqlite.Connection) -> asyncio.Task:
+        reclaim = asyncio.get_running_loop().create_task(self._reclaim(conn))
+        self._reclaims.add(reclaim)
+        reclaim.add_done_callback(self._reclaims.discard)
+        return reclaim
+
     async def _release(self) -> None:
         """If not in a transaction, unpin the connection; the last task using it returns it to the pool."""
         if self._txn_depth.get(0) > 0:
             return
-        lease = self._task_lease.get(None)
-        self._task_conn.set(None)
-        self._task_lease.set(None)
-        if lease is None or lease.returned:
-            return
-        self._unhold(lease, asyncio.current_task())
-        if not lease.holders:
-            self._give_back(lease)
+        lease = self._drop_pin()
+        if lease is not None:
             self._pool.put_nowait(lease.conn)
 
     async def close(self) -> None:
+        closing, self._closing = self._closing, asyncio.Event()
+        closing.set()  # tasks waiting for a connection raise NotConnectedError
         for lease in list(self._leases):
             self._give_back(lease)
         if self._reclaims:
@@ -214,8 +349,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         cursor = None
         try:
             cursor = await conn.execute(query, params or [])
-        except Exception as e:
-            error_msg = str(e)
+        except BaseException as e:  # a cancellation counts as a failure
+            error_msg = str(e) or type(e).__name__
+            await self._release_after_failure(e)
             raise
         finally:
             if _logging:
@@ -230,15 +366,42 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         return cursor
 
     async def executemany(self, query: str, param_list: List[List[Any]]) -> aiosqlite.Cursor:
+        """Run ``query`` once per parameter list.
+
+        Inside an explicit transaction the rows are part of it (a rollback removes
+        them); outside one they are committed and the connection is returned.
+        """
         conn = await self._acquire()
-        cursor = await conn.executemany(query, param_list)
-        await self.commit()
+        try:
+            cursor = await conn.executemany(query, param_list)
+            if self._txn_depth.get(0) == 0:
+                await conn.commit()
+        except BaseException as exc:
+            await self._release_after_failure(exc)
+            raise
+        await self._release()
         return cursor
 
     async def executescript(self, script: str) -> aiosqlite.Cursor:
+        """Run a script of statements, commit, and return the connection.
+
+        Raises ``QueryError`` inside an explicit transaction: SQLite's driver commits
+        the open transaction before it runs a script, which would end it unseen.
+        """
+        if self._txn_depth.get(0) > 0:
+            raise QueryError(
+                "executescript cannot run inside a transaction: "
+                "SQLite commits the open transaction before it runs a script",
+                sql=script,
+            )
         conn = await self._acquire()
-        cursor = await conn.executescript(script)
-        await conn.commit()
+        try:
+            cursor = await conn.executescript(script)
+            await conn.commit()
+        except BaseException as exc:
+            await self._release_after_failure(exc)
+            raise
+        await self._release()
         return cursor
 
     async def commit(self) -> None:
@@ -250,7 +413,11 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     async def auto_commit(self) -> None:
         """Commit only if NOT inside an explicit transaction, then release connection."""
         if self._txn_depth.get(0) == 0:
-            await self.commit()
+            try:
+                await self.commit()
+            except BaseException as exc:
+                await self._release_after_failure(exc)
+                raise
             await self._release()
 
     @property
@@ -267,10 +434,14 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         """
         conn = await self._acquire()
         depth = self._txn_depth.get(0)
-        if depth == 0:
-            await conn.execute("BEGIN IMMEDIATE")
-        else:
-            await conn.execute(f"SAVEPOINT sp_{depth}")
+        try:
+            if depth == 0:
+                await conn.execute("BEGIN IMMEDIATE")
+            else:
+                await conn.execute(f"SAVEPOINT sp_{depth}")
+        except BaseException as exc:
+            await self._release_after_failure(exc)  # a failed BEGIN leaves no transaction to end
+            raise
         self._txn_depth.set(depth + 1)
 
     async def end_transaction(self, *, commit: bool = True) -> None:
@@ -287,14 +458,23 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
 
         if depth == 0:
             # Outermost: commit or rollback entire transaction
+            # The connection goes back whether the commit or rollback works.
             if commit:
-                await conn.commit()
+                try:
+                    await conn.commit()
+                except BaseException as exc:
+                    await self._release_after_failure(exc)
+                    raise
             else:
                 try:
                     await conn.rollback()
-                except Exception:
-                    pass
-            # Release connection back to pool
+                except BaseException as exc:
+                    # not raised (the caller may be handling an exception already),
+                    # but the connection is rolled back again or replaced, never reused as is
+                    await self._release_after_failure(exc)
+                    if not isinstance(exc, Exception):
+                        raise
+                    return
             await self._release()
         else:
             # Nested: release or rollback savepoint
@@ -316,10 +496,14 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         conn = self._pinned()
         if conn is None:
             return
-        if exc_type is None:
-            await conn.commit()
-        else:
-            await conn.rollback()
+        try:
+            if exc_type is None:
+                await conn.commit()
+            else:
+                await conn.rollback()
+        except BaseException as exc:
+            await self._release_after_failure(exc)
+            raise
         await self._release()
 
     @property
@@ -355,7 +539,13 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
 
     # factories
     @classmethod
-    def in_memory(cls, shared: bool = True, name: Optional[str] = None) -> Self:
+    def in_memory(
+        cls,
+        shared: bool = True,
+        name: Optional[str] = None,
+        *,
+        acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S,
+    ) -> Self:
         pragmas = [
             "PRAGMA foreign_keys = ON",
             "PRAGMA synchronous = OFF",
@@ -369,10 +559,12 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             uri = f"file:{ident}?mode=memory&cache=shared"
         else:
             uri = ":memory:"
-        return cls(uri, pragmas=pragmas, pool_size=1)
+        return cls(uri, pragmas=pragmas, pool_size=1, acquire_timeout=acquire_timeout)
 
     @classmethod
-    def on_disk(cls, path: str = "sqler.db") -> Self:
+    def on_disk(
+        cls, path: str = "sqler.db", *, acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S
+    ) -> Self:
         pragmas = [
             "PRAGMA foreign_keys = ON",
             "PRAGMA busy_timeout = 5000",
@@ -383,4 +575,4 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             "PRAGMA mmap_size = 268435456",
             "PRAGMA temp_store = MEMORY",
         ]
-        return cls(path, pragmas=pragmas, pool_size=4)
+        return cls(path, pragmas=pragmas, pool_size=4, acquire_timeout=acquire_timeout)

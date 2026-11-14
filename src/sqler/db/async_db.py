@@ -3,6 +3,7 @@ from typing import Any, Optional
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import StaleVersionError
+from sqler.pool import PoolStats
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -38,6 +39,10 @@ class AsyncSQLerDB:
 
     async def close(self) -> None:
         await self.adapter.close()
+
+    def pool_stats(self) -> PoolStats:
+        """Return the adapter's connection pool statistics (synchronous, cheap)."""
+        return self.adapter.pool_stats()
 
     async def _ensure_table(self, table: str) -> None:
         table = validate_table_name(table)
