@@ -194,9 +194,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        doc = cls._resolve_relations(doc, db=db)
-        inst = cls.model_validate(doc)
-        object.__setattr__(inst, "_id", doc.get("_id"))
+        inst = _refs.from_row(cls, cls._resolve_relations(doc, db=db))
         object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
         return inst
 
@@ -222,13 +220,9 @@ class SQLerLiteModel(SQLerLiteModelBase):
             return []
         # Use queryset's batch resolution
         qs = cls.using(given) if given is not None else cls.query()
-        docs = qs._batch_resolve(docs)
         instances = []
-        for doc in docs:
-            inst = cls.model_validate(doc)
-            object.__setattr__(inst, "_id", doc.get("_id"))
-            if cls._versioned_rows:
-                object.__setattr__(inst, "_version", doc["_version"])
+        for doc in qs._batch_resolve(docs):
+            inst = _refs.from_row(cls, doc)
             object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
             instances.append(inst)
         return instances
@@ -495,13 +489,12 @@ class SQLerLiteModel(SQLerLiteModelBase):
         """
         db, table = cls._require_binding()
         out: dict = {}
-        for doc in _read_documents(db, table, ids):
-            rid = doc["_id"]
-            raw = doc
+        read = _refs.read_versioned if cls._versioned_rows else _read_documents
+        for raw in read(db, table, ids):
+            rid = raw["_id"]
             try:
-                doc = cls._resolve_relations(doc, db=db, _seen=seen | {(table, rid)})
-                inst = cls.model_validate(doc)
-                object.__setattr__(inst, "_id", doc.get("_id"))
+                doc = cls._resolve_relations(raw, db=db, _seen=seen | {(table, rid)})
+                inst = _refs.from_row(cls, doc)
                 object.__setattr__(inst, "_snapshot", cls._make_snapshot(raw))
             except (LookupError, RuntimeError, ValueError):
                 out[rid] = _refs.KEEP

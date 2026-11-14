@@ -178,11 +178,7 @@ class SQLerModel(BaseModel):
         doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        doc = cls._resolve_relations(doc, db=db)
-        inst = cls.model_validate(doc)  # type: ignore[call-arg]
-        # attach db id stored outside the json payload
-        inst._id = doc.get("_id")
-        return inst  # type: ignore[return-value]
+        return _refs.from_row(cls, cls._resolve_relations(doc, db=db))
 
     @classmethod
     def from_ids(cls: Type[TModel], ids: list[int], *, db=None) -> list[TModel]:
@@ -210,15 +206,7 @@ class SQLerModel(BaseModel):
             return []
         # Use queryset's batch resolution for efficient nested ref loading
         qs = cls.using(given) if given is not None else cls.query()
-        docs = qs._batch_resolve(docs)
-        instances = []
-        for doc in docs:
-            inst = cls.model_validate(doc)
-            inst._id = doc.get("_id")
-            if cls._versioned_rows:
-                inst._version = doc["_version"]
-            instances.append(inst)
-        return instances
+        return [_refs.from_row(cls, doc) for doc in qs._batch_resolve(docs)]
 
     @classmethod
     def count(cls: Type[TModel]) -> int:
@@ -579,9 +567,7 @@ class SQLerModel(BaseModel):
         for doc in _read_documents(db, table, ids):
             rid = doc["_id"]
             try:
-                doc = cls._resolve_relations(doc, db=db, _seen=seen | {(table, rid)})
-                inst = cls.model_validate(doc)  # type: ignore[call-arg]
-                inst._id = doc.get("_id")
+                inst = _refs.from_row(cls, cls._resolve_relations(doc, db=db, _seen=seen | {(table, rid)}))
             except (LookupError, RuntimeError, ValueError):
                 out[rid] = _refs.KEEP
                 continue

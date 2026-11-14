@@ -298,7 +298,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         holds a reference."""
         adapter = self._query._adapter  # type: ignore[attr-defined]
         assert adapter is not None, "Query has no adapter bound"
-        walk = _refs.batch(docs, max_depth)
+        walk = _refs.batch(docs, max_depth, self._model_cls, self._db)
         try:
             want = next(walk)
             while True:

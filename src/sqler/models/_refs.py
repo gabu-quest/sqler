@@ -4,7 +4,8 @@ A stored reference is a dict holding ``_table`` and ``_id``. Two resolvers follo
 
 - the batch resolver behind ``query().all()``, ``first()`` and ``from_ids`` puts the
   stored documents in place of the references, read from the queryset's own database,
-  level by level to a fixed depth;
+  level by level to a fixed depth; at a typed position (:func:`typed_fields`) it puts a
+  model built from the row (:func:`from_row`) instead;
 - the per-row resolver behind ``from_id`` and ``refresh`` asks the class that owns each
   table and puts model instances in place.
 
@@ -14,14 +15,18 @@ table are read with one statement, then put what they loaded in place.
 
 from __future__ import annotations
 
+import builtins
 import inspect
+import re
+import sys
+import typing
 from typing import Any, Callable, Generator, Optional
 
 from sqler import registry
 from sqler.db.async_db import _aselect_rows
 from sqler.db.sqler_db import _in_order, _row_columns, _row_documents, _select_rows
 from sqler.exceptions import InvalidTableNameError
-from sqler.models._table_names import _aload_unbound, _load_unbound
+from sqler.models._table_names import _aload_unbound, _default_table_name, _load_unbound
 from sqler.utils import validate_table_name
 
 # A reference whose row could not be hydrated: it stays the reference it was.
@@ -89,18 +94,21 @@ def replace(value: Any, get: Callable[[tuple[str, int], Any], Any]) -> Any:
 
 
 def batch(
-    docs: list[dict], max_depth: int
+    docs: list[dict], max_depth: int, cls: Any = None, db: Any = None
 ) -> Generator[tuple[str, list], Any, tuple[list[dict], bool]]:
     """Resolve the references of ``docs`` into stored documents, to ``max_depth`` levels.
 
-    Yields ``(table, ids)`` for each read and is sent the documents :func:`read_rows`
-    gives, or ``None`` when the table does not exist; one read per table per level. A table whose
-    name is not an identifier is never read, and its references stay as they are.
+    Yields ``(table, ids)`` for each read and is sent what :func:`read_rows` gives:
+    ``(documents, versions)``, or ``None`` when the table does not exist; one read per
+    table per level. A table whose name is not an identifier is never read, and its
+    references stay as they are.
     Returns ``(documents, found)``: ``found`` is False when no document holds a
     reference, and then the documents are ``docs`` itself; else they are new ones in
     which a reference that is being replaced further up stays a reference, a row that is
     gone stays a reference, and one into a missing table of a bound class reads as
-    ``None``.
+    ``None``. A reference at a typed position of ``cls`` (the class of ``docs``), whose
+    table belongs to a class the field admits, is replaced by that class's model of the
+    row (:func:`from_row`), when the class reads ``db``: bound to it, or never bound.
     """
     found: dict[tuple[str, int], None] = {}
     if max_depth > 0:
@@ -109,6 +117,7 @@ def batch(
     if not found:
         return docs, False
     resolved: dict[tuple[str, int], dict] = {}
+    versions: dict[tuple[str, int], Any] = {}
     missing: set[str] = set()
     for _ in range(max_depth):
         wanted: dict[str, list[int]] = {}
@@ -131,53 +140,209 @@ def batch(
             if got is None:
                 missing.add(table)
                 continue
+            got, row_versions = got
             for obj in got:
                 resolved[(table, int(obj["_id"]))] = obj
                 level.append(obj)
+            if row_versions:
+                versions.update(((table, rid), v) for rid, v in row_versions.items())
         found = {}
         for d in level:
             collect(d, found)
 
     processing: set[tuple[str, int]] = set()
 
-    def expand(key: tuple[str, int], keep: Any) -> Any:
+    def expand(key: tuple[str, int], keep: Any, admits: tuple = ()) -> Any:
         if key in processing:
             return keep  # a cycle: the row is being replaced further up
         doc = resolved.get(key)
         if doc is None:
             return None if key[0] in missing and table_is_bound(key[0]) else keep
+        mdl = registry.resolve(key[0]) if admits and db is not None else None
+        if mdl is not None and not (issubclass(mdl, admits) and _reads(mdl, db)):
+            mdl = None  # not a class the field admits, or bound to another database
         processing.add(key)
-        out = {k: replace(v, expand) for k, v in doc.items()}
+        out = fill(doc, typed_fields(mdl) if mdl is not None else {})
         processing.discard(key)
-        return out
+        if mdl is None:
+            return out
+        row = {**out, "_version": versions.get(key, 0)} if mdl._versioned_rows else out
+        try:
+            return from_row(mdl, row)
+        except (TypeError, ValueError):
+            return out  # refused by its class: the parent's validation says so, as it did
 
-    return [replace(d, expand) for d in docs], True
+    def fill(doc: dict, typed: dict) -> dict:
+        if not typed:
+            return {k: replace(v, expand) for k, v in doc.items()}
+        return {
+            k: replace(v, lambda key, keep, a=typed.get(k, ()): expand(key, keep, a))
+            for k, v in doc.items()
+        }
+
+    top = typed_fields(cls) if cls is not None and db is not None else {}
+    return [fill(d, top) for d in docs], True
 
 
-def read_rows(adapter: Any, table: str, ids: list, db: Any = None) -> Optional[list]:
-    """The documents of the rows ``ids``, or ``None`` when ``table`` does not exist.
+def _reads(mdl: Any, db: Any) -> bool:
+    """True when the class ``mdl`` reads ``db``: bound to it, or never bound."""
+    bound = getattr(mdl, "_db", None)
+    return bound is None or bound is db
 
-    Read through ``db``'s by-id reader, as ``db.find_documents`` reads them. Without a
-    database that has one (a queryset built by hand, ``PooledSQLerDB``) ``adapter`` reads
-    ``_id`` and ``data`` only.
+
+def from_row(cls: Any, doc: dict) -> Any:
+    """A model of the row ``doc`` that knows its row: ``_id``, and ``_version`` for a class
+    whose rows are versioned. ``doc`` is a row as the by-id readers give it.
+
+    The one step every way in uses to turn a row into a model, for every model base.
+    """
+    inst = cls.model_validate(doc)
+    _set(inst, "_id", doc["_id"])
+    if cls._versioned_rows:
+        _set(inst, "_version", doc.get("_version") or 0)
+    return inst
+
+
+def _set(inst: Any, name: str, value: Any) -> None:
+    try:
+        setattr(inst, name, value)
+    except AttributeError:  # a frozen dataclass
+        object.__setattr__(inst, name, value)
+
+
+# ---- typed references -----------------------------------------------------------------
+
+_TYPED: dict[type, dict[str, tuple]] = {}
+# names in a string annotation that are typing constructs, never model classes
+_TYPING_NAMES = frozenset(
+    {"Optional", "Union", "None", "List", "list", "Dict", "dict", "typing", "ClassVar", "Any"}
+)
+
+
+# ``Literal[...]`` in a string annotation: what it holds are values, never names
+_LITERALS = re.compile(r"Literal\[[^\]]*\]")
+
+
+def typed_fields(cls: Any) -> dict[str, tuple]:
+    """``{field: model classes it admits}`` for the fields of ``cls`` whose annotation names
+    a model class (``Child``, ``Optional[Child]``, ``list[Child]``, ``dict[str, Child]``),
+    for the pydantic and the lite bases alike.
+
+    Found once per class; an answer is not kept while a name in an annotation cannot be
+    found yet (a class defined before the class it refers to).
+    """
+    if not _is_model_class(cls):
+        return {}  # another family (msgspec): its fields stay what the base gives
+    typed = _TYPED.get(cls)
+    if typed is None:
+        typed, complete = {}, True
+        for name, ann, owner in _annotations(cls):
+            classes: list = []
+            complete &= _model_classes(ann, owner, classes)
+            if classes:
+                typed[name] = tuple(classes)
+        if complete:
+            _TYPED[cls] = typed
+    return typed
+
+
+def _annotations(cls: Any) -> list:
+    """``(field, annotation, class that declares it)`` for each field of ``cls``."""
+    fields = getattr(cls, "__dataclass_fields__", None)
+    if fields is not None:  # a lite class: a string annotation is read where it was written
+        return [(n, f.type, _declarer(cls, n)) for n, f in fields.items() if not n.startswith("_")]
+    if not getattr(cls, "__pydantic_complete__", True):
+        return [(n, typing.ForwardRef(n), cls) for n in cls.model_fields]
+    return [(n, f.annotation, cls) for n, f in cls.model_fields.items()]
+
+
+def _declarer(cls: Any, name: str) -> Any:
+    for klass in cls.__mro__:
+        if name in vars(klass).get("__annotations__", {}):
+            return klass
+    return cls
+
+
+def _is_model_class(x: Any) -> bool:
+    return isinstance(x, type) and hasattr(x, "_versioned_rows")  # every model base has it
+
+
+def _model_classes(ann: Any, owner: Any, out: list) -> bool:
+    """Add the model classes ``ann`` names to ``out``; False when a name is not found."""
+    if isinstance(ann, typing.ForwardRef):
+        return False
+    if typing.get_origin(ann) is typing.Literal:
+        return True  # its arguments are values, not annotations
+    if isinstance(ann, str):
+        space = vars(sys.modules.get(owner.__module__, builtins))
+        complete = True
+        for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", _LITERALS.sub("", ann)):
+            if name in _TYPING_NAMES:
+                continue
+            found = space.get(name, getattr(builtins, name, None))
+            if found is None:
+                found = registry.resolve(_default_table_name(name)) or registry.resolve_class_name(
+                    name
+                )
+                if found is None or found.__name__ != name:
+                    complete = False
+                    continue
+            if _is_model_class(found):
+                out.append(found)
+        return complete
+    if _is_model_class(ann):
+        out.append(ann)
+        return True
+    complete = True
+    for arg in typing.get_args(ann):
+        complete &= _model_classes(arg, owner, out)
+    return complete
+
+
+def read_rows(adapter: Any, table: str, ids: list, db: Any = None) -> Optional[tuple]:
+    """``(documents, versions)`` of the rows ``ids``, or ``None`` when ``table`` does not exist.
+
+    Read through ``db``'s by-id reader, as ``db.find_documents`` reads them; for the table of
+    a versioned class bound to ``db`` the same statement reads the ``_version`` column, given
+    as ``{id: version}`` and left out of the documents (0 where the table has no such column:
+    the read changes no schema). Without a database that has a reader
+    (a queryset built by hand, ``PooledSQLerDB``) ``adapter`` reads ``_id`` and ``data`` only.
     """
     reader = getattr(db, "_read_rows", None)
-    if reader is not None:
-        rows, columns = reader(table, ids)
-    else:
+    if reader is None:
         columns = _row_columns()
         rows = _select_rows(adapter, table, columns, ids)
-    return None if rows is None else _row_documents(rows, columns)
+        return None if rows is None else (_row_documents(rows, columns), None)
+    versioned = _versioned_here(table, db)
+    rows, columns = reader(table, ids, versioned=versioned, alter=False)
+    return _documents(rows, columns, versioned)
 
 
-async def aread_rows(adapter: Any, table: str, ids: list, db: Any = None) -> Optional[list]:
+async def aread_rows(adapter: Any, table: str, ids: list, db: Any = None) -> Optional[tuple]:
     """Async twin of :func:`read_rows`."""
-    if db is not None:
-        rows, columns = await db._read_rows(table, ids)
-    else:
+    if db is None:
         columns = _row_columns()
         rows = await _aselect_rows(adapter, table, columns, ids)
-    return None if rows is None else _row_documents(rows, columns)
+        return None if rows is None else (_row_documents(rows, columns), None)
+    versioned = _versioned_here(table, db)
+    rows, columns = await db._read_rows(table, ids, versioned=versioned, alter=False)
+    return _documents(rows, columns, versioned)
+
+
+def _versioned_here(table: str, db: Any) -> bool:
+    mdl = registry.resolve(table)
+    # the classes the batch builds (see ``_reads``); another family (msgspec) has no versions
+    return mdl is not None and _reads(mdl, db) and getattr(mdl, "_versioned_rows", False)
+
+
+def _documents(rows: Any, columns: Any, versioned: bool) -> Optional[tuple]:
+    if rows is None:
+        return None
+    if not versioned:
+        return _row_documents(rows, columns), None
+    # the version column (third) is kept apart, so a document is what an unversioned read gives
+    docs = _row_documents([(r[0], r[1], *r[3:]) for r in rows], [*columns[:2], *columns[3:]])
+    return docs, {r[0]: r[2] for r in rows}
 
 
 # ---- the per-row resolver -----------------------------------------------------------
@@ -208,15 +373,16 @@ def plan(data: dict, db: Any, seen: frozenset) -> tuple[dict, list]:
     return groups, unbound
 
 
-def resolve(data: dict, db: Any, seen: frozenset) -> dict:
+def resolve(data: dict, db: Any, seen: frozenset, fields: Any = None) -> dict:
     """Replace the references in ``data`` by model instances of the classes that own them.
 
     The rows of one table are read with one statement, by that class's ``_load_refs``. A
     reference to a row being loaded further up (``seen``) stays a reference, which cuts a
     cycle; a row that is gone reads as ``None``. ``data`` with nothing to load is
-    returned as it is.
+    returned as it is. ``fields`` names the only fields to look in (all when ``None``).
     """
-    groups, unbound = plan(data, db, seen)
+    part = data if fields is None else {k: data[k] for k in fields if k in data}
+    groups, unbound = plan(part, db, seen)
     if not groups and not unbound:
         return data
     loaded: dict = {}
@@ -240,12 +406,18 @@ def resolve(data: dict, db: Any, seen: frozenset) -> dict:
                     found[rid] = KEEP
         for rid in ids:
             loaded[(table, rid)] = found.get(rid)
-    return {k: replace(v, loaded.get) for k, v in data.items()}
+    return _put(data, part, loaded)
 
 
-async def aresolve(data: dict, db: Any, seen: frozenset) -> dict:
+def _put(data: dict, part: dict, loaded: dict) -> dict:
+    out = {k: replace(v, loaded.get) for k, v in part.items()}
+    return out if part is data else {**data, **out}
+
+
+async def aresolve(data: dict, db: Any, seen: frozenset, fields: Any = None) -> dict:
     """Async twin of :func:`resolve`, through each class's ``_aload_refs``."""
-    groups, unbound = plan(data, db, seen)
+    part = data if fields is None else {k: data[k] for k in fields if k in data}
+    groups, unbound = plan(part, db, seen)
     if not groups and not unbound:
         return data
     loaded: dict = {}
@@ -268,7 +440,7 @@ async def aresolve(data: dict, db: Any, seen: frozenset) -> dict:
                     found[rid] = KEEP
         for rid in ids:
             loaded[(table, rid)] = found.get(rid)
-    return {k: replace(v, loaded.get) for k, v in data.items()}
+    return _put(data, part, loaded)
 
 
 # ---- versioned rows for the safe bases ----------------------------------------------

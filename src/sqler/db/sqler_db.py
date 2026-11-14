@@ -759,7 +759,7 @@ class SQLerDB:
         return _row_documents(_in_order(rows or [], ids), columns)
 
     def _read_rows(
-        self, table: str, ids: list, *, versioned: bool = False
+        self, table: str, ids: list, *, versioned: bool = False, alter: bool = True
     ) -> tuple[Optional[list], list[str]]:
         """The by-id read every reader of this database goes through.
 
@@ -767,9 +767,21 @@ class SQLerDB:
         with: the promoted columns of ``table`` (:meth:`_columns_of`), and ``_version`` when
         ``versioned``. A missing table gives ``None`` rows and is not created; a table made
         before versioning gets its ``_version`` column on a versioned read, as it always did.
+        With ``alter=False`` it gets none, and nothing is sent that fails for want of it: a
+        table not remembered as versioned is asked for its columns; with ``_version`` that is
+        remembered, without it the rows are read at version 0 and nothing is remembered.
         """
         table = validate_table_name(table)
-        columns = _row_columns(self._columns_of(table), versioned)
+        promoted = self._columns_of(table)
+        columns = _row_columns(promoted, versioned)
+        if versioned and not alter and not self._is_versioned(table):
+            names = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+            if "_version" not in names:
+                plain = _select_rows(self.adapter, table, _row_columns(promoted), ids)
+                if plain is None:  # a missing table stays a missing table
+                    return None, columns
+                return [(r[0], r[1], 0, *r[2:]) for r in plain], columns
+            self._remember(table)
         try:
             rows = _select_rows(self.adapter, table, columns, ids)
         except sqlite3.OperationalError as exc:
