@@ -4,11 +4,14 @@ This module provides reusable mixins for timestamps, soft delete,
 and lifecycle hooks.
 """
 
+import json
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Optional, Self
 
+from sqler import _stored
+from sqler.models import _dirty
 from sqler.models._table_names import _instance_binding
 from sqler.utils import validate_table_name
 
@@ -667,16 +670,70 @@ def _remember_identity(obj) -> dict:
     version = getattr(obj, "_version", _NO_VALUE)
     if version is not _NO_VALUE:
         kept["_version"] = version
-    kept["_pre_save_snapshot"] = obj.__dict__.get("_pre_save_snapshot")
     return kept
 
 
 def _restore_identity(obj, kept: dict) -> None:
     for name, value in kept.items():
-        if name == "_pre_save_snapshot":
-            obj.__dict__["_pre_save_snapshot"] = value
-        else:
-            setattr(obj, name, value)
+        setattr(obj, name, value)
+
+
+def _audit_table_ddl(audit_table: str) -> str:
+    return f"""
+        CREATE TABLE IF NOT EXISTS {audit_table} (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            user TEXT,
+            timestamp TEXT NOT NULL,
+            changes TEXT,
+            snapshot TEXT
+        );
+        """
+
+
+def _audit_insert(
+    audit_table: str, record_id, action: str, user, changes: Optional[dict], snapshot: dict
+) -> tuple[str, list]:
+    """The statement and parameters of one audit row; both columns are documents in stored form."""
+    return (
+        f"INSERT INTO {audit_table} (record_id, action, user, timestamp, changes, snapshot) "
+        f"VALUES (?, ?, ?, ?, ?, ?);",
+        [
+            record_id,
+            action,
+            user,
+            datetime.now(timezone.utc).isoformat(),
+            _stored.dumps(changes) if changes else None,
+            _stored.dumps(snapshot),
+        ],
+    )
+
+
+def _audit_changes(old_row: Optional[dict], written: dict) -> dict[str, dict[str, Any]]:
+    """What an update changed: for each key of the two stored documents that differs, its value
+    in the row read before the save and in the document the save wrote (``None`` where a side
+    has no such key). No row before the save, no changes."""
+    if old_row is None:
+        return {}
+    old = _dirty.snapshot(old_row)
+    return {
+        key: {"old": old.get(key), "new": written.get(key)}
+        for key in sorted(_dirty.changed_fields(old, written))
+    }
+
+
+def _audit_entries(rows) -> list[dict[str, Any]]:
+    return [
+        {
+            "action": row[0],
+            "user": row[1],
+            "timestamp": row[2],
+            "changes": json.loads(row[3]) if row[3] else None,
+            "snapshot": json.loads(row[4]) if row[4] else None,
+        }
+        for row in rows
+    ]
 
 
 @asynccontextmanager
@@ -724,94 +781,19 @@ class AuditLogMixin:
     The audit log is stored in a table named `{model_table}_audit`.
     """
 
-    # Internal snapshot for change detection — not a model field.
-    # Untyped to avoid being picked up by @dataclass or msgspec Struct.
-    _pre_save_snapshot = None
-
-    def _capture_snapshot(self) -> None:
-        """Capture current state before save for change detection."""
-        # Get model data excluding private fields
-        data = {}
-        for field_name in self.__class__.model_fields:  # type: ignore[attr-defined]
-            try:
-                data[field_name] = getattr(self, field_name)
-            except AttributeError:
-                pass
-        self.__dict__["_pre_save_snapshot"] = data
-
-    def _get_changes(self) -> dict[str, dict[str, Any]]:
-        """Get dict of changed fields with old/new values."""
-        snapshot = self.__dict__.get("_pre_save_snapshot")
-        if snapshot is None:
-            return {}
-
-        changes = {}
-        for field_name in self.__class__.model_fields:  # type: ignore[attr-defined]
-            try:
-                old_value = snapshot.get(field_name)
-                new_value = getattr(self, field_name)
-                if old_value != new_value:
-                    changes[field_name] = {"old": old_value, "new": new_value}
-            except AttributeError:
-                pass
-
-        return changes
-
-    def _log_audit(self, action: str, changes: Optional[dict] = None, *, db=None) -> None:
-        """Log an audit entry.
-
-        Args:
-            action: Type of action (create, update, delete).
-            changes: Dict of field changes (for updates).
-        """
-        import json
-
+    def _log_audit(
+        self, action: str, changes: Optional[dict], snapshot: dict, *, db
+    ) -> None:
+        """Write one audit row: ``changes`` (updates) and ``snapshot`` are stored documents."""
         db, table = _instance_binding(self, db)
         audit_table = validate_table_name(f"{table}_audit")
-
-        # Ensure audit table exists
-        ddl = f"""
-        CREATE TABLE IF NOT EXISTS {audit_table} (
-            _id INTEGER PRIMARY KEY AUTOINCREMENT,
-            record_id INTEGER NOT NULL,
-            action TEXT NOT NULL,
-            user TEXT,
-            timestamp TEXT NOT NULL,
-            changes TEXT,
-            snapshot TEXT
-        );
-        """
-        db.adapter.execute(ddl)
+        db.adapter.execute(_audit_table_ddl(audit_table))
         db.adapter.auto_commit()
-
-        # Create audit entry
-        record_id = getattr(self, "_id", None)
         user = AuditMixin.get_current_user() if hasattr(AuditMixin, "get_current_user") else None
-
-        # Get current snapshot
-        snapshot = {}
-        for field_name in self.__class__.model_fields:  # type: ignore[attr-defined]
-            try:
-                value = getattr(self, field_name)
-                # Convert datetime to string for JSON
-                if isinstance(value, datetime):
-                    value = value.isoformat()
-                snapshot[field_name] = value
-            except AttributeError:
-                pass
-
-        db.adapter.execute(
-            f"INSERT INTO {audit_table} (record_id, action, user, timestamp, changes, snapshot) "
-            f"VALUES (?, ?, ?, ?, ?, ?);",
-            [
-                record_id,
-                action,
-                user,
-                datetime.now(timezone.utc).isoformat(),
-                json.dumps(changes) if changes else None,
-                json.dumps(snapshot),
-            ],
+        sql, params = _audit_insert(
+            audit_table, getattr(self, "_id", None), action, user, changes, snapshot
         )
+        db.adapter.execute(sql, params)
         db.adapter.auto_commit()
 
     def get_audit_log(self, *, db=None) -> list[dict[str, Any]]:
@@ -820,8 +802,6 @@ class AuditLogMixin:
         Returns:
             List of audit log entries, newest first.
         """
-        import json
-
         db, table = _instance_binding(self, db)
         audit_table = validate_table_name(f"{table}_audit")
         record_id = getattr(self, "_id", None)
@@ -839,19 +819,7 @@ class AuditLogMixin:
         except Exception:
             return []
 
-        logs = []
-        for row in rows:
-            logs.append(
-                {
-                    "action": row[0],
-                    "user": row[1],
-                    "timestamp": row[2],
-                    "changes": json.loads(row[3]) if row[3] else None,
-                    "snapshot": json.loads(row[4]) if row[4] else None,
-                }
-            )
-
-        return logs
+        return _audit_entries(rows)
 
     def save(self, *, db=None) -> Self:
         """Save with automatic audit logging.
@@ -873,36 +841,20 @@ class AuditLogMixin:
 
     def _save_and_log(self, db) -> Self:
         is_new = getattr(self, "_id", None) is None
-
-        # For updates, fetch current DB state to compare against
-        if not is_new:
-            db, table = _instance_binding(self, db)
-            current = db.find_document(table, self._id)
-            if current:
-                self.__dict__["_pre_save_snapshot"] = {
-                    k: v for k, v in current.items() if k not in ("_id", "_version")
-                }
-
+        old_row = None if is_new else db.find_document(_instance_binding(self, db)[1], self._id)
         result = super().save(db=db)  # type: ignore[misc]
-
+        written = self._snapshot  # type: ignore[attr-defined]
         if is_new:
-            self._log_audit("create", db=db)
-            # Capture state for future updates
-            self._capture_snapshot()
-        else:
-            changes = self._get_changes()
-            if changes:
-                self._log_audit("update", changes, db=db)
-            # Update snapshot for next save
-            self._capture_snapshot()
-
+            self._log_audit("create", None, written, db=db)
+        elif changes := _audit_changes(old_row, written):
+            self._log_audit("update", changes, written, db=db)
         return result  # type: ignore[return-value]
 
     def delete(self, *, db=None) -> None:
         """Delete with audit logging (the row and its audit entry go together)."""
         db, _ = _instance_binding(self, db)
         with _atomic(db):
-            self._log_audit("delete", db=db)
+            self._log_audit("delete", None, self._dump_with_relations(), db=db)  # type: ignore[attr-defined]
             super().delete(db=db)  # type: ignore[misc]
 
 
@@ -918,94 +870,29 @@ class AsyncAuditLogMixin:
         logs = await user.get_audit_log()
     """
 
-    _pre_save_snapshot = None
-
-    def _capture_snapshot(self) -> None:
-        """Capture current state before save."""
-        data = {}
-        for field_name in self.__class__.model_fields:  # type: ignore[attr-defined]
-            try:
-                data[field_name] = getattr(self, field_name)
-            except AttributeError:
-                pass
-        self.__dict__["_pre_save_snapshot"] = data
-
-    def _get_changes(self) -> dict[str, dict[str, Any]]:
-        """Get dict of changed fields with old/new values."""
-        snapshot = self.__dict__.get("_pre_save_snapshot")
-        if snapshot is None:
-            return {}
-
-        changes = {}
-        for field_name in self.__class__.model_fields:  # type: ignore[attr-defined]
-            try:
-                old_value = snapshot.get(field_name)
-                new_value = getattr(self, field_name)
-                if old_value != new_value:
-                    changes[field_name] = {"old": old_value, "new": new_value}
-            except AttributeError:
-                pass
-
-        return changes
-
-    async def _log_audit(self, action: str, changes: Optional[dict] = None, *, db=None) -> None:
-        """Log an audit entry (async)."""
-        import json
-
+    async def _log_audit(
+        self, action: str, changes: Optional[dict], snapshot: dict, *, db
+    ) -> None:
+        """Write one audit row (async); ``changes`` and ``snapshot`` are stored documents."""
         db, table = _instance_binding(self, db)
         audit_table = validate_table_name(f"{table}_audit")
-
-        ddl = f"""
-        CREATE TABLE IF NOT EXISTS {audit_table} (
-            _id INTEGER PRIMARY KEY AUTOINCREMENT,
-            record_id INTEGER NOT NULL,
-            action TEXT NOT NULL,
-            user TEXT,
-            timestamp TEXT NOT NULL,
-            changes TEXT,
-            snapshot TEXT
-        );
-        """
-        cursor = await db.adapter.execute(ddl)
+        cursor = await db.adapter.execute(_audit_table_ddl(audit_table))
         await cursor.close()
         await db.adapter.auto_commit()
-
-        record_id = getattr(self, "_id", None)
         user = (
             AsyncAuditMixin.get_current_user()
             if hasattr(AsyncAuditMixin, "get_current_user")
             else None
         )
-
-        snapshot = {}
-        for field_name in self.__class__.model_fields:  # type: ignore[attr-defined]
-            try:
-                value = getattr(self, field_name)
-                if isinstance(value, datetime):
-                    value = value.isoformat()
-                snapshot[field_name] = value
-            except AttributeError:
-                pass
-
-        cursor = await db.adapter.execute(
-            f"INSERT INTO {audit_table} (record_id, action, user, timestamp, changes, snapshot) "
-            f"VALUES (?, ?, ?, ?, ?, ?);",
-            [
-                record_id,
-                action,
-                user,
-                datetime.now(timezone.utc).isoformat(),
-                json.dumps(changes) if changes else None,
-                json.dumps(snapshot),
-            ],
+        sql, params = _audit_insert(
+            audit_table, getattr(self, "_id", None), action, user, changes, snapshot
         )
+        cursor = await db.adapter.execute(sql, params)
         await cursor.close()
         await db.adapter.auto_commit()
 
     async def get_audit_log(self, *, db=None) -> list[dict[str, Any]]:
         """Get the audit log for this record (async)."""
-        import json
-
         db, table = _instance_binding(self, db)
         audit_table = validate_table_name(f"{table}_audit")
         record_id = getattr(self, "_id", None)
@@ -1024,19 +911,7 @@ class AsyncAuditLogMixin:
         except Exception:
             return []
 
-        logs = []
-        for row in rows:
-            logs.append(
-                {
-                    "action": row[0],
-                    "user": row[1],
-                    "timestamp": row[2],
-                    "changes": json.loads(row[3]) if row[3] else None,
-                    "snapshot": json.loads(row[4]) if row[4] else None,
-                }
-            )
-
-        return logs
+        return _audit_entries(rows)
 
     async def save(self, *, db=None) -> Self:
         """Save with automatic audit logging (async).
@@ -1056,34 +931,20 @@ class AsyncAuditLogMixin:
 
     async def _save_and_log(self, db) -> Self:
         is_new = getattr(self, "_id", None) is None
-
-        # For updates, fetch current DB state to compare against
-        if not is_new:
-            db, table = _instance_binding(self, db)
-            current = await db.find_document(table, self._id)
-            if current:
-                self.__dict__["_pre_save_snapshot"] = {
-                    k: v for k, v in current.items() if k not in ("_id", "_version")
-                }
-
+        old_row = (
+            None if is_new else await db.find_document(_instance_binding(self, db)[1], self._id)
+        )
         result = await super().save(db=db)  # type: ignore[misc]
-
+        written = self._snapshot  # type: ignore[attr-defined]
         if is_new:
-            await self._log_audit("create", db=db)
-            # Capture state for future updates
-            self._capture_snapshot()
-        else:
-            changes = self._get_changes()
-            if changes:
-                await self._log_audit("update", changes, db=db)
-            # Update snapshot for next save
-            self._capture_snapshot()
-
+            await self._log_audit("create", None, written, db=db)
+        elif changes := _audit_changes(old_row, written):
+            await self._log_audit("update", changes, written, db=db)
         return result  # type: ignore[return-value]
 
     async def delete(self, *, db=None) -> None:
         """Delete with audit logging (the row and its audit entry go together)."""
         db, _ = _instance_binding(self, db)
         async with _aatomic(db):
-            await self._log_audit("delete", db=db)
+            await self._log_audit("delete", None, await self._adump_with_relations(), db=db)  # type: ignore[attr-defined]
             await super().delete(db=db)  # type: ignore[misc]
