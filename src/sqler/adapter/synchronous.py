@@ -6,7 +6,7 @@ from typing import Any, Optional, Self
 
 from sqler.logging import query_logger
 
-from ..exceptions import NotConnectedError, QueryError
+from ..exceptions import NotConnectedError, QueryError, unique_violation_from
 from .abstract import AdapterABC
 
 
@@ -156,9 +156,12 @@ class SQLiteAdapter(AdapterABC):
                 cursor.execute(query, params)
             else:
                 cursor.execute(query)
-        except BaseException as e:  # an interrupt counts as a failure
-            error_msg = str(e) or type(e).__name__
+        except BaseException as exc:  # an interrupt counts as a failure
+            error_msg = str(exc) or type(exc).__name__
             self._end_failed_implicit_transaction(conn)
+            converted = unique_violation_from(exc)
+            if converted is not None:
+                raise converted from exc
             raise
         finally:
             if _logging:
@@ -185,8 +188,11 @@ class SQLiteAdapter(AdapterABC):
             cursor.executemany(query, param_list or [])
             if self._txn_depth == 0:
                 conn.commit()
-        except BaseException:
+        except BaseException as exc:
             self._end_failed_implicit_transaction(conn)
+            converted = unique_violation_from(exc)
+            if converted is not None:
+                raise converted from exc
             raise
         return cursor
 
@@ -207,8 +213,11 @@ class SQLiteAdapter(AdapterABC):
         try:
             cursor.executescript(script)
             conn.commit()
-        except BaseException:
+        except BaseException as exc:
             self._end_failed_implicit_transaction(conn)
+            converted = unique_violation_from(exc)
+            if converted is not None:
+                raise converted from exc
             raise
         return cursor
 
@@ -221,8 +230,11 @@ class SQLiteAdapter(AdapterABC):
         conn = self._conn()  # Raises NotConnectedError if not connected
         try:
             conn.commit()
-        except BaseException:
+        except BaseException as exc:
             self._end_failed_implicit_transaction(conn)
+            converted = unique_violation_from(exc)
+            if converted is not None:
+                raise converted from exc
             raise
 
     def auto_commit(self) -> None:

@@ -9,7 +9,12 @@ from typing import Any, List, Optional, Self
 
 import aiosqlite
 
-from sqler.exceptions import ConnectionPoolExhaustedError, NotConnectedError, QueryError
+from sqler.exceptions import (
+    ConnectionPoolExhaustedError,
+    NotConnectedError,
+    QueryError,
+    unique_violation_from,
+)
 from sqler.logging import query_logger
 from sqler.pool import PoolStats
 
@@ -349,9 +354,12 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         cursor = None
         try:
             cursor = await conn.execute(query, params or [])
-        except BaseException as e:  # a cancellation counts as a failure
-            error_msg = str(e) or type(e).__name__
-            await self._release_after_failure(e)
+        except BaseException as exc:  # a cancellation counts as a failure
+            error_msg = str(exc) or type(exc).__name__
+            await self._release_after_failure(exc)
+            converted = unique_violation_from(exc)
+            if converted is not None:
+                raise converted from exc
             raise
         finally:
             if _logging:
@@ -378,6 +386,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
                 await conn.commit()
         except BaseException as exc:
             await self._release_after_failure(exc)
+            converted = unique_violation_from(exc)
+            if converted is not None:
+                raise converted from exc
             raise
         await self._release()
         return cursor
@@ -400,6 +411,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             await conn.commit()
         except BaseException as exc:
             await self._release_after_failure(exc)
+            converted = unique_violation_from(exc)
+            if converted is not None:
+                raise converted from exc
             raise
         await self._release()
         return cursor
