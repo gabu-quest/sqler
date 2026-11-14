@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 from typing import Any, Generic, Optional, Type, TypeVar
 
 from sqler.models import _refs
-from sqler.models._table_names import _is_missing_table, _unchecked_table_name
-from sqler.models.queryset import _ref_key
+from sqler.models._table_names import _unchecked_table_name
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
 
@@ -65,9 +63,10 @@ class AsyncSQLerQuerySet(Generic[T]):
     # execution
     async def all(self) -> list[T]:
         docs = await self._query.all_dicts()
+        per_row = self._resolve
         if self._resolve:
             try:
-                docs = await self._abatch_resolve(docs)
+                docs, per_row = await self._abatch(docs)
             except RecursionError:
                 logger.warning(
                     f"Circular reference detected during async batch resolution for "
@@ -81,7 +80,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         results: list[T] = []
         other_table = self._reads_other_table()
         for d in docs:
-            if self._resolve:
+            if per_row:
                 try:
                     aresolver = getattr(self._model_cls, "_aresolve_relations", None)
                     if aresolver is not None:
@@ -280,121 +279,18 @@ class AsyncSQLerQuerySet(Generic[T]):
         return rows
 
     async def _abatch_resolve(self, docs: list[dict], max_depth: int = 5) -> list[dict]:
-        """Recursively resolve all relationship references in batch (async).
+        """Resolve the references of ``docs`` into stored documents (see ``_refs.batch``)."""
+        return (await self._abatch(docs, max_depth))[0]
 
-        This method:
-        1. Recursively collects ALL refs at all nesting depths
-        2. Fetches them in batch (one query per table per depth level)
-        3. Replaces refs with resolved data, recursively processing nested refs
-
-        Args:
-            docs: List of documents to resolve.
-            max_depth: Maximum recursion depth to prevent infinite loops.
-
-        Returns:
-            list[dict]: Documents with references replaced by actual data.
-        """
-        if max_depth <= 0 or not docs:
-            return docs
-
-        import json
-
+    async def _abatch(self, docs: list[dict], max_depth: int = 5) -> tuple[list[dict], bool]:
+        """``(documents, found)`` of ``_refs.batch``: ``found`` is False when no document
+        holds a reference."""
         adapter = self._query._adapter  # type: ignore[attr-defined]
         assert adapter is not None, "Query has no adapter bound"
-
-        # Master dict to hold ALL resolved refs across all depths
-        resolved: dict[tuple[str, int], dict] = {}
-        # tables a reference points into that do not exist
-        missing: set[str] = set()
-
-        async def collect_and_fetch(values: list, depth: int) -> None:
-            """Recursively collect refs and fetch them, building up resolved dict."""
-            if depth <= 0:
-                return
-
-            # Collect refs grouped by table
-            refs_by_table: dict[str, set[int]] = {}
-
-            def collect(value):
-                if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    key = _ref_key(value)
-                    if key is None:  # Not a usable ref: left as it is, never sent to SQL
-                        return
-                    if key not in resolved:  # Don't re-fetch already resolved
-                        refs_by_table.setdefault(key[0], set()).add(key[1])
-                elif isinstance(value, dict):
-                    for v in value.values():
-                        collect(v)
-                elif isinstance(value, list):
-                    for v in value:
-                        collect(v)
-
-            for v in values:
-                collect(v)
-
-            if not refs_by_table:
-                return
-
-            # Fetch all refs and recurse into fetched docs
-            nested_docs: list[dict] = []
-            for table, ids in refs_by_table.items():
-                if not ids:
-                    continue
-                placeholders = ",".join(["?"] * len(ids))
-                sql = f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders})"
-                try:
-                    cur = await adapter.execute(sql, list(ids))
-                except sqlite3.OperationalError as exc:
-                    if not _is_missing_table(exc, table):
-                        raise
-                    missing.add(table)
-                    continue
-                rows = await cur.fetchall()
-                await cur.close()
-                for _id, data_json in rows:
-                    obj = json.loads(data_json)
-                    obj["_id"] = _id
-                    resolved[(table, int(_id))] = obj
-                    nested_docs.append(obj)
-
-            # Recursively fetch nested refs
-            if nested_docs:
-                await collect_and_fetch(nested_docs, depth - 1)
-
-        # Collect and fetch all refs at all depths into single resolved dict
-        await collect_and_fetch(docs, max_depth)
-
-        if not resolved and not missing:
-            return docs
-
-        # Replace refs with resolved data, recursively processing nested refs
-        def make_replace():
-            # Track refs currently being processed (stack) to detect cycles
-            processing: set[tuple[str, int]] = set()
-
-            def replace(value):
-                if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    key = _ref_key(value)
-                    if key is None:
-                        return value  # Not a usable ref, keep original
-                    if key in processing:
-                        return value  # Circular ref - we're already processing this
-                    fetched = resolved.get(key)
-                    if fetched is None:
-                        if key[0] in missing and _refs.table_is_bound(key[0]):
-                            return None  # as a read of one row gives
-                        return value  # Not found, keep original ref
-                    # Mark as processing, resolve, then unmark
-                    processing.add(key)
-                    result = {k: replace(v) for k, v in fetched.items()}
-                    processing.discard(key)
-                    return result
-                if isinstance(value, dict):
-                    return {k: replace(v) for k, v in value.items()}
-                if isinstance(value, list):
-                    return [replace(v) for v in value]
-                return value
-
-            return replace
-
-        return [make_replace()(d) for d in docs]
+        walk = _refs.batch(docs, max_depth)
+        try:
+            want = next(walk)
+            while True:
+                want = walk.send(await _refs.aread_rows(adapter, *want))
+        except StopIteration as done:
+            return done.value
