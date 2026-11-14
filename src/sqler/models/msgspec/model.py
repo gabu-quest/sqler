@@ -18,6 +18,7 @@ from typing import (
 )
 
 from sqler import registry
+from sqler._stored import stored
 from sqler.exceptions import NotBoundError, UniqueConstraintError
 from sqler.models import _dirty
 from sqler.models._table_names import (  # noqa: F401
@@ -27,7 +28,6 @@ from sqler.models._table_names import (  # noqa: F401
     _pluralize,
     _read_document,
     _read_documents,
-    _ref_table,
 )
 from sqler.models.msgspec.base import SQLerMsgspecModelBase, _mixin_field_names, _public_fields
 from sqler.utils import validate_field_name, validate_table_name
@@ -457,45 +457,15 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         return self
 
     def _dump_with_relations(self) -> dict:
-        """Serialize model with relationship encoding.
-
-        Related model instances are encoded as {"_table": ..., "_id": ...}
-        for storage.
-        """
-        from datetime import date, datetime
-
-        visited: set[tuple[str, int]] = set()
-
-        def encode(value: object) -> Any:
-            # Handle SQLerMsgspecModel instances
-            if isinstance(value, SQLerMsgspecModel):
-                if value._id is None:
-                    raise ValueError("Related model must be saved before saving parent")
-                table = _ref_table(value)
-                if (table, int(value._id)) not in visited:
-                    visited.add((table, int(value._id)))
-                return {"_table": table, "_id": value._id}
-
-            # Handle already-encoded ref dicts
-            if isinstance(value, dict) and "_table" in value and "_id" in value:
-                return {"_table": value["_table"], "_id": value["_id"]}
-
-            if isinstance(value, list):
-                return [encode(v) for v in value]
-            if isinstance(value, dict):
-                return {k: encode(v) for k, v in value.items()}
-            if isinstance(value, datetime):
-                return value.isoformat()
-            if isinstance(value, date):
-                return value.isoformat()
-            return value
-
-        payload: dict = {}
-        for f in _public_fields(type(self)):
-            payload[f.name] = encode(getattr(self, f.name))
+        """The document ``save()`` writes: each field in stored form, a related model as the
+        reference to its row."""
+        cls = type(self)
+        payload = {
+            f.name: stored(getattr(self, f.name), SQLerMsgspecModel) for f in _public_fields(cls)
+        }
         # Include mixin fields (not visible to msgspec.structs.fields)
-        for name in _mixin_field_names(type(self)):
-            payload[name] = encode(getattr(self, name, None))
+        for name in _mixin_field_names(cls):
+            payload[name] = stored(getattr(self, name, None), SQLerMsgspecModel)
         return payload
 
     # ----- dirty tracking -----

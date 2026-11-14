@@ -2,6 +2,7 @@ import re
 import sqlite3
 from typing import Any, Optional, Self
 
+from sqler._stored import column_arg, json_arg
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
 from sqler.query.expression import SQLerExpression
@@ -599,8 +600,6 @@ class AsyncSQLerQuery:
         for key in fields:
             validate_field_name(key)
 
-        import json
-
         promoted_set: list[str] = []
         promoted_params: list[Any] = []
         json_set_parts: list[str] = []
@@ -620,13 +619,13 @@ class AsyncSQLerQuery:
                     json_set_parts.append(f"'$.{field}', {expr_sql}")
                     json_set_params.extend(value.params)
             else:
-                serialized = json.dumps(value) if isinstance(value, (dict, list)) else value
                 if is_promoted:
                     promoted_set.append(f"{field} = ?")
-                    promoted_params.append(serialized)
+                    promoted_params.append(column_arg(value))
                 else:
-                    json_set_parts.append(f"'$.{field}', ?")
-                    json_set_params.append(serialized)
+                    slot, param = json_arg(value)
+                    json_set_parts.append(f"'$.{field}', {slot}")
+                    json_set_params.append(param)
 
         set_clauses: list[str] = []
         all_set_params: list[Any] = []
@@ -698,13 +697,13 @@ class AsyncSQLerQuery:
                     json_set_parts.append(f"'$.{field}', {expr_sql}")
                     json_set_params.extend(value.params)
             else:
-                serialized = json.dumps(value) if isinstance(value, (dict, list)) else value
                 if is_promoted:
                     promoted_set.append(f"{field} = ?")
-                    promoted_params.append(serialized)
+                    promoted_params.append(column_arg(value))
                 else:
-                    json_set_parts.append(f"'$.{field}', ?")
-                    json_set_params.append(serialized)
+                    slot, param = json_arg(value)
+                    json_set_parts.append(f"'$.{field}', {slot}")
+                    json_set_params.append(param)
 
         set_clauses: list[str] = []
         all_set_params: list[Any] = []
@@ -832,13 +831,13 @@ class AsyncSQLerQuery:
                     json_set_parts.append(f"'$.{field}', {expr_sql}")
                     json_set_params.extend(value.params)
             else:
-                serialized = json.dumps(value) if isinstance(value, (dict, list)) else value
                 if is_promoted:
                     promoted_set.append(f"{field} = ?")
-                    promoted_params.append(serialized)
+                    promoted_params.append(column_arg(value))
                 else:
-                    json_set_parts.append(f"'$.{field}', ?")
-                    json_set_params.append(serialized)
+                    slot, param = json_arg(value)
+                    json_set_parts.append(f"'$.{field}', {slot}")
+                    json_set_params.append(param)
 
         set_clauses: list[str] = []
         all_set_params: list[Any] = []

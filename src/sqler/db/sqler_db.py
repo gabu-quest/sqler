@@ -5,6 +5,7 @@ import threading
 from types import SimpleNamespace
 from typing import Any, NamedTuple, Optional
 
+from sqler._stored import dumps, stored
 from sqler.adapter import SQLiteAdapter
 from sqler.exceptions import InvalidIdentifierError, StaleVersionError
 from sqler.query import SQLerQuery
@@ -366,11 +367,11 @@ class SQLerDB:
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = v
+                promoted_vals[k] = stored(v)
             else:
                 json_doc[k] = v
 
-        payload = json.dumps(json_doc)
+        payload = dumps(json_doc)
 
         if _id is None:
             # INSERT
@@ -424,11 +425,11 @@ class SQLerDB:
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = v
+                promoted_vals[k] = stored(v)
             else:
                 json_doc[k] = v
 
-        payload = json.dumps(json_doc)
+        payload = dumps(json_doc)
 
         if _id is None:
             cols = ["data", "_version"] + list(promoted_vals.keys())
@@ -473,7 +474,7 @@ class SQLerDB:
             int: Newly assigned ``_id``.
         """
         self._ensure_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         cursor = self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
         self.adapter.auto_commit()
         return cursor.lastrowid
@@ -490,7 +491,7 @@ class SQLerDB:
             int: The existing or newly assigned ``_id``.
         """
         self._ensure_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         if _id is None:
             return self.insert_document(table, doc)
         self.adapter.execute(f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id])
@@ -609,13 +610,13 @@ class SQLerDB:
 
                 for doc in chunk:
                     if promoted_fields:
-                        promoted_vals = {k: doc[k] for k in promoted_fields if k in doc}
+                        promoted_vals = {k: stored(doc[k]) for k in promoted_fields if k in doc}
                         json_doc = {k: v for k, v in doc.items() if k not in promoted_fields}
                     else:
                         json_doc = doc
                         promoted_vals = {}
 
-                    payload = json.dumps(json_doc)
+                    payload = dumps(json_doc)
                     row_placeholders = ["json(?)"]
                     params.append(payload)
 
@@ -686,7 +687,7 @@ class SQLerDB:
                 for offset in range(0, len(inserts), 999):
                     chunk = inserts[offset : offset + 999]
                     params = [
-                        json.dumps({k: v for k, v in doc.items() if k != "_id"})
+                        dumps({k: v for k, v in doc.items() if k != "_id"})
                         for _, doc in chunk
                     ]
                     values_sql = ", ".join("(json(?))" for _ in chunk)
@@ -710,9 +711,7 @@ class SQLerDB:
                     for _, doc in chunk:
                         params.extend([
                             int(doc["_id"]),
-                            json.dumps(
-                                {k: v for k, v in doc.items() if k != "_id"}
-                            ),
+                            dumps({k: v for k, v in doc.items() if k != "_id"}),
                         ])
                     values_sql = ", ".join("(?, json(?))" for _ in chunk)
                     sql = (
@@ -1110,7 +1109,7 @@ class SQLerDB:
         table = validate_table_name(table)
         if not self._is_versioned(table):
             self._ensure_versioned_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         if _id is None:
             cur = self.adapter.execute(
                 f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",

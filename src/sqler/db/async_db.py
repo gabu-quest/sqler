@@ -3,6 +3,7 @@ import sqlite3
 from contextvars import ContextVar
 from typing import Any, Optional
 
+from sqler._stored import dumps, stored
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter
 from sqler.db.sqler_db import (
     _MAX_VARIABLES,
@@ -245,11 +246,11 @@ class AsyncSQLerDB:
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = v
+                promoted_vals[k] = stored(v)
             else:
                 json_doc[k] = v
 
-        payload = json.dumps(json_doc)
+        payload = dumps(json_doc)
 
         if _id is None:
             cols = ["data"] + list(promoted_vals.keys())
@@ -296,11 +297,11 @@ class AsyncSQLerDB:
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = v
+                promoted_vals[k] = stored(v)
             else:
                 json_doc[k] = v
 
-        payload = json.dumps(json_doc)
+        payload = dumps(json_doc)
 
         if _id is None:
             cols = ["data", "_version"] + list(promoted_vals.keys())
@@ -341,7 +342,7 @@ class AsyncSQLerDB:
 
     async def insert_document(self, table: str, doc: dict[str, Any]) -> int:
         await self._ensure_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         cur = await self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
         try:
             await self.adapter.auto_commit()
@@ -352,7 +353,7 @@ class AsyncSQLerDB:
 
     async def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
         await self._ensure_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         if _id is None:
             return await self.insert_document(table, doc)
         cur = await self.adapter.execute(
@@ -553,13 +554,13 @@ class AsyncSQLerDB:
 
                 for doc in chunk:
                     if promoted_fields:
-                        promoted_vals = {k: doc[k] for k in promoted_fields if k in doc}
+                        promoted_vals = {k: stored(doc[k]) for k in promoted_fields if k in doc}
                         json_doc = {k: v for k, v in doc.items() if k not in promoted_fields}
                     else:
                         json_doc = doc
                         promoted_vals = {}
 
-                    payload = json.dumps(json_doc)
+                    payload = dumps(json_doc)
                     row_placeholders = ["json(?)"]
                     params.append(payload)
 
@@ -610,7 +611,7 @@ class AsyncSQLerDB:
         for doc in docs:
             doc_id = doc.get("_id")
             payload_dict = {k: v for k, v in doc.items() if k != "_id"}
-            payload = json.dumps(payload_dict)
+            payload = dumps(payload_dict)
             if doc_id is None:
                 cur = await self.adapter.execute(
                     f"INSERT INTO {table} (data) VALUES (json(?));",
@@ -838,7 +839,7 @@ class AsyncSQLerDB:
         self, table: str, _id: Optional[int], doc: dict[str, Any], expected_version: Optional[int]
     ) -> tuple[int, int]:
         await self._ensure_versioned_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         if _id is None:
             cur = await self.adapter.execute(
                 f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",

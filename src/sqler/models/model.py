@@ -7,6 +7,7 @@ from typing import ClassVar, Optional, Type, TypeVar
 from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
+from sqler._stored import stored
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import NotBoundError, UniqueConstraintError
 from sqler.models import _dirty, _refs
@@ -17,7 +18,6 @@ from sqler.models._table_names import (  # noqa: F401
     _pluralize,
     _read_document,
     _read_documents,
-    _ref_table,
     _register_defined_class,
 )
 from sqler.models.queryset import SQLerQuerySet
@@ -562,41 +562,10 @@ class SQLerModel(BaseModel):
         return out
 
     def _dump_with_relations(self) -> dict:
-        from datetime import date, datetime
-
-        visited: set[tuple[str, int]] = set()
-
-        def encode(value: object):
-            from sqler.models.model import SQLerModel
-            from sqler.models.ref import as_ref
-
-            if isinstance(value, SQLerModel):
-                # avoid recursion: require saved child
-                if value._id is None:
-                    raise ValueError("Related model must be saved before saving parent")
-                key = (_ref_table(value), int(value._id))
-                if key not in visited:
-                    visited.add(key)
-                return as_ref(value)
-            # already a ref dict: validate minimally
-            if isinstance(value, dict) and "_table" in value and "_id" in value:
-                return {"_table": value["_table"], "_id": value["_id"]}
-            if isinstance(value, list):
-                return [encode(v) for v in value]
-            if isinstance(value, dict):
-                return {k: encode(v) for k, v in value.items()}
-            if isinstance(value, BaseModel):
-                return value.model_dump()
-            # Handle datetime/date serialization
-            if isinstance(value, datetime):
-                return value.isoformat()
-            if isinstance(value, date):
-                return value.isoformat()
-            return value
-
-        payload: dict = {}
-        for name in self.__class__.model_fields:
-            if name == "_id":
-                continue
-            payload[name] = encode(getattr(self, name))
-        return payload
+        """The document ``save()`` writes: each field in stored form, a related model as the
+        reference to its row."""
+        return {
+            name: stored(getattr(self, name), SQLerModel)
+            for name in type(self).model_fields
+            if name != "_id"
+        }
