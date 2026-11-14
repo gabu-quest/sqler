@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 import pathlib
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -22,7 +23,8 @@ from typing import Any, NamedTuple, Optional
 
 import pydantic
 import pytest
-from sqler import AsyncSQLerDB, SQLerDB, SQLerModel, SQLerSafeModel
+import sqler
+from sqler import AsyncSQLerDB, SQLerDB, SQLerModel, SQLerSafeModel, UnstorableValueError
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.async_safe import AsyncSQLerSafeModel
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
@@ -69,6 +71,10 @@ class Inner(pydantic.BaseModel):
     day: date
 
 
+class Priced(pydantic.BaseModel):
+    price: Decimal
+
+
 class Slot(pydantic.BaseModel):
     at: datetime
     tags: set[str] = set()
@@ -109,6 +115,14 @@ KINDS = [
     Kind("dict_of_date", dict[str, date], {"d": DAY}, {"d": DAY_TEXT}, {"d": date(2026, 11, 15)}),
     Kind("deep", None, [{"d": [DAY, (AT,)], "u": {UID}}], [{"d": [DAY_TEXT, [AT_TEXT]], "u": [UID_TEXT]}], []),
     Kind("nested_model", Inner, Inner(day=DAY), {"day": DAY_TEXT}, Inner(day=date(2026, 11, 15))),
+    Kind("decimal", Decimal, Decimal("1.1"), 1.1, Decimal("2.5")),
+    Kind("decimal_whole", Decimal, Decimal("5"), 5, Decimal("6")),
+    Kind("decimal_trailing_zeros", Decimal, Decimal("5.00"), 5, Decimal("6")),
+    Kind("list_of_decimal", list[Decimal], [Decimal("1.1"), Decimal("2")], [1.1, 2], [Decimal("3")]),
+    Kind("dict_of_decimal", dict[str, Decimal], {"p": Decimal("1.1")}, {"p": 1.1}, {"p": Decimal("2")}),
+    Kind("set_of_decimal", set[Decimal], {Decimal("2.5"), Decimal("1.1")}, [1.1, 2.5], {Decimal("4")}),
+    Kind("tuple_of_decimal", None, (Decimal("1.1"), Decimal("2")), [1.1, 2], ()),
+    Kind("nested_model_decimal", Priced, Priced(price=Decimal("1.1")), {"price": 1.1}, Priced(price=Decimal("2"))),
     Kind(
         "nested_model_deep",
         Slot,
@@ -190,7 +204,7 @@ class Rows:
 
 def _text(plain):
     """What ``json_extract`` gives for the stored ``plain``: a scalar as it is, else JSON text."""
-    return plain if isinstance(plain, (str, int)) else json.dumps(plain, separators=(",", ":"))
+    return plain if isinstance(plain, (str, int, float)) else json.dumps(plain, separators=(",", ":"))
 
 
 def _run(steps, is_async: bool):
@@ -243,16 +257,16 @@ def test_save_many_stores_the_same_form(base, kind):
 @pytest.mark.parametrize("base", list(BASES))
 @pytest.mark.parametrize(
     "value, kind_name",
-    [(Decimal("1.10"), "Decimal"), (timedelta(hours=2), "timedelta"), (b"ab", "bytes")],
-    ids=["decimal", "timedelta", "bytes"],
+    [(timedelta(hours=2), "timedelta"), (b"ab", "bytes")],
+    ids=["timedelta", "bytes"],
 )
-def test_a_kind_with_no_stored_form_is_refused_as_before(base, value, kind_name):
+def test_a_kind_with_no_stored_form_is_refused_naming_the_field(base, value, kind_name):
     spec = BASES[base]
 
     async def steps(rows):
         cls = spec.make(spec.cls, None)
         cls.set_db(rows.db, "t")
-        with pytest.raises(TypeError, match=f"^Object of type {kind_name} is not JSON serializable$"):
+        with pytest.raises(TypeError, match=rf"^Object of type {kind_name} is not JSON serializable \(at v\)$"):
             await _aw(cls(v=value).save())
         return await rows.sql("SELECT count(*) FROM t")
 
@@ -402,7 +416,7 @@ def test_a_filter_finds_what_save_stored(events, expression, names):
 
 @pytest.mark.parametrize(
     "kind",
-    [k for k in KINDS if k.name in {"datetime_tz", "date", "time", "uuid", "path", "enum", "str_enum", "int_enum", "enum_of_date"}],
+    [k for k in KINDS if k.name in {"datetime_tz", "date", "time", "uuid", "path", "enum", "str_enum", "int_enum", "enum_of_date", "decimal", "decimal_whole"}],
     ids=lambda k: k.name,
 )
 def test_a_filter_on_a_kind_finds_the_row_saved_with_it(kind):
@@ -460,8 +474,8 @@ def test_a_filter_on_a_plain_value_binds_it_as_it_is(value):
 
 
 def test_a_filter_on_a_kind_with_no_stored_form_is_refused_as_before(events):
-    with pytest.raises(sqlite3.ProgrammingError, match="type 'decimal.Decimal' is not supported"):
-        SvEvent.query().filter(F("extra") == Decimal("1.10")).count()
+    with pytest.raises(sqlite3.ProgrammingError, match="type 'datetime.timedelta' is not supported"):
+        SvEvent.query().filter(F("extra") == timedelta(hours=2)).count()
 
 
 def test_an_async_filter_finds_what_save_stored():
@@ -503,6 +517,8 @@ _UPDATE_VALUES = [
     ("plain_dict", {"k": [1]}, '{"k":[1]}', "object"),
     ("text", "plain", "plain", "text"),
     ("int", 5, 5, "integer"),
+    ("decimal", Decimal("1.1"), 1.1, "real"),
+    ("decimal_whole", Decimal("5.00"), 5, "integer"),
     ("true", True, 1, "true"),  # json_extract gives 1 for a JSON true; the type tells them apart
     ("false", False, 0, "false"),
 ]
@@ -560,6 +576,7 @@ RAW = {
     "deep": [{"d": DAY, "s": {AT}}],
     "text": "t",
     "n": 1,
+    "price": Decimal("1.1"),
 }
 RAW_STORED = {
     "when": WHEN_TEXT,
@@ -576,6 +593,7 @@ RAW_STORED = {
     "deep": [{"d": DAY_TEXT, "s": [AT_TEXT]}],
     "text": "t",
     "n": 1,
+    "price": 1.1,
 }
 
 
@@ -644,10 +662,11 @@ def test_a_raw_document_write_stores_the_form_save_stores(is_async, write):
 
 
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_a_raw_write_of_a_kind_with_no_stored_form_is_refused_as_before(is_async):
+def test_a_raw_write_of_a_kind_with_no_stored_form_is_refused_naming_the_place(is_async):
     async def steps(rows):
-        with pytest.raises(TypeError, match="^Object of type Decimal is not JSON serializable$"):
-            await _aw(rows.db.insert_document("raw", {"d": Decimal("1.10")}))
+        doc = {"lines": [{"d": 1}, {"d": 2}, {"d": timedelta(hours=2)}]}
+        with pytest.raises(TypeError, match=r"^Object of type timedelta is not JSON serializable \(at lines\[2\]\.d\)$"):
+            await _aw(rows.db.insert_document("raw", doc))
         return await rows.sql("SELECT count(*) FROM raw")
 
     assert _run(steps, is_async) == [(0,)]
@@ -800,3 +819,343 @@ def test_a_timezone_aware_datetime_has_one_form_every_way_in():
         assert SvEvent.query().filter(F("name") == "updated").first().when == tokyo
     finally:
         db.close()
+
+
+# ---- Decimal ----------------------------------------------------------------------------
+# A Decimal is stored as the JSON number it equals; one a number cannot hold exactly is refused.
+
+_DECIMAL_TEXT = [
+    ("1.1", "1.1"),
+    ("5", "5"),
+    ("-0.25", "-0.25"),
+    ("5.00", "5"),  # a whole value is the integer: 5.00 and 5 are one number and one stored form
+    ("9999999999999.99", "9999999999999.99"),
+    ("-0", "0"),
+    ("1E+2", "100"),
+    ("0.000001", "1e-06"),
+]
+_REFUSED_DECIMALS = ["NaN", "Infinity", "-Infinity", "0.1234567890123456789", str(2**63), "1e400"]
+
+
+@pytest.mark.parametrize("base", list(BASES))
+@pytest.mark.parametrize("given, text", _DECIMAL_TEXT, ids=[d[0] for d in _DECIMAL_TEXT])
+def test_a_decimal_is_stored_as_a_number_in_the_row_text(base, given, text):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, Decimal)
+        cls.set_db(rows.db, "t")
+        await _aw(cls(v=Decimal(given)).save())
+        return await rows.sql("SELECT data FROM t")
+
+    [(data,)] = _run(steps, spec.is_async)
+    assert f'"v": {text}' in data or f'"v":{text}' in data
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("given, text", _DECIMAL_TEXT, ids=[d[0] for d in _DECIMAL_TEXT])
+def test_a_decimal_in_a_document_write_is_a_number_in_the_row_text(is_async, given, text):
+    async def steps(rows):
+        await _aw(rows.db.insert_document("raw", {"v": Decimal(given), "xs": [Decimal(given)]}))
+        return await rows.sql("SELECT data FROM raw")
+
+    [(data,)] = _run(steps, is_async)
+    assert data.count(text) == 2 and f'"{text}"' not in data
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("call", list(_UPDATES))
+@pytest.mark.parametrize("given, text", _DECIMAL_TEXT, ids=[d[0] for d in _DECIMAL_TEXT])
+def test_a_decimal_in_an_update_is_a_number(is_async, call, given, text):
+    model = SvAsyncEvent if is_async else SvEvent
+
+    async def steps(rows):
+        model.set_db(rows.db, _TABLE[model])
+        await _aw(model(name="a").save())
+        await _aw(_UPDATES[call](model.query().filter(F("name") == "a"), extra=Decimal(given)))
+        return await rows.sql(f"SELECT json_type(data, '$.extra'), json_extract(data, '$.extra') FROM {_TABLE[model]}")
+
+    [(kind, value)] = _run(steps, is_async)
+    assert kind in {"integer", "real"}
+    assert value == float(Decimal(given))
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_decimal_in_a_promoted_column_is_a_number(is_async):
+    async def steps(rows):
+        await _aw(rows.db.ensure_table("raw", promoted={"price": "REAL"}))
+        await _aw(rows.db.upsert_document_promoted("raw", None, {"price": Decimal("1.1"), "n": 1}, ["price"]))
+        with pytest.raises(TypeError, match="a number cannot hold it"):
+            await _aw(rows.db.upsert_document_promoted("raw", None, {"price": Decimal("NaN")}, ["price"]))
+        return await rows.sql("SELECT price, typeof(price) FROM raw")
+
+    assert _run(steps, is_async) == [(1.1, "real")]
+
+
+@pytest.mark.parametrize("given", _REFUSED_DECIMALS)
+@pytest.mark.parametrize("base", list(BASES))
+def test_a_decimal_a_number_cannot_hold_is_refused_on_save(base, given):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, None)
+        cls.set_db(rows.db, "t")
+        await _aw(cls(v=1).save())
+        with pytest.raises(TypeError, match=rf"^Decimal {re.escape(str(Decimal(given)))} cannot be stored: a number cannot hold it$"):
+            await _aw(cls(v=Decimal(given)).save())
+        return await rows.sql("SELECT count(*) FROM t")
+
+    assert _run(steps, spec.is_async) == [(1,)]
+
+
+@pytest.mark.parametrize("given", _REFUSED_DECIMALS)
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_decimal_a_number_cannot_hold_is_refused_in_a_document_and_names_the_place(is_async, given):
+    async def steps(rows):
+        doc = {"lines": [{"price": 1}, {"price": 2}, {"price": Decimal(given)}]}
+        with pytest.raises(TypeError, match=r"a number cannot hold it \(at lines\[2\]\.price\)$"):
+            await _aw(rows.db.insert_document("raw", doc))
+        with pytest.raises(TypeError, match=r"\(at price\)$"):
+            await _aw(rows.db.insert_document("raw", {"price": Decimal(given)}))
+        return await rows.sql("SELECT count(*) FROM raw")
+
+    assert _run(steps, is_async) == [(0,)]
+
+
+@pytest.mark.parametrize("given", _REFUSED_DECIMALS)
+@pytest.mark.parametrize("call", list(_UPDATES))
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_decimal_a_number_cannot_hold_is_refused_in_an_update(is_async, call, given):
+    model = SvAsyncEvent if is_async else SvEvent
+
+    async def steps(rows):
+        model.set_db(rows.db, _TABLE[model])
+        await _aw(model(name="a").save())
+        with pytest.raises(TypeError, match=r"a number cannot hold it"):
+            await _aw(_UPDATES[call](model.query().filter(F("name") == "a"), extra=Decimal(given)))
+        return await rows.stored(_TABLE[model], "extra")
+
+    assert _run(steps, is_async) == [None]
+
+
+@pytest.mark.parametrize("given", _REFUSED_DECIMALS)
+def test_a_decimal_a_number_cannot_hold_is_refused_in_a_filter(events, given):
+    value = Decimal(given)
+    for expression in (
+        lambda: F("extra") == value,
+        lambda: F("extra") >= value,
+        lambda: F("extra").between(0, value),
+        lambda: F("extra").isin([1, value]),
+    ):
+        with pytest.raises(TypeError, match=rf"{re.escape(str(value))}.*a number cannot hold it"):
+            expression()
+
+
+_PRICES = ["0.1", "0.3", "1.05", "1.1", "2", "-0.25", "10", "9.99"]
+
+
+@pytest.fixture
+def prices():
+    db = SQLerDB.in_memory(shared=False)
+    SvEvent.set_db(db, "sv_events")
+    for text in _PRICES:
+        SvEvent(name=text, extra=Decimal(text)).save()
+    yield db
+    db.close()
+
+
+def _priced(expression) -> list[str]:
+    return sorted(e.name for e in SvEvent.query().filter(expression).all())
+
+
+@pytest.mark.parametrize("make", [Decimal, float, int], ids=["decimal", "float", "int"])
+def test_a_filter_by_a_number_compares_numbers(prices, make):
+    # 10 > 9.99 and 2 > 1.1: a text comparison would order them the other way
+    one = Decimal("1.1")
+    if make is Decimal:
+        assert _priced(F("extra") == one) == ["1.1"]
+        assert _priced(F("extra") != one) == sorted(set(_PRICES) - {"1.1"})
+        assert _priced(F("extra") < one) == ["-0.25", "0.1", "0.3", "1.05"]
+        assert _priced(F("extra") <= one) == ["-0.25", "0.1", "0.3", "1.05", "1.1"]
+        assert _priced(F("extra") > one) == ["10", "2", "9.99"]
+        assert _priced(F("extra") >= one) == ["1.1", "10", "2", "9.99"]
+        assert _priced(F("extra").between(Decimal("1.1"), Decimal("9.99"))) == ["1.1", "2", "9.99"]
+        assert _priced(F("extra").isin([Decimal("0.1"), Decimal("10"), Decimal("7")])) == ["0.1", "10"]
+        assert _priced(F("extra").in_list([Decimal("0.3")])) == ["0.3"]
+    else:
+        assert _priced(F("extra") > make(2)) == ["10", "9.99"]
+        assert _priced(F("extra") >= make(2)) == ["10", "2", "9.99"]
+        assert _priced(F("extra") == make(2)) == ["2"]
+        assert _priced(F("extra").between(make(0), make(2))) == ["0.1", "0.3", "1.05", "1.1", "2"]
+
+
+def test_a_decimal_sum_is_found_by_the_decimal_it_equals():
+    db = SQLerDB.in_memory(shared=False)
+    try:
+        SvEvent.set_db(db, "sv_events")
+        SvEvent(name="s", extra=Decimal("0.1") + Decimal("0.2")).save()
+        assert _priced(F("extra") == Decimal("0.3")) == ["s"]
+    finally:
+        db.close()
+
+
+def _typed(base_cls, **ann):
+    kw = {"kw_only": True} if base_cls is SQLerMsgspecModel else {}
+    return type("SvTyped", (base_cls,), {"__annotations__": ann, **{k: None for k in ann}}, **kw)
+
+
+@pytest.mark.parametrize("base", ["pydantic", "safe", "msgspec", "async", "async-safe"])
+def test_a_decimal_field_loads_as_the_decimal_saved(base):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = _typed(spec.cls, v=Optional[Decimal], w=Optional[Decimal])
+        cls.set_db(rows.db, "t")
+        saved = await _aw(cls(v=Decimal("0.1") + Decimal("0.2"), w=None).save())
+        loaded = await _aw(cls.from_id(saved._id))
+        again = await _aw(loaded.save())
+        return loaded.v, type(loaded.v), loaded.w, await rows.sql("SELECT data FROM t"), again._id
+
+    loaded, kind, none, data, _ = _run(steps, spec.is_async)
+    assert (loaded, kind, none) == (Decimal("0.3"), Decimal, None)
+    assert data[0][0].count("0.3") == 1
+
+
+@pytest.mark.parametrize("base", ["pydantic", "safe", "lite", "lite-safe", "msgspec"])
+def test_a_decimal_model_is_clean_after_load_and_saves_the_same_bytes(base):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, Decimal)
+        cls.set_db(rows.db, "t")
+        saved = await _aw(cls(v=Decimal("1.10")).save())
+        before = await rows.documents("t")
+        loaded = await _aw(cls.from_id(saved._id))
+        clean = loaded.is_dirty()
+        await _aw(loaded.save())
+        after = await rows.documents("t")
+        for doc in (before[0], after[0]):
+            doc.pop("_version", None)  # a safe model counts its saves
+        return clean, before == after
+
+    assert _run(steps, spec.is_async) == (False, True)
+
+
+class SubDecimal(Decimal):
+    pass
+
+
+@pytest.mark.parametrize("base", list(BASES))
+def test_a_decimal_subclass_is_stored_as_a_number(base):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, None)
+        cls.set_db(rows.db, "t")
+        await _aw(cls(v=[SubDecimal("1.1")]).save())
+        return await rows.sql("SELECT json_extract(data, '$.v[0]'), json_type(data, '$.v[0]') FROM t")
+
+    assert _run(steps, spec.is_async) == [(1.1, "real")]
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_decimal_as_a_dict_key_is_refused_as_any_non_text_key_is(is_async):
+    async def steps(rows):
+        with pytest.raises(TypeError, match="keys must be str, int, float, bool or None, not decimal.Decimal"):
+            await _aw(rows.db.insert_document("raw", {"d": {Decimal("1.1"): 1}}))
+        return await rows.sql("SELECT count(*) FROM raw")
+
+    assert _run(steps, is_async) == [(0,)]
+
+
+def test_a_refused_value_raises_the_sqler_error_with_its_place_and_value():
+    bad = Decimal("0.1234567890123456789")
+
+    async def steps(rows):
+        with pytest.raises(UnstorableValueError) as err:
+            await _aw(rows.db.insert_document("raw", {"lines": [0, {"price": bad}]}))
+        return err.value
+
+    err = _run(steps, False)
+    assert (err.field, err.value) == ("lines[1].price", bad)
+    assert str(err) == f"Decimal {bad} cannot be stored: a number cannot hold it (at lines[1].price)"
+    assert (isinstance(err, TypeError), isinstance(err, sqler.SQLerError)) == (True, True)
+    assert "UnstorableValueError" in sqler.__all__
+
+
+def test_a_refused_dict_key_is_not_given_the_place_of_another_value():
+    """The place names the value that was refused, never a different one further on."""
+
+    async def steps(rows):
+        with pytest.raises(TypeError) as err:
+            await _aw(rows.db.insert_document("raw", {"d": {Decimal("1.1"): 1}, "x": timedelta(days=1)}))
+        return str(err.value), await rows.sql("SELECT count(*) FROM raw")
+
+    message, count = _run(steps, False)
+    assert message == "keys must be str, int, float, bool or None, not decimal.Decimal"
+    assert count == [(0,)]
+
+
+@pytest.mark.parametrize("base", ["lite", "lite-safe", "async-lite", "async-lite-safe"])
+def test_a_lite_base_loads_a_decimal_as_the_number_stored(base):
+    """A lite base decodes nothing by annotation: the field comes back as the JSON number."""
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, Decimal)
+        cls.set_db(rows.db, "t")
+        saved = await _aw(cls(v=Decimal("1.10")).save())
+        loaded = await _aw(cls.from_id(saved._id))
+        return loaded.v, type(loaded.v)
+
+    assert _run(steps, spec.is_async) == (1.1, float)
+
+
+def test_a_set_of_decimals_is_stored_in_one_order():
+    async def steps(rows):
+        await _aw(rows.db.insert_document("raw", {"s": {Decimal("2.5"), Decimal("1.1"), Decimal("10"), Decimal("-1")}}))
+        return await rows.stored("raw", "s")
+
+    assert [json.loads(t) for t in _run(steps, False)] == [[-1, 1.1, 2.5, 10]]
+
+
+@pytest.mark.parametrize("base", ["safe", "async-safe"])
+def test_a_decimal_beside_a_rebased_counter_is_saved_as_a_number(base):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = _typed(spec.cls, price=Decimal, count=int)
+        cls.set_db(rows.db, "t")
+        saved = await _aw(cls(price=Decimal("1.1"), count=0).save())
+        one = await _aw(cls.from_id(saved._id))
+        two = await _aw(cls.from_id(saved._id))
+        one.count += 1
+        await _aw(one.save())
+        two.count += 1
+        await _aw(two.save())
+        return await rows.sql("SELECT json_extract(data, '$.count'), json_type(data, '$.price') FROM t")
+
+    assert _run(steps, spec.is_async) == [(2, "real")]
+
+
+@pytest.mark.parametrize("base", ["safe", "async-safe"])
+@pytest.mark.parametrize("number", [float, Decimal], ids=["float", "decimal"])
+def test_a_decimal_counter_field_behaves_as_a_float_one_does(base, number):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = _typed(spec.cls, price=number)
+        cls.set_db(rows.db, "t")
+        saved = await _aw(cls(price=number("1")).save())
+        one = await _aw(cls.from_id(saved._id))
+        two = await _aw(cls.from_id(saved._id))
+        one.price = number("2")
+        await _aw(one.save())
+        two.price = number("3")
+        try:
+            await _aw(two.save())
+        except Exception as err:
+            return type(err).__name__
+        return "saved"
+
+    assert _run(steps, spec.is_async) == "StaleVersionError"

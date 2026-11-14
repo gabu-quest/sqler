@@ -122,6 +122,16 @@ class ValidationError(ModelError):
         self.value = value
 
 
+class UnstorableValueError(ValidationError, TypeError):
+    """Raised when a value has no stored form: a kind sqler does not store, or a ``Decimal``
+    that no JSON number holds exactly.
+
+    ``value`` is the refused value. ``field`` is its place in the document being written
+    (``price``, ``lines[2].price``) where the write knows it, else ``None``. It is also a
+    ``TypeError``, the class raised for such a value before this one existed.
+    """
+
+
 class NotFoundError(ModelError):
     """Raised when a requested model instance is not found."""
 
