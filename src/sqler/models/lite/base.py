@@ -97,31 +97,13 @@ class SQLerLiteModelBase:
         for k, v in data.items():
             if k not in field_names or k.startswith("_"):
                 continue
-            # Check if this is a dict that might be a related model
-            if isinstance(v, dict) and "_id" in v:
-                # Try to resolve using registry
-                from sqler import registry
-
-                # Check if this dict has _table (from _resolve_relations path)
-                # or try to infer the model from the field annotation
-                if "_table" in v:
-                    if v.keys() == {"_table", "_id"}:
-                        # a bare stored reference: its row could not be read (a missing
-                        # table or row); it stays the reference it was, never an empty model
-                        init_data[k] = v
-                        continue
-                    # Already has table info, use registry
-                    table = v.get("_table")
-                    model_cls = registry.resolve(table) if isinstance(table, str) else None
-                    if model_cls is not None and hasattr(model_cls, "model_validate"):
-                        init_data[k] = model_cls.model_validate(v)
-                        continue
-                else:
-                    # No _table - this is from batch_resolve, try to get model from annotation
-                    admits = _refs.typed_fields(cls).get(k)
-                    if admits:
-                        init_data[k] = admits[0].model_validate(v)
-                        continue
+            # a typed position holding a stored document the batch built no model of: its
+            # model; a reference that was not followed stays the dict it is
+            if isinstance(v, dict) and "_id" in v and "_table" not in v:
+                admits = _refs.typed_fields(cls).get(k)
+                if admits:
+                    init_data[k] = admits[0].model_validate(v)
+                    continue
             init_data[k] = v
 
         # Create instance

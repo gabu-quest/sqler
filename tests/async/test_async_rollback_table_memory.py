@@ -9,7 +9,7 @@ import asyncio
 import contextvars
 import warnings
 from dataclasses import dataclass
-from typing import Any
+from typing import Optional
 
 import pytest
 import pytest_asyncio
@@ -40,7 +40,7 @@ class AMemRefChild(AsyncSQLerLiteSafeModel):
 class AMemRefParent(AsyncSQLerLiteModel):
     __tablename__ = "amem_ref_parents"
     name: str = ""
-    child: Any = None
+    child: Optional[AMemRefChild] = None
 
 
 @pytest_asyncio.fixture

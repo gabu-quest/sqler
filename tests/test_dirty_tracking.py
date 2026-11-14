@@ -765,10 +765,9 @@ def test_row_with_a_key_the_class_has_no_field_for_is_dirty_in_that_key(kind, wa
 
 @pytest.mark.parametrize("note", [{}, {"note": "n"}])
 @pytest.mark.parametrize("kind", ["lite", "alite"])
-def test_stored_reference_in_an_untyped_field_after_all_is_dirty(kind, note):
-    """``all()`` hands an untyped field the stored row of the child, not the reference; what
-    ``save()`` would write for it is that row, so the field differs from the stored
-    reference (with a key besides ``_table`` and ``_id`` or without)."""
+def test_stored_reference_in_an_untyped_field_after_all_is_not_dirty(kind, note):
+    """An untyped field is never followed: ``all()`` hands it the stored reference, which is
+    what ``save()`` would write (a key besides ``_table`` and ``_id`` is not stored)."""
 
     async def scenario():
         db = await bind(kind, "x")
@@ -781,4 +780,5 @@ def test_stored_reference_in_an_untyped_field_after_all_is_dirty(kind, note):
         await close(db)
         return out
 
-    assert asyncio.run(scenario()) == ({"name": "c", "_id": 1}, True, {"meta"})
+    ref = {"_table": f"dt_{kind}_child_x", "_id": 1}
+    assert asyncio.run(scenario()) == (ref, False, set())

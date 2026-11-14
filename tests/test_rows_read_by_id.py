@@ -8,7 +8,7 @@ What is stored is checked with ``sqlite3`` alone.
 import sqlite3
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional, Union
 
 import pytest
 from sqler import SQLerDB, SQLerLiteModel, SQLerLiteSafeModel, SQLerModel, SQLerSafeModel
@@ -26,7 +26,7 @@ class RbiHolder(SQLerModel):
     __tablename__ = "rbi_holders"
     name: str = ""
     typed: Optional[RbiJob] = None
-    untyped: Any = None
+    held: "Union[dict, RbiJob, RbiPlain, None]" = None
 
 
 class RbiSafeJob(SQLerSafeModel):
@@ -40,7 +40,7 @@ class RbiSafeHolder(SQLerModel):
     __tablename__ = "rbi_safe_holders"
     name: str = ""
     typed: Optional[RbiSafeJob] = None
-    untyped: Any = None
+    held: "Union[dict, RbiSafeJob, None]" = None
 
 
 @dataclass
@@ -55,7 +55,7 @@ class RbiLiteJob(SQLerLiteModel):
 class RbiLiteHolder(SQLerLiteModel):
     __tablename__ = "rbi_lite_holders"
     name: str = ""
-    untyped: Any = None
+    held: "Union[dict, RbiLiteJob, None]" = None
 
 
 @dataclass
@@ -70,7 +70,7 @@ class RbiLiteSafeJob(SQLerLiteSafeModel):
 class RbiLiteSafeHolder(SQLerLiteModel):
     __tablename__ = "rbi_lite_safe_holders"
     name: str = ""
-    untyped: Any = None
+    held: "Union[dict, RbiLiteSafeJob, None]" = None
 
 
 class RbiPlain(SQLerModel):
@@ -99,7 +99,10 @@ class RbiBare(SQLerModel):
 
 class RbiBareHolder(SQLerModel):
     __tablename__ = "rbi_bare_holders"
-    untyped: Any = None
+    held: "Union[dict, RbiBare, None]" = None
+
+
+RbiHolder.model_rebuild()  # it names RbiPlain, defined after it
 
 
 class RbiLate(SQLerModel):
@@ -197,10 +200,10 @@ def test_a_null_column_and_a_json_key_of_its_name_read_as_find_document_reads_th
         {"name": "m", "status": "col", "_id": 2},
     ]
     assert db.find_documents("rbi_jobs", [1, 2]) == one
-    RbiHolder(untyped={"_table": "rbi_jobs", "_id": 1}).save()
-    RbiHolder(untyped={"_table": "rbi_jobs", "_id": 2}).save()
-    assert [h.untyped["status"] for h in RbiHolder.query().all()] == [None, "col"]
-    assert [h.untyped["status"] for h in RbiHolder.from_ids([1, 2])] == [None, "col"]
+    RbiHolder(held={"_table": "rbi_jobs", "_id": 1}).save()
+    RbiHolder(held={"_table": "rbi_jobs", "_id": 2}).save()
+    assert [_status(h.held) for h in RbiHolder.query().all()] == [None, "col"]
+    assert [_status(h.held) for h in RbiHolder.from_ids([1, 2])] == [None, "col"]
 
 
 def test_a_table_with_promoted_columns_read_through_a_class_that_declares_none(db):
@@ -212,10 +215,10 @@ def test_a_table_with_promoted_columns_read_through_a_class_that_declares_none(d
         RbiBareHolder.set_db(db)
     assert RbiBare.from_id(1).status == "ready"
     assert [b.status for b in RbiBare.from_ids([1])] == ["ready"]
-    RbiBareHolder(untyped={"_table": "rbi_bares", "_id": 1}).save()
-    assert RbiBareHolder.from_id(1).untyped.status == "ready"
-    assert RbiBareHolder.from_ids([1])[0].untyped["status"] == "ready"
-    assert RbiBareHolder.query().first().untyped["status"] == "ready"
+    RbiBareHolder(held={"_table": "rbi_bares", "_id": 1}).save()
+    assert RbiBareHolder.from_id(1).held.status == "ready"
+    assert RbiBareHolder.from_ids([1])[0].held.status == "ready"
+    assert RbiBareHolder.query().first().held.status == "ready"
 
 
 def test_a_class_that_declares_a_column_its_table_was_made_without(db):
@@ -245,12 +248,12 @@ def test_a_referenced_row_carries_its_promoted_column(db, family, way):
     job_cls, holder_cls = FAMILIES[family]
     job = job_cls(name="j", status="ready")
     job.save()
-    fields = {"untyped": job}
+    fields = {"held": job}
     if "typed" in getattr(holder_cls, "model_fields", {}):
         fields["typed"] = job
     holder_cls(name="h", **fields).save()
     got = WAYS[way](holder_cls)
-    assert _status(got.untyped) == "ready"
+    assert _status(got.held) == "ready"
     if "typed" in fields:
         assert got.typed.status == "ready"
 
@@ -382,7 +385,7 @@ def test_from_ids_of_the_safe_base_reads_with_one_statement(db):
 def test_a_parent_with_a_referenced_row_reads_one_statement_per_table(db):
     job = RbiJob(name="j", status="ready")
     job.save()
-    RbiHolder(name="h", typed=job, untyped=job).save()
+    RbiHolder(name="h", typed=job, held=job).save()
     assert len(_reads(lambda: RbiHolder.from_ids([1]))) == 3  # the holders' columns learned once
     assert len(_reads(lambda: RbiHolder.from_ids([1]))) == 2
     assert len(_reads(lambda: RbiHolder.query().all())) == 2
@@ -404,7 +407,7 @@ def fresh(path, db):
 def _with_ready_job(holder_cls=RbiHolder, job_cls=RbiJob, status="ready"):
     job = job_cls(name="j", status=status)
     job.save()
-    holder_cls(name="h", typed=job, untyped=job).save()
+    holder_cls(name="h", typed=job, held=job).save()
 
 
 def _column(path, table, column, _id=1):
@@ -430,7 +433,7 @@ def test_a_referenced_row_read_through_using_a_fresh_database_object_is_whole(db
     _with_ready_job()
     got = RbiHolder.using(fresh).first()
     assert got.typed.status == "ready"
-    assert got.untyped == {"name": "j", "_id": 1, "status": "ready"}
+    assert got.held == {"name": "j", "_id": 1, "status": "ready"}
     got.typed.save(db=fresh)
     assert _column(path, "rbi_jobs", "status") == "ready"
 
@@ -568,12 +571,12 @@ def test_two_querysets_of_one_class_on_two_databases_read_their_own_child_rows(d
     try:
         job = RbiJob(name="o", status="there")
         job.save(db=other)
-        RbiHolder(name="h2", typed=job, untyped=job).save(db=other)
+        RbiHolder(name="h2", typed=job, held=job).save(db=other)
         mine, theirs = RbiHolder.using(db).first(), RbiHolder.using(other).first()
     finally:
         other.close()
-    assert (mine.typed.name, mine.typed.status, mine.untyped["status"]) == ("j", "here", "here")
-    assert (theirs.typed.name, theirs.typed.status, theirs.untyped["status"]) == ("o", "there", "there")
+    assert (mine.typed.name, mine.typed.status, _status(mine.held)) == ("j", "here", "here")
+    assert (theirs.typed.name, theirs.typed.status, _status(theirs.held)) == ("o", "there", "there")
 
 
 def test_a_queryset_built_by_hand_reads_child_rows_as_before(db):
@@ -583,7 +586,7 @@ def test_a_queryset_built_by_hand_reads_child_rows_as_before(db):
 
     _with_ready_job()
     qs = SQLerQuerySet(RbiHolder, SQLerQuery(table="rbi_holders", adapter=db.adapter))
-    assert qs.first().untyped == {"name": "j", "_id": 1}
+    assert qs.first().held == {"name": "j", "_id": 1}
 
 
 # --- a queryset's copy carries everything the queryset holds -------------------------------
@@ -594,7 +597,7 @@ CHAINS = {
     "exclude": lambda qs: qs.exclude(_name_is("x")),
     "or_filter": lambda qs: qs.or_filter(_name_is_h()),
     "distinct": lambda qs: qs.distinct(),
-    "select": lambda qs: qs.select("name", "untyped"),
+    "select": lambda qs: qs.select("name", "held"),
     "order_by": lambda qs: qs.order_by("name"),
     "limit": lambda qs: qs.limit(5),
     "offset": lambda qs: qs.limit(5).offset(0),
@@ -622,8 +625,8 @@ def test_every_chaining_method_keeps_resolve_off(db, method):
     assert qs._resolve is False
     assert qs._db is db
     if method in ROWS:
-        assert qs.first().untyped == _REF
-        assert [h.untyped for h in qs.all()] == [_REF]
+        assert qs.first().held == _REF
+        assert [h.held for h in qs.all()] == [_REF]
 
 
 @pytest.mark.parametrize("method", list(CHAINS))
@@ -633,7 +636,7 @@ def test_every_chaining_method_keeps_the_database_of_using(db, fresh, method):
     assert qs._resolve is True
     assert qs._db is fresh
     if method in ROWS:
-        assert qs.first().untyped == {"name": "j", "_id": 1, "status": "ready"}
+        assert qs.first().held == {"name": "j", "_id": 1, "status": "ready"}
 
 
 def test_a_model_bound_to_a_pooled_database_still_resolves_its_references(tmp_path):
@@ -643,11 +646,11 @@ def test_a_model_bound_to_a_pooled_database_still_resolves_its_references(tmp_pa
     try:
         child = RbiPlain(name="p")
         child.save(db=pooled)
-        RbiHolder(name="h", untyped=child).save(db=pooled)
+        RbiHolder(name="h", held=child).save(db=pooled)
         got = RbiHolder.using(pooled).first()
     finally:
         pooled.close()
-    assert got.untyped == {"name": "p", "_id": 1}
+    assert got.held == {"name": "p", "_id": 1}
 
 
 # --- a by-id read does not fail on the number of ids -----------------------------------------

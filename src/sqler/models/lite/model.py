@@ -470,7 +470,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
     @classmethod
     def _resolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
         """Replace the references in ``data`` by the rows they point to (see ``_refs.resolve``)."""
-        return _refs.resolve(data, db, _seen)
+        return _refs.resolve(data, db, _seen, cls)
 
     @classmethod
     def _load_refs(cls, ids: list, seen: frozenset) -> dict:

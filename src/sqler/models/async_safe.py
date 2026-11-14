@@ -86,7 +86,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         for doc in await _refs.aread_versioned(db, table, ids):
             rid = doc["_id"]
             try:
-                typed = await _refs.aresolve(doc, db, seen | {(table, rid)}, _refs.typed_fields(cls))
+                typed = await _refs.aresolve(doc, db, seen | {(table, rid)}, cls)
                 inst = _refs.from_row(cls, typed, doc)
             except (LookupError, RuntimeError, ValueError):
                 out[rid] = _refs.KEEP
@@ -100,7 +100,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         doc = await db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        typed = await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls))
+        typed = await _refs.aresolve(doc, db, frozenset(), cls)
         return _refs.from_row(cls, typed, doc)  # type: ignore[return-value]
 
     @classmethod
@@ -213,7 +213,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     raise
                 payload = _retry.rebase(latest_doc, held, snap, delta)
                 async def build():
-                    return cls.model_validate(await _refs.aresolve(payload, db, frozenset(), _refs.typed_fields(cls)))
+                    return cls.model_validate(await _refs.aresolve(payload, db, frozenset(), cls))
 
                 written = await retry.abuild(stale, build)
                 self._version = latest_doc.get("_version", 0)
@@ -232,7 +232,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         doc = await db.find_document_with_version(table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        row, doc = doc, await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls))
+        row, doc = doc, await _refs.aresolve(doc, db, frozenset(), cls)
         fresh = cls.model_validate(doc)  # type: ignore[call-arg]
         for fname in self.__class__.model_fields:
             if fname == "_id":
