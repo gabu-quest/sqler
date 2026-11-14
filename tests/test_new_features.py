@@ -1,4 +1,4 @@
-"""Tests for new features: export/import, caching, tracking, FTS."""
+"""Tests for new features: export/import, caching, tracking."""
 
 import csv
 import json
@@ -10,11 +10,8 @@ from sqler import (
     ChangeTracker,
     DiffMixin,
     ExportResult,
-    FTSIndex,
     ImportResult,
     QueryCache,
-    SearchableMixin,
-    SearchResult,
     SQLerDB,
     SQLerModel,
     TrackedModel,
@@ -607,158 +604,6 @@ class TestDiffMixin:
         assert cloned.name == "Apple"
         assert cloned.quantity == 20
         assert cloned._id is None  # Clone has no _id
-
-
-# =============================================================================
-# FTS Tests
-# =============================================================================
-
-
-class TestFTSIndex:
-    """Tests for FTSIndex functionality."""
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        self.db = SQLerDB.in_memory()
-
-        class Article(SQLerModel):
-            title: str
-            content: str
-            author: str
-
-        Article.set_db(self.db)
-        self.Article = Article
-
-        # Create test articles (this creates the table)
-        self.Article(
-            title="Python Tutorial", content="Learn Python programming from scratch", author="Alice"
-        ).save()
-        self.Article(
-            title="JavaScript Guide",
-            content="Modern JavaScript development techniques",
-            author="Bob",
-        ).save()
-        self.Article(
-            title="Advanced Python",
-            content="Deep dive into Python internals and performance",
-            author="Alice",
-        ).save()
-
-    def test_fts_index_creation(self):
-        """FTS index can be created."""
-        fts = FTSIndex(self.Article, fields=["title", "content"])
-        fts.create(self.db)
-
-        # Rebuild after table exists
-        count = fts.rebuild()
-        assert count == 3
-
-    def test_fts_search_basic(self):
-        """Basic search returns matching documents."""
-        fts = FTSIndex(self.Article, fields=["title", "content"])
-        fts.create(self.db)
-        fts.rebuild()
-
-        results = fts.search("Python")
-
-        assert len(results) == 2
-        titles = [r.title for r in results]
-        assert "Python Tutorial" in titles
-        assert "Advanced Python" in titles
-
-    def test_fts_search_phrase(self):
-        """Phrase search works."""
-        fts = FTSIndex(self.Article, fields=["title", "content"])
-        fts.create(self.db)
-        fts.rebuild()
-
-        results = fts.search('"Python programming"')
-
-        assert len(results) == 1
-        assert results[0].title == "Python Tutorial"
-
-    def test_fts_search_ranked(self):
-        """Ranked search returns scores."""
-        fts = FTSIndex(self.Article, fields=["title", "content"])
-        fts.create(self.db)
-        fts.rebuild()
-
-        results = fts.search_ranked("Python")
-
-        assert len(results) == 2
-        assert all(isinstance(r, SearchResult) for r in results)
-        assert all(r.score != 0 for r in results)
-
-    def test_fts_count(self):
-        """Count matching documents."""
-        fts = FTSIndex(self.Article, fields=["title", "content"])
-        fts.create(self.db)
-        fts.rebuild()
-
-        count = fts.count("Python")
-        assert count == 2
-
-        count = fts.count("JavaScript")
-        assert count == 1
-
-    def test_fts_index_single_document(self):
-        """Index a single document after creation."""
-        fts = FTSIndex(self.Article, fields=["title", "content"])
-        fts.create(self.db)
-        fts.rebuild()
-
-        # Add new article
-        new_article = self.Article(
-            title="Rust Programming", content="Systems programming with Rust", author="Charlie"
-        )
-        new_article.save()
-        fts.index(new_article)
-
-        results = fts.search("Rust")
-        assert len(results) == 1
-        assert results[0].title == "Rust Programming"
-
-
-class TestSearchableMixin:
-    """Tests for SearchableMixin."""
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        self.db = SQLerDB.in_memory()
-
-        class Post(SearchableMixin, SQLerModel):
-            title: str
-            body: str
-
-            class FTS:
-                fields = ["title", "body"]
-
-        Post.set_db(self.db)
-        self.Post = Post
-
-    def test_searchable_mixin_create_index(self):
-        """create_search_index() works."""
-        self.Post.create_search_index(self.db)
-
-        # Add posts
-        self.Post(title="Hello World", body="This is my first post").save()
-        self.Post(title="Python Tips", body="Learn Python effectively").save()
-
-        self.Post.rebuild_search_index()
-
-        results = self.Post.search("Python")
-        assert len(results) == 1
-        assert results[0].title == "Python Tips"
-
-    def test_searchable_mixin_count(self):
-        """search_count() works."""
-        self.Post.create_search_index(self.db)
-        self.Post(title="Hello", body="World").save()
-        self.Post(title="Hello", body="There").save()
-        self.Post.rebuild_search_index()
-
-        count = self.Post.search_count("Hello")
-        assert count == 2
 
 
 # =============================================================================

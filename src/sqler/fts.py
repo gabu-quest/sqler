@@ -14,13 +14,13 @@ Usage::
 
     # Create FTS index
     fts = FTSIndex(Article, fields=["title", "content"])
-    fts.create()  # Creates FTS5 virtual table
-    fts.rebuild()  # Populates index from existing data
+    fts.create()  # The FTS5 table, its triggers, and the rows already in the table
 
     # Search
     results = fts.search("python tutorial")
     results = fts.search("python OR rust", limit=10)
     results = fts.search('"exact phrase"')
+    results = fts.search("C++ it's foo-bar", plain=True)  # words, not a query
 
     # Ranked results
     results = fts.search_ranked("machine learning", limit=20)
@@ -35,6 +35,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
 
+from sqler.db.async_db import AsyncSQLerDB
+from sqler.exceptions import SchemaError, SearchQueryError
 from sqler.utils import validate_field_name, validate_identifier
 
 if TYPE_CHECKING:
@@ -54,6 +56,60 @@ def _check_tokenizer(tokenizer: object) -> str:
             f"Must contain only alphanumeric characters, spaces, and underscores."
         )
     return tokenizer
+
+
+# What SQLite says of a MATCH string it cannot read as an FTS5 query.
+_REFUSED_QUERY = ("fts5: ", "unterminated string", "no such column: ", "unknown special query: ")
+
+# The triggers that keep a content_sync index equal to its table: name suffix -> event.
+_SYNC_TRIGGERS = {"ai": "INSERT", "au": "UPDATE", "ad": "DELETE"}
+
+# The arguments of a stored ``fts5(...)``: runs of anything but a comma, a quoted run whole.
+_FTS5_ARG = re.compile(r"""(?:'[^']*'|"[^"]*"|`[^`]*`|\[[^\]]*\]|[^,'"`\[])+""")
+_FTS5_BODY = re.compile(r"(?is)\s*CREATE\s+VIRTUAL\s+TABLE\s+\S+\s+USING\s+fts5\s*\((.*)\)\s*;?\s*")
+
+
+def _unquote(word: str) -> str:
+    """An FTS5 argument word without its quotes (a doubled quote inside is one)."""
+    if len(word) >= 2 and word[0] + word[-1] in ("''", '""', "``", "[]"):
+        return word[1:-1].replace(word[0] * 2, word[0]) if word[0] != "[" else word[1:-1]
+    return word
+
+
+def _stored_definition(sql: Optional[str]) -> Optional[tuple[list[str], str, list[str]]]:
+    """What a stored ``CREATE VIRTUAL TABLE ... USING fts5(...)`` defines: its columns, its
+    tokenizer with single spaces (``unicode61``, FTS5's default, when it names none) and
+    any other argument as written. ``None`` when the statement is not an FTS5 table.
+
+    This compares what the index is, not how its statement is spelled: the released
+    version's statement, with its line breaks, defines the same index as today's.
+    """
+    found = _FTS5_BODY.fullmatch(sql or "")
+    if found is None:
+        return None
+    columns, tokenizer, other = [], "unicode61", []
+    for arg in (a.strip() for a in _FTS5_ARG.findall(found.group(1))):
+        key, eq, value = arg.partition("=")
+        if eq and key.strip().lower() == "tokenize":
+            tokenizer = " ".join(_unquote(value.strip()).split())
+        elif eq or len(arg.split()) != 1:
+            other.append(arg)  # content=, prefix=, a column with UNINDEXED: not sqler's index
+        else:
+            columns.append(_unquote(arg))
+    return columns, tokenizer, other
+
+
+def _plain_query(text: str) -> str:
+    """The FTS5 query that finds every word of ``text``.
+
+    Each run of characters between spaces becomes one FTS5 string, with ``"`` doubled
+    inside it (a NUL counts as a space: SQLite ends the query text there). FTS5 hands a
+    string to the tokenizer as text and reads no syntax in it, so no character of
+    ``text`` is an operator; strings side by side must all match. Text with no run gives
+    ``""``, which matches nothing.
+    """
+    runs = text.replace("\x00", " ").split()
+    return " ".join('"' + run.replace('"', '""') + '"' for run in runs) or '""'
 
 
 @dataclass
@@ -138,7 +194,10 @@ class FTSIndex:
             fields: Fields to include in the index
             index_name: Custom index table name (default: {table}_fts)
             tokenizer: FTS5 tokenizer (default: porter unicode61)
-            content_sync: Keep index synced with content table
+            content_sync: ``create()`` adds triggers that update the index on every
+                insert, update and delete of the table, whoever writes. With
+                ``False`` the index changes only through ``index()``, ``remove()``
+                and ``rebuild()``.
             db: Database holding the model's rows. Needed when the class was never
                 bound with ``set_db()``; a ``db`` given to ``create()``,
                 ``drop()`` or ``rebuild()`` replaces it.
@@ -209,56 +268,209 @@ class FTSIndex:
         self._index_table = value
 
     def _get_db(self) -> "SQLerDB":
-        """The database given to this index, else the one the model class is bound to."""
-        if self._db is not None:
-            return self._db
-        db = getattr(self.model_class, "_db", None)
+        """The database given to this index, else the one the model class is bound to.
+
+        Raises:
+            ValueError: There is neither.
+            TypeError: It is an ``AsyncSQLerDB``: a search index works on a ``SQLerDB``.
+        """
+        db = self._db if self._db is not None else getattr(self.model_class, "_db", None)
         if db is None:
             raise ValueError(
                 "Model has no database bound: pass db= to FTSIndex or to create()/rebuild()"
             )
+        if isinstance(db, AsyncSQLerDB):
+            raise TypeError(
+                "a search index works on a SQLerDB: got an AsyncSQLerDB, and the async "
+                "database has no search yet"
+            )
         return db
 
     def create(self, db: Optional["SQLerDB"] = None) -> None:
-        """Create the FTS5 virtual table.
+        """Make the index what this definition says, or refuse.
+
+        - No index table: it is created. With ``content_sync`` the model's table is
+          created first when it is missing (a trigger needs its table), then the three
+          triggers, and the index is filled from the rows already in the table.
+        - An index table with the same fields in the same order and the same tokenizer
+          (compared as definitions, not as statement text, so an index made by an older
+          sqler counts) is kept.
+        - An index table with other fields, another order or another tokenizer: raises
+          ``SchemaError`` and changes nothing; ``drop()`` then ``create()`` changes it.
+        - With ``content_sync``, a trigger that is missing or is not the one this
+          definition writes now (a field promoted to a column since, an older sqler) is
+          replaced, and the index is filled again from the table.
+        - Without ``content_sync``, triggers of this index are dropped.
+
+        All of it is one transaction: a ``create()`` that fails leaves everything as it
+        was. A ``create()`` that finds everything as defined writes nothing.
 
         Args:
             db: Optional database (uses model's db if not provided)
         """
         if db:
             self._db = db
-
         db = self._get_db()
 
         # A field is a column name of the index table: a dotted (nested) field is not one.
-        # index() reads the attribute of that name, so it could never be filled either.
         for f in self.fields:
             validate_identifier(f)
 
-        # Build column list
-        columns = ", ".join(self.fields)
+        if self._make(db, write=False):
+            with db.transaction():
+                self._make(db, write=True)
 
-        # Use standalone FTS table (not external content)
-        # This is more compatible with SQLer's JSON document storage
-        sql = f"""
-        CREATE VIRTUAL TABLE IF NOT EXISTS {self.index_table}
-        USING fts5(
-            {columns},
-            tokenize='{self.tokenizer}'
-        );
+    def _trigger_names(self) -> dict[str, str]:
+        """The index's triggers: name -> event."""
+        return {f"{self.index_table}_{suffix}": event for suffix, event in _SYNC_TRIGGERS.items()}
+
+    def _make(self, db: "SQLerDB", *, write: bool) -> bool:
+        """What ``create()`` finds and what it does: whether anything differs from the
+        definition, and with ``write`` the statements that make it so (the caller holds
+        the transaction). A definition the index table does not have raises SchemaError,
+        before any statement.
         """
+        idx, table = self.index_table, self.table
+        names = self._trigger_names()
+        stored = {
+            name.lower(): (kind, sql)
+            for name, kind, sql in db.adapter.execute(
+                "SELECT name, type, sql FROM sqlite_master WHERE lower(name) IN "
+                f"({', '.join('?' * (2 + len(names)))});",
+                [n.lower() for n in (idx, table, *names)],
+            ).fetchall()
+        }
 
-        db.adapter.execute(sql)
-        db.adapter.auto_commit()
+        index = stored.get(idx.lower())
+        if index is not None:
+            self._check_definition(index)
+        changed = index is None
+        if changed and write:
+            db.adapter.execute(
+                f"CREATE VIRTUAL TABLE {idx} USING fts5"
+                f"({', '.join(self.fields)}, tokenize='{self.tokenizer}');"
+            )
+
+        if not self.content_sync:
+            for name in names:
+                if stored.get(name.lower(), ("",))[0] == "trigger":
+                    changed = True
+                    if write:
+                        db.adapter.execute(f"DROP TRIGGER IF EXISTS {name};")
+            return changed
+
+        promoted = getattr(self.model_class, "__promoted__", None) or {}
+        if table.lower() not in stored or any(c not in db._columns_of(table) for c in promoted):
+            # a trigger needs its table, and reads a promoted field from its column
+            if not write:
+                return True
+            db.ensure_table(
+                table, promoted=promoted or None, checks=getattr(self.model_class, "__checks__", None)
+            )
+        for name, sql in self._trigger_sql(db).items():
+            if stored.get(name.lower()) != ("trigger", sql):
+                changed = True
+                if write:
+                    db.adapter.execute(f"DROP TRIGGER IF EXISTS {name};")
+                    db.adapter.execute(sql)
+        if changed and write:
+            self._fill(db)
+        return changed
+
+    def _check_definition(self, index: tuple[str, Optional[str]]) -> None:
+        """Raise SchemaError unless the stored ``index`` (type, statement) is this definition."""
+        kind, sql = index
+        found = _stored_definition(sql) if kind == "table" else None
+        if found is None:
+            raise SchemaError(
+                f"{self.index_table!r} is not a search index (an FTS5 table): "
+                f"give FTSIndex another index_name"
+            )
+        columns, tokenizer, other = found
+        asked = " ".join(self.tokenizer.split())
+        if [c.lower() for c in columns] != [f.lower() for f in self.fields] or tokenizer != asked or other:
+            extra = f" and arguments {other}" if other else ""
+            raise SchemaError(
+                f"search index {self.index_table!r} has fields {columns} and tokenizer "
+                f"{tokenizer!r}{extra}; asked for fields {self.fields} and tokenizer {asked!r}. "
+                f"To change it, call drop() then create()."
+            )
+
+    def _trigger_sql(self, db: "SQLerDB") -> dict[str, str]:
+        """The statement of each trigger of a content_sync index, as SQLite stores it.
+
+        Every name in it is checked: the fields, the index name and the table. The update
+        trigger fires only when the row id or the stored value of an indexed field changed,
+        compared so that ``1`` and ``1.0`` differ as they do in the index: the fields read
+        from ``data`` as one ``json_array()``, a promoted column with ``quote()`` (a column
+        may hold a blob, which JSON cannot).
+        """
+        idx, table = self.index_table, self.table
+        promoted = db._columns_of(table)
+        in_data = [f for f in self.fields if f not in promoted]
+        changed = ["old._id IS NOT new._id"]
+        if in_data:
+            old, new = (
+                "json_array(" + ", ".join(f"json_extract({row}.data, '$.{f}')" for f in in_data) + ")"
+                for row in ("old", "new")
+            )
+            changed.append(f"{old} IS NOT {new}")
+        changed += [f"quote(old.{f}) IS NOT quote(new.{f})" for f in self.fields if f in promoted]
+        changed = " OR ".join(changed)
+        forget = f"DELETE FROM {idx} WHERE rowid = old._id;"
+        fill = f"{self._fill_sql(db, 'new')};"
+        body = {
+            "INSERT": f"BEGIN DELETE FROM {idx} WHERE rowid = new._id; {fill} END",
+            "UPDATE": f"WHEN {changed} BEGIN {forget} {fill} END",
+            "DELETE": f"BEGIN {forget} END",
+        }
+        return {
+            name: f"CREATE TRIGGER {name} AFTER {event} ON {table} {body[event]}"
+            for name, event in self._trigger_names().items()
+        }
 
     def drop(self, db: Optional["SQLerDB"] = None) -> None:
-        """Drop the FTS index."""
+        """Drop the FTS index and its triggers."""
         if db:
             self._db = db
         db = self._get_db()
 
-        sql = f"DROP TABLE IF EXISTS {self.index_table};"
-        db.adapter.execute(sql)
+        with db.transaction():
+            for name in self._trigger_names():
+                db.adapter.execute(f"DROP TRIGGER IF EXISTS {name};")
+            db.adapter.execute(f"DROP TABLE IF EXISTS {self.index_table};")
+
+    def _values(self, db: "SQLerDB", row: str) -> list[str]:
+        """Each field of the stored row ``row`` where it is stored: a promoted column by its
+        name, any other field from ``data`` with ``json_extract``."""
+        promoted = db._columns_of(self.table)
+        return [
+            f"{row}.{f}" if f in promoted else f"json_extract({row}.data, '$.{f}')"
+            for f in self.fields
+        ]
+
+    def _fill_sql(self, db: "SQLerDB", row: str) -> str:
+        """The ``INSERT`` of the index row of the stored row ``row`` (``new`` in a trigger,
+        an alias of the table in a select).
+
+        The triggers, ``rebuild()``, ``create()`` and ``index()`` all use it, so they give
+        the same text for a row.
+        """
+        return (
+            f"INSERT INTO {self.index_table}(rowid, {', '.join(self.fields)}) "
+            f"SELECT {row}._id, {', '.join(self._values(db, row))}"
+        )
+
+    def _fill(self, db: "SQLerDB") -> None:
+        """Make the index hold every row of the table and nothing else."""
+        db.adapter.execute(f"DELETE FROM {self.index_table};")
+        db.adapter.execute(f"{self._fill_sql(db, 't')} FROM {self.table} AS t;")
+
+    def _refill(self, _id: int) -> None:
+        """Make the index row of ``_id`` what its stored row says: none when it has no row."""
+        db = self._get_db()
+        db.adapter.execute(f"DELETE FROM {self.index_table} WHERE rowid = ?;", [_id])
+        db.adapter.execute(f"{self._fill_sql(db, 't')} FROM {self.table} AS t WHERE t._id = ?;", [_id])
         db.adapter.auto_commit()
 
     def rebuild(self, db: Optional["SQLerDB"] = None) -> int:
@@ -280,18 +492,7 @@ class FTSIndex:
             # Source table doesn't exist yet, nothing to index
             return 0
 
-        # Clear existing index
-        db.adapter.execute(f"DELETE FROM {self.index_table};")
-
-        # Insert from source table using JSON extraction
-        field_exprs = ", ".join([f"json_extract(data, '$.{f}')" for f in self.fields])
-
-        sql = f"""
-        INSERT INTO {self.index_table}(rowid, {", ".join(self.fields)})
-        SELECT _id, {field_exprs}
-        FROM {self.table};
-        """
-        cursor = db.adapter.execute(sql)
+        self._fill(db)
         db.adapter.auto_commit()
 
         # Get count
@@ -299,41 +500,33 @@ class FTSIndex:
         return cursor.fetchone()[0]
 
     def index(self, model: "SQLerModel") -> None:
-        """Add or update a document in the index.
+        """Make the index entry of a saved row what the table holds for it.
+
+        The row is read from the table, as the triggers and ``rebuild()`` read it. With
+        ``content_sync`` the triggers already did this: calling it changes nothing.
 
         Args:
             model: Model instance to index
         """
         if model._id is None:
             raise ValueError("Cannot index unsaved model")
-
-        db = self._get_db()
-
-        # Delete existing entry if present
-        db.adapter.execute(
-            f"DELETE FROM {self.index_table} WHERE rowid = ?;",
-            [model._id],
-        )
-
-        # Insert new entry
-        field_vals = [str(getattr(model, f, "") or "") for f in self.fields]
-        placeholders = ", ".join(["?"] * len(self.fields))
-        db.adapter.execute(
-            f"INSERT INTO {self.index_table}(rowid, {', '.join(self.fields)}) VALUES (?, {placeholders});",
-            [model._id] + field_vals,
-        )
-
-        db.adapter.auto_commit()
+        self._refill(model._id)
 
     def remove(self, model_or_id: Union["SQLerModel", int]) -> None:
         """Remove a document from the index.
 
+        With ``content_sync`` the triggers own the index: the entry goes only when its row
+        is gone from the table, so the index stays equal to the table.
+
         Args:
             model_or_id: Model instance or _id to remove
         """
-        db = self._get_db()
         _id = model_or_id._id if hasattr(model_or_id, "_id") else model_or_id
+        if self.content_sync:
+            self._refill(_id)
+            return
 
+        db = self._get_db()
         db.adapter.execute(
             f"DELETE FROM {self.index_table} WHERE rowid = ?;",
             [_id],
@@ -347,6 +540,7 @@ class FTSIndex:
         *,
         limit: int = 100,
         offset: int = 0,
+        plain: bool = False,
     ) -> list["SQLerModel"]:
         """Search the index and return matching models.
 
@@ -360,12 +554,20 @@ class FTSIndex:
         - Column: "title:python"
 
         Args:
-            query: FTS5 query string
+            query: FTS5 query string, or with ``plain`` text to find
             limit: Maximum results
             offset: Skip first N results
+            plain: Read ``query`` as words, not as a query: a row matches when it has
+                every word, a word being what the index's tokenizer makes of the text
+                between spaces (``C++``, ``it's``, ``foo-bar`` work; no character is
+                syntax). Text with no word in it matches nothing.
 
         Returns:
             List of matching model instances
+
+        Raises:
+            SearchQueryError: SQLite refuses ``query`` as an FTS5 query (never with
+                ``plain``).
 
         Security note:
             The query string is passed as a SQL bound parameter, so it is
@@ -376,16 +578,12 @@ class FTSIndex:
             untrusted callers, validate or truncate the query string and
             consider rate-limiting search endpoints in your application.
         """
-        db = self._get_db()
-
         sql = f"""
         SELECT rowid FROM {self.index_table}
         WHERE {self.index_table} MATCH ?
         LIMIT ? OFFSET ?;
         """
-
-        cursor = db.adapter.execute(sql, [query, limit, offset])
-        rows = cursor.fetchall()
+        rows = self._search_rows(sql, query, plain, after=(limit, offset))
 
         # Load models
         ids = [row[0] for row in rows]
@@ -404,6 +602,7 @@ class FTSIndex:
         *,
         limit: int = 100,
         offset: int = 0,
+        plain: bool = False,
     ) -> list[SearchResult]:
         """Search with BM25 ranking scores.
 
@@ -412,16 +611,16 @@ class FTSIndex:
         queries and the ``from_ids()`` hydration pipeline.
 
         Args:
-            query: FTS5 query string
+            query: FTS5 query string, or with ``plain`` text to find (see ``search()``)
             limit: Maximum results
             offset: Skip first N results
+            plain: Read ``query`` as words, not as a query
 
         Returns:
             List of SearchResult with scores (sorted by relevance)
         """
         from sqler.models._table_names import _is_missing_table
 
-        db = self._get_db()
         source_table = self.table
 
         sql = f"""
@@ -434,12 +633,11 @@ class FTSIndex:
         """
 
         try:
-            cursor = db.adapter.execute(sql, [query, limit, offset])
+            rows = self._search_rows(sql, query, plain, after=(limit, offset))
         except sqlite3.OperationalError as exc:
             if not _is_missing_table(exc, source_table):
                 raise
             return []  # the source table was never created: no rows to rank
-        rows = cursor.fetchall()
 
         if not rows:
             return []
@@ -462,21 +660,21 @@ class FTSIndex:
         offset: int = 0,
         highlight_start: str = "<mark>",
         highlight_end: str = "</mark>",
+        plain: bool = False,
     ) -> list[SearchResult]:
         """Search with highlighted snippets.
 
         Args:
-            query: FTS5 query string
+            query: FTS5 query string, or with ``plain`` text to find (see ``search()``)
             limit: Maximum results
             offset: Skip first N results
             highlight_start: Opening tag for highlights
             highlight_end: Closing tag for highlights
+            plain: Read ``query`` as words, not as a query
 
         Returns:
             List of SearchResult with highlights dict
         """
-        db = self._get_db()
-
         # Build highlight expressions for each field using ? placeholders
         highlight_exprs = []
         highlight_params: list[Any] = []
@@ -494,8 +692,7 @@ class FTSIndex:
         LIMIT ? OFFSET ?;
         """
 
-        cursor = db.adapter.execute(sql, highlight_params + [query, limit, offset])
-        rows = cursor.fetchall()
+        rows = self._search_rows(sql, query, plain, before=highlight_params, after=(limit, offset))
 
         if not rows:
             return []
@@ -543,6 +740,7 @@ class FTSIndex:
         max_tokens: int = 64,
         highlight_start: str = "<b>",
         highlight_end: str = "</b>",
+        plain: bool = False,
     ) -> str:
         """Get a highlighted snippet for a specific document.
 
@@ -553,13 +751,13 @@ class FTSIndex:
             max_tokens: Maximum tokens in snippet
             highlight_start: Opening highlight tag
             highlight_end: Closing highlight tag
+            plain: Read ``query`` as words, not as a query (see ``search()``)
 
         Returns:
             Highlighted snippet string
         """
         if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
             raise TypeError(f"max_tokens must be an integer, got {type(max_tokens).__name__}")
-        db = self._get_db()
         field_idx = 0 if field is None else self.fields.index(field)
 
         sql = f"""
@@ -568,23 +766,37 @@ class FTSIndex:
         WHERE rowid = ? AND {self.index_table} MATCH ?;
         """
 
-        cursor = db.adapter.execute(sql, [highlight_start, highlight_end, model._id, query])
-        row = cursor.fetchone()
-        return row[0] if row else ""
+        rows = self._search_rows(sql, query, plain, before=(highlight_start, highlight_end, model._id))
+        return rows[0][0] if rows else ""
 
-    def count(self, query: str) -> int:
+    def count(self, query: str, *, plain: bool = False) -> int:
         """Count matching documents.
 
         Args:
-            query: FTS5 query string
+            query: FTS5 query string, or with ``plain`` text to find (see ``search()``)
+            plain: Read ``query`` as words, not as a query
 
         Returns:
             Number of matching documents
         """
-        db = self._get_db()
         sql = f"SELECT COUNT(*) FROM {self.index_table} WHERE {self.index_table} MATCH ?;"
-        cursor = db.adapter.execute(sql, [query])
-        return cursor.fetchone()[0]
+        return self._search_rows(sql, query, plain)[0][0]
+
+    def _search_rows(self, sql: str, query: str, plain: bool, before=(), after=()) -> list:
+        """The rows of a ``MATCH ?`` statement, its parameters ``before``, the query, ``after``.
+
+        The query goes as given, or with ``plain`` as its words (``_plain_query``). A query
+        SQLite refuses raises SearchQueryError; any other error is raised as it is.
+        """
+        params = [*before, _plain_query(query) if plain else query, *after]
+        try:
+            return self._get_db().adapter.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as exc:
+            if not str(exc).startswith(_REFUSED_QUERY):
+                raise
+            raise SearchQueryError(
+                f"search query {query!r} refused by SQLite: {exc}", sql=sql, params=params
+            ) from exc
 
     def stats(self) -> FTSStats:
         """Get index statistics."""
@@ -699,30 +911,32 @@ class SearchableMixin:
             cls._fts_index = None
 
     @classmethod
-    def search(cls, query: str, *, limit: int = 100, offset: int = 0) -> list:
-        """Search for matching documents."""
+    def search(cls, query: str, *, limit: int = 100, offset: int = 0, plain: bool = False) -> list:
+        """Search for matching documents (``plain``: see ``FTSIndex.search()``)."""
         if cls._fts_index is None:
             cls.create_search_index()
-        return cls._fts_index.search(query, limit=limit, offset=offset)
+        return cls._fts_index.search(query, limit=limit, offset=offset, plain=plain)
 
     @classmethod
-    def search_ranked(cls, query: str, *, limit: int = 100, offset: int = 0) -> list[SearchResult]:
-        """Search with relevance ranking."""
+    def search_ranked(
+        cls, query: str, *, limit: int = 100, offset: int = 0, plain: bool = False
+    ) -> list[SearchResult]:
+        """Search with relevance ranking (``plain``: see ``FTSIndex.search()``)."""
         if cls._fts_index is None:
             cls.create_search_index()
-        return cls._fts_index.search_ranked(query, limit=limit, offset=offset)
+        return cls._fts_index.search_ranked(query, limit=limit, offset=offset, plain=plain)
 
     @classmethod
-    def search_count(cls, query: str) -> int:
-        """Count matching documents."""
+    def search_count(cls, query: str, *, plain: bool = False) -> int:
+        """Count matching documents (``plain``: see ``FTSIndex.search()``)."""
         if cls._fts_index is None:
             cls.create_search_index()
-        return cls._fts_index.count(query)
+        return cls._fts_index.count(query, plain=plain)
 
     def save(self, *args, **kwargs):
-        """Save and update search index."""
+        """Save and update search index (with ``content_sync`` its triggers do)."""
         result = super().save(*args, **kwargs)
-        if self._fts_index is not None:
+        if self._fts_index is not None and not self._fts_index.content_sync:
             self._fts_index.index(self)
         return result
 
@@ -734,10 +948,10 @@ class SearchableMixin:
         return result
 
     def delete(self, *args, **kwargs):
-        """Delete and remove from search index."""
+        """Delete and remove from search index (with ``content_sync`` its triggers do)."""
         _id = self._id
         result = super().delete(*args, **kwargs)
-        if self._fts_index is not None and _id is not None:
+        if self._fts_index is not None and _id is not None and not self._fts_index.content_sync:
             self._fts_index.remove(_id)
         return result
 

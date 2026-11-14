@@ -176,16 +176,29 @@ def test_search_index_given_the_database_finds_an_unbound_models_row(db):
     assert fts.count("ownership") == 1
 
 
-def test_search_on_a_class_whose_table_does_not_exist_yet(db):
+def test_a_synced_index_on_a_class_whose_table_does_not_exist_yet_creates_it(db):
     class UrNeverSaved(SQLerModel):
         title: str = ""
 
     fts = FTSIndex(UrNeverSaved, ["title"], db=db)
     assert fts.table == "urneversaveds"
     fts.create()
+    assert _exists(db, "urneversaveds") is True
     assert fts.rebuild() == 0
     assert fts.search("anything") == []
     assert fts.count("anything") == 0
+
+
+def test_a_manual_index_on_a_class_whose_table_does_not_exist_leaves_it_missing(db):
+    class UrNeverSavedManual(SQLerModel):
+        title: str = ""
+
+    fts = FTSIndex(UrNeverSavedManual, ["title"], db=db, content_sync=False)
+    fts.create()
+    assert fts.rebuild() == 0
+    assert fts.search("anything") == []
+    assert fts.count("anything") == 0
+    assert _exists(db, "urneversavedmanuals") is False
 
 
 def test_from_ids_with_a_database_on_an_unbound_class(db):
@@ -377,7 +390,8 @@ def test_every_search_on_a_missing_source_table_is_empty(db, method):
     class UsNever(SQLerModel):
         title: str = ""
 
-    fts = FTSIndex(UsNever, ["title"], db=db)
+    # an index without triggers: one with them creates the table it follows
+    fts = FTSIndex(UsNever, ["title"], db=db, content_sync=False)
     fts.create()
     # an index row whose source row (and table) does not exist
     db.adapter.execute(f"INSERT INTO {fts.index_table}(rowid, title) VALUES (1, 'python')")
