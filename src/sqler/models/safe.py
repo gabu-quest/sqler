@@ -6,6 +6,7 @@ from typing import ClassVar, Optional, Type, TypeVar
 from pydantic import PrivateAttr
 
 from sqler.exceptions import StaleVersionError
+from sqler.models import _refs
 from sqler.models._table_names import _instance_binding
 
 from . import save_retry as _retry
@@ -65,6 +66,24 @@ class SQLerSafeModel(SQLerModel):
         super().set_db(db, table)
         # upgrade table to versioned
         db._ensure_versioned_table(cls._table)  # type: ignore[arg-type]
+
+    @classmethod
+    def _load_refs(cls: Type[TSafe], ids: list, seen: frozenset) -> dict:  # type: ignore[override]
+        """Load the rows ``ids`` with their versions and snapshots, one statement."""
+        db, table = cls._require_binding()
+        out: dict = {}
+        for doc in _refs.read_versioned(db, table, ids):
+            rid = doc["_id"]
+            try:
+                inst = cls.model_validate(doc)  # type: ignore[call-arg]
+                inst._id = rid  # type: ignore[attr-defined]
+                inst._version = doc.get("_version", 0)  # type: ignore[attr-defined]
+                inst._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
+            except (LookupError, RuntimeError, ValueError):
+                out[rid] = _refs.KEEP
+                continue
+            out[rid] = inst
+        return out
 
     @classmethod
     def from_id(cls: Type[TSafe], id_: int) -> Optional[TSafe]:  # type: ignore[override]

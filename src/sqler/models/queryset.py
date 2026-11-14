@@ -6,6 +6,7 @@ import sqlite3
 from typing import Any, Callable, Generic, Iterator, Optional, Type, TypeVar
 
 from sqler.exceptions import InvalidTableNameError
+from sqler.models import _refs
 from sqler.models._table_names import _is_missing_table, _unchecked_table_name
 from sqler.query import SQLerExpression, SQLerQuery
 from sqler.query.query import PaginatedResult
@@ -371,6 +372,8 @@ class SQLerQuerySet(Generic[T]):
 
         # Master dict to hold ALL resolved refs across all depths
         resolved: dict[tuple[str, int], dict] = {}
+        # tables a reference points into that do not exist
+        missing: set[str] = set()
 
         def collect_and_fetch(values: list, depth: int) -> None:
             """Recursively collect refs and fetch them, building up resolved dict."""
@@ -407,7 +410,13 @@ class SQLerQuerySet(Generic[T]):
                     continue
                 placeholders = ",".join(["?"] * len(ids))
                 sql = f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders})"
-                cur = adapter.execute(sql, list(ids))
+                try:
+                    cur = adapter.execute(sql, list(ids))
+                except sqlite3.OperationalError as exc:
+                    if not _is_missing_table(exc, table):
+                        raise
+                    missing.add(table)
+                    continue
                 rows = cur.fetchall()
                 for _id, data_json in rows:
                     obj = json.loads(data_json)
@@ -422,7 +431,7 @@ class SQLerQuerySet(Generic[T]):
         # Collect and fetch all refs at all depths into single resolved dict
         collect_and_fetch(docs, max_depth)
 
-        if not resolved:
+        if not resolved and not missing:
             return docs
 
         # Replace refs with resolved data, recursively processing nested refs
@@ -439,6 +448,8 @@ class SQLerQuerySet(Generic[T]):
                         return value  # Circular ref - we're already processing this
                     fetched = resolved.get(key)
                     if fetched is None:
+                        if key[0] in missing and _refs.table_is_bound(key[0]):
+                            return None  # as a read of one row gives
                         return value  # Not found, keep original ref
                     # Mark as processing, resolve, then unmark
                     processing.add(key)

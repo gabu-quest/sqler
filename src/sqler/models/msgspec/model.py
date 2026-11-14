@@ -7,6 +7,7 @@ It maintains full API compatibility with SQLerLiteModel.
 
 from __future__ import annotations
 
+import os
 import warnings
 from typing import (
     TYPE_CHECKING,
@@ -33,6 +34,10 @@ from sqler.utils import validate_field_name, validate_table_name
 if TYPE_CHECKING:
     from sqler.db.sqler_db import SQLerDB
     from sqler.models.queryset import SQLerQuerySet
+
+# The deprecation warning is attributed to the first caller outside the sqler package, so a
+# subclass's ``super().set_db()`` does not hide it behind sqler's own file.
+_SQLER_PREFIXES = (os.path.dirname(os.path.abspath(registry.__file__)) + os.sep,)
 
 T = TypeVar("T", bound="SQLerMsgspecModel")
 
@@ -85,7 +90,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
             "set_db() will be removed in a future version.",
             DeprecationWarning,
-            stacklevel=2,
+            skip_file_prefixes=_SQLER_PREFIXES,
         )
         explicit = getattr(cls, "__tablename__", None)
         chosen = validate_table_name(

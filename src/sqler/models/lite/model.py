@@ -8,6 +8,7 @@ where Pydantic's native extensions cannot be installed.
 
 from __future__ import annotations
 
+import os
 import warnings
 from dataclasses import fields
 from typing import (
@@ -21,6 +22,7 @@ from typing import (
 
 from sqler import registry
 from sqler.exceptions import NotBoundError, UniqueConstraintError
+from sqler.models import _refs
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
@@ -37,6 +39,10 @@ from sqler.utils import validate_field_name, validate_table_name
 if TYPE_CHECKING:
     from sqler.db.sqler_db import SQLerDB
     from sqler.models.queryset import SQLerQuerySet
+
+# The deprecation warning is attributed to the first caller outside the sqler package, so a
+# subclass's ``super().set_db()`` does not hide it behind sqler's own file.
+_SQLER_PREFIXES = (os.path.dirname(os.path.abspath(registry.__file__)) + os.sep,)
 
 T = TypeVar("T", bound="SQLerLiteModel")
 
@@ -90,7 +96,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
             "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
             "set_db() will be removed in a future version.",
             DeprecationWarning,
-            stacklevel=2,
+            skip_file_prefixes=_SQLER_PREFIXES,
         )
         explicit = getattr(cls, "__tablename__", None)
         chosen = validate_table_name(
@@ -474,30 +480,57 @@ class SQLerLiteModel(SQLerLiteModelBase):
         return isinstance(value, dict) and "_table" in value and "_id" in value
 
     @classmethod
-    def _resolve_relations(cls, data: dict, db=None) -> dict:
-        """Resolve reference dicts to model instances recursively."""
+    def _resolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
+        """Replace the references in ``data`` by the rows they point to.
 
-        def decode(value: object) -> Any:
-            if isinstance(value, dict):
-                if cls._is_ref_dict(value):
-                    table = value.get("_table")
-                    rid = value.get("_id")
-                    mdl = registry.resolve(table) if isinstance(table, str) else None
-                    if mdl is not None and getattr(mdl, "_db", None) is None and db is not None:
-                        # a class never bound: read the row from the parent's db; only
-                        # a missing table or row is forgiven (it stays a reference)
-                        return _load_unbound(mdl, db, table, rid)
-                    if mdl is not None and hasattr(mdl, "from_id"):
-                        try:
-                            return mdl.from_id(rid)
-                        except (LookupError, RuntimeError, ValueError):
-                            return value
-                return {k: decode(v) for k, v in value.items()}
-            if isinstance(value, list):
-                return [decode(v) for v in value]
-            return value
+        The rows of one table are read with one statement. A reference to a row that is
+        being loaded further up stays a reference, which cuts a cycle.
+        """
+        groups, unbound = _refs.plan(data, db, _seen)
+        loaded: dict = {}
+        for mdl, table, rid in unbound:
+            # a class never bound: read the row from the parent's db; only
+            # a missing table or row is forgiven (it stays a reference)
+            loaded[(table, rid)] = _load_unbound(mdl, db, table, rid)
+        for table, (mdl, ids) in groups.items():
+            loader = getattr(mdl, "_load_refs", None)
+            found: dict = {}
+            if loader is not None:
+                try:
+                    found = loader(ids, _seen)
+                except (LookupError, RuntimeError, ValueError):
+                    found = {rid: _refs.KEEP for rid in ids}
+            else:
+                for rid in ids:
+                    try:
+                        found[rid] = mdl.from_id(rid)
+                    except (LookupError, RuntimeError, ValueError):
+                        found[rid] = _refs.KEEP
+            _refs.settle(table, ids, found, loaded)
+        return {k: _refs.replace(v, loaded) for k, v in data.items()}
 
-        return {k: decode(v) for k, v in data.items()}
+    @classmethod
+    def _load_refs(cls, ids: list, seen: frozenset) -> dict:
+        """Load the rows ``ids`` of this class's table with one statement.
+
+        Returns ``{id: instance}``; a row that is gone is missing, one that cannot be
+        hydrated maps to ``_refs.KEEP``.
+        """
+        db, table = cls._require_binding()
+        out: dict = {}
+        for doc in _read_documents(db, table, ids):
+            rid = doc["_id"]
+            raw = doc
+            try:
+                doc = cls._resolve_relations(doc, db=db, _seen=seen | {(table, rid)})
+                inst = cls.model_validate(doc)
+                object.__setattr__(inst, "_id", doc.get("_id"))
+                object.__setattr__(inst, "_snapshot", cls._make_snapshot(raw))
+            except (LookupError, RuntimeError, ValueError):
+                out[rid] = _refs.KEEP
+                continue
+            out[rid] = inst
+        return out
 
     def _dump_with_relations(self) -> dict:
         """Serialize model with relationship encoding.
