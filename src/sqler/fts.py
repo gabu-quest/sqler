@@ -31,10 +31,11 @@ Usage::
 
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
 
-from sqler.utils import validate_field_name, validate_identifier, validate_table_name
+from sqler.utils import validate_field_name, validate_identifier
 
 if TYPE_CHECKING:
     from sqler import SQLerDB
@@ -118,6 +119,7 @@ class FTSIndex:
         index_name: Optional[str] = None,
         tokenizer: str = "porter unicode61",
         content_sync: bool = True,
+        db: Optional["SQLerDB"] = None,
     ):
         """Create an FTS index configuration.
 
@@ -127,6 +129,9 @@ class FTSIndex:
             index_name: Custom index table name (default: {table}_fts)
             tokenizer: FTS5 tokenizer (default: porter unicode61)
             content_sync: Keep index synced with content table
+            db: Database holding the model's rows. Needed when the class was never
+                bound with ``set_db()``; a ``db`` given to ``create()``,
+                ``drop()`` or ``rebuild()`` replaces it.
         """
         # Validate all inputs that will be interpolated into SQL
         for f in fields:
@@ -140,22 +145,21 @@ class FTSIndex:
         self.tokenizer = tokenizer  # checked by the setter
         self.content_sync = content_sync
 
-        # Get table name - _table is set via set_db() or using()
         self.index_table = index_name  # Set later if needed
 
-        # Get database
-        self._db: Optional["SQLerDB"] = None
+        # The database given here, else the class binding (see _get_db)
+        self._db: Optional["SQLerDB"] = db
 
     @property
     def table(self) -> str:
-        """Get the table name from the model class."""
-        # Try _table first (set by set_db or using)
-        table = getattr(self.model_class, "_table", None)
-        if not table:
-            # Fallback to lowercase class name
-            table = self.model_class.__name__.lower()
-        # a class's ``_table`` can be set by hand: it goes into SQL as an identifier
-        return validate_table_name(table)
+        """The model's table, by the one rule every model route uses.
+
+        The table bound with ``set_db()``, else ``__tablename__``, else the plural
+        of the class name (``Article`` -> ``articles``); checked before it is used.
+        """
+        from sqler.models._table_names import _model_table_name
+
+        return _model_table_name(self.model_class)
 
     @property
     def fields(self) -> list[str]:
@@ -195,12 +199,14 @@ class FTSIndex:
         self._index_table = value
 
     def _get_db(self) -> "SQLerDB":
-        """Get the database connection."""
+        """The database given to this index, else the one the model class is bound to."""
         if self._db is not None:
             return self._db
         db = getattr(self.model_class, "_db", None)
         if db is None:
-            raise ValueError("Model has no database bound")
+            raise ValueError(
+                "Model has no database bound: pass db= to FTSIndex or to create()/rebuild()"
+            )
         return db
 
     def create(self, db: Optional["SQLerDB"] = None) -> None:
@@ -371,6 +377,10 @@ class FTSIndex:
         if not ids:
             return []
 
+        # the database given to this index loads the rows (a class never bound has no
+        # other); a missing source table loads none
+        if self._db is not None:
+            return self.model_class.from_ids(ids, db=self._db)
         return self.model_class.from_ids(ids)
 
     def search_ranked(
@@ -394,6 +404,8 @@ class FTSIndex:
         Returns:
             List of SearchResult with scores (sorted by relevance)
         """
+        from sqler.models._table_names import _is_missing_table
+
         db = self._get_db()
         source_table = self.table
 
@@ -406,7 +418,12 @@ class FTSIndex:
         LIMIT ? OFFSET ?;
         """
 
-        cursor = db.adapter.execute(sql, [query, limit, offset])
+        try:
+            cursor = db.adapter.execute(sql, [query, limit, offset])
+        except sqlite3.OperationalError as exc:
+            if not _is_missing_table(exc, source_table):
+                raise
+            return []  # the source table was never created: no rows to rank
         rows = cursor.fetchall()
 
         if not rows:
@@ -480,7 +497,12 @@ class FTSIndex:
 
         # Load models
         ids = list(id_data.keys())
-        models = self.model_class.from_ids(ids)
+        # the database given to this index loads the rows (a class never bound has no
+        # other); a missing source table loads none
+        if self._db is not None:
+            models = self.model_class.from_ids(ids, db=self._db)
+        else:
+            models = self.model_class.from_ids(ids)
 
         # Create results
         results = []

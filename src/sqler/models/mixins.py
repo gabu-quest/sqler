@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Optional, Self
 
+from sqler.models._table_names import _instance_binding
 from sqler.utils import validate_table_name
 
 # Context variables for thread/async-safe user tracking
@@ -723,7 +724,7 @@ class AuditLogMixin:
         """
         import json
 
-        db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
+        db, table = _instance_binding(self, db)
         audit_table = validate_table_name(f"{table}_audit")
 
         # Ensure audit table exists
@@ -779,7 +780,7 @@ class AuditLogMixin:
         """
         import json
 
-        db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
+        db, table = _instance_binding(self, db)
         audit_table = validate_table_name(f"{table}_audit")
         record_id = getattr(self, "_id", None)
 
@@ -816,7 +817,7 @@ class AuditLogMixin:
 
         # For updates, fetch current DB state to compare against
         if not is_new:
-            db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
+            db, table = _instance_binding(self, db)
             current = db.find_document(table, self._id)
             if current:
                 self.__dict__["_pre_save_snapshot"] = {
@@ -890,7 +891,7 @@ class AsyncAuditLogMixin:
         """Log an audit entry (async)."""
         import json
 
-        db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
+        db, table = _instance_binding(self, db)
         audit_table = validate_table_name(f"{table}_audit")
 
         ddl = f"""
@@ -944,7 +945,7 @@ class AsyncAuditLogMixin:
         """Get the audit log for this record (async)."""
         import json
 
-        db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
+        db, table = _instance_binding(self, db)
         audit_table = validate_table_name(f"{table}_audit")
         record_id = getattr(self, "_id", None)
 
@@ -982,7 +983,7 @@ class AsyncAuditLogMixin:
 
         # For updates, fetch current DB state to compare against
         if not is_new:
-            db, table = self._resolve_binding(db)  # type: ignore[attr-defined]
+            db, table = _instance_binding(self, db)
             current = await db.find_document(table, self._id)
             if current:
                 self.__dict__["_pre_save_snapshot"] = {

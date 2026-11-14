@@ -6,6 +6,7 @@ from typing import ClassVar, Optional, Type, TypeVar
 from pydantic import PrivateAttr
 
 from sqler.exceptions import StaleVersionError
+from sqler.models._table_names import _instance_binding
 from sqler.query.async_query import AsyncSQLerQuery
 
 from . import save_retry as _retry
@@ -153,7 +154,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
             StaleVersionError: If the version is stale and cannot be rebased.
         """
         cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
 
         # Get the rebase configuration for this model class
         rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
@@ -228,7 +229,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
 
     async def refresh(self: TASafe) -> TASafe:  # type: ignore[override]
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = _instance_binding(self)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
         doc = await db.find_document_with_version(table, self._id)

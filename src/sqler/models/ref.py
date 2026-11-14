@@ -12,10 +12,13 @@ def as_ref(model) -> SQLerRef:
     """Return a standardized reference dict for a SQLerModel instance.
 
     Raises:
-        ValueError: If the model is unsaved (missing _id) or has no bound table.
+        ValueError: If the model is unsaved (missing _id).
+        InvalidTableNameError: If the class's table name is not valid.
     """
-    table: Optional[str] = getattr(model.__class__, "_table", None)
+    from sqler.models._table_names import _ref_table
+
     _id: Optional[int] = getattr(model, "_id", None)
-    if not table or _id is None:
-        raise ValueError("Cannot create ref: model must be bound and saved")
+    if _id is None:
+        raise ValueError("Cannot create ref: model must be saved")
+    table: str = _ref_table(model)
     return {"_table": table, "_id": int(_id)}
