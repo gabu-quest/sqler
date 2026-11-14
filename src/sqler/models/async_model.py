@@ -342,9 +342,9 @@ class AsyncSQLerModel(BaseModel):
         db, table = cls._resolve_binding(db)
         promoted = getattr(cls, "__promoted__", None)
 
-        if promoted and table not in db._promoted_columns:
+        if promoted:
             checks = getattr(cls, "__checks__", None)
-            await db._ensure_table_with_promoted(table, promoted, checks)
+            await db._ensure_promoted(table, promoted, checks)
 
         payloads = [await inst._adump_with_relations() for inst in instances]
 
@@ -362,10 +362,10 @@ class AsyncSQLerModel(BaseModel):
         cls = self.__class__
         db, table = _instance_binding(self, db)
         promoted = getattr(cls, "__promoted__", None)
-        if promoted and table not in db._promoted_columns:
+        if promoted:
             checks = getattr(cls, "__checks__", None)
-            await db._ensure_table_with_promoted(table, promoted, checks)
-        elif not promoted:
+            await db._ensure_promoted(table, promoted, checks)
+        else:
             await db._ensure_table(table)
         payload = await self._adump_with_relations()
         if promoted:

@@ -196,9 +196,9 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         db, table = cls._resolve_binding(db)
         promoted = getattr(cls, "__promoted__", None)
 
-        if promoted and table not in db._promoted_columns:
+        if promoted:
             checks = getattr(cls, "__checks__", None)
-            await db._ensure_table_with_promoted(table, promoted, checks)
+            await db._ensure_promoted(table, promoted, checks)
         await db._ensure_versioned_table(table)
 
         payloads = [await inst._adump_with_relations() for inst in instances]
@@ -257,9 +257,7 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
                 attempt_payload["_version"] = 0 if self._id is None else self._version + 1
                 promoted = getattr(cls, "__promoted__", None)
                 if promoted:
-                    if table not in db._promoted_columns:
-                        checks = getattr(cls, "__checks__", None)
-                        await db._ensure_table_with_promoted(table, promoted, checks)
+                    await db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
                     new_id, new_version = await db.upsert_with_version_promoted(
                         table, self._id, attempt_payload, self._version,
                         list(promoted.keys()),

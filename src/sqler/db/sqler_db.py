@@ -1,7 +1,8 @@
 import json
 import sqlite3
 import threading
-from typing import Any, Optional
+from types import SimpleNamespace
+from typing import Any, NamedTuple, Optional
 
 from sqler.adapter import SQLiteAdapter
 from sqler.exceptions import StaleVersionError
@@ -15,6 +16,16 @@ from sqler.utils import (
     validate_identifier,
     validate_table_name,
 )
+
+
+class _Level(NamedTuple):
+    """One open transaction of a database object's own: what it learned about tables, and the
+    adapter's depth right after its ``begin_transaction`` (the level is the innermost one of the
+    adapter's only while the adapter's depth is still this number)."""
+
+    versioned: set[str]
+    promoted: dict[str, list[str]]
+    depth: int
 
 
 class SQLerDB:
@@ -60,14 +71,12 @@ class SQLerDB:
         self.adapter.connect()
         # serialize DDL operations (e.g., adding _version) across threads
         self._ddl_lock = threading.RLock()
-        # cache of tables already ensured to be versioned
+        # what is remembered about committed tables: versioned tables, promoted columns per table
         self._versioned_tables: set[str] = set()
-        # promoted columns per table: table -> list of column names
         self._promoted_columns: dict[str, list[str]] = {}
-        # what each promoted table was created with: table -> (promoted, checks)
-        self._promoted_specs: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
-        # remembered tables a rollback may have removed: checked at the next call that trusts them
-        self._due_after_rollback: set[str] = set()
+        # what each open level of this object's own transactions learned, innermost last; counted
+        # like the adapter's depth: per thread, or once for the single ":memory:" connection
+        self._open = SimpleNamespace(levels=[]) if adapter._memory_singleton else _OpenLevels()
 
     def ensure_table(
         self,
@@ -118,6 +127,16 @@ class SQLerDB:
         """
         self.adapter.execute(ddl)
         self.adapter.auto_commit()
+
+    def _ensure_promoted(
+        self,
+        table: str,
+        promoted: dict[str, str],
+        checks: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here."""
+        if self._promoted_of(table) is None:
+            self._ensure_table_with_promoted(table, promoted, checks)
 
     def _ensure_table_with_promoted(
         self,
@@ -187,34 +206,44 @@ class SQLerDB:
                         )
                 self.adapter.auto_commit()
 
-            self._promoted_columns[table] = list(promoted.keys())
-            self._promoted_specs[table] = (dict(promoted), dict(checks))
-            self._due_after_rollback.discard(table)
+            self._remember(table, promoted=list(promoted))
 
-    def _check_remembered(self, table: str) -> None:
-        """Run the check a rollback left due for ``table``, on the connection this call uses anyway.
+    def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]]]]:
+        """Where an ensure call keeps what it learned about a table.
 
-        A table, or a promoted or ``_version`` column, created inside a transaction that
-        rolled back is gone: what is remembered about it is forgotten. What still exists
-        stays remembered. Creates nothing.
+        The innermost open level of this object's own transactions, if the adapter's depth is
+        still that level's; with no level open, the shared memory, at depth 0. Anywhere else
+        the transaction is not this object's (the adapter used directly, another thread's on
+        the single ``":memory:"`` connection): nowhere. Forgetting costs a repeated
+        ``CREATE TABLE IF NOT EXISTS``, remembering wrongly loses a write.
         """
-        if table not in self._due_after_rollback:
-            return
-        rows = self.adapter.execute(f'PRAGMA table_info("{table}");').fetchall()
-        self._due_after_rollback.discard(table)
-        have = {row[1] for row in rows}
-        promoted = self._promoted_columns.get(table)
-        if promoted is not None and not set(promoted) <= have:
-            del self._promoted_columns[table]
-        if table in self._versioned_tables and "_version" not in have:
-            self._versioned_tables.discard(table)
+        depth = self.adapter._txn_depth
+        levels = self._open.levels
+        if levels:
+            level = levels[-1]
+            return (level.versioned, level.promoted) if level.depth == depth else None
+        return (self._versioned_tables, self._promoted_columns) if depth == 0 else None
 
-    def _promoted_ready(self, table: str) -> None:
-        """Before a promoted write: a promoted table a rollback removed is created again as it was."""
-        self._check_remembered(table)
-        spec = self._promoted_specs.get(table)
-        if table not in self._promoted_columns and spec is not None:
-            self._ensure_table_with_promoted(table, *spec)
+    def _remember(self, table: str, *, promoted: Optional[list[str]] = None) -> None:
+        """Remember ``table``'s ``promoted`` columns, or without them that it has ``_version``."""
+        learned = self._learned()
+        if learned is None:
+            return
+        if promoted is None:
+            learned[0].add(table)
+        else:
+            learned[1][table] = promoted
+
+    def _is_versioned(self, table: str) -> bool:
+        """Whether ``table`` is remembered to have its ``_version`` column, here and now."""
+        return table in self._versioned_tables or any(table in level.versioned for level in self._open.levels)
+
+    def _promoted_of(self, table: str) -> Optional[list[str]]:
+        """The promoted columns remembered for ``table`` here and now; ``None`` if it is not remembered."""
+        for level in reversed(self._open.levels):
+            if table in level.promoted:
+                return level.promoted[table]
+        return self._promoted_columns.get(table)
 
     def upsert_document_promoted(
         self,
@@ -237,7 +266,6 @@ class SQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_column_name(field)
-        self._promoted_ready(table)
         # Split promoted from JSON
         promoted_vals = {}
         json_doc = {}
@@ -294,8 +322,7 @@ class SQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_column_name(field)
-        self._promoted_ready(table)
-        if table not in self._versioned_tables:
+        if not self._is_versioned(table):
             self._ensure_versioned_table(table)
 
         promoted_vals = {}
@@ -413,7 +440,6 @@ class SQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
-        self._promoted_ready(table)
         cols = ["data"] + promoted_fields
         return self._insert_many_chunked(table, docs, cols=cols, versioned=False, promoted_fields=promoted_fields)
 
@@ -452,7 +478,6 @@ class SQLerDB:
             return []
         for field in promoted_fields:
             validate_identifier(field)
-        self._promoted_ready(table)
         self._ensure_versioned_table(table)
         cols = ["data"] + promoted_fields
         ids = self._insert_many_chunked(table, docs, cols=cols, versioned=True, promoted_fields=promoted_fields)
@@ -617,8 +642,7 @@ class SQLerDB:
             if not found.
         """
         table = validate_table_name(table)
-        self._check_remembered(table)
-        promoted = self._promoted_columns.get(table, [])
+        promoted = self._promoted_of(table) or ()
         cols = ", ".join(["_id", "data", *promoted])
         try:
             cur = self.adapter.execute(f"SELECT {cols} FROM {table} WHERE _id = ?;", [_id])
@@ -778,7 +802,7 @@ class SQLerDB:
         Returns:
             Transaction: Context manager for transaction scope.
         """
-        return Transaction(self.adapter, self._forget_rolled_back)
+        return Transaction(self.adapter, self)
 
     def create_index(
         self,
@@ -883,27 +907,32 @@ class SQLerDB:
 
     def __enter__(self):
         """Enter context manager; begin transaction."""
-        self.adapter.begin_transaction()
+        self._begin_level()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Exit context manager; commit or rollback."""
-        if exc_type is None:
-            self.adapter.end_transaction(commit=True)
-        else:
-            _rollback_keeping_callers_exception(self.adapter)
-            self._forget_rolled_back()
+        """Exit context manager; commit, or roll back while the caller's exception leaves."""
+        self._end_level(exc_type is None, quiet=exc_type is not None)
         return False
 
-    def _forget_rolled_back(self) -> None:
-        """After a rollback, mark what is remembered about tables as due for a check.
+    def _begin_level(self) -> None:
+        self.adapter.begin_transaction()
+        self._open.levels.append(_Level(set(), {}, self.adapter._txn_depth))
 
-        ``ensure_table`` remembers a table's promoted columns and its ``_version`` column; a
-        table (or column) created inside a transaction that rolled back is gone. The rollback
-        runs no statement and raises nothing: the check runs at the next call that trusts what
-        is remembered (``_check_remembered``), on the connection that call uses anyway.
+    def _end_level(self, commit: bool, *, quiet: bool = False) -> None:
+        """End this thread's innermost level; what it learned about tables goes with it.
+
+        A commit moves it to the level above, or at the outermost level to the shared memory;
+        a rollback, or a commit that fails, drops it. That runs no statement and raises
+        nothing. ``quiet``: an error of the adapter's own is not raised (the caller's
+        exception is on its way out).
         """
-        self._due_after_rollback |= set(self._promoted_columns) | self._versioned_tables
+        levels = self._open.levels
+        level = levels.pop() if levels else None  # none: begun on another thread; nothing to merge
+        _end_transaction(self.adapter, commit, quiet)
+        if commit and level is not None and (above := self._learned()) is not None:
+            above[0].update(level.versioned)
+            above[1].update(level.promoted)
 
     # ---- versioned (optimistic locking) helpers ----
 
@@ -933,8 +962,7 @@ class SQLerDB:
                 continue
             cols.add(name)
         if "_version" in cols:
-            # mark cache and return
-            self._versioned_tables.add(table)
+            self._remember(table)
             return
         # serialize DDL; re-check inside lock
         with self._ddl_lock:
@@ -956,8 +984,7 @@ class SQLerDB:
                     f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
                 )
                 self.adapter.auto_commit()
-            # update cache regardless
-            self._versioned_tables.add(table)
+            self._remember(table)
 
     def _versioned_update(self, sql: str, params: list[Any]) -> Any:
         """Run a versioned ``UPDATE`` and commit it unless an explicit transaction is open.
@@ -1009,8 +1036,7 @@ class SQLerDB:
             RuntimeError: On stale version conflicts (no rows updated).
         """
         table = validate_table_name(table)
-        self._check_remembered(table)
-        if table not in self._versioned_tables:
+        if not self._is_versioned(table):
             self._ensure_versioned_table(table)
         payload = json.dumps(doc)
         if _id is None:
@@ -1048,8 +1074,7 @@ class SQLerDB:
             dict | None: Decoded document with ``_id`` and ``_version`` keys, or None.
         """
         table = validate_table_name(table)
-        self._check_remembered(table)
-        promoted = self._promoted_columns.get(table, [])
+        promoted = self._promoted_of(table) or ()
         if promoted:
             extra_cols = ", " + ", ".join(promoted)
         else:
@@ -1088,13 +1113,21 @@ class SQLerDB:
         return obj
 
 
-def _rollback_keeping_callers_exception(adapter) -> None:
-    """Roll back while the caller's exception is on its way out: an error of the rollback's own
-    (the adapter closed inside the block, say) does not replace it."""
+class _OpenLevels(threading.local):
+    """The open levels of a database object's own transactions on this thread."""
+
+    def __init__(self):
+        self.levels: list[_Level] = []
+
+
+def _end_transaction(adapter, commit: bool, quiet: bool) -> None:
+    """End the adapter's innermost transaction; ``quiet``: an error of its own is not raised
+    (the adapter closed inside the block, say), so the caller's exception is the one that leaves."""
     try:
-        adapter.end_transaction(commit=False)
+        adapter.end_transaction(commit=commit)
     except Exception:
-        pass
+        if not quiet:
+            raise
 
 
 class Transaction:
@@ -1105,43 +1138,39 @@ class Transaction:
     the context exits successfully, or rolls back on exception.
     """
 
-    def __init__(self, adapter, on_rollback=None):
+    def __init__(self, adapter, db: Optional[SQLerDB] = None):
         self.adapter = adapter
-        self._on_rollback = on_rollback
+        self._db = db  # None: a bare adapter transaction (PooledSQLerDB)
         self._active = False
 
-    def _end(self, commit: bool) -> None:
-        self.adapter.end_transaction(commit=commit)
-        if not commit and self._on_rollback is not None:
-            self._on_rollback()
+    def _end(self, commit: bool, quiet: bool = False) -> None:
+        self._active = False
+        if self._db is None:
+            _end_transaction(self.adapter, commit, quiet)
+        else:
+            self._db._end_level(commit, quiet=quiet)
 
     def __enter__(self):
         """Begin the transaction."""
-        self.adapter.begin_transaction()
+        if self._db is None:
+            self.adapter.begin_transaction()
+        else:
+            self._db._begin_level()
         self._active = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Commit on success, rollback on exception."""
-        if not self._active:
-            return False
-        self._active = False
-        if exc_type is None:
-            self._end(True)
-        else:
-            _rollback_keeping_callers_exception(self.adapter)
-            if self._on_rollback is not None:
-                self._on_rollback()
+        if self._active:
+            self._end(exc_type is None, quiet=exc_type is not None)
         return False
 
     def commit(self):
         """Explicitly commit the transaction."""
         if self._active:
             self._end(True)
-            self._active = False
 
     def rollback(self):
         """Explicitly rollback the transaction."""
         if self._active:
             self._end(False)
-            self._active = False

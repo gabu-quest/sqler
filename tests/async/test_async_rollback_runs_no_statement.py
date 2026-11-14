@@ -1,9 +1,8 @@
 """Ending a transaction by rollback runs no statement of its own and raises nothing of its own.
 
 The database object remembers the promoted columns and the ``_version`` column of the tables
-it created. A rollback may have removed them; it marks what is remembered as due for a check,
-and the check runs at the next call that trusts it, on the connection that call uses anyway.
-So a statement cancelled inside a transaction reaches the caller at once, with its own
+it created. What it learned inside a transaction is kept with that transaction, and a rollback
+drops it without a statement. So a statement cancelled inside a transaction reaches the caller at once, with its own
 exception, whatever the database object remembers, even with a pool of one whose only
 connection is still busy with the cancelled statement.
 """
@@ -76,7 +75,7 @@ async def test_cancelled_statement_reaches_caller_at_once_with_a_remembered_vers
         await db.ensure_table("vers", versioned=True)
         exc_type, elapsed = await _cancel_in_transaction(db)
         assert (exc_type, elapsed < CALLER_SEES_IT_S) == (TimeoutError, True), elapsed
-        # the next versioned write checks the cache and works, once the connection is back
+        # the next versioned write works, once the connection is back
         rid, version = await asyncio.wait_for(db.upsert_with_version("vers", None, {"n": 1}, None), 15)
         assert version == 0
         cur = await db.adapter.execute("SELECT count(*) FROM t")

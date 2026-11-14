@@ -1,8 +1,10 @@
 import json
 import sqlite3
+from contextvars import ContextVar
 from typing import Any, Optional
 
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter
+from sqler.db.sqler_db import _Level
 from sqler.exceptions import StaleVersionError
 from sqler.pool import PoolStats
 from sqler.query.query import is_missing_table
@@ -41,14 +43,14 @@ class AsyncSQLerDB:
 
     def __init__(self, adapter: AsyncSQLiteAdapter):
         self.adapter = adapter
-        # Cache of tables already ensured to be versioned
+        # what is remembered about committed tables: versioned tables, promoted columns per table
         self._versioned_tables: set[str] = set()
-        # promoted columns per table: table -> list of column names
         self._promoted_columns: dict[str, list[str]] = {}
-        # what each promoted table was created with: table -> (promoted, checks)
-        self._promoted_specs: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
-        # remembered tables a rollback may have removed: checked at the next call that trusts them
-        self._due_after_rollback: set[str] = set()
+        # what each open level of this object's own transactions learned, innermost last;
+        # per task, like the adapter's depth (a task started inside a level shares it)
+        self._open: ContextVar[tuple[_Level, ...]] = ContextVar(
+            "sqler_open_levels", default=()
+        )
 
     async def connect(self) -> None:
         await self.adapter.connect()
@@ -89,6 +91,16 @@ class AsyncSQLerDB:
         """
         await self.adapter.execute(ddl)
         await self.adapter.auto_commit()
+
+    async def _ensure_promoted(
+        self,
+        table: str,
+        promoted: dict[str, str],
+        checks: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here."""
+        if self._promoted_of(table) is None:
+            await self._ensure_table_with_promoted(table, promoted, checks)
 
     async def _ensure_table_with_promoted(
         self,
@@ -139,33 +151,44 @@ class AsyncSQLerDB:
                     )
             await self.adapter.auto_commit()
 
-        self._promoted_columns[table] = list(promoted.keys())
-        self._promoted_specs[table] = (dict(promoted), dict(checks))
-        self._due_after_rollback.discard(table)
+        self._remember(table, promoted=list(promoted))
 
-    async def _check_remembered(self, table: str) -> None:
-        """The async twin of ``SQLerDB._check_remembered``: the check a rollback left due for ``table``."""
-        if table not in self._due_after_rollback:
+    def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]]]]:
+        """Where an ensure call keeps what it learned about a table.
+
+        The innermost open level of this object's own transactions, if the adapter's depth is
+        still that level's; with no level open, the shared memory, at depth 0. Anywhere else
+        the transaction is not this object's (the adapter used directly, another thread's on
+        the single ``":memory:"`` connection): nowhere. Forgetting costs a repeated
+        ``CREATE TABLE IF NOT EXISTS``, remembering wrongly loses a write.
+        """
+        depth = self.adapter._txn_depth.get(0)
+        levels = self._open.get()
+        if levels:
+            level = levels[-1]
+            return (level.versioned, level.promoted) if level.depth == depth else None
+        return (self._versioned_tables, self._promoted_columns) if depth == 0 else None
+
+    def _remember(self, table: str, *, promoted: Optional[list[str]] = None) -> None:
+        """Remember ``table``'s ``promoted`` columns, or without them that it has ``_version``."""
+        learned = self._learned()
+        if learned is None:
             return
-        cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
-        try:
-            rows = await cur.fetchall()
-        finally:
-            await cur.close()
-        self._due_after_rollback.discard(table)
-        have = {row[1] for row in rows}
-        promoted = self._promoted_columns.get(table)
-        if promoted is not None and not set(promoted) <= have:
-            del self._promoted_columns[table]
-        if table in self._versioned_tables and "_version" not in have:
-            self._versioned_tables.discard(table)
+        if promoted is None:
+            learned[0].add(table)
+        else:
+            learned[1][table] = promoted
 
-    async def _promoted_ready(self, table: str) -> None:
-        """Before a promoted write: a promoted table a rollback removed is created again as it was."""
-        await self._check_remembered(table)
-        spec = self._promoted_specs.get(table)
-        if table not in self._promoted_columns and spec is not None:
-            await self._ensure_table_with_promoted(table, *spec)
+    def _is_versioned(self, table: str) -> bool:
+        """Whether ``table`` is remembered to have its ``_version`` column, in this task now."""
+        return table in self._versioned_tables or any(table in level.versioned for level in self._open.get())
+
+    def _promoted_of(self, table: str) -> Optional[list[str]]:
+        """The promoted columns remembered for ``table`` in this task now; ``None`` if it is not remembered."""
+        for level in reversed(self._open.get()):
+            if table in level.promoted:
+                return level.promoted[table]
+        return self._promoted_columns.get(table)
 
     async def upsert_document_promoted(
         self,
@@ -178,7 +201,6 @@ class AsyncSQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_column_name(field)
-        await self._promoted_ready(table)
         promoted_vals = {}
         json_doc = {}
         for k, v in doc.items():
@@ -228,7 +250,6 @@ class AsyncSQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_column_name(field)
-        await self._promoted_ready(table)
         await self._ensure_versioned_table(table)
 
         promoted_vals = {}
@@ -305,8 +326,7 @@ class AsyncSQLerDB:
 
     async def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         table = validate_table_name(table)
-        await self._check_remembered(table)
-        promoted = self._promoted_columns.get(table, [])
+        promoted = self._promoted_of(table) or ()
         cols = ", ".join(["_id", "data", *promoted])
         try:
             cur = await self.adapter.execute(f"SELECT {cols} FROM {table} WHERE _id = ?;", [_id])
@@ -419,7 +439,6 @@ class AsyncSQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
-        await self._promoted_ready(table)
         cols = ["data"] + promoted_fields
         return await self._insert_many_chunked(table, docs, cols=cols, versioned=False, promoted_fields=promoted_fields)
 
@@ -458,7 +477,6 @@ class AsyncSQLerDB:
             return []
         for field in promoted_fields:
             validate_identifier(field)
-        await self._promoted_ready(table)
         await self._ensure_versioned_table(table)
         cols = ["data"] + promoted_fields
         ids = await self._insert_many_chunked(table, docs, cols=cols, versioned=True, promoted_fields=promoted_fields)
@@ -770,9 +788,7 @@ class AsyncSQLerDB:
             table: Table name.
         """
         table = validate_table_name(table)
-        await self._check_remembered(table)
-        # Fast path: check cache first
-        if table in self._versioned_tables:
+        if self._is_versioned(table):
             return
         await self._ensure_table(table)
         cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
@@ -789,8 +805,7 @@ class AsyncSQLerDB:
                 await self.adapter.auto_commit()
             finally:
                 await cur2.close()
-        # Update cache
-        self._versioned_tables.add(table)
+        self._remember(table)
 
     async def upsert_with_version(
         self, table: str, _id: Optional[int], doc: dict[str, Any], expected_version: Optional[int]
@@ -826,8 +841,7 @@ class AsyncSQLerDB:
 
     async def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         table = validate_table_name(table)
-        await self._check_remembered(table)
-        promoted = self._promoted_columns.get(table, [])
+        promoted = self._promoted_of(table) or ()
         if promoted:
             extra_cols = ", " + ", ".join(promoted)
         else:
@@ -881,38 +895,36 @@ class AsyncSQLerDB:
         Returns:
             AsyncTransaction: Async context manager for transaction scope.
         """
-        return AsyncTransaction(self.adapter, self._forget_rolled_back)
+        return AsyncTransaction(self.adapter, self)
 
     async def __aenter__(self):
         """Enter async context manager; begin transaction."""
-        await self.adapter.begin_transaction()
+        await self._begin_level()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Exit async context manager; commit or rollback."""
-        if exc_type is None:
-            await self.adapter.end_transaction(commit=True)
-        else:
-            await _rollback_keeping_callers_exception(self.adapter)
-            self._forget_rolled_back()
+        """Exit async context manager; commit, or roll back while the caller's exception leaves."""
+        await self._end_level(exc_type is None, quiet=exc_type is not None)
         return False
 
-    def _forget_rolled_back(self) -> None:
-        """After a rollback, mark what is remembered about tables as due for a check.
+    async def _begin_level(self) -> None:
+        await self.adapter.begin_transaction()
+        self._open.set((*self._open.get(), _Level(set(), {}, self.adapter._txn_depth.get(0))))
 
-        The async twin of ``SQLerDB._forget_rolled_back``: no statement, nothing raised, no
-        connection needed (the only one may still be busy with a cancelled statement).
-        """
-        self._due_after_rollback |= set(self._promoted_columns) | self._versioned_tables
-
-
-async def _rollback_keeping_callers_exception(adapter) -> None:
-    """Roll back while the caller's exception is on its way out: an error of the rollback's own
-    does not replace it."""
-    try:
-        await adapter.end_transaction(commit=False)
-    except Exception:
-        pass
+    async def _end_level(self, commit: bool, *, quiet: bool = False) -> None:
+        """End this task's innermost level; the async twin of ``SQLerDB._end_level``."""
+        levels = self._open.get()
+        level = levels[-1] if levels else None  # none: begun in another task; nothing to merge
+        self._open.set(levels[:-1])
+        try:
+            await self.adapter.end_transaction(commit=commit)
+        except Exception:
+            if not quiet:
+                raise
+            return
+        if commit and level is not None and (above := self._learned()) is not None:
+            above[0].update(level.versioned)
+            above[1].update(level.promoted)
 
 
 class AsyncTransaction:
@@ -922,43 +934,33 @@ class AsyncTransaction:
     (like model.save()) respect the transaction boundary and don't auto-commit.
     """
 
-    def __init__(self, adapter, on_rollback=None):
+    def __init__(self, adapter, db: AsyncSQLerDB):
         self.adapter = adapter
-        self._on_rollback = on_rollback
+        self._db = db
         self._active = False
 
-    async def _end(self, commit: bool) -> None:
-        await self.adapter.end_transaction(commit=commit)
-        if not commit and self._on_rollback is not None:
-            self._on_rollback()
+    async def _end(self, commit: bool, quiet: bool = False) -> None:
+        self._active = False
+        await self._db._end_level(commit, quiet=quiet)
 
     async def __aenter__(self):
         """Begin the transaction."""
-        await self.adapter.begin_transaction()
+        await self._db._begin_level()
         self._active = True
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Commit on success, rollback on exception."""
-        if not self._active:
-            return False
-        self._active = False
-        if exc_type is None:
-            await self._end(True)
-        else:
-            await _rollback_keeping_callers_exception(self.adapter)
-            if self._on_rollback is not None:
-                self._on_rollback()
+        if self._active:
+            await self._end(exc_type is None, quiet=exc_type is not None)
         return False
 
     async def commit(self):
         """Explicitly commit the transaction."""
         if self._active:
             await self._end(True)
-            self._active = False
 
     async def rollback(self):
         """Explicitly rollback the transaction."""
         if self._active:
             await self._end(False)
-            self._active = False
