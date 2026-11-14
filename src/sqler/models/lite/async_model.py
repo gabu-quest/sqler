@@ -20,6 +20,7 @@ from typing import (
 )
 
 from sqler import registry
+from sqler._stored import stored
 from sqler.exceptions import NotBoundError, UniqueConstraintError
 from sqler.models import _dirty, _refs
 from sqler.models._table_names import (
@@ -28,9 +29,9 @@ from sqler.models._table_names import (
     _default_table_name,
     _instance_binding,
     _model_table_name,
-    _ref_table,
 )
 from sqler.models.lite.base import SQLerLiteModelBase
+from sqler.models.lite.model import SQLerLiteModel
 from sqler.utils import validate_field_name, validate_table_name
 
 if TYPE_CHECKING:
@@ -469,50 +470,10 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         return self._dump_with_relations()
 
     def _dump_with_relations(self) -> dict:
-        """Serialize model with relationship encoding; it awaits nothing."""
-        from datetime import date, datetime
-
-        def encode(value: Any) -> Any:
-            # Handle AsyncSQLerLiteModel instances
-            if isinstance(value, AsyncSQLerLiteModel):
-                if value._id is None:
-                    raise ValueError("Related async model must be saved before saving parent")
-                return {"_table": _ref_table(value), "_id": value._id}
-
-            # Handle sync lite models
-            from sqler.models.lite.model import SQLerLiteModel
-
-            if isinstance(value, SQLerLiteModel):
-                if value._id is None:
-                    raise ValueError("Related model must be saved before saving parent")
-                return {"_table": _ref_table(value), "_id": value._id}
-
-            # Handle already-encoded ref dicts
-            if isinstance(value, dict) and "_table" in value and "_id" in value:
-                return {"_table": value["_table"], "_id": value["_id"]}
-
-            # Handle lists
-            if isinstance(value, list):
-                return [encode(v) for v in value]
-
-            # Handle dicts
-            if isinstance(value, dict):
-                out = {}
-                for k, v in value.items():
-                    out[k] = encode(v)
-                return out
-
-            # Handle datetime/date
-            if isinstance(value, datetime):
-                return value.isoformat()
-            if isinstance(value, date):
-                return value.isoformat()
-
-            return value
-
-        payload: dict = {}
-        for f in fields(self):
-            if f.name.startswith("_"):
-                continue
-            payload[f.name] = encode(getattr(self, f.name))
-        return payload
+        """The document ``save()`` writes: each field in stored form, a related model (async
+        or sync) as the reference to its row. It awaits nothing."""
+        return {
+            f.name: stored(getattr(self, f.name), (AsyncSQLerLiteModel, SQLerLiteModel))
+            for f in fields(self)
+            if not f.name.startswith("_")
+        }

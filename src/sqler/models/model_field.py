@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, List, Sequence, Type, Union
 
+from sqler._stored import stored
 from sqler.models.model import SQLerModel
 from sqler.query.expression import SQLerExpression
 
@@ -98,7 +99,7 @@ class SQLerModelField:
                 "EXISTS (SELECT 1 FROM "
                 f"{table} r WHERE r._id = json_extract({outer_table}.data, {ref_literal}) AND {where_right})"
             )
-        return SQLerExpression(sql, [val])
+        return SQLerExpression(sql, [stored(val)])
 
     def __compare(self, op: str, val: Any) -> SQLerExpression:
         return self._build_exists(op, val)

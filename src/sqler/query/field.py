@@ -1,6 +1,7 @@
 import re
 from typing import Any, Optional, Union
 
+from sqler._stored import stored
 from sqler.query import SQLerExpression
 
 _PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -201,6 +202,7 @@ class SQLerField:
         do a comparison on this field (==, >, etc)
         uses SQLerAnyExpression for any() chains, else direct json_extract
         """
+        val = stored(val)
         if self.alias_stack:
             return SQLerAnyExpression(self.path, self.alias_stack, op, val)
         expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) {op} ?"
@@ -256,7 +258,7 @@ class SQLerField:
         """
         json_path = self._json_path_sql()
         expr = f"EXISTS (SELECT 1 FROM json_each(data, {json_path}) WHERE json_each.value = ?)"
-        return SQLerExpression(expr, [value])
+        return SQLerExpression(expr, [stored(value)])
 
     def isin(self, values: list[Any]) -> SQLerExpression:
         """
@@ -272,7 +274,7 @@ class SQLerField:
             f"EXISTS (SELECT 1 FROM json_each(data, {json_path}) "
             f"WHERE json_each.value IN ({placeholders}))"
         )
-        return SQLerExpression(expr, values)
+        return SQLerExpression(expr, [stored(v) for v in values])
 
     def like(self, pattern: str) -> SQLerExpression:
         """
@@ -290,7 +292,7 @@ class SQLerField:
           # -> JSON_EXTRACT(data, '$.age') BETWEEN ? AND ?
         """
         expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) BETWEEN ? AND ?"
-        return SQLerExpression(expr, [low, high])
+        return SQLerExpression(expr, [stored(low), stored(high)])
 
     def is_null(self) -> SQLerExpression:
         """
@@ -350,7 +352,7 @@ class SQLerField:
             return SQLerExpression("0", [])
         placeholders = ", ".join("?" for _ in values)
         expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) IN ({placeholders})"
-        return SQLerExpression(expr, list(values))
+        return SQLerExpression(expr, [stored(v) for v in values])
 
     # --- Arithmetic operators for F-expressions in update() ---
 

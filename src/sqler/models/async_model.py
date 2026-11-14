@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Any, ClassVar, Optional, Type, TypeVar
+from typing import ClassVar, Optional, Type, TypeVar
 
 from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
+from sqler._stored import stored
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import NotBoundError, UniqueConstraintError
 from sqler.models import _dirty, _refs
@@ -16,10 +17,10 @@ from sqler.models._table_names import (
     _default_table_name,
     _instance_binding,
     _model_table_name,
-    _ref_table,
     _register_defined_class,
 )
 from sqler.models.async_queryset import AsyncSQLerQuerySet
+from sqler.models.model import SQLerModel
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
 from sqler.utils import validate_field_name, validate_table_name
@@ -459,36 +460,10 @@ class AsyncSQLerModel(BaseModel):
         return out
 
     async def _adump_with_relations(self) -> dict:
-        async def aencode(value: Any):
-            from datetime import datetime
-
-            from sqler.models.async_model import AsyncSQLerModel
-            from sqler.models.model import SQLerModel
-
-            if isinstance(value, AsyncSQLerModel):
-                if value._id is None:
-                    raise ValueError("Related async model must be saved before saving parent")
-                return {"_table": _ref_table(value), "_id": value._id}
-            if isinstance(value, SQLerModel):
-                if value._id is None:
-                    raise ValueError("Related model must be saved before saving parent")
-                return {"_table": _ref_table(value), "_id": value._id}
-            if isinstance(value, datetime):
-                return value.isoformat()
-            if isinstance(value, list):
-                return [await aencode(v) for v in value]
-            if isinstance(value, dict):
-                out = {}
-                for k, v in value.items():
-                    out[k] = await aencode(v)
-                return out
-            if isinstance(value, BaseModel):
-                return value.model_dump()
-            return value
-
-        payload: dict = {}
-        for name in self.__class__.model_fields:
-            if name == "_id":
-                continue
-            payload[name] = await aencode(getattr(self, name))
-        return payload
+        """The document ``save()`` writes: each field in stored form, a related model (async
+        or sync) as the reference to its row."""
+        return {
+            name: stored(getattr(self, name), (AsyncSQLerModel, SQLerModel))
+            for name in type(self).model_fields
+            if name != "_id"
+        }

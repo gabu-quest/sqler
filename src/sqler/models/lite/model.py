@@ -21,6 +21,7 @@ from typing import (
 )
 
 from sqler import registry
+from sqler._stored import stored
 from sqler.exceptions import NotBoundError, UniqueConstraintError
 from sqler.models import _dirty, _refs
 from sqler.models._table_names import (  # noqa: F401
@@ -30,7 +31,6 @@ from sqler.models._table_names import (  # noqa: F401
     _pluralize,
     _read_document,
     _read_documents,
-    _ref_table,
 )
 from sqler.models.lite.base import SQLerLiteModelBase
 from sqler.utils import validate_field_name, validate_table_name
@@ -494,48 +494,10 @@ class SQLerLiteModel(SQLerLiteModelBase):
         return out
 
     def _dump_with_relations(self) -> dict:
-        """Serialize model with relationship encoding.
-
-        Related model instances are encoded as {"_table": ..., "_id": ...}
-        for storage.
-        """
-        from datetime import date, datetime
-
-        visited: set[tuple[str, int]] = set()
-
-        def encode(value: object) -> Any:
-            # Handle SQLerLiteModel instances
-            if isinstance(value, SQLerLiteModel):
-                if value._id is None:
-                    raise ValueError("Related model must be saved before saving parent")
-                table = _ref_table(value)
-                if (table, int(value._id)) not in visited:
-                    visited.add((table, int(value._id)))
-                return {"_table": table, "_id": value._id}
-
-            # Handle already-encoded ref dicts
-            if isinstance(value, dict) and "_table" in value and "_id" in value:
-                return {"_table": value["_table"], "_id": value["_id"]}
-
-            # Handle lists
-            if isinstance(value, list):
-                return [encode(v) for v in value]
-
-            # Handle dicts
-            if isinstance(value, dict):
-                return {k: encode(v) for k, v in value.items()}
-
-            # Handle datetime/date
-            if isinstance(value, datetime):
-                return value.isoformat()
-            if isinstance(value, date):
-                return value.isoformat()
-
-            return value
-
-        payload: dict = {}
-        for f in fields(self):
-            if f.name.startswith("_"):
-                continue
-            payload[f.name] = encode(getattr(self, f.name))
-        return payload
+        """The document ``save()`` writes: each field in stored form, a related model as the
+        reference to its row."""
+        return {
+            f.name: stored(getattr(self, f.name), SQLerLiteModel)
+            for f in fields(self)
+            if not f.name.startswith("_")
+        }
