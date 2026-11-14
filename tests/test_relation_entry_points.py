@@ -797,7 +797,7 @@ EXPECTED: dict = {('lite', 'from_id'): ({'name': 'p',
                      2)}
 
 
-# ---- hostile inputs whose answer this stream sets ----------------------------------
+# ---- hostile inputs at a typed position ---------------------------------------------
 
 
 def _bound(make_db, base: str):
@@ -1187,15 +1187,13 @@ def _observe(db: Any, cls: type, rid: int, way: str, table: str) -> Any:
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", sorted(TYPED))
 def test_a_typed_field_whose_row_is_gone(typed, base, way):
-    """Item 2 of the first brief, pinned (``p11_gone_row.py``): a reference to a row that is
-    gone stays what each way gave on the base; the rows that are there are models of
-    their rows, and the safe ``from_id`` / ``refresh`` now resolve typed references, so
-    they give what SQLerModel.from_id gives."""
+    """A reference to a row that is gone gives one answer on every way in
+    (``gone_expected``)."""
     db, (_, c_cls, p_cls, _), _ = typed(base)
     pt = p_cls.__tablename__
     p2 = p_cls(title="p2", one=c_cls.from_id(2), many=[c_cls.from_id(1), c_cls.from_id(2)]).save()
     db.delete_document(c_cls.__tablename__, 2)
-    assert _observe(db, p_cls, p2._id, way, pt) == GONE_EXPECTED[(base, way)]
+    assert _observe(db, p_cls, p2._id, way, pt) == gone_expected(base)
 
 
 @pytest.mark.parametrize("way", TYPED_WAYS)
@@ -1210,7 +1208,7 @@ def test_a_typed_field_holding_a_reference_that_cannot_be_followed(typed, base, 
         else {"_table": g_cls.__tablename__, "_id": 1}
     )
     rid = db.insert_document(pt, {"title": "h", "one": held})
-    assert _observe(db, p_cls, rid, way, pt) == UNFOLLOWED_EXPECTED[(shape, base, way)]
+    assert _observe(db, p_cls, rid, way, pt) == UNFOLLOWED_EXPECTED
 
 
 @pytest.mark.parametrize("base", sorted(TYPED))
@@ -1491,6 +1489,21 @@ def test_a_child_of_a_class_never_bound_read_through_using_saves_its_row(make_db
 # ---- typed fields of a class --------------------------------------------------------
 
 
+def _at(cls: type) -> Any:
+    """Where ``Optional[cls]`` puts a model: the field's value."""
+    return _refs.Position((cls,), None, None)
+
+
+def _in_list(cls: type) -> Any:
+    """Where ``list[cls]`` puts a model: each entry."""
+    return _refs.Position((), _at(cls), None)
+
+
+def _in_dict(cls: type) -> Any:
+    """Where ``dict[str, cls]`` puts a model: each value."""
+    return _refs.Position((), None, _at(cls))
+
+
 def test_typed_fields_of_a_class_defined_before_the_class_it_refers_to(make_db):
     """Item 5: asked while the child class does not exist, the answer is not kept; asked
     after, it names the child, and a load builds the child from its row."""
@@ -1519,8 +1532,8 @@ def test_typed_fields_of_a_class_defined_before_the_class_it_refers_to(make_db):
         name: str = ""
 
     FwdP.model_rebuild()
-    assert _refs.typed_fields(FwdP) == {"one": (FwdC,)}
-    assert _refs.typed_fields(LFwdP) == {"one": (LFwdC,)}
+    assert _refs.typed_fields(FwdP) == {"one": _at(FwdC)}
+    assert _refs.typed_fields(LFwdP) == {"one": _at(LFwdC)}
     db = make_db()
     for c_cls, p_cls in ((FwdC, FwdP), (LFwdC, LFwdP)):
         cid = db.insert_document(c_cls.__tablename__, {"name": "c"})
@@ -1530,9 +1543,9 @@ def test_typed_fields_of_a_class_defined_before_the_class_it_refers_to(make_db):
 
 
 def test_typed_fields_names_every_model_class_a_field_admits():
-    assert _refs.typed_fields(TyP) == {"one": (TyC,), "many": (TyC,), "bag": (TyC,)}
-    assert _refs.typed_fields(LtyP) == {"one": (LtyC,), "many": (LtyC,), "bag": (LtyC,)}
-    assert _refs.typed_fields(Pd_Parent) == {"one": (Pd_Child,), "many": (Pd_Child,)}
+    assert _refs.typed_fields(TyP) == {"one": _at(TyC), "many": _in_list(TyC), "bag": _in_dict(TyC)}
+    assert _refs.typed_fields(LtyP) == {"one": _at(LtyC), "many": _in_list(LtyC), "bag": _in_dict(LtyC)}
+    assert _refs.typed_fields(Pd_Parent) == {"one": _at(Pd_Child), "many": _in_list(Pd_Child)}
     assert _refs.typed_fields(TyG) == {}
 
 
@@ -1627,7 +1640,7 @@ def test_a_class_bound_to_a_pooled_database_gets_children_with_their_rows(tmp_pa
         pdb.close()
 
 
-# ---- p6: classes never bound, read through using(db) --------------------------------
+# ---- classes never bound, read through using(db) ------------------------------------
 
 
 class UbC(SQLerSafeModel):
@@ -1688,7 +1701,7 @@ def test_a_child_of_a_class_never_bound_holds_its_column_version(make_db, base, 
     assert [r[1]["many"] for r in rows_of(db, pt)] == [[{"_table": ct, "_id": 1}]]
 
 
-# ---- msgspec models: not a base of this stream, pinned as they are ----------------------
+# ---- msgspec models, pinned as they are ------------------------------------------------
 
 
 class MsC(SQLerMsgspecModel):
@@ -1732,554 +1745,25 @@ def test_a_msgspec_typed_field_gives_what_it_gave(make_db, way):
     assert rows_of(db, MsP.__tablename__) == stored
 
 
-# What each way gives, pinned. Where it differs from the base: a child built by the
-# batch gets its row's _id (and _version); the safe from_id / refresh resolve typed
-# references, so they give what SQLerModel.from_id gives (a ValidationError where a
-# typed field cannot take the row it names).
-GONE_EXPECTED: dict = {('lite', 'all'): ({'bag': {},
-                    'many': [('LtyC',
-                              1,
-                              '-',
-                              {'g': ('LtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                             ('ref', 'rep_lty_c', 2)],
-                    'one': ('ref', 'rep_lty_c', 2),
-                    'title': 'p2'},
-                   {'bag': {},
-                    'many': [{'_id': 1, '_table': 'rep_lty_c'}, {'_id': 2, '_table': 'rep_lty_c'}],
-                    'one': {'_id': 2, '_table': 'rep_lty_c'},
-                    'title': 'p2'}),
- ('lite', 'first'): ({'bag': {},
-                      'many': [('LtyC',
-                                1,
-                                '-',
-                                {'g': ('LtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                               ('ref', 'rep_lty_c', 2)],
-                      'one': ('ref', 'rep_lty_c', 2),
-                      'title': 'p2'},
-                     {'bag': {},
-                      'many': [{'_id': 1, '_table': 'rep_lty_c'},
-                               {'_id': 2, '_table': 'rep_lty_c'}],
-                      'one': {'_id': 2, '_table': 'rep_lty_c'},
-                      'title': 'p2'}),
- ('lite', 'from_id'): ({'bag': {},
-                        'many': [('LtyC',
-                                  1,
-                                  '-',
-                                  {'g': ('LtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                 None],
-                        'one': None,
-                        'title': 'p2'},
-                       {'bag': {},
-                        'many': [{'_id': 1, '_table': 'rep_lty_c'}, None],
-                        'one': None,
-                        'title': 'p2'}),
- ('lite', 'from_ids'): ({'bag': {},
-                         'many': [('LtyC',
-                                   1,
-                                   '-',
-                                   {'g': ('LtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                  ('ref', 'rep_lty_c', 2)],
-                         'one': ('ref', 'rep_lty_c', 2),
-                         'title': 'p2'},
-                        {'bag': {},
-                         'many': [{'_id': 1, '_table': 'rep_lty_c'},
-                                  {'_id': 2, '_table': 'rep_lty_c'}],
-                         'one': {'_id': 2, '_table': 'rep_lty_c'},
-                         'title': 'p2'}),
- ('lite', 'refresh'): ({'bag': {},
-                        'many': [('LtyC',
-                                  1,
-                                  '-',
-                                  {'g': ('LtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                 None],
-                        'one': None,
-                        'title': 'p2'},
-                       {'bag': {},
-                        'many': [{'_id': 1, '_table': 'rep_lty_c'}, None],
-                        'one': None,
-                        'title': 'p2'}),
- ('lite-safe', 'all'): ({'bag': {},
-                         'many': [('LtysC',
-                                   1,
-                                   1,
-                                   {'g': ('LtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                  ('ref', 'rep_ltys_c', 2)],
-                         'one': ('ref', 'rep_ltys_c', 2),
-                         'title': 'p2'},
-                        {'bag': {},
-                         'many': [{'_id': 1, '_table': 'rep_ltys_c'},
-                                  {'_id': 2, '_table': 'rep_ltys_c'}],
-                         'one': {'_id': 2, '_table': 'rep_ltys_c'},
-                         'title': 'p2'}),
- ('lite-safe', 'first'): ({'bag': {},
-                           'many': [('LtysC',
-                                     1,
-                                     1,
-                                     {'g': ('LtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                    ('ref', 'rep_ltys_c', 2)],
-                           'one': ('ref', 'rep_ltys_c', 2),
-                           'title': 'p2'},
-                          {'bag': {},
-                           'many': [{'_id': 1, '_table': 'rep_ltys_c'},
-                                    {'_id': 2, '_table': 'rep_ltys_c'}],
-                           'one': {'_id': 2, '_table': 'rep_ltys_c'},
-                           'title': 'p2'}),
- ('lite-safe', 'from_id'): ({'bag': {},
-                             'many': [('LtysC',
-                                       1,
-                                       1,
-                                       {'g': ('LtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                      None],
-                             'one': None,
-                             'title': 'p2'},
-                            {'bag': {},
-                             'many': [{'_id': 1, '_table': 'rep_ltys_c'}, None],
-                             'one': None,
-                             'title': 'p2'}),
- ('lite-safe', 'from_ids'): ({'bag': {},
-                              'many': [('LtysC',
-                                        1,
-                                        1,
-                                        {'g': ('LtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                       ('ref', 'rep_ltys_c', 2)],
-                              'one': ('ref', 'rep_ltys_c', 2),
-                              'title': 'p2'},
-                             {'bag': {},
-                              'many': [{'_id': 1, '_table': 'rep_ltys_c'},
-                                       {'_id': 2, '_table': 'rep_ltys_c'}],
-                              'one': {'_id': 2, '_table': 'rep_ltys_c'},
-                              'title': 'p2'}),
- ('lite-safe', 'refresh'): ({'bag': {},
-                             'many': [('LtysC',
-                                       1,
-                                       1,
-                                       {'g': ('LtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                      None],
-                             'one': None,
-                             'title': 'p2'},
-                            {'bag': {},
-                             'many': [{'_id': 1, '_table': 'rep_ltys_c'}, None],
-                             'one': None,
-                             'title': 'p2'}),
- ('pydantic', 'all'): ({'bag': {},
-                        'many': [('TyC',
-                                  1,
-                                  '-',
-                                  {'g': ('TyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                 ('TyC', None, '-', {'g': None, 'name': ''})],
-                        'one': ('TyC', None, '-', {'g': None, 'name': ''}),
-                        'title': 'p2'},
-                       ('ValueError', 'Related model must be saved before saving parent')),
- ('pydantic', 'first'): ({'bag': {},
-                          'many': [('TyC',
-                                    1,
-                                    '-',
-                                    {'g': ('TyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                   ('TyC', None, '-', {'g': None, 'name': ''})],
-                          'one': ('TyC', None, '-', {'g': None, 'name': ''}),
-                          'title': 'p2'},
-                         ('ValueError', 'Related model must be saved before saving parent')),
- ('pydantic', 'from_id'): ('load raised', 'ValidationError'),
- ('pydantic', 'from_ids'): ({'bag': {},
-                             'many': [('TyC',
-                                       1,
-                                       '-',
-                                       {'g': ('TyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                      ('TyC', None, '-', {'g': None, 'name': ''})],
-                             'one': ('TyC', None, '-', {'g': None, 'name': ''}),
-                             'title': 'p2'},
-                            ('ValueError', 'Related model must be saved before saving parent')),
- ('pydantic', 'refresh'): ('load raised', 'ValidationError'),
- ('safe', 'all'): ({'bag': {},
-                    'many': [('TysC', 1, 1, {'g': ('TysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                             ('TysC', None, 0, {'g': None, 'name': ''})],
-                    'one': ('TysC', None, 0, {'g': None, 'name': ''}),
-                    'title': 'p2'},
-                   ('ValueError', 'Related model must be saved before saving parent')),
- ('safe', 'first'): ({'bag': {},
-                      'many': [('TysC', 1, 1, {'g': ('TysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                               ('TysC', None, 0, {'g': None, 'name': ''})],
-                      'one': ('TysC', None, 0, {'g': None, 'name': ''}),
-                      'title': 'p2'},
-                     ('ValueError', 'Related model must be saved before saving parent')),
- ('safe', 'from_id'): ('load raised', 'ValidationError'),
- ('safe', 'from_ids'): ({'bag': {},
-                         'many': [('TysC',
-                                   1,
-                                   1,
-                                   {'g': ('TysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                  ('TysC', None, 0, {'g': None, 'name': ''})],
-                         'one': ('TysC', None, 0, {'g': None, 'name': ''}),
-                         'title': 'p2'},
-                        ('ValueError', 'Related model must be saved before saving parent')),
- ('safe', 'refresh'): ('load raised', 'ValidationError')}
-UNFOLLOWED_EXPECTED: dict = {('id-str', 'lite', 'all'): ({'bag': {},
-                              'many': [],
-                              'one': ('ref', 'rep_lty_c', 'x'),
-                              'title': 'h'},
-                             {'bag': {},
-                              'many': [],
-                              'one': {'_id': 'x', '_table': 'rep_lty_c'},
-                              'title': 'h'}),
- ('id-str', 'lite', 'first'): ({'bag': {},
-                                'many': [],
-                                'one': ('ref', 'rep_lty_c', 'x'),
-                                'title': 'h'},
-                               {'bag': {},
-                                'many': [],
-                                'one': {'_id': 'x', '_table': 'rep_lty_c'},
-                                'title': 'h'}),
- ('id-str', 'lite', 'from_id'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('ref', 'rep_lty_c', 'x'),
-                                  'title': 'h'},
-                                 {'bag': {},
-                                  'many': [],
-                                  'one': {'_id': 'x', '_table': 'rep_lty_c'},
-                                  'title': 'h'}),
- ('id-str', 'lite', 'from_ids'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('ref', 'rep_lty_c', 'x'),
-                                   'title': 'h'},
-                                  {'bag': {},
-                                   'many': [],
-                                   'one': {'_id': 'x', '_table': 'rep_lty_c'},
-                                   'title': 'h'}),
- ('id-str', 'lite', 'refresh'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('ref', 'rep_lty_c', 'x'),
-                                  'title': 'h'},
-                                 {'bag': {},
-                                  'many': [],
-                                  'one': {'_id': 'x', '_table': 'rep_lty_c'},
-                                  'title': 'h'}),
- ('id-str', 'lite-safe', 'all'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('ref', 'rep_ltys_c', 'x'),
-                                   'title': 'h'},
-                                  {'bag': {},
-                                   'many': [],
-                                   'one': {'_id': 'x', '_table': 'rep_ltys_c'},
-                                   'title': 'h'}),
- ('id-str', 'lite-safe', 'first'): ({'bag': {},
-                                     'many': [],
-                                     'one': ('ref', 'rep_ltys_c', 'x'),
-                                     'title': 'h'},
-                                    {'bag': {},
-                                     'many': [],
-                                     'one': {'_id': 'x',
-                                             '_table': 'rep_ltys_c'},
-                                     'title': 'h'}),
- ('id-str', 'lite-safe', 'from_id'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ref', 'rep_ltys_c', 'x'),
-                                       'title': 'h'},
-                                      {'bag': {},
-                                       'many': [],
-                                       'one': {'_id': 'x',
-                                               '_table': 'rep_ltys_c'},
-                                       'title': 'h'}),
- ('id-str', 'lite-safe', 'from_ids'): ({'bag': {},
-                                        'many': [],
-                                        'one': ('ref', 'rep_ltys_c', 'x'),
-                                        'title': 'h'},
-                                       {'bag': {},
-                                        'many': [],
-                                        'one': {'_id': 'x',
-                                                '_table': 'rep_ltys_c'},
-                                        'title': 'h'}),
- ('id-str', 'lite-safe', 'refresh'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ref', 'rep_ltys_c', 'x'),
-                                       'title': 'h'},
-                                      {'bag': {},
-                                       'many': [],
-                                       'one': {'_id': 'x',
-                                               '_table': 'rep_ltys_c'},
-                                       'title': 'h'}),
- ('id-str', 'pydantic', 'all'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('TyC',
-                                          None,
-                                          '-',
-                                          {'g': None, 'name': ''}),
-                                  'title': 'h'},
-                                 ('ValueError',
-                                  'Related model must be saved before saving '
-                                  'parent')),
- ('id-str', 'pydantic', 'first'): ({'bag': {},
-                                    'many': [],
-                                    'one': ('TyC',
-                                            None,
-                                            '-',
-                                            {'g': None, 'name': ''}),
-                                    'title': 'h'},
-                                   ('ValueError',
-                                    'Related model must be saved before saving '
-                                    'parent')),
- ('id-str', 'pydantic', 'from_id'): ({'bag': {},
-                                      'many': [],
-                                      'one': ('TyC',
-                                              None,
-                                              '-',
-                                              {'g': None, 'name': ''}),
-                                      'title': 'h'},
-                                     ('ValueError',
-                                      'Related model must be saved before '
-                                      'saving parent')),
- ('id-str', 'pydantic', 'from_ids'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('TyC',
-                                               None,
-                                               '-',
-                                               {'g': None, 'name': ''}),
-                                       'title': 'h'},
-                                      ('ValueError',
-                                       'Related model must be saved before '
-                                       'saving parent')),
- ('id-str', 'pydantic', 'refresh'): ({'bag': {},
-                                      'many': [],
-                                      'one': ('TyC',
-                                              None,
-                                              '-',
-                                              {'g': None, 'name': ''}),
-                                      'title': 'h'},
-                                     ('ValueError',
-                                      'Related model must be saved before '
-                                      'saving parent')),
- ('id-str', 'safe', 'all'): ({'bag': {},
-                              'many': [],
-                              'one': ('TysC', None, 0, {'g': None, 'name': ''}),
-                              'title': 'h'},
-                             ('ValueError',
-                              'Related model must be saved before saving '
-                              'parent')),
- ('id-str', 'safe', 'first'): ({'bag': {},
-                                'many': [],
-                                'one': ('TysC',
-                                        None,
-                                        0,
-                                        {'g': None, 'name': ''}),
-                                'title': 'h'},
-                               ('ValueError',
-                                'Related model must be saved before saving '
-                                'parent')),
- ('id-str', 'safe', 'from_id'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('TysC',
-                                          None,
-                                          0,
-                                          {'g': None, 'name': ''}),
-                                  'title': 'h'},
-                                 ('ValueError',
-                                  'Related model must be saved before saving '
-                                  'parent')),
- ('id-str', 'safe', 'from_ids'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('TysC',
-                                           None,
-                                           0,
-                                           {'g': None, 'name': ''}),
-                                   'title': 'h'},
-                                  ('ValueError',
-                                   'Related model must be saved before saving '
-                                   'parent')),
- ('id-str', 'safe', 'refresh'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('TysC',
-                                          None,
-                                          0,
-                                          {'g': None, 'name': ''}),
-                                  'title': 'h'},
-                                 ('ValueError',
-                                  'Related model must be saved before saving '
-                                  'parent')),
- ('other-table', 'lite', 'all'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('ref', 'rep_lty_g', 1),
-                                   'title': 'h'},
-                                  {'bag': {},
-                                   'many': [],
-                                   'one': {'_id': 1, '_table': 'rep_lty_g'},
-                                   'title': 'h'}),
- ('other-table', 'lite', 'first'): ({'bag': {},
-                                     'many': [],
-                                     'one': ('ref', 'rep_lty_g', 1),
-                                     'title': 'h'},
-                                    {'bag': {},
-                                     'many': [],
-                                     'one': {'_id': 1, '_table': 'rep_lty_g'},
-                                     'title': 'h'}),
- ('other-table', 'lite', 'from_id'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ref', 'rep_lty_g', 1),
-                                       'title': 'h'},
-                                      {'bag': {},
-                                       'many': [],
-                                       'one': {'_id': 1, '_table': 'rep_lty_g'},
-                                       'title': 'h'}),
- ('other-table', 'lite', 'from_ids'): ({'bag': {},
-                                        'many': [],
-                                        'one': ('ref', 'rep_lty_g', 1),
-                                        'title': 'h'},
-                                       {'bag': {},
-                                        'many': [],
-                                        'one': {'_id': 1,
-                                                '_table': 'rep_lty_g'},
-                                        'title': 'h'}),
- ('other-table', 'lite', 'refresh'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ref', 'rep_lty_g', 1),
-                                       'title': 'h'},
-                                      {'bag': {},
-                                       'many': [],
-                                       'one': {'_id': 1, '_table': 'rep_lty_g'},
-                                       'title': 'h'}),
- ('other-table', 'lite-safe', 'all'): ({'bag': {},
-                                        'many': [],
-                                        'one': ('ref', 'rep_ltys_g', 1),
-                                        'title': 'h'},
-                                       {'bag': {},
-                                        'many': [],
-                                        'one': {'_id': 1,
-                                                '_table': 'rep_ltys_g'},
-                                        'title': 'h'}),
- ('other-table', 'lite-safe', 'first'): ({'bag': {},
-                                          'many': [],
-                                          'one': ('ref', 'rep_ltys_g', 1),
-                                          'title': 'h'},
-                                         {'bag': {},
-                                          'many': [],
-                                          'one': {'_id': 1,
-                                                  '_table': 'rep_ltys_g'},
-                                          'title': 'h'}),
- ('other-table', 'lite-safe', 'from_id'): ({'bag': {},
-                                            'many': [],
-                                            'one': ('ref', 'rep_ltys_g', 1),
-                                            'title': 'h'},
-                                           {'bag': {},
-                                            'many': [],
-                                            'one': {'_id': 1,
-                                                    '_table': 'rep_ltys_g'},
-                                            'title': 'h'}),
- ('other-table', 'lite-safe', 'from_ids'): ({'bag': {},
-                                             'many': [],
-                                             'one': ('ref', 'rep_ltys_g', 1),
-                                             'title': 'h'},
-                                            {'bag': {},
-                                             'many': [],
-                                             'one': {'_id': 1,
-                                                     '_table': 'rep_ltys_g'},
-                                             'title': 'h'}),
- ('other-table', 'lite-safe', 'refresh'): ({'bag': {},
-                                            'many': [],
-                                            'one': ('ref', 'rep_ltys_g', 1),
-                                            'title': 'h'},
-                                           {'bag': {},
-                                            'many': [],
-                                            'one': {'_id': 1,
-                                                    '_table': 'rep_ltys_g'},
-                                            'title': 'h'}),
- ('other-table', 'pydantic', 'all'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('TyC',
-                                               None,
-                                               '-',
-                                               {'g': None, 'name': ''}),
-                                       'title': 'h'},
-                                      ('ValueError',
-                                       'Related model must be saved before '
-                                       'saving parent')),
- ('other-table', 'pydantic', 'first'): ({'bag': {},
-                                         'many': [],
-                                         'one': ('TyC',
-                                                 None,
-                                                 '-',
-                                                 {'g': None, 'name': ''}),
-                                         'title': 'h'},
-                                        ('ValueError',
-                                         'Related model must be saved before '
-                                         'saving parent')),
- ('other-table', 'pydantic', 'from_id'): ({'bag': {},
-                                           'many': [],
-                                           'one': ('TyC',
-                                                   None,
-                                                   '-',
-                                                   {'g': None, 'name': ''}),
-                                           'title': 'h'},
-                                          ('ValueError',
-                                           'Related model must be saved before '
-                                           'saving parent')),
- ('other-table', 'pydantic', 'from_ids'): ({'bag': {},
-                                            'many': [],
-                                            'one': ('TyC',
-                                                    None,
-                                                    '-',
-                                                    {'g': None, 'name': ''}),
-                                            'title': 'h'},
-                                           ('ValueError',
-                                            'Related model must be saved '
-                                            'before saving parent')),
- ('other-table', 'pydantic', 'refresh'): ({'bag': {},
-                                           'many': [],
-                                           'one': ('TyC',
-                                                   None,
-                                                   '-',
-                                                   {'g': None, 'name': ''}),
-                                           'title': 'h'},
-                                          ('ValueError',
-                                           'Related model must be saved before '
-                                           'saving parent')),
- ('other-table', 'safe', 'all'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('TysC',
-                                           None,
-                                           0,
-                                           {'g': None, 'name': ''}),
-                                   'title': 'h'},
-                                  ('ValueError',
-                                   'Related model must be saved before saving '
-                                   'parent')),
- ('other-table', 'safe', 'first'): ({'bag': {},
-                                     'many': [],
-                                     'one': ('TysC',
-                                             None,
-                                             0,
-                                             {'g': None, 'name': ''}),
-                                     'title': 'h'},
-                                    ('ValueError',
-                                     'Related model must be saved before '
-                                     'saving parent')),
- ('other-table', 'safe', 'from_id'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('TysC',
-                                               None,
-                                               0,
-                                               {'g': None, 'name': ''}),
-                                       'title': 'h'},
-                                      ('ValueError',
-                                       'Related model must be saved before '
-                                       'saving parent')),
- ('other-table', 'safe', 'from_ids'): ({'bag': {},
-                                        'many': [],
-                                        'one': ('TysC',
-                                                None,
-                                                0,
-                                                {'g': None, 'name': ''}),
-                                        'title': 'h'},
-                                       ('ValueError',
-                                        'Related model must be saved before '
-                                        'saving parent')),
- ('other-table', 'safe', 'refresh'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('TysC',
-                                               None,
-                                               0,
-                                               {'g': None, 'name': ''}),
-                                       'title': 'h'},
-                                      ('ValueError',
-                                       'Related model must be saved before '
-                                       'saving parent'))}
+def gone_expected(base: str) -> Any:
+    """One answer for every way in: the reference to the row that is gone reads as ``None``
+    in ``one`` and is left out of ``many``; the row that is there is a model of its row.
+    Saving writes the parent without the reference to the gone row."""
+    g_cls, c_cls, _, _ = TYPED[base]
+    v = 1 if base in VERSIONED else "-"
+    child = (c_cls.__name__, 1, v, {"g": (g_cls.__name__, 1, v, {"name": "g2"}), "name": "c1b"})
+    return (
+        {"bag": {}, "many": [child], "one": None, "title": "p2"},
+        {"bag": {}, "many": [{"_id": 1, "_table": c_cls.__tablename__}], "one": None, "title": "p2"},
+    )
+
+
+# a typed reference that cannot be followed leads to no row of the field's class: ``None``,
+# on every base and every way in, and saving writes ``None`` in its place
+UNFOLLOWED_EXPECTED = (
+    {"bag": {}, "many": [], "one": None, "title": "h"},
+    {"bag": {}, "many": [], "one": None, "title": "h"},
+)
 ELSEWHERE_EXPECTED: dict = {('lite', 'all'): ({'never': ('LtyuC', 1, '-', {'name': 'never-bound'}),
                     'other': ('LtyoC', 1, '-', {'name': 'in-parent-db'}),
                     'title': 'e'},
@@ -2532,7 +2016,7 @@ def test_a_literal_field_is_not_typed_and_the_answer_is_kept(p_cls, c_cls):
     gives the same object."""
     _refs._TYPED.pop(p_cls, None)
     first = _refs.typed_fields(p_cls)
-    assert first == {"one": (c_cls,)}
+    assert first == {"one": _at(c_cls)}
     assert p_cls in _refs._TYPED
     assert _refs.typed_fields(p_cls) is first
 
@@ -2547,7 +2031,7 @@ _ElsewhereSub = dataclass(_ElsewhereSub)
 
 
 def test_a_lite_subclass_in_another_module_inherits_its_parents_answer():
-    assert _refs.typed_fields(_ElsewhereSub) == {"one": (LLitC,)}
+    assert _refs.typed_fields(_ElsewhereSub) == {"one": _at(LLitC)}
     assert _ElsewhereSub in _refs._TYPED
 
 

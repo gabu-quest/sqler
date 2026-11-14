@@ -706,7 +706,7 @@ def test_reference_to_a_row_deleted_with_sql_reads_none_and_is_dirty(kind):
 
 
 @pytest.mark.parametrize("kind", ["lite", "litesafe"])
-def test_lite_reference_to_a_row_deleted_with_sql_holds_the_stored_reference(kind):
+def test_lite_reference_to_a_row_deleted_with_sql_reads_none_and_is_dirty(kind):
     async def scenario():
         db = await bind(kind, "h")
         child, _, linked, _ = KINDS[kind]
@@ -716,10 +716,10 @@ def test_lite_reference_to_a_row_deleted_with_sql_holds_the_stored_reference(kin
         got = await load(linked, row, "all")
         out = (got.one, got.is_dirty(), got.get_dirty_fields())
         await close(db)
-        return out, child._table, c._id
+        return out
 
-    out, table, cid = asyncio.run(scenario())
-    assert out == ({"_table": table, "_id": cid}, False, set())
+    # a typed reference to a row that is gone reads as None; save() would write null
+    assert asyncio.run(scenario()) == (None, True, {"one"})
 
 
 @pytest.mark.parametrize("kind", ["alite", "alitesafe"])

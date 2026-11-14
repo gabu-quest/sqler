@@ -1,6 +1,7 @@
 """``from_id`` and ``refresh`` load references with the batched loader ``from_ids`` uses.
 
-``other`` is typed: it admits both classes, alone, in a list or inside a dict.
+``other`` is typed: it admits both classes, alone, as the entries of a list, or as the
+values of a dict inside a dict.
 
 Counted through the driver's trace callback: a two-row cycle takes 3 SELECTs, a row
 holding 20 references takes 2, whichever way the row is loaded.
@@ -18,41 +19,41 @@ from sqler.models.lite.safe import SQLerLiteSafeModel
 class PxA(SQLerModel):
     __tablename__ = "fx_px_a"
     name: str
-    other: "Optional[Union[PxA, PxB, list, dict]]" = None
+    other: "Optional[Union[PxA, PxB, list[Union[PxA, PxB]], dict[str, dict[str, Union[PxA, PxB]]], list, dict]]" = None
 
 
 class PxB(SQLerModel):
     __tablename__ = "fx_px_b"
     name: str
-    other: "Optional[Union[PxA, PxB, list, dict]]" = None
+    other: "Optional[Union[PxA, PxB, list[Union[PxA, PxB]], dict[str, dict[str, Union[PxA, PxB]]], list, dict]]" = None
 
 
 @dataclass
 class LxA(SQLerLiteModel):
     __tablename__ = "fx_lx_a"
     name: str = ""
-    other: "Optional[Union[LxA, LxB, list, dict]]" = None
+    other: "Optional[Union[LxA, LxB, list[Union[LxA, LxB]], dict[str, dict[str, Union[LxA, LxB]]], list, dict]]" = None
 
 
 @dataclass
 class LxB(SQLerLiteModel):
     __tablename__ = "fx_lx_b"
     name: str = ""
-    other: "Optional[Union[LxA, LxB, list, dict]]" = None
+    other: "Optional[Union[LxA, LxB, list[Union[LxA, LxB]], dict[str, dict[str, Union[LxA, LxB]]], list, dict]]" = None
 
 
 @dataclass
 class LsA(SQLerLiteSafeModel):
     __tablename__ = "fx_ls_a"
     name: str = ""
-    other: "Optional[Union[LsA, LsB, list, dict]]" = None
+    other: "Optional[Union[LsA, LsB, list[Union[LsA, LsB]], dict[str, dict[str, Union[LsA, LsB]]], list, dict]]" = None
 
 
 @dataclass
 class LsB(SQLerLiteSafeModel):
     __tablename__ = "fx_ls_b"
     name: str = ""
-    other: "Optional[Union[LsA, LsB, list, dict]]" = None
+    other: "Optional[Union[LsA, LsB, list[Union[LsA, LsB]], dict[str, dict[str, Union[LsA, LsB]]], list, dict]]" = None
 
 
 PxA.model_rebuild()
@@ -184,11 +185,11 @@ def test_a_reference_nested_in_a_dict_is_loaded(world):
     assert got.other["deep"]["x"].name == "b"
 
 
-def test_a_reference_to_a_table_that_does_not_exist_stays_a_reference(world):
+def test_a_reference_to_a_table_no_class_owns_reads_as_none(world):
     db, a_cls, _ = world
     dangling = {"_table": "fx_no_such_table", "_id": 1}
     a = put(db, a_cls, name="a", other=dangling)
-    assert a_cls.from_id(a).other == dangling
+    assert a_cls.from_id(a).other is None
 
 
 def test_a_safe_row_whose_referenced_row_changed_version_loads_the_new_one():

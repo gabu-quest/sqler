@@ -15,7 +15,8 @@ import dataclasses
 import inspect
 import re
 import warnings
-from typing import Any, Optional
+from collections.abc import Mapping, Sequence
+from typing import Annotated, Any, Optional, Union
 
 import pytest
 from pydantic import Field as PydField
@@ -48,12 +49,18 @@ BASES = {
 }
 
 
+# a field with no default
+REQUIRED = object()
+
+
 def _make(key: str, base: type, lite: bool, name: str, fields: dict) -> type:
     """A model class of ``base`` with ``fields`` (``{name: (annotation, default)}``); a
-    default that is a type (``dict``, ``list``) is a factory."""
+    default that is a type (``dict``, ``list``) is a factory, ``REQUIRED`` none."""
     ns: dict = {"__tablename__": f"rp_{key.replace('-', '_')}_{name.lower()}", "__annotations__": {}}
     for field_name, (annotation, default) in fields.items():
         ns["__annotations__"][field_name] = annotation
+        if default is REQUIRED:
+            continue
         if isinstance(default, type):
             ns[field_name] = (dataclasses.field if lite else PydField)(default_factory=default)
         else:
@@ -84,7 +91,31 @@ def _classes(key: str) -> dict:
         },
     )
     plain = make("Plain", {"name": (str, ""), "extra": (dict, dict)})
-    return {"secret": secret, "team": team, "user": user, "comment": comment, "plain": plain}
+    admin = _make(key, user, lite, "Admin", {})
+    holder = make(
+        "Holder",
+        {
+            "one": (Optional[user], None),
+            "many": (list[user], list),
+            "by_key": (dict[str, user], dict),
+            "either": (Optional[Union[dict, user]], None),
+            "num": (Optional[Union[int, user]], None),
+            "grid": (list[list[user]], list),
+            "groups": (dict[str, list[user]], dict),
+            "admin": (Optional[admin], None),
+        },
+    )
+    strict = make("Strict", {"writer": (user, REQUIRED)})
+    return {
+        "secret": secret,
+        "team": team,
+        "user": user,
+        "comment": comment,
+        "plain": plain,
+        "admin": admin,
+        "holder": holder,
+        "strict": strict,
+    }
 
 
 CLASSES = {key: _classes(key) for key in BASES}
@@ -186,7 +217,7 @@ def shape(x: Any) -> Any:
     return (kind, getattr(x, "_id", None), x.name)
 
 
-# ---- p32: a reference in an untyped field -------------------------------------------
+# ---- a reference in an untyped field ------------------------------------------------
 
 
 @pytest.mark.parametrize("way", WAYS)
@@ -263,21 +294,6 @@ def test_a_followed_child_follows_its_own_typed_field(key, way):
 
 # ---- a typed position admits only its classes ---------------------------------------
 
-# what a typed field gives for a reference into a table of a class it does not admit: the
-# lite bases keep the dict; pydantic validates the dict as the field's class (fields at
-# their defaults, no row id)
-NOT_ADMITTED = {
-    "pydantic": ("User", None, ""),
-    "safe": ("User", None, ""),
-    "lite": "ref",
-    "lite-safe": "ref",
-    "async-pydantic": ("User", None, ""),
-    "async-safe": ("User", None, ""),
-    "async-lite": "ref",
-    "async-lite-safe": "ref",
-}
-
-
 @pytest.mark.parametrize("way", WAYS)
 @pytest.mark.parametrize("key", list(BASES))
 def test_a_typed_field_holding_a_reference_into_another_table_reads_nothing_from_it(key, way):
@@ -288,9 +304,8 @@ def test_a_typed_field_holding_a_reference_into_another_table_reads_nothing_from
             got = await w.load("comment", cid, way)
         return shape(got.writer), selects_from(sent, w.t["secret"])
 
-    ref = {"_table": f"rp_{key.replace('-', '_')}_secret", "_id": 1}
-    want = ref if NOT_ADMITTED[key] == "ref" else NOT_ADMITTED[key]
-    assert run(key, scenario) == (want, 0)
+    # it leads to no row of the field's class: ``None``, on every base
+    assert run(key, scenario) == (None, 0)
 
 
 @pytest.mark.parametrize("way", WAYS)
@@ -315,10 +330,9 @@ def test_a_list_and_a_dict_of_children_with_one_entry_into_another_table(key, wa
             selects_from(sent, w.t["user"]),
         )
 
-    ref = {"_table": f"rp_{key.replace('-', '_')}_secret", "_id": 1}
-    other = ref if NOT_ADMITTED[key] == "ref" else NOT_ADMITTED[key]
+    # the entry into another table leads to no row of the field's class: it is left out
     user = ("User", 1, "u")
-    assert run(key, scenario) == ([user, other], {"a": user, "b": other}, 0, 1)
+    assert run(key, scenario) == ([user], {"a": user}, 0, 1)
 
 
 # ---- a model put in an untyped field ------------------------------------------------
@@ -437,6 +451,148 @@ def test_a_lite_class_naming_itself_in_quotes_follows_the_reference(base):
     assert run(key, scenario) == [("RpCategory", 1, "root"), ("RpCategory", 1, "root")]
 
 
+# ---- where an annotation puts a model -------------------------------------------------
+
+
+@dataclasses.dataclass
+class RpShapeUser(SQLerLiteModel):
+    __tablename__ = "rp_shape_user"
+    name: str = ""
+
+
+def _at(*admits, item=None, value=None, fixed=False):
+    from sqler.models import _refs
+
+    return _refs.Position(admits, item, value, fixed)
+
+
+# names a module gives to an annotation: an assignment and a ``type`` statement
+RpShapeUsers = list[RpShapeUser]
+type RpShapePair = tuple[RpShapeUser, RpShapeUser]
+type RpShapeTree = dict[str, RpShapeTree] | RpShapeUser  # names itself
+RpShapeLoop = "RpShapeLoop | RpShapeUser"  # text that names itself
+
+_USER = _at(RpShapeUser)
+_IN_LIST = _at(item=_USER)
+_IN_PLACES = _at(item=_USER, fixed=True)
+_IN_DICT = _at(value=_USER)
+
+# annotation -> the Position of the field, None where it puts no model; each one as the
+# object and, where it differs, as the text a class writes under
+# ``from __future__ import annotations`` or in quotes
+SHAPES = [
+    (RpShapeUser, _USER),
+    ("RpShapeUser", _USER),
+    (Optional[RpShapeUser], _USER),
+    ("Optional[RpShapeUser]", _USER),
+    ("typing.Optional[RpShapeUser]", _USER),
+    ("RpShapeUser | None", _USER),
+    ("None | RpShapeUser", _USER),
+    (Union[int, RpShapeUser], _USER),
+    ("Union[int, RpShapeUser]", _USER),
+    (Annotated[RpShapeUser, "note"], _USER),
+    ("Annotated[RpShapeUser, note]", _USER),
+    (list[RpShapeUser], _IN_LIST),
+    ("list[RpShapeUser]", _IN_LIST),
+    ("List[RpShapeUser]", _IN_LIST),
+    (list["RpShapeUser"], _IN_LIST),
+    (set[RpShapeUser], _IN_LIST),
+    ("set[RpShapeUser]", _IN_LIST),
+    (frozenset[RpShapeUser], _IN_LIST),
+    ("frozenset[RpShapeUser]", _IN_LIST),
+    (Sequence[RpShapeUser], _IN_LIST),
+    ("Sequence[RpShapeUser]", _IN_LIST),
+    (tuple[RpShapeUser, ...], _IN_LIST),
+    ("tuple[RpShapeUser, ...]", _IN_LIST),
+    (tuple[RpShapeUser, RpShapeUser], _IN_PLACES),
+    ("tuple[RpShapeUser, RpShapeUser]", _IN_PLACES),
+    (tuple[int, RpShapeUser], _IN_PLACES),
+    ("Tuple[int, RpShapeUser]", _IN_PLACES),
+    (dict[str, RpShapeUser], _IN_DICT),
+    ("dict[str, RpShapeUser]", _IN_DICT),
+    (Mapping[str, RpShapeUser], _IN_DICT),
+    ("Mapping[str, RpShapeUser]", _IN_DICT),
+    (dict[str, list[RpShapeUser]], _at(value=_IN_LIST)),
+    ("dict[str, list[RpShapeUser]]", _at(value=_IN_LIST)),
+    (list[dict[str, RpShapeUser]], _at(item=_IN_DICT)),
+    ("list[dict[str, RpShapeUser]]", _at(item=_IN_DICT)),
+    (Optional[list[Optional[RpShapeUser]]], _IN_LIST),
+    ("Optional[list[Optional[RpShapeUser]]]", _IN_LIST),
+    ("list[RpShapeUser | None] | None", _IN_LIST),
+    (Union[RpShapeUser, list[RpShapeUser]], _at(RpShapeUser, item=_USER)),
+    ("RpShapeUser | list[RpShapeUser]", _at(RpShapeUser, item=_USER)),
+    # the key of a dict, a class object, a value of a Literal: no stored model is there
+    (dict[RpShapeUser, str], None),
+    ("dict[RpShapeUser, str]", None),
+    (type[RpShapeUser], None),
+    ("type[RpShapeUser]", None),
+    ("Literal['RpShapeUser']", None),
+    (list, None),
+    ("list", None),
+    (dict[str, Any], None),
+    # a name the module gives to an annotation is read through to what it names
+    (RpShapeUsers, _IN_LIST),
+    ("RpShapeUsers", _IN_LIST),
+    ("Optional[RpShapeUsers]", _IN_LIST),
+    ("dict[str, RpShapeUsers]", _at(value=_IN_LIST)),
+    (RpShapePair, _IN_PLACES),
+    ("RpShapePair", _IN_PLACES),
+    (Optional[RpShapePair], _IN_PLACES),
+    # a name that names itself is read through once
+    (RpShapeTree, _USER),
+    ("RpShapeTree", _USER),
+    ("RpShapeLoop", _USER),
+]
+
+
+@pytest.mark.parametrize("annotation,want", SHAPES, ids=[str(a) for a, _ in SHAPES])
+def test_typed_fields_reads_where_an_annotation_puts_a_model(annotation, want):
+    """The same answer for an annotation and for its text."""
+    from sqler.models import _refs
+
+    ns = {"__tablename__": "rp_shape_holder", "__module__": __name__, "__annotations__": {"f": annotation}, "f": None}
+    holder = dataclasses.dataclass(type("RpShapeHolder", (SQLerLiteModel,), ns))
+
+    assert _refs.typed_fields(holder) == ({} if want is None else {"f": want})
+
+
+@pytest.mark.parametrize(
+    "key,quoted",
+    [("pydantic", False), ("lite", False), ("lite", True)],
+    ids=["pydantic", "lite", "lite-text"],
+)
+def test_a_gone_row_in_a_tuple_with_one_entry_per_place_keeps_the_places(key, quoted):
+    """``tuple[User, User]`` has a first and a second: the row that is gone reads as ``None``
+    at its place and the other stays second. In ``tuple[User, ...]`` it is left out. (A
+    pydantic class resolves the text of its annotations itself.)"""
+    base, lite, _ = BASES[key]
+    user = _make(key, base, lite, "PairUser", {"name": (str, "")})
+    globals()[user.__name__] = user  # where the text of an annotation finds it
+    n = user.__name__
+    pair = f"tuple[Optional[{n}], Optional[{n}]]" if quoted else tuple[Optional[user], Optional[user]]
+    row = f"tuple[{n}, ...]" if quoted else tuple[user, ...]
+    try:
+        holder = _make(key, base, lite, f"PairHolder{int(quoted)}", {"pair": (pair, None), "row": (row, ())})
+        db = SQLerDB.in_memory(shared=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            user.set_db(db)
+            holder.set_db(db)
+        db.insert_document(user.__tablename__, {"name": "kept"})
+        gone = {"_table": user.__tablename__, "_id": 2}
+        kept = {"_table": user.__tablename__, "_id": 1}
+        db.insert_document(holder.__tablename__, {"pair": [gone, kept], "row": [gone, kept]})
+        got = [holder.from_id(1), holder.from_ids([1])[0], holder.query().all()[0], holder.query().first()]
+        db.close()
+    finally:
+        del globals()[n]
+
+    def names(entries):
+        return [None if e is None else (e._id, e.name) for e in entries]
+
+    assert [(names(g.pair), names(g.row)) for g in got] == [([None, (1, "kept")], [(1, "kept")])] * 4
+
+
 # ---- a msgspec class whose annotation names a class that is not there yet ------------
 
 
@@ -466,4 +622,284 @@ def test_a_msgspec_class_naming_a_class_not_defined_yet_follows_nothing_until_it
     db.close()
 
     assert before == ({}, [])
-    assert after == {"child": (RpMsLater,)}
+    assert after == {"child": _refs.Position((RpMsLater,), None, None)}
+
+
+# ---- a typed reference that leads to no row of the field's class ----------------------
+#
+# One answer on every base and every way in: ``None`` where the reference is the field's
+# value, left out where it is an entry of a list or a value of a dict (the key goes too).
+
+
+def pic(key: str, x: Any) -> Any:
+    """A loaded value all the way down: a model as ``(class, _id, name)``, the class named
+    without the base's prefix."""
+    if x is None or isinstance(x, (str, int)):
+        return x
+    if isinstance(x, list):
+        return [pic(key, v) for v in x]
+    if isinstance(x, dict):
+        return {k: pic(key, v) for k, v in x.items()}
+    prefix = f"Rp{''.join(p.title() for p in key.split('-'))}"
+    return (type(x).__name__.removeprefix(prefix), getattr(x, "_id", None), getattr(x, "name", "-"))
+
+
+def _held(w: World, spec: Any) -> Any:
+    """``("user", 1)`` is a reference into a class's table; ``("raw", d)`` is ``d`` as it is."""
+    if isinstance(spec, tuple) and spec[0] == "raw":
+        return spec[1]
+    if isinstance(spec, tuple):
+        return w.ref(*spec)
+    if isinstance(spec, list):
+        return [_held(w, v) for v in spec]
+    if isinstance(spec, dict):
+        return {k: _held(w, v) for k, v in spec.items()}
+    return spec
+
+
+U1 = ("User", 1, "u1")
+GONE_USER = ("user", 99)
+NO_CLASS = ("raw", {"_table": "rp_no_class_owns_it", "_id": 1})
+
+# (field, what it holds, what it reads as, the table it must not be read from)
+NO_ROW = [
+    pytest.param("one", GONE_USER, None, None, id="one-gone"),
+    pytest.param("many", [("user", 1), GONE_USER], [U1], None, id="many-one-gone"),
+    pytest.param("many", [("user", 98), GONE_USER], [], None, id="many-all-gone"),
+    pytest.param("many", [GONE_USER, ("user", 1), GONE_USER], [U1], None, id="many-same-gone-twice"),
+    pytest.param("by_key", {"a": ("user", 1), "b": GONE_USER}, {"a": U1}, None, id="dict-one-gone"),
+    pytest.param("one", ("secret", 1), None, "secret", id="one-other-class"),
+    pytest.param("many", [("user", 1), ("secret", 1)], [U1], "secret", id="many-other-class"),
+    pytest.param("by_key", {"a": ("user", 1), "b": ("secret", 1)}, {"a": U1}, "secret", id="dict-other-class"),
+    pytest.param("one", NO_CLASS, None, None, id="one-no-class"),
+    pytest.param("many", [("user", 1), NO_CLASS], [U1], None, id="many-no-class"),
+    pytest.param("either", ("secret", 1), None, "secret", id="union-dict-reference-not-followed"),
+    pytest.param("either", ("user", 1), U1, None, id="union-dict-reference-followed"),
+    pytest.param("num", 5, 5, "user", id="union-int-holding-an-int"),
+    pytest.param("num", ("user", 1), U1, None, id="union-int-holding-a-reference"),
+    pytest.param("grid", [[("user", 1), GONE_USER], [GONE_USER]], [[U1], []], None, id="list-of-lists"),
+    pytest.param(
+        "groups", {"a": [("user", 1), GONE_USER], "b": [GONE_USER]}, {"a": [U1], "b": []}, None, id="dict-of-lists"
+    ),
+    pytest.param("one", ("admin", 1), ("Admin", 1, "a1"), None, id="parent-class-field-subclass-row"),
+    pytest.param("admin", ("user", 1), None, "user", id="subclass-field-parent-class-row"),
+]
+
+
+async def _two_rows(w: World) -> None:
+    await w.put("user", {"name": "u1"})
+    await w.put("admin", {"name": "a1"})
+    await w.put("secret", {"owner": "admin", "token": "s3cr3t"})
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("field,held,want,unread", NO_ROW)
+@pytest.mark.parametrize("key", list(BASES))
+def test_a_typed_reference_to_no_row_of_the_fields_class(key, field, held, want, unread, way):
+    async def scenario(w):
+        await _two_rows(w)
+        hid = await w.put("holder", {field: _held(w, held)})
+        with query_logger.capture() as sent:
+            got = await w.load("holder", hid, way)
+        return pic(key, getattr(got, field)), selects_from(sent, w.t[unread]) if unread else 0
+
+    assert run(key, scenario) == (want, 0)
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("table,rid", BAD)
+@pytest.mark.parametrize("key", list(BASES))
+def test_an_unusable_reference_at_a_typed_position_reads_as_no_row(key, table, rid, way):
+    async def scenario(w):
+        await w.put("user", {"name": "u1"})
+        bad = {"_table": w.t["user"] if table == "USER" else table, "_id": rid}
+        hid = await w.put("holder", {"one": bad, "many": [bad], "by_key": {"b": bad}})
+        with query_logger.capture() as sent:
+            got = await w.load("holder", hid, way)
+        return got.one, got.many, got.by_key, selects_from(sent, w.t["user"])
+
+    assert run(key, scenario) == (None, [], {}, 0)
+
+
+# a reference deeper than the annotation puts a model is data: nothing is read for it, and
+# it stays the dict it is; a pydantic base validates the dict at a ``User`` position as a
+# ``User`` (no row id), a lite base keeps it
+DEEPER_THAN_A_USER = {
+    k: ("User", None, "") if not BASES[k][1] else {"deeper": "ref"} for k in BASES
+}
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("key", list(BASES))
+def test_a_reference_deeper_than_the_annotation_puts_a_model_is_data(key, way):
+    async def scenario(w):
+        await w.put("user", {"name": "u1"})
+        ref = w.ref("user", 1)
+        hid = await w.put("holder", {"either": {"k": ref}, "by_key": {"k": {"deeper": ref}}})
+        with query_logger.capture() as sent:
+            got = await w.load("holder", hid, way)
+        deeper = pic(key, got.by_key["k"])
+        if isinstance(deeper, dict):
+            deeper = {k: "ref" if v == ref else v for k, v in deeper.items()}
+        return got.either == {"k": ref}, deeper, selects_from(sent, w.t["user"])
+
+    assert run(key, scenario) == (True, DEEPER_THAN_A_USER[key], 0)
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("key", list(BASES))
+def test_a_gone_row_two_levels_down(key, way):
+    async def scenario(w):
+        uid = await w.put("user", {"name": "u1", "team": w.ref("team", 99)})
+        hid = await w.put("holder", {"one": w.ref("user", uid), "many": [w.ref("user", uid)]})
+        got = await w.load("holder", hid, way)
+        return pic(key, got.one), got.one.team, [m.team for m in got.many]
+
+    assert run(key, scenario) == (U1, None, [None])
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("key", list(BASES))
+def test_a_typed_reference_into_a_dropped_table(key, way):
+    async def scenario(w):
+        await w.put("user", {"name": "u1"})
+        hid = await w.put("holder", {"one": w.ref("user", 1), "many": [w.ref("user", 1)]})
+        await aw(w.db.adapter.execute(f"DROP TABLE {w.t['user']}"))
+        got = await w.load("holder", hid, way)
+        return got.one, got.many
+
+    assert run(key, scenario) == (None, [])
+
+
+@pytest.mark.parametrize("key", list(BASES))
+def test_refresh_after_a_child_row_was_deleted(key):
+    async def scenario(w):
+        await w.put("user", {"name": "u1"})
+        await w.put("user", {"name": "u2"})
+        hid = await w.put(
+            "holder", {"one": w.ref("user", 2), "many": [w.ref("user", 1), w.ref("user", 2)]}
+        )
+        got = await w.load("holder", hid, "from_id")
+        before = pic(key, got.one), pic(key, got.many)
+        await aw(w.db.delete_document(w.t["user"], 2))
+        await aw(got.refresh())
+        return before, (got.one, pic(key, got.many))
+
+    assert run(key, scenario) == (
+        (("User", 2, "u2"), [U1, ("User", 2, "u2")]),
+        (None, [U1]),
+    )
+
+
+# a field that cannot hold ``None``: the walk gives ``None`` and the class says so
+REQUIRED_FIELD = {
+    k: ("ValidationError", "writer") if not BASES[k][1] else ("loaded", None) for k in BASES
+}
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("key", list(BASES))
+def test_a_required_typed_field_whose_row_is_not_there(key, way):
+    async def scenario(w):
+        await w.put("user", {"name": "u1"})
+        sid = await w.put("strict", {"writer": w.ref("user", 99)})
+        try:
+            got = await w.load("strict", sid, way)
+        except Exception as exc:  # the outcome is pinned, whatever it is
+            first = str(exc).splitlines()[1] if "\n" in str(exc) else str(exc)
+            return type(exc).__name__, first.strip()
+        return "loaded", got.writer
+
+    assert run(key, scenario) == REQUIRED_FIELD[key]
+
+
+# ``is_dirty()``: a model whose reference read as no row would be saved without it
+DIRTY = {k: "no is_dirty" if k in ("async-pydantic", "async-safe") else None for k in BASES}
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("key", list(BASES))
+def test_a_model_loaded_with_a_reference_to_no_row_is_dirty(key, way):
+    async def scenario(w):
+        user, holder = w.c["user"], w.c["holder"]
+        u1 = await aw(user(name="u1").save())
+        u2 = await aw(user(name="u2").save())
+        saved = [
+            await aw(holder(one=u1, many=[u1], by_key={"a": u1}).save()),
+            await aw(holder(one=u2).save()),
+            await aw(holder(many=[u1, u2]).save()),
+            await aw(holder(by_key={"a": u1, "b": u2}).save()),
+        ]
+        await aw(w.db.delete_document(w.t["user"], u2._id))
+        out = []
+        for h in saved:
+            got = await w.load("holder", h._id, way)
+            out.append(got.is_dirty() if hasattr(got, "is_dirty") else "no is_dirty")
+        return out
+
+    want = [False, True, True, True] if DIRTY[key] is None else ["no is_dirty"] * 4
+    assert run(key, scenario) == want
+
+
+# statements of one load of a holder: its row's SELECT ("refresh" also the query that loads the
+# instance it refreshes) and one SELECT of the users' table, whether its references lead to
+# rows or not; a reference into a class the field does not admit reads nothing
+STATEMENTS_OF_A_HOLDER: dict = {"from_id": 2, "from_ids": 2, "refresh": 3, "all": 2, "first": 2}
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("key", list(BASES))
+def test_a_reference_to_no_row_costs_what_a_found_one_costs(key, way):
+    async def scenario(w):
+        await w.put("user", {"name": "u1"})
+        await w.put("user", {"name": "u2"})
+        found = await w.put("holder", {"one": w.ref("user", 2), "many": [w.ref("user", 1), w.ref("user", 2)]})
+        lost = await w.put(
+            "holder",
+            {
+                "one": w.ref("user", 99),
+                "many": [w.ref("user", 1), w.ref("user", 98)],
+                "by_key": {"b": w.ref("secret", 1)},
+            },
+        )
+        await w.load("holder", found, way)  # the tables' columns are learned once, here
+        with query_logger.capture() as found_sent:
+            await w.load("holder", found, way)
+        with query_logger.capture() as lost_sent:
+            await w.load("holder", lost, way)
+        shapes = [[q.sql.split(" WHERE ")[0] for q in sent] for sent in (found_sent, lost_sent)]
+        return len(shapes[1]), shapes[0] == shapes[1]
+
+    assert run(key, scenario) == (STATEMENTS_OF_A_HOLDER[way], True)
+
+
+def test_a_msgspec_query_reads_a_typed_reference_to_no_row_by_the_same_rule():
+    from sqler.models.msgspec.model import SQLerMsgspecModel
+
+    class RpMsUser(SQLerMsgspecModel, kw_only=True):
+        name: str = ""
+
+    class RpMsOwner(SQLerMsgspecModel, kw_only=True):
+        one: Optional[RpMsUser] = None
+        many: list[RpMsUser] = []
+        by_key: dict[str, RpMsUser] = {}
+
+    globals()["RpMsUser"] = RpMsUser
+    db = SQLerDB.in_memory()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            RpMsUser.set_db(db, "rp_ms_user")
+            RpMsOwner.set_db(db, "rp_ms_owner")
+        db.insert_document("rp_ms_user", {"name": "u1"})
+        ref, gone = {"_table": "rp_ms_user", "_id": 1}, {"_table": "rp_ms_user", "_id": 99}
+        db.insert_document("rp_ms_owner", {"one": gone, "many": [ref, gone], "by_key": {"a": ref, "b": gone}})
+        got = [RpMsOwner.query().all()[0], RpMsOwner.query().first()]
+        out = [
+            (g.one, [(type(m).__name__, m._id, m.name) for m in g.many], sorted(g.by_key)) for g in got
+        ]
+    finally:
+        del globals()["RpMsUser"]
+        db.close()
+
+    assert out == [(None, [("RpMsUser", 1, "u1")], ["a"])] * 2

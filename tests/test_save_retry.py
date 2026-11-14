@@ -474,8 +474,8 @@ TABLE_LOCKED = "database table is locked"
 def _fail_rereads(h: Harness, times: int) -> list:
     """Make the next ``times`` calls of ``find_document_with_version`` raise "locked".
 
-    This wraps the database's ``find_document_with_version`` (allowed for this
-    case by the brief): it raises ``sqlite3.OperationalError(TABLE_LOCKED)``
+    This wraps the database's ``find_document_with_version`` (a real database
+    cannot be made to fail a chosen number of times): it raises ``sqlite3.OperationalError(TABLE_LOCKED)``
     ``times`` times, then passes each call through to the real method.
     """
     db = h.db
@@ -948,7 +948,7 @@ async def _drop_child(rows, id_):
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_rebase_onto_a_row_naming_a_deleted_child(kind):
-    # p23: the other writer saved a list naming child 2; child 2 is deleted with SQL.
+    # the other writer saved a list naming child 2; child 2 is deleted with SQL.
     async def scenario():
         rows = await Rows(kind).open()
         try:
@@ -975,11 +975,9 @@ def test_rebase_onto_a_row_naming_a_deleted_child(kind):
         finally:
             await rows.close()
 
-    got = asyncio.run(scenario())
-    if kind in ("sync", "async"):
-        assert got == (("StaleVersionError", "ValidationError"), 10, [2], 1, 11, [], 0)
-    else:
-        assert got == (None, 11, [2], 2, 11, [None], 2)
+    # the reference to the deleted child reads as no row, so the merged model is built on
+    # every base; save() writes only ``count``, and the stored list keeps what it held
+    assert asyncio.run(scenario()) == (None, 11, [2], 2, 11, [], 2)
 
 
 @pytest.mark.parametrize("kind", KINDS)

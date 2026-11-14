@@ -100,9 +100,9 @@ class SQLerLiteModelBase:
             # a typed position holding a stored document the batch built no model of: its
             # model; a reference that was not followed stays the dict it is
             if isinstance(v, dict) and "_id" in v and "_table" not in v:
-                admits = _refs.typed_fields(cls).get(k)
-                if admits:
-                    init_data[k] = admits[0].model_validate(v)
+                at = _refs.typed_fields(cls).get(k)
+                if at is not None and at.admits:
+                    init_data[k] = at.admits[0].model_validate(v)
                     continue
             init_data[k] = v
 

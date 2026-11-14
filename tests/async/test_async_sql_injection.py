@@ -276,6 +276,7 @@ from typing import Union  # noqa: E402
 
 from pydantic import Field as _PydField  # noqa: E402
 from sqler import AsyncSQLerModel  # noqa: E402
+from sqler.logging import query_logger  # noqa: E402
 from sqler.query import SQLerField as F  # noqa: E402
 
 HOSTILE_TABLES = [
@@ -322,40 +323,53 @@ async def rdb():
 
 
 class TestAsyncBatchResolveRejectsHostileRefs:
+    # a reference the walk refuses leads to no row of the field's class: it is left out of
+    # the dict, and no statement is sent for it (the log is emptied first: ``capture()``
+    # reads from its length, and a full log captures nothing)
+
+    @pytest.fixture(autouse=True)
+    def _empty_query_log(self):
+        query_logger.clear()
+        yield
+        query_logger.clear()
+
     @pytest.mark.parametrize("table", HOSTILE_TABLES)
     @pytest.mark.asyncio
-    async def test_hostile_table_left_unchanged(self, rdb, table):
+    async def test_hostile_table_left_out(self, rdb, table):
         ref = {"_table": table, "_id": 1}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+        with query_logger.capture() as sent:
+            out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert (out, len(sent)) == ([{"payload": {}, "_id": 1}], 0)
 
     @pytest.mark.parametrize("bad", BAD_IDS, ids=repr)
     @pytest.mark.asyncio
-    async def test_bad_id_left_unchanged(self, rdb, bad):
+    async def test_bad_id_left_out(self, rdb, bad):
         ref = {"_table": "hr_users", "_id": bad}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+        with query_logger.capture() as sent:
+            out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert (out, len(sent)) == ([{"payload": {}, "_id": 1}], 0)
 
     @pytest.mark.parametrize("edge", EDGE_IDS, ids=repr)
     @pytest.mark.asyncio
-    async def test_edge_id_without_row_left_unchanged(self, rdb, edge):
+    async def test_edge_id_without_row_left_out(self, rdb, edge):
         ref = {"_table": "hr_users", "_id": edge}
         out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+        assert out == [{"payload": {}, "_id": 1}]
 
     @pytest.mark.parametrize("table", ["hr_users\n", "hr_users\r\n", "\nhr_users"], ids=repr)
     @pytest.mark.asyncio
-    async def test_newline_table_left_unchanged(self, rdb, table):
+    async def test_newline_table_left_out(self, rdb, table):
         ref = {"_table": table, "_id": 1}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+        with query_logger.capture() as sent:
+            out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert (out, len(sent)) == ([{"payload": {}, "_id": 1}], 0)
 
     @pytest.mark.asyncio
     async def test_bad_ref_does_not_stop_good_ref(self, rdb):
         bad = {"_table": "hr_users; x", "_id": 1}
         good = {"_table": "hr_users", "_id": 1}
         out = await AHolder.query()._abatch_resolve([{"payload": {"a": bad, "b": good}}])
-        assert out[0]["payload"]["a"] == bad
+        assert list(out[0]["payload"]) == ["b"]
         assert out[0]["payload"]["b"].name == "u1"
 
     @pytest.mark.asyncio
@@ -363,7 +377,7 @@ class TestAsyncBatchResolveRejectsHostileRefs:
         ref = {"_table": "secrets WHERE 1 UNION SELECT _id, data FROM secrets", "_id": 1}
         await AHolder(payload={"k": ref}).save()
         got = await AHolder.query().all()
-        assert got[0].payload == {"k": ref}
+        assert got[0].payload == {}
 
 
 LITERAL_NAMES = [
