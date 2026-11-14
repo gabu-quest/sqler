@@ -7,6 +7,7 @@ compatibility with SQLerSafeModel while being Pydantic-free.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import fields
 from typing import (
@@ -18,6 +19,7 @@ from typing import (
 )
 
 from sqler.exceptions import StaleVersionError
+from sqler.models import _refs
 from sqler.models import save_retry as _retry
 from sqler.models._table_names import _instance_binding
 from sqler.models.lite.model import SQLerLiteModel
@@ -96,6 +98,33 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         super().set_db(db, table)
         # Upgrade table to versioned
         db._ensure_versioned_table(cls._table)  # type: ignore[arg-type]
+
+    @classmethod
+    def _load_refs(cls, ids: list, seen: frozenset) -> dict:
+        """Load the rows ``ids`` with their versions, one statement for the table."""
+        db, table = cls._require_binding()
+        db._ensure_versioned_table(table)
+        marks = ",".join("?" for _ in ids)
+        cur = db.adapter.execute(
+            f"SELECT _id, data, _version FROM {table} WHERE _id IN ({marks});", list(ids)
+        )
+        out: dict = {}
+        for row in cur.fetchall():
+            rid = row[0]
+            raw = json.loads(row[1])
+            raw["_id"] = rid
+            raw["_version"] = row[2]
+            try:
+                doc = cls._resolve_relations(raw, db=db, _seen=seen | {(table, rid)})
+                inst = cls.model_validate(doc)
+                object.__setattr__(inst, "_id", rid)
+                object.__setattr__(inst, "_version", row[2] if row[2] is not None else 0)
+                object.__setattr__(inst, "_snapshot", cls._make_snapshot(raw))
+            except (LookupError, RuntimeError, ValueError):
+                out[rid] = _refs.KEEP
+                continue
+            out[rid] = inst
+        return out
 
     @classmethod
     def from_id(cls: Type[TSafe], id_: int) -> Optional[TSafe]:

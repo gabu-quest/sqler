@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import warnings
 from typing import Any, ClassVar, Optional, Type, TypeVar
 
@@ -9,6 +10,7 @@ from pydantic import BaseModel, PrivateAttr
 from sqler import registry
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import NotBoundError, UniqueConstraintError
+from sqler.models import _refs
 from sqler.models._table_names import (
     _aload_unbound,
     _aread_document,
@@ -23,6 +25,10 @@ from sqler.models.async_queryset import AsyncSQLerQuerySet
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
 from sqler.utils import validate_field_name, validate_table_name
+
+# The deprecation warning is attributed to the first caller outside the sqler package, so a
+# subclass's ``super().set_db()`` does not hide it behind sqler's own file.
+_SQLER_PREFIXES = (os.path.dirname(os.path.abspath(registry.__file__)) + os.sep,)
 
 TAModel = TypeVar("TAModel", bound="AsyncSQLerModel")
 
@@ -76,7 +82,7 @@ class AsyncSQLerModel(BaseModel):
             "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
             "set_db() will be removed in a future version.",
             DeprecationWarning,
-            stacklevel=2,
+            skip_file_prefixes=_SQLER_PREFIXES,
         )
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
@@ -431,39 +437,55 @@ class AsyncSQLerModel(BaseModel):
 
     # ----- relationship helpers (async) -----
     @classmethod
-    async def _aresolve_relations(cls, data: dict, db=None) -> dict:
-        async def adecode(value: Any):
-            if isinstance(value, dict):
-                if isinstance(value.get("_table"), str) and "_id" in value:
-                    table = value["_table"]
-                    rid = value["_id"]
-                    mdl = registry.resolve(table)
-                    if mdl is not None and getattr(mdl, "_db", None) is None and db is not None:
-                        # a class never bound: read the row from the parent's db
-                        return await _aload_unbound(mdl, db, table, rid)
-                    if mdl is not None and hasattr(mdl, "from_id"):
-                        fn = getattr(mdl, "from_id")
-                        if inspect.iscoroutinefunction(fn):
-                            try:
-                                return await fn(rid)
-                            except Exception:
-                                return value
-                        else:
-                            try:
-                                return fn(rid)
-                            except Exception:
-                                return value
-                out = {}
-                for k, v in value.items():
-                    out[k] = await adecode(v)
-                return out
-            if isinstance(value, list):
-                return [await adecode(v) for v in value]
-            return value
+    async def _aresolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
+        """Replace the references in ``data`` by the rows they point to.
 
-        out = {}
-        for k, v in data.items():
-            out[k] = await adecode(v)
+        The rows of one table are read with one statement. A reference to a row that is
+        being loaded further up stays a reference, which cuts a cycle.
+        """
+        groups, unbound = _refs.plan(data, db, _seen)
+        loaded: dict = {}
+        for mdl, table, rid in unbound:
+            # a class never bound: read the row from the parent's db; only
+            # a missing table or row is forgiven (it stays a reference)
+            loaded[(table, rid)] = await _aload_unbound(mdl, db, table, rid)
+        for table, (mdl, ids) in groups.items():
+            loader = getattr(mdl, "_aload_refs", None)
+            found: dict = {}
+            if loader is not None:
+                try:
+                    found = await loader(ids, _seen)
+                except Exception:
+                    found = {rid: _refs.KEEP for rid in ids}
+            else:
+                for rid in ids:
+                    try:
+                        fn = mdl.from_id
+                        found[rid] = await fn(rid) if inspect.iscoroutinefunction(fn) else fn(rid)
+                    except Exception:
+                        found[rid] = _refs.KEEP
+            _refs.settle(table, ids, found, loaded)
+        return {k: _refs.replace(v, loaded) for k, v in data.items()}
+
+    @classmethod
+    async def _aload_refs(cls, ids: list, seen: frozenset) -> dict:
+        """Load the rows ``ids`` of this class's table with one statement.
+
+        Returns ``{id: instance}``; a row that is gone is missing, one that cannot be
+        hydrated maps to ``_refs.KEEP``.
+        """
+        db, table = cls._require_binding()
+        out: dict = {}
+        for doc in await _aread_documents(db, table, ids):
+            rid = doc["_id"]
+            try:
+                doc = await cls._aresolve_relations(doc, db=db, _seen=seen | {(table, rid)})
+                inst = cls.model_validate(doc)  # type: ignore[call-arg]
+                inst._id = doc.get("_id")
+            except Exception:
+                out[rid] = _refs.KEEP
+                continue
+            out[rid] = inst
         return out
 
     async def _adump_with_relations(self) -> dict:

@@ -7,6 +7,7 @@ compatibility with AsyncSQLerSafeModel while being Pydantic-free.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import fields
 from typing import (
@@ -18,6 +19,7 @@ from typing import (
 )
 
 from sqler.exceptions import StaleVersionError
+from sqler.models import _refs
 from sqler.models import save_retry as _retry
 from sqler.models._table_names import _instance_binding
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
@@ -93,6 +95,38 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
         return AsyncSQLerQuerySet[TASafe](cls, q)
+
+    @classmethod
+    async def _aload_refs(cls, ids: list, seen: frozenset) -> dict:
+        """Load the rows ``ids`` with their versions, one statement for the table."""
+        db, table = cls._require_binding()
+        await db._ensure_versioned_table(table)
+        marks = ",".join("?" for _ in ids)
+        cur = await db.adapter.execute(
+            f"SELECT _id, data, _version FROM {table} WHERE _id IN ({marks});", list(ids)
+        )
+        try:
+            rows = await cur.fetchall()
+        finally:
+            await cur.close()
+        await db.adapter.auto_commit()
+        out: dict = {}
+        for row in rows:
+            rid = row[0]
+            raw = json.loads(row[1])
+            raw["_id"] = rid
+            raw["_version"] = row[2]
+            try:
+                doc = await cls._aresolve_relations(raw, db=db, _seen=seen | {(table, rid)})
+                inst = cls.model_validate(doc)
+                object.__setattr__(inst, "_id", rid)
+                object.__setattr__(inst, "_version", row[2] if row[2] is not None else 0)
+                object.__setattr__(inst, "_snapshot", cls._make_snapshot(raw))
+            except Exception:
+                out[rid] = _refs.KEEP
+                continue
+            out[rid] = inst
+        return out
 
     @classmethod
     async def from_id(cls: Type[TASafe], id_: int) -> Optional[TASafe]:

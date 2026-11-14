@@ -6,6 +6,7 @@ from typing import ClassVar, Optional, Type, TypeVar
 from pydantic import PrivateAttr
 
 from sqler.exceptions import StaleVersionError
+from sqler.models import _refs
 from sqler.models._table_names import _instance_binding
 from sqler.query.async_query import AsyncSQLerQuery
 
@@ -75,6 +76,24 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         # we cannot await here; users should ensure schema via an async helper, or we
         # leave it to first save/refresh paths which call versioned helpers
         # For explicitness, no-op here; version checks happen on use.
+
+    @classmethod
+    async def _aload_refs(cls: Type[TASafe], ids: list, seen: frozenset) -> dict:  # type: ignore[override]
+        """Load the rows ``ids`` with their versions and snapshots, one statement."""
+        db, table = cls._require_binding()
+        out: dict = {}
+        for doc in await _refs.aread_versioned(db, table, ids):
+            rid = doc["_id"]
+            try:
+                inst = cls.model_validate(doc)  # type: ignore[call-arg]
+                inst._id = rid
+                inst._version = doc.get("_version", 0)
+                inst._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
+            except (LookupError, RuntimeError, ValueError):
+                out[rid] = _refs.KEEP
+                continue
+            out[rid] = inst
+        return out
 
     @classmethod
     async def from_id(cls: Type[TASafe], id_: int) -> Optional[TASafe]:  # type: ignore[override]
