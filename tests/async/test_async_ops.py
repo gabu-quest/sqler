@@ -268,7 +268,7 @@ async def test_vacuum_inside_a_transaction_is_a_clear_error_and_the_transaction_
 @pytest.mark.asyncio
 async def test_health_check_on_a_closed_database_returns_and_holds_nothing(tmp_path):
     """The sync twin answers "not connected"; the async adapter connects again on first use
-    (its lazy connect), so the probe runs on a fresh pool. What this stream owns is that the
+    (its lazy connect), so the probe runs on a fresh pool. What is pinned here is that the
     call returns a status and leaves that pool whole."""
     d = AsyncSQLerDB(_adapter(str(tmp_path / "closed.db")))
     await d.connect()
