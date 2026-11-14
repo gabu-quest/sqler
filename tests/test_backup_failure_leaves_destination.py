@@ -3,6 +3,7 @@
 import os
 import sqlite3
 import stat
+import sys
 
 import pytest
 import pytest_asyncio
@@ -11,9 +12,14 @@ from sqler.db.async_db import AsyncSQLerDB
 from sqler.db.sqler_db import SQLerDB
 from sqler.ops import async_backup, backup
 
-_CAN_WRITE_READONLY = os.geteuid() == 0
+# Windows has no effective user id; there the read-only attribute holds for every user.
+_CAN_WRITE_READONLY = hasattr(os, "geteuid") and os.geteuid() == 0
 _skip_root = pytest.mark.skipif(
     _CAN_WRITE_READONLY, reason="the process can write a read-only file (root)"
+)
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX permission bits and unprivileged symlinks do not exist on Windows",
 )
 
 
@@ -181,6 +187,7 @@ async def test_async_closed_source_keeps_existing_destination(adb, tmp_path):
     assert not [n for n in os.listdir(tmp_path) if n.startswith("b.db") and n != "b.db"]
 
 
+@_posix_only
 def test_sync_symlink_destination_writes_the_target(tmp_path):
     db = _make_source(tmp_path / "src.db")
     other = tmp_path / "other"
@@ -197,6 +204,7 @@ def test_sync_symlink_destination_writes_the_target(tmp_path):
     assert os.listdir(other) == ["real.db"]
 
 
+@_posix_only
 def test_sync_existing_destination_keeps_its_mode(tmp_path):
     db = _make_source(tmp_path / "src.db")
     dest = tmp_path / "b.db"
@@ -208,6 +216,7 @@ def test_sync_existing_destination_keeps_its_mode(tmp_path):
     assert _rows(dest, "SELECT x FROM t ORDER BY x") == [(1,), (2,), (3,)]
 
 
+@_posix_only
 @pytest.mark.asyncio
 async def test_async_symlink_destination_writes_the_target(adb, tmp_path):
     other = tmp_path / "other"
@@ -224,6 +233,7 @@ async def test_async_symlink_destination_writes_the_target(adb, tmp_path):
     assert not [n for n in os.listdir(tmp_path) if n.endswith(".tmp")]
 
 
+@_posix_only
 @pytest.mark.asyncio
 async def test_async_existing_destination_keeps_its_mode(adb, tmp_path):
     dest = tmp_path / "b.db"
