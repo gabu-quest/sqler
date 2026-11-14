@@ -25,15 +25,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Async adapter: a cancelled statement returns its connection by itself.** A `wait_for` timeout or `task.cancel()` reaches the caller at once, also while the statement waits on a lock held by another connection. The connection goes back to the pool once SQLite has finished with it, and a cancelled write is rolled back. A commit or `executescript` that SQLite had already started when it was cancelled still completes.
 - **Async adapter: `executemany` inside a transaction no longer commits it**, so a rollback removes its rows. Outside a transaction `executemany` and `executescript` commit and return the connection.
 
+- **`async_export_jsonl` and `async_import_jsonl` run.** They imported `aiofiles`, which sqler does not depend on, and the import called `afrom_id` and `asave`, which no model has. They now need no extra package, do their file work off the event loop thread, work with all four async model bases, and give the same file and the same result as `export_jsonl` and `import_jsonl`.
+- **JSONL import ignores a `_version` key in the file**, sync and async. An export of a safe model carries it; a lite safe model could not import its own export, and an update wrote the file's version over the stored one.
+- **Async migrations are atomic.** `AsyncMigrationRunner` runs each migration's `up()` (or `down()`) and its version row in one transaction, as the sync runner does. A migration that fails or is cancelled leaves the schema, the data and the recorded versions as they were.
+- **The async migration runner, `async_health_check`, `async_get_stats`, `async_checkpoint` and `async_vacuum` return their pooled connection** when they finish or raise. Inside your own transaction they keep using its connection and do not end it.
+- **`async_health_check` always returns a `HealthStatus`**, also when returning the connection fails (the status is then unhealthy and names the error).
+- **A migration runner first used inside a transaction that is rolled back** creates its version table again on the next call.
+
 ### Changed
 
 - **The PyPI publish workflow runs the linter and the test suite first**, and refuses a tag that does not match the version in `pyproject.toml`.
 - **Async adapter: `executescript` inside a transaction raises `QueryError`**, because SQLite commits the open transaction before it runs a script.
 - **Async adapter: waiting for a pooled connection times out.** `acquire_timeout` (seconds, default 30, `None` waits forever) on `AsyncSQLiteAdapter`, `on_disk()` and `in_memory()`; a wait that runs out raises `ConnectionPoolExhaustedError`. Tasks waiting when `close()` is called raise `NotConnectedError`.
 
+- **`adapter.executescript()` inside an async migration fails.** The migration now runs in a transaction and the adapter refuses a script there. Use one `adapter.execute()` per statement; the failed `MigrationResult.error` says so.
+- **`async_vacuum` inside a transaction raises `QueryError`** before it runs anything; the transaction stays usable.
+
 ### Added
 
 - **`AsyncSQLiteAdapter.pool_stats()` and `AsyncSQLerDB.pool_stats()`** return `PoolStats`: pool size, free and in-use connections, checkouts, timeouts, average and longest wait.
+- **`AsyncMigrationRunner.applied_migrations()`**, and `status()` returns `applied_count` and `applied` as the sync runner does.
 
 ## [1.2026.4.2] - 2026-04-18
 
