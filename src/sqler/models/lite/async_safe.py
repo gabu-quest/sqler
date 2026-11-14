@@ -7,7 +7,6 @@ compatibility with AsyncSQLerSafeModel while being Pydantic-free.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import fields
 from typing import (
@@ -100,27 +99,14 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
     async def _aload_refs(cls, ids: list, seen: frozenset) -> dict:
         """Load the rows ``ids`` with their versions, one statement for the table."""
         db, table = cls._require_binding()
-        await db._ensure_versioned_table(table)
-        marks = ",".join("?" for _ in ids)
-        cur = await db.adapter.execute(
-            f"SELECT _id, data, _version FROM {table} WHERE _id IN ({marks});", list(ids)
-        )
-        try:
-            rows = await cur.fetchall()
-        finally:
-            await cur.close()
-        await db.adapter.auto_commit()
         out: dict = {}
-        for row in rows:
-            rid = row[0]
-            raw = json.loads(row[1])
-            raw["_id"] = rid
-            raw["_version"] = row[2]
+        for raw in await _refs.aread_versioned(db, table, ids):
+            rid = raw["_id"]
             try:
                 doc = await cls._aresolve_relations(raw, db=db, _seen=seen | {(table, rid)})
                 inst = cls.model_validate(doc)
                 object.__setattr__(inst, "_id", rid)
-                object.__setattr__(inst, "_version", row[2] if row[2] is not None else 0)
+                object.__setattr__(inst, "_version", raw["_version"] or 0)
                 object.__setattr__(inst, "_snapshot", cls._make_snapshot(raw))
             except Exception:
                 out[rid] = _refs.KEEP

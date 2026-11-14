@@ -26,7 +26,6 @@ from sqler.models import _refs
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
-    _load_unbound,
     _model_table_name,
     _pluralize,
     _read_document,
@@ -481,33 +480,8 @@ class SQLerLiteModel(SQLerLiteModelBase):
 
     @classmethod
     def _resolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
-        """Replace the references in ``data`` by the rows they point to.
-
-        The rows of one table are read with one statement. A reference to a row that is
-        being loaded further up stays a reference, which cuts a cycle.
-        """
-        groups, unbound = _refs.plan(data, db, _seen)
-        loaded: dict = {}
-        for mdl, table, rid in unbound:
-            # a class never bound: read the row from the parent's db; only
-            # a missing table or row is forgiven (it stays a reference)
-            loaded[(table, rid)] = _load_unbound(mdl, db, table, rid)
-        for table, (mdl, ids) in groups.items():
-            loader = getattr(mdl, "_load_refs", None)
-            found: dict = {}
-            if loader is not None:
-                try:
-                    found = loader(ids, _seen)
-                except (LookupError, RuntimeError, ValueError):
-                    found = {rid: _refs.KEEP for rid in ids}
-            else:
-                for rid in ids:
-                    try:
-                        found[rid] = mdl.from_id(rid)
-                    except (LookupError, RuntimeError, ValueError):
-                        found[rid] = _refs.KEEP
-            _refs.settle(table, ids, found, loaded)
-        return {k: _refs.replace(v, loaded) for k, v in data.items()}
+        """Replace the references in ``data`` by the rows they point to (see ``_refs.resolve``)."""
+        return _refs.resolve(data, db, _seen)
 
     @classmethod
     def _load_refs(cls, ids: list, seen: frozenset) -> dict:

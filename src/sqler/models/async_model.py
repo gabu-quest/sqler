@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import os
 import warnings
 from typing import Any, ClassVar, Optional, Type, TypeVar
@@ -12,7 +11,6 @@ from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import NotBoundError, UniqueConstraintError
 from sqler.models import _refs
 from sqler.models._table_names import (
-    _aload_unbound,
     _aread_document,
     _aread_documents,
     _default_table_name,
@@ -438,34 +436,8 @@ class AsyncSQLerModel(BaseModel):
     # ----- relationship helpers (async) -----
     @classmethod
     async def _aresolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
-        """Replace the references in ``data`` by the rows they point to.
-
-        The rows of one table are read with one statement. A reference to a row that is
-        being loaded further up stays a reference, which cuts a cycle.
-        """
-        groups, unbound = _refs.plan(data, db, _seen)
-        loaded: dict = {}
-        for mdl, table, rid in unbound:
-            # a class never bound: read the row from the parent's db; only
-            # a missing table or row is forgiven (it stays a reference)
-            loaded[(table, rid)] = await _aload_unbound(mdl, db, table, rid)
-        for table, (mdl, ids) in groups.items():
-            loader = getattr(mdl, "_aload_refs", None)
-            found: dict = {}
-            if loader is not None:
-                try:
-                    found = await loader(ids, _seen)
-                except Exception:
-                    found = {rid: _refs.KEEP for rid in ids}
-            else:
-                for rid in ids:
-                    try:
-                        fn = mdl.from_id
-                        found[rid] = await fn(rid) if inspect.iscoroutinefunction(fn) else fn(rid)
-                    except Exception:
-                        found[rid] = _refs.KEEP
-            _refs.settle(table, ids, found, loaded)
-        return {k: _refs.replace(v, loaded) for k, v in data.items()}
+        """Replace the references in ``data`` by the rows they point to (see ``_refs.aresolve``)."""
+        return await _refs.aresolve(data, db, _seen)
 
     @classmethod
     async def _aload_refs(cls, ids: list, seen: frozenset) -> dict:
