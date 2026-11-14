@@ -20,6 +20,7 @@ Usage::
     print(f"Imported {len(imported)} users")
 """
 
+import asyncio
 import csv
 import io
 import json
@@ -597,14 +598,12 @@ def export_jsonl(
             sql, params = query._build_query(include_id=include_id, include_version=False)
             rows = query._adapter.execute(sql, params).fetchall()
             for row in rows:
-                if include_id:
-                    obj = json.loads(row[1])
-                    obj["_id"] = row[0]
-                else:
-                    obj = json.loads(row[0])
-                if not all_fields:
-                    obj = {k: obj[k] for k in fields if k in obj}
-                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                f.write(
+                    _jsonl_line_from_row(
+                        row, include_id=include_id, all_fields=all_fields, fields=fields
+                    )
+                    + "\n"
+                )
             count = len(rows)
 
     return ExportResult(
@@ -613,6 +612,68 @@ def export_jsonl(
         count=count,
         size_bytes=path.stat().st_size,
     )
+
+
+def _jsonl_line_from_row(row: Any, *, include_id: bool, all_fields: bool, fields: list[str]) -> str:
+    """Render one query row (``_id, data`` or ``data``) as an exported JSONL line (no newline)."""
+    if include_id:
+        obj = json.loads(row[1])
+        obj["_id"] = row[0]
+    else:
+        obj = json.loads(row[0])
+    if not all_fields:
+        obj = {k: obj[k] for k in fields if k in obj}
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def _jsonl_parse_record(
+    line: str, transform: Optional[Callable[[dict], dict]]
+) -> tuple[Optional[int], dict]:
+    """Parse one import line: JSON, ``transform``, then split off ``_id``.
+
+    Touches no database. Raises whatever the parse or the transform raises.
+    """
+    record = json.loads(line)
+    if transform:
+        record = transform(record)
+    record_id = record.pop("_id", None)
+    # Safe models store their row version inside the JSON, so an export carries it. It is
+    # not a constructor field (lite models reject it) and must not overwrite the stored
+    # version on update, so it is dropped here.
+    record.pop("_version", None)
+    return record_id, record
+
+
+def _jsonl_apply_record(existing: Any, record: dict) -> None:
+    """Copy an imported record onto an existing instance (before it is saved)."""
+    for key, value in record.items():
+        setattr(existing, key, value)
+
+
+def _jsonl_error(line_num: int, line: str, exc: Exception) -> dict[str, Any]:
+    """The error record kept for a line that failed to import."""
+    return {
+        "line": line_num,
+        "data": line[:200],  # Truncate for large lines
+        "error": str(exc),
+        "error_type": type(exc).__name__,
+    }
+
+
+def _jsonl_result(total: int, succeeded: int, errors: list[dict[str, Any]]) -> ImportResult:
+    return ImportResult(
+        count=total,
+        succeeded=succeeded,
+        failed=total - succeeded,
+        errors=errors,
+    )
+
+
+def _write_text_lines(path: Path, lines: list[str]) -> None:
+    """Write ``lines``, each followed by a newline, as UTF-8 (runs in a worker thread)."""
+    with open(path, "w", encoding="utf-8") as f:
+        for text in lines:
+            f.write(text + "\n")
 
 
 def export_jsonl_string(
@@ -731,18 +792,12 @@ def import_jsonl(
             total += 1
 
             try:
-                record = json.loads(line)
-
-                if transform:
-                    record = transform(record)
-
-                record_id = record.pop("_id", None)
+                record_id, record = _jsonl_parse_record(line, transform)
 
                 if update_existing and record_id:
                     existing = model_class.from_id(record_id)
                     if existing:
-                        for key, value in record.items():
-                            setattr(existing, key, value)
+                        _jsonl_apply_record(existing, record)
                         existing.save()
                     else:
                         instance = model_class(**record)
@@ -754,23 +809,12 @@ def import_jsonl(
                 succeeded += 1
 
             except Exception as e:
-                error_info = {
-                    "line": line_num,
-                    "data": line[:200],  # Truncate for large lines
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                }
-                errors.append(error_info)
+                errors.append(_jsonl_error(line_num, line, e))
 
                 if not skip_errors:
                     break
 
-    return ImportResult(
-        count=total,
-        succeeded=succeeded,
-        failed=total - succeeded,
-        errors=errors,
-    )
+    return _jsonl_result(total, succeeded, errors)
 
 
 # =============================================================================
@@ -1020,9 +1064,10 @@ async def async_export_jsonl(
     fields: Optional[list[str]] = None,
     include_id: bool = True,
 ) -> ExportResult:
-    """Async export to JSONL file."""
-    import aiofiles
+    """Async export to JSONL file (same bytes as :func:`export_jsonl`).
 
+    The file is written in a worker thread, so the event loop is not blocked.
+    """
     path = Path(path)
     query, model_class = _get_query_and_model(source)
 
@@ -1032,37 +1077,30 @@ async def async_export_jsonl(
     else:
         all_fields = False
 
-    async with aiofiles.open(path, "w", encoding="utf-8") as f:
-        # Fast path: raw JSON strings, no parsing needed
-        if not include_id and all_fields:
-            raw_rows = await query.all()
-            for raw in raw_rows:
-                await f.write(raw + "\n")
-            count = len(raw_rows)
-        else:
-            sql, params = query._build_query(include_id=include_id)
-            cur = await query._adapter.execute(sql, params)
-            try:
-                rows = await cur.fetchall()
-            finally:
-                await cur.close()
-                await query._adapter.auto_commit()
-            for row in rows:
-                if include_id:
-                    obj = json.loads(row[1])
-                    obj["_id"] = row[0]
-                else:
-                    obj = json.loads(row[0])
-                if not all_fields:
-                    obj = {k: obj[k] for k in fields if k in obj}
-                await f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-            count = len(rows)
+    # Fast path: raw JSON strings, no parsing needed
+    if not include_id and all_fields:
+        lines = await query.all()
+    else:
+        sql, params = query._build_query(include_id=include_id)
+        cur = await query._adapter.execute(sql, params)
+        try:
+            rows = await cur.fetchall()
+        finally:
+            await cur.close()
+            await query._adapter.auto_commit()
+        lines = [
+            _jsonl_line_from_row(row, include_id=include_id, all_fields=all_fields, fields=fields)
+            for row in rows
+        ]
+
+    await asyncio.to_thread(_write_text_lines, path, lines)
+    size_bytes = (await asyncio.to_thread(path.stat)).st_size
 
     return ExportResult(
         path=str(path),
         format="jsonl",
-        count=count,
-        size_bytes=path.stat().st_size,
+        count=len(lines),
+        size_bytes=size_bytes,
     )
 
 
@@ -1074,17 +1112,22 @@ async def async_import_jsonl(
     update_existing: bool = False,
     transform: Optional[Callable[[dict], dict]] = None,
 ) -> ImportResult:
-    """Async import JSONL data."""
-    import aiofiles
+    """Async import JSONL data (same rule per line as :func:`import_jsonl`).
 
+    Lines are read in a worker thread; the model's ``from_id`` and ``save`` are awaited.
+    """
     path = Path(path)
     errors: list[dict[str, Any]] = []
     succeeded = 0
     total = 0
 
-    async with aiofiles.open(path, "r", encoding="utf-8") as f:
+    f = await asyncio.to_thread(open, path, "r", encoding="utf-8")
+    try:
         line_num = 0
-        async for line in f:
+        while True:
+            line = await asyncio.to_thread(f.readline)
+            if not line:
+                break
             line_num += 1
             line = line.strip()
             if not line:
@@ -1093,43 +1136,28 @@ async def async_import_jsonl(
             total += 1
 
             try:
-                record = json.loads(line)
-
-                if transform:
-                    record = transform(record)
-
-                record_id = record.pop("_id", None)
+                record_id, record = _jsonl_parse_record(line, transform)
 
                 if update_existing and record_id:
-                    existing = await model_class.afrom_id(record_id)
+                    existing = await model_class.from_id(record_id)
                     if existing:
-                        for key, value in record.items():
-                            setattr(existing, key, value)
-                        await existing.asave()
+                        _jsonl_apply_record(existing, record)
+                        await existing.save()
                     else:
                         instance = model_class(**record)
-                        await instance.asave()
+                        await instance.save()
                 else:
                     instance = model_class(**record)
-                    await instance.asave()
+                    await instance.save()
 
                 succeeded += 1
 
             except Exception as e:
-                error_info = {
-                    "line": line_num,
-                    "data": line[:200],
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                }
-                errors.append(error_info)
+                errors.append(_jsonl_error(line_num, line, e))
 
                 if not skip_errors:
                     break
+    finally:
+        await asyncio.to_thread(f.close)
 
-    return ImportResult(
-        count=total,
-        succeeded=succeeded,
-        failed=total - succeeded,
-        errors=errors,
-    )
+    return _jsonl_result(total, succeeded, errors)
