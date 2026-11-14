@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Security
+
+- **A reference stored in a document is resolved only when it is well formed.** `{"_table": ..., "_id": ...}` found in a document was used to build a `SELECT` with the table name taken from the stored data. It is now resolved only when `_table` is a valid table name and `_id` is an integer that fits SQLite's 64-bit range; anything else is left as it is. A reference whose `_id` is a string or a float is no longer converted to an integer, and an `_id` too large for SQLite no longer raises `OverflowError` when the document is read.
+- **Field and key names used in queries are escaped.** A name with a quote could end the SQL string that held its JSON path, in `F("...")` comparisons and in `any()` on nested arrays. Names are now carried as data. A name with a backslash, a NUL, or whitespace other than single spaces raises `InvalidFieldNameError`.
+- **Names ending in a newline are rejected.** `validate_table_name`, `validate_field_name` and `validate_identifier` accepted `"users\n"`.
+
 ### Fixed
 
 - **`created_at` and `updated_at` are equal after the first save.** Since 1.2026.4.3 the first save set `updated_at` one microsecond after `created_at`. Every later save still gives a strictly later `updated_at`, now also when the clock has not advanced or has gone backwards, and when two saves follow each other within one clock tick. Applies to `TimestampMixin`, `AuditMixin` and `AsyncAuditMixin`. A stored `updated_at` that lies in the future is not pulled back: the next save is one microsecond after it.
