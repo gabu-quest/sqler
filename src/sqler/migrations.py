@@ -235,6 +235,13 @@ class MigrationRunner:
             )
         return records
 
+    def _is_recorded(self, version: int) -> bool:
+        """True if ``version`` already has a row in the migrations table."""
+        cursor = self.db.adapter.execute(
+            f"SELECT 1 FROM {MIGRATIONS_TABLE} WHERE version = ?;", [version]
+        )
+        return cursor.fetchone() is not None
+
     def pending_migrations(self) -> list[Migration]:
         """Get list of migrations not yet applied.
 
@@ -249,6 +256,11 @@ class MigrationRunner:
 
         Args:
             target_version: Version to migrate to (None = latest).
+
+        Runners that start together are safe: each migration runs under the write
+        lock, and one whose version another runner has recorded meanwhile is
+        skipped, so ``up()`` takes effect once and the slower runner reports
+        success with nothing in ``applied``.
 
         Returns:
             MigrationResult with details of applied migrations.
@@ -272,6 +284,10 @@ class MigrationRunner:
             try:
                 # Run migration in a transaction
                 with self.db.transaction():
+                    # The write lock is held now: a runner that started with this one may
+                    # have recorded the version since ``current`` was read. Its work stands.
+                    if self._is_recorded(migration.version):
+                        continue
                     migration.up(self.db)
 
                     # Record the migration
@@ -359,6 +375,10 @@ class MigrationRunner:
             try:
                 # Run rollback in a transaction
                 with self.db.transaction():
+                    # The write lock is held now: a runner that started with this one may
+                    # have removed the version since ``current`` was read. Its work stands.
+                    if not self._is_recorded(migration.version):
+                        continue
                     migration.down(self.db)
 
                     # Remove the migration record
@@ -487,9 +507,7 @@ class AsyncMigrationRunner:
         """Get the current database schema version."""
         await self._ensure_migrations_table()
         async with _connection_returned(self.db):
-            cursor = await self.db.adapter.execute(
-                f"SELECT MAX(version) FROM {MIGRATIONS_TABLE};"
-            )
+            cursor = await self.db.adapter.execute(f"SELECT MAX(version) FROM {MIGRATIONS_TABLE};")
             try:
                 row = await cursor.fetchone()
             finally:
@@ -519,6 +537,16 @@ class AsyncMigrationRunner:
             for row in rows
         ]
 
+    async def _is_recorded(self, version: int) -> bool:
+        """True if ``version`` already has a row in the migrations table."""
+        cursor = await self.db.adapter.execute(
+            f"SELECT 1 FROM {MIGRATIONS_TABLE} WHERE version = ?;", [version]
+        )
+        try:
+            return (await cursor.fetchone()) is not None
+        finally:
+            await cursor.close()
+
     async def pending_migrations(self) -> list[AsyncMigration]:
         """Get list of migrations not yet applied."""
         current = await self.current_version()
@@ -545,6 +573,10 @@ class AsyncMigrationRunner:
             try:
                 # The migration and its version row are one transaction, as in the sync runner
                 async with self.db.transaction():
+                    # The write lock is held now: a runner that started with this one may
+                    # have recorded the version since ``current`` was read. Its work stands.
+                    if await self._is_recorded(migration.version):
+                        continue
                     await migration.up(self.db)
 
                     duration_ms = (time.perf_counter() - start) * 1000
@@ -624,6 +656,9 @@ class AsyncMigrationRunner:
             start = time.perf_counter()
             try:
                 async with self.db.transaction():
+                    # The write lock is held now: skip a version another runner removed.
+                    if not await self._is_recorded(migration.version):
+                        continue
                     await migration.down(self.db)
 
                     cursor = await self.db.adapter.execute(

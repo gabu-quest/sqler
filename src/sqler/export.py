@@ -24,6 +24,7 @@ import asyncio
 import csv
 import io
 import json
+import types
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -93,16 +94,52 @@ class ImportResult:
         }
 
 
+# A CSV cell that starts with one of these is read as a formula by a spreadsheet
+_CSV_FORMULA_STARTS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_looks_escaped(value: str) -> bool:
+    """True if ``value`` is what :func:`_csv_escape_string` produces from some string.
+
+    That is one or more apostrophes followed by nothing or by a formula character.
+    The one rule both directions use: export adds an apostrophe to a string that
+    already looks escaped, import removes one only from a cell that does.
+    """
+    stripped = value.lstrip("'")
+    if stripped == value:
+        return False
+    return stripped == "" or stripped[0] in _CSV_FORMULA_STARTS
+
+
+def _csv_escape_string(value: str) -> str:
+    """Make a string safe to write into a CSV cell, reversibly.
+
+    A leading ``'`` is added to the empty string (so it is not read back as a
+    missing value), to a string that starts with a formula character, and to a
+    string that already looks escaped (see :func:`_csv_looks_escaped`). Any other
+    string, ``'90s`` and ``it's`` among them, is written as it is.
+    """
+    if value == "" or value[0] in _CSV_FORMULA_STARTS or _csv_looks_escaped(value):
+        return "'" + value
+    return value
+
+
+def _csv_unescape_string(value: str) -> str:
+    """Undo :func:`_csv_escape_string`: remove one leading ``'`` from a cell that looks escaped."""
+    return value[1:] if _csv_looks_escaped(value) else value
+
+
 def _serialize_value(value: Any, for_csv: bool = False) -> Any:
     """Serialize a value for export.
 
     Args:
         value: Value to serialize
         for_csv: If True, serialize lists/dicts to JSON strings AND escape
-            CSV formula-injection prefixes (``=``, ``+``, ``-``, ``@``) by
-            prepending a single quote. The single quote is the standard
-            spreadsheet escape and is stripped on display in Excel/Sheets,
-            while preventing arbitrary formula execution.
+            strings so a spreadsheet shows no formula: a string that starts
+            with ``=``, ``+``, ``-``, ``@``, a tab or a carriage return gets a
+            leading single quote (the standard spreadsheet escape), and so do
+            the empty string and a string that already looks escaped, so
+            ``import_csv`` returns every string unchanged.
     """
     if isinstance(value, datetime):
         return value.isoformat()
@@ -110,19 +147,23 @@ def _serialize_value(value: Any, for_csv: bool = False) -> Any:
         return value.isoformat()
     if for_csv and isinstance(value, (list, dict)):
         return json.dumps(value)
-    if for_csv and isinstance(value, str) and value and value[0] in ("=", "+", "-", "@"):
-        return "'" + value
+    if for_csv and isinstance(value, str):
+        return _csv_escape_string(value)
     return value
 
 
 def _deserialize_value(value: str, field_type: Any) -> Any:
-    """Deserialize a string value based on field type."""
+    """Deserialize a string value based on field type.
+
+    An empty cell is ``None``. A string value loses the one leading ``'`` that
+    the CSV export adds (see :func:`_csv_escape_string`).
+    """
     if value == "" or value is None:
         return None
 
     # Handle Optional types
     origin = getattr(field_type, "__origin__", None)
-    if origin is Union:
+    if origin is Union or isinstance(field_type, types.UnionType):
         args = field_type.__args__
         # Get non-None type
         for arg in args:
@@ -145,6 +186,8 @@ def _deserialize_value(value: str, field_type: Any) -> Any:
             return json.loads(value)
         except json.JSONDecodeError:
             return value
+    if isinstance(value, str):
+        return _csv_unescape_string(value)
     return value
 
 
@@ -295,6 +338,39 @@ def export_csv_string(
     return output.getvalue()
 
 
+def _import_csv_row(
+    model_class: Type["SQLerModel"],
+    row: dict,
+    transform: Optional[Callable[[dict], dict]],
+    update_existing: bool,
+) -> None:
+    """Save one CSV row: transform, ``_id``, deserialize, create or update."""
+    if transform:
+        row = transform(row)
+
+    record_id = row.pop("_id", None)
+    if record_id:
+        record_id = int(record_id)
+
+    for field_name, value in list(row.items()):
+        if field_name in model_class.model_fields:
+            field_info = model_class.model_fields[field_name]
+            row[field_name] = _deserialize_value(value, field_info.annotation)
+
+    if update_existing and record_id:
+        existing = model_class.from_id(record_id)
+        if existing:
+            for key, value in row.items():
+                setattr(existing, key, value)
+            existing.save()
+        else:
+            instance = model_class(**row)
+            instance.save()
+    else:
+        instance = model_class(**row)
+        instance.save()
+
+
 def import_csv(
     model_class: Type["SQLerModel"],
     path: Union[str, Path],
@@ -302,7 +378,7 @@ def import_csv(
     delimiter: str = ",",
     skip_errors: bool = False,
     update_existing: bool = False,
-    batch_size: int = 100,
+    batch_size: Optional[int] = None,
     transform: Optional[Callable[[dict], dict]] = None,
 ) -> ImportResult:
     """Import CSV data into model table.
@@ -313,71 +389,85 @@ def import_csv(
         delimiter: CSV delimiter
         skip_errors: Continue on validation errors
         update_existing: Update records with matching _id
-        batch_size: Commit every N records (for memory efficiency)
+        batch_size: Commit every N rows. Without it (``None``, the default) every
+            row is saved and committed on its own, so a failure at row k keeps the
+            rows before it. With it, an import that stops at a failing row (no
+            ``skip_errors``) keeps the rows of the full batches before it and
+            nothing of the batch the failure is in; ``succeeded`` counts only the
+            rows kept. With ``skip_errors`` a failing row is skipped and the rest
+            of its batch is kept. Inside a transaction of the caller the batches
+            are nested in it and commit with it.
         transform: Optional function to transform each row before import
 
     Returns:
         ImportResult with import statistics
     """
+    if batch_size is not None and batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
     path = Path(path)
     errors: list[dict[str, Any]] = []
     succeeded = 0
     total = 0
 
-    with open(path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter=delimiter)
+    db = model_class.db() if batch_size is not None else None
+    batch = None  # the open transaction of the current batch
+    in_batch = 0  # rows seen in it
+    ok_in_batch = 0  # rows of it that were saved
 
-        for row_num, row in enumerate(reader, start=2):  # Start at 2 (after header)
-            total += 1
+    try:
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter=delimiter)
 
-            try:
-                # Transform if provided
-                if transform:
-                    row = transform(row)
+            for row_num, row in enumerate(reader, start=2):  # Start at 2 (after header)
+                total += 1
+                if db is not None and batch is None:
+                    batch = db.transaction()
+                    batch.__enter__()
+                    in_batch = ok_in_batch = 0
 
-                # Handle _id
-                record_id = row.pop("_id", None)
-                if record_id:
-                    record_id = int(record_id)
-
-                # Deserialize values based on model field types
-                for field_name, value in list(row.items()):
-                    if field_name in model_class.model_fields:
-                        field_info = model_class.model_fields[field_name]
-                        row[field_name] = _deserialize_value(value, field_info.annotation)
-
-                # Create or update
-                if update_existing and record_id:
-                    existing = model_class.from_id(record_id)
-                    if existing:
-                        for key, value in row.items():
-                            setattr(existing, key, value)
-                        existing.save()
+                try:
+                    if db is not None:
+                        # a failed row undoes itself and leaves the batch usable
+                        with db.transaction():
+                            _import_csv_row(model_class, row, transform, update_existing)
                     else:
-                        instance = model_class(**row)
-                        instance.save()
-                else:
-                    instance = model_class(**row)
-                    instance.save()
+                        _import_csv_row(model_class, row, transform, update_existing)
+                    succeeded += 1
+                    ok_in_batch += 1
 
-                succeeded += 1
+                except Exception as e:
+                    error_info = {
+                        "row": row_num,
+                        "data": row,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    }
+                    errors.append(error_info)
 
-            except Exception as e:
-                error_info = {
-                    "row": row_num,
-                    "data": row,
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                }
-                errors.append(error_info)
+                    if not skip_errors:
+                        if batch is not None:
+                            batch.rollback()
+                            batch = None
+                            succeeded -= ok_in_batch
+                        return ImportResult(
+                            count=total,
+                            succeeded=succeeded,
+                            failed=total - succeeded,
+                            errors=errors,
+                        )
 
-                if not skip_errors:
-                    return ImportResult(
-                        count=total,
-                        succeeded=succeeded,
-                        failed=total - succeeded,
-                        errors=errors,
-                    )
+                in_batch += 1
+                if batch is not None and in_batch >= batch_size:  # type: ignore[operator]
+                    batch.commit()
+                    batch = None
+
+        if batch is not None:
+            batch.commit()
+            batch = None
+    finally:
+        if batch is not None:
+            batch.rollback()  # an unexpected error: nothing of the open batch is kept
 
     return ImportResult(
         count=total,
@@ -854,30 +944,7 @@ def import_csv_string(
         total += 1
 
         try:
-            if transform:
-                row = transform(row)
-
-            record_id = row.pop("_id", None)
-            if record_id:
-                record_id = int(record_id)
-
-            for field_name, value in list(row.items()):
-                if field_name in model_class.model_fields:
-                    field_info = model_class.model_fields[field_name]
-                    row[field_name] = _deserialize_value(value, field_info.annotation)
-
-            if update_existing and record_id:
-                existing = model_class.from_id(record_id)
-                if existing:
-                    for key, value in row.items():
-                        setattr(existing, key, value)
-                    existing.save()
-                else:
-                    instance = model_class(**row)
-                    instance.save()
-            else:
-                instance = model_class(**row)
-                instance.save()
+            _import_csv_row(model_class, row, transform, update_existing)
 
             succeeded += 1
 
