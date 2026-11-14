@@ -19,6 +19,7 @@ from typing import (
 
 from sqler.exceptions import StaleVersionError
 from sqler.models import save_retry as _retry
+from sqler.models._table_names import _instance_binding
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.utils import (
     DEFAULT_REBASE_CONFIG,
@@ -118,18 +119,20 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         return inst
 
     @classmethod
-    def from_ids(cls: Type[TSafe], ids: list[int]) -> list[TSafe]:
+    def from_ids(cls: Type[TSafe], ids: list[int], *, db=None) -> list[TSafe]:
         """Hydrate multiple instances by id list with versions.
 
         Args:
             ids: List of row ids to load.
+            db: Optional database (overrides class-level binding).
 
         Returns:
             List of model instances. Missing ids are omitted.
         """
         if not ids:
             return []
-        db, table = cls._require_binding()
+        given = db
+        db, table = cls._resolve_binding(db)
         # Use versioned query
         docs = []
         for id_ in ids:
@@ -139,7 +142,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         if not docs:
             return []
         # Batch resolve
-        qs = cls.query()
+        qs = cls.using(given) if given is not None else cls.query()
         docs = qs._batch_resolve(docs)
         instances = []
         for doc in docs:
@@ -225,7 +228,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
             StaleVersionError: If the version is stale and cannot be rebased.
         """
         cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
 
         # Get the rebase configuration for this model class
         rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
@@ -305,7 +308,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = _instance_binding(self)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
         doc = db.find_document_with_version(table, self._id)

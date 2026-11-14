@@ -17,8 +17,16 @@ from typing import (
 )
 
 from sqler import registry
-from sqler.exceptions import NotBoundError
-from sqler.models._table_names import _default_table_name, _pluralize  # noqa: F401
+from sqler.exceptions import NotBoundError, UniqueConstraintError
+from sqler.models._table_names import (  # noqa: F401
+    _default_table_name,
+    _instance_binding,
+    _model_table_name,
+    _pluralize,
+    _read_document,
+    _read_documents,
+    _ref_table,
+)
 from sqler.models.msgspec.base import SQLerMsgspecModelBase, _mixin_field_names, _public_fields
 from sqler.utils import validate_field_name, validate_table_name
 
@@ -110,14 +118,22 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             cls.set_db(db, table)
 
     @classmethod
-    def using(cls: Type[T], db: "SQLerDB") -> "SQLerQuerySet[T]":
-        """Return a queryset bound to a specific DB (no class-level mutation)."""
+    def using(cls: Type[T], db: "SQLerDB", table: Optional[str] = None) -> "SQLerQuerySet[T]":
+        """Return a queryset bound to a specific DB (no class-level mutation).
+
+        Args:
+            db: Database to read.
+            table: Optional table to read instead of the class's own. The class
+                binding is not changed. A row read from it remembers the table:
+                ``save()``, ``delete()`` and ``refresh()`` use that table.
+
+        A read creates no table: on a table nobody created, ``all()`` is empty,
+        ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
+        """
         from sqler.models.queryset import SQLerQuerySet
         from sqler.query import SQLerQuery
 
-        table = validate_table_name(
-            getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-        )
+        table = validate_table_name(table) if table is not None else _model_table_name(cls)
         q = SQLerQuery(table=table, adapter=db.adapter)
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
@@ -145,12 +161,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
     def _resolve_binding(cls, db=None) -> tuple["SQLerDB", str]:
         """Return (db, table) using the provided db or the class-level binding."""
         if db is not None:
-            table = (
-                cls._table
-                or getattr(cls, "__tablename__", None)
-                or _default_table_name(cls.__name__)
-            )
-            return db, validate_table_name(table)
+            return db, _model_table_name(cls)
         return cls._require_binding()
 
     @classmethod
@@ -169,7 +180,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             Model instance when found, else ``None``.
         """
         db, table = cls._require_binding()
-        doc = db.find_document(table, id_)
+        doc = _read_document(db, table, id_)
         if doc is None:
             return None
         inst = cls.model_validate(doc)
@@ -178,7 +189,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         return inst
 
     @classmethod
-    def from_ids(cls: Type[T], ids: list[int]) -> list[T]:
+    def from_ids(cls: Type[T], ids: list[int], *, db=None) -> list[T]:
         """Hydrate multiple instances by id list (batch operation).
 
         Note: relation resolution is not performed (prototype scope).
@@ -186,6 +197,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
 
         Args:
             ids: List of row ids to load.
+            db: Optional database (overrides class-level binding).
 
         Returns:
             List of model instances (in same order as input ids).
@@ -193,8 +205,8 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         """
         if not ids:
             return []
-        db, table = cls._require_binding()
-        docs = db.find_documents(table, ids)
+        db, table = cls._resolve_binding(db)
+        docs = _read_documents(db, table, ids)
         if not docs:
             return []
         instances = []
@@ -270,7 +282,14 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             return existing, False
         merged = {**lookup, **(defaults or {})}
         inst = cls(**merged)
-        inst.save(db=db)
+        try:
+            inst.save(db=db)
+        except UniqueConstraintError:
+            # another caller inserted the same lookup between the read and the insert
+            existing = qs.first()
+            if existing is None:
+                raise  # refused by a unique index on a field outside the lookup
+            return existing, False
         return inst, True
 
     @classmethod
@@ -350,10 +369,13 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         Returns:
             self: The same instance (for chaining).
         """
+        db, table = _instance_binding(self, db)
         cls = self.__class__
-        db, table = cls._resolve_binding(db)
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
+        if promoted and table not in db._promoted_columns:
+            # the bound route creates this table in set_db(); a given db may not have it
+            db.ensure_table(table, promoted=promoted, checks=getattr(cls, "__checks__", None))
         if promoted:
             promoted_fields = list(promoted.keys())
             new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
@@ -378,8 +400,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             db: Optional database to delete from (overrides class-level binding).
             on_delete: One of "restrict", "set_null", or "cascade".
         """
-        cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot delete unsaved model (missing _id)")
         target = (table, int(self._id))
@@ -418,10 +439,10 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = _instance_binding(self)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = db.find_document(table, self._id)
+        doc = _read_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
         # Update fields in-place
@@ -451,12 +472,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             if isinstance(value, SQLerMsgspecModel):
                 if value._id is None:
                     raise ValueError("Related model must be saved before saving parent")
-                table = value.__class__._table
-                if table is None:
-                    raise ValueError(
-                        f"Related model {value.__class__.__name__} has no bound table"
-                    )
-                table = validate_table_name(table)
+                table = _ref_table(value)
                 if (table, int(value._id)) not in visited:
                     visited.add((table, int(value._id)))
                 return {"_table": table, "_id": value._id}

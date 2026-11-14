@@ -19,6 +19,7 @@ def register(table: str, cls: type) -> None:
         table: Table name to register.
         cls: Model class associated with the table.
     """
+    _REGISTRY.pop(table, None)  # a re-registered table moves to the end (latest wins)
     _REGISTRY[table] = cls
     # Clear all caches when registry changes
     resolve.cache_clear()
@@ -36,6 +37,18 @@ def resolve(table: str) -> Optional[type]:
         The model class if registered, None otherwise.
     """
     return _REGISTRY.get(table)
+
+
+def resolve_class_name(name: str) -> Optional[type]:
+    """Return the registered model class called ``name`` (the latest one registered), or None.
+
+    Used to turn a string annotation such as ``"Address"`` into its model class
+    when the class's table name is not derived from the annotation text.
+    """
+    for cls in reversed(list(_REGISTRY.values())):
+        if cls.__name__ == name:
+            return cls
+    return None
 
 
 def tables() -> dict[str, type]:
@@ -60,10 +73,17 @@ def _get_allowed_tables(target_table: str) -> frozenset[str]:
     target_cls = resolve(target_table)
     allowed: set[str] = {target_table}
     if target_cls is not None:
+        from sqler.exceptions import InvalidTableNameError
+        from sqler.models._table_names import _model_table_name
+
         allowed.add(target_cls.__name__.lower())
         alias = getattr(target_cls, "__tablename__", None)
         if isinstance(alias, str):
             allowed.add(alias)
+        try:
+            allowed.add(_model_table_name(target_cls))
+        except InvalidTableNameError:
+            pass  # a bad class table never named a stored reference
     return frozenset(allowed)
 
 

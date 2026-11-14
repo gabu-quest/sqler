@@ -139,9 +139,12 @@ asyncio.run(main())
 The recommended way to bind models is `using()` (class-level) and `save(db=)` / `delete(db=)` (instance-level):
 
 ```python
-# Class-level: using() returns a bound proxy (no global mutation)
-users = User.using(db).query().filter(F("age") > 30).all()
-user = User.using(db).from_id(1)
+# Class-level: using() returns a queryset on db (no global mutation)
+users = User.using(db).filter(F("age") > 30).all()
+users = User.from_ids([1, 2], db=db)
+
+# One query on another table; the class binding is not changed
+archived = User.using(db, "users_archive").all()
 
 # Instance-level: target a specific DB for writes
 user = User(name="Alice", age=30)
@@ -149,10 +152,59 @@ user.save(db=db1)       # writes to db1
 user.delete(db=db2)     # deletes from db2
 
 # Works with all model variants: SQLerModel, AsyncSQLerModel,
-# SQLerLiteModel, AsyncSQLerLiteModel, SafeModel, AsyncSafeModel
+# SQLerLiteModel, AsyncSQLerLiteModel, SQLerMsgspecModel, SafeModel, AsyncSafeModel
 ```
 
 Both patterns avoid global `set_db()` state and are safe for multi-DB scenarios.
+
+**Which table a class uses.** Every route (`save(db=)`, `using(db)`, references,
+`FTSIndex`, the registry) uses one rule: the table bound with `set_db()`, else
+`__tablename__`, else the plural of the class name (`User` → `users`; a name that
+already ends in `s` is kept). A class bound with `set_db(db, "a")` reads `a` from any
+database given to `using()`.
+
+**`using(db, table=None)`.** With `table`, that one query reads the named table; the
+name is checked before any SQL (`InvalidTableNameError`). A row read this way
+remembers its table: `save()`, `delete()` and `refresh()` use it, so a row is never
+written to a different table than it was read from; `row.save(db=other_db)` updates
+the row with the same `_id` in that table of `other_db`. `as_ref(row)`, and the
+reference a model holding it stores, name that table. On the msgspec base the table
+is kept outside the struct fields: it is in neither `msgspec.json.encode(row)` nor `==`.
+A copy made with `model_copy()` (pydantic) keeps the table. A copy made with
+`dataclasses.replace()` (lite) or `msgspec.structs.replace()` does not: it keeps the
+`_id` and is a row of the class's own table, so read the row again instead of saving
+such a copy.
+
+**A read creates no table.** `using(db)`, `using(db, table)` and `query()` on an async
+bound class run no `CREATE TABLE`: on a table nobody created, `all()` is `[]`,
+`first()` is `None`, `count()` is 0, `exists()` is false, `sum()`/`avg()`/`min()`/`max()`
+are `None` (`[]` with `group_by()`), `paginate()` gives an empty page, and a queryset
+`update()` or `delete_all()` changes 0 rows; the table is still missing afterwards.
+`from_id()`, `from_ids()` and `refresh()` read the same way (a missing table is a
+missing row). "no such table" for any other table (a join, a subquery, a missing
+search index) and "no such column" still raise. Writes (`save()`, the insert of
+`first_or_create()`) create the table as before. A read never needs the write lock, so
+it does not wait behind another connection's write.
+
+**References without `set_db()`.** A model saved with `save(db=db)` can be held by
+another model; read back through `using(db)`, the related model is in place. Model
+classes are registered under their table when they are defined, so a stored reference
+finds its class even when that class was defined after the row was written. A class
+that is only defined never takes the place of a class bound to the same table with
+`set_db()` (a later import of a same-named class, a class defined inside a function, a
+subclass); `set_db()` always registers. When the referenced row cannot be read because
+its table is missing, the stored reference stays the `{"_table", "_id"}` dict; any
+other error (a row that does not fit its class) raises, sync and async alike.
+
+A search index for such a class is given the database, `FTSIndex(Article, ["title"],
+db=db)`, and reads the class's table by the same rule: `search()`,
+`search_with_highlights()` and `search_ranked()` load the rows from that database, and
+return `[]` when the class's table does not exist.
+
+**`first_or_create(lookup, defaults=None, *, db=None)`.** Reads, then inserts. When a
+unique index refuses the insert because another caller inserted the same lookup first,
+it reads again and returns that row with `created` false. If the refusal came from a
+unique index on a field outside the lookup, the `UniqueConstraintError` reaches you.
 
 ---
 

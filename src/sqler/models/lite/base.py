@@ -8,12 +8,18 @@ and other environments where Pydantic cannot be installed.
 from __future__ import annotations
 
 import dataclasses
+import re
 import typing
 from dataclasses import fields
 from datetime import date, datetime
 from typing import Any, ClassVar, Optional, Type, TypeVar
 
 T = TypeVar("T", bound="SQLerLiteModelBase")
+
+# names in a string annotation that are typing constructs, never model classes
+_TYPING_NAMES = frozenset(
+    {"Optional", "Union", "None", "List", "list", "Dict", "dict", "typing", "ClassVar", "Any"}
+)
 
 
 def _is_classvar(ann: object) -> bool:
@@ -34,6 +40,8 @@ class SQLerLiteModelBase:
     # These are NOT dataclass fields
     _id: Optional[int] = None
     _snapshot: Optional[dict] = None
+    # table this row was read from, when ``using(db, table)`` named one other than the class's
+    _source_table: Optional[str] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Inject annotations from non-dataclass mixin bases.
@@ -63,6 +71,10 @@ class SQLerLiteModelBase:
                 # Copy default value so @dataclass can find it in cls.__dict__
                 if name in base.__dict__:
                     setattr(cls, name, base.__dict__[name])
+
+        from sqler.models._table_names import _register_defined_class
+
+        _register_defined_class(cls)
 
     def __post_init__(self) -> None:
         """Initialize private attributes after dataclass __init__."""
@@ -100,6 +112,11 @@ class SQLerLiteModelBase:
                 # Check if this dict has _table (from _resolve_relations path)
                 # or try to infer the model from the field annotation
                 if "_table" in v:
+                    if v.keys() == {"_table", "_id"}:
+                        # a bare stored reference: its row could not be read (a missing
+                        # table or row); it stays the reference it was, never an empty model
+                        init_data[k] = v
+                        continue
                     # Already has table info, use registry
                     table = v.get("_table")
                     model_cls = registry.resolve(table) if isinstance(table, str) else None
@@ -157,6 +174,7 @@ class SQLerLiteModelBase:
         if isinstance(ann, str):
             # Try to find in registry by pluralized name
             from sqler import registry
+            from sqler.models._table_names import _default_table_name
 
             # Try common table name patterns
             lower = ann.lower()
@@ -167,6 +185,17 @@ class SQLerLiteModelBase:
                         return model_cls
                 except (LookupError, TypeError):
                     pass
+            # A forward reference names a class: "Address", "Optional[Address]",
+            # "Address | None". Look each name up as a registered class (by its
+            # default table, then by class name, so __tablename__ does not matter).
+            for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", ann):
+                if name in _TYPING_NAMES:
+                    continue
+                model_cls = registry.resolve(_default_table_name(name)) or registry.resolve_class_name(name)
+                if model_cls is not None and model_cls.__name__ == name and issubclass(
+                    model_cls, SQLerLiteModelBase
+                ):
+                    return model_cls
 
         return None
 

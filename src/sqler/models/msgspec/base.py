@@ -70,7 +70,7 @@ def _mixin_field_names(cls: type) -> frozenset[str]:
     return result
 
 
-class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True):
+class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
     """Base class for msgspec-backed models providing Pydantic-like interface.
 
     Subclasses define their fields as Struct fields. The `_id` and `_snapshot`
@@ -80,10 +80,22 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True):
     ``kw_only=True`` allows subclasses to freely add required fields after
     these optional base fields (msgspec requires required fields before
     optional fields in positional mode).
+
+    ``dict=True`` gives instances a ``__dict__`` for state that is not a field
+    (``_source_table``); it is not encoded and not compared.
     """
 
     _id: Optional[int] = None
     _snapshot: Optional[dict] = None
+    # ``dict=True``: a row read through ``using(db, table)`` from a table other than
+    # its class's keeps that table in ``_source_table``, an instance attribute that is
+    # not a struct field, so it is in neither the encoded bytes nor ``==``.
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        from sqler.models._table_names import _register_defined_class
+
+        _register_defined_class(cls)
 
     @classmethod
     def model_validate(cls: Type[T], data: dict) -> T:

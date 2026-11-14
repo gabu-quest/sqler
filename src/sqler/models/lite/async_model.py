@@ -20,9 +20,17 @@ from typing import (
 )
 
 from sqler import registry
-from sqler.exceptions import NotBoundError
+from sqler.exceptions import NotBoundError, UniqueConstraintError
+from sqler.models._table_names import (
+    _aload_unbound,
+    _aread_document,
+    _aread_documents,
+    _default_table_name,
+    _instance_binding,
+    _model_table_name,
+    _ref_table,
+)
 from sqler.models.lite.base import SQLerLiteModelBase
-from sqler.models.lite.model import _default_table_name
 from sqler.utils import validate_field_name, validate_table_name
 
 if TYPE_CHECKING:
@@ -106,14 +114,28 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             cls.set_db(db, table)
 
     @classmethod
-    def using(cls: Type[TAModel], db: "AsyncSQLerDB") -> "AsyncSQLerQuerySet[TAModel]":
-        """Return a queryset bound to a specific DB (no class-level mutation)."""
+    def using(
+        cls: Type[TAModel], db: "AsyncSQLerDB", table: Optional[str] = None
+    ) -> "AsyncSQLerQuerySet[TAModel]":
+        """Return a queryset bound to a specific DB (no class-level mutation).
+
+        Args:
+            db: Database to read.
+            table: Optional table to read instead of the class's own. The class
+                binding is not changed. A row read from it remembers the table:
+                ``save()``, ``delete()`` and ``refresh()`` use that table.
+
+        A read creates no table: on a table nobody created, ``all()`` is empty,
+        ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
+        """
+        table = validate_table_name(table) if table is not None else _model_table_name(cls)
+        return cls._queryset(db, table)
+
+    @classmethod
+    def _queryset(cls: Type[TAModel], db: "AsyncSQLerDB", table: str) -> "AsyncSQLerQuerySet[TAModel]":
         from sqler.models.async_queryset import AsyncSQLerQuerySet
         from sqler.query.async_query import AsyncSQLerQuery
 
-        table = validate_table_name(
-            getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-        )
         q = AsyncSQLerQuery(table=table, adapter=db.adapter)
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
@@ -135,8 +157,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
     def _resolve_binding(cls, db=None) -> tuple["AsyncSQLerDB", str]:
         """Return (db, table) using the provided db or the class-level binding."""
         if db is not None:
-            table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-            return db, validate_table_name(table)
+            return db, _model_table_name(cls)
         return cls._require_binding()
 
     @classmethod
@@ -156,33 +177,35 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             Model instance when found, else ``None``.
         """
         db, table = cls._require_binding()
-        doc = await db.find_document(table, id_)
+        doc = await _aread_document(db, table, id_)
         if doc is None:
             return None
-        doc = await cls._aresolve_relations(doc)
+        doc = await cls._aresolve_relations(doc, db=db)
         inst = cls.model_validate(doc)
         object.__setattr__(inst, "_id", doc.get("_id"))
         object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
         return inst
 
     @classmethod
-    async def from_ids(cls: Type[TAModel], ids: list[int]) -> list[TAModel]:
+    async def from_ids(cls: Type[TAModel], ids: list[int], *, db=None) -> list[TAModel]:
         """Hydrate multiple instances by id list (batch operation).
 
         Args:
             ids: List of row ids to load.
+            db: Optional database (overrides class-level binding).
 
         Returns:
             List of model instances. Missing ids are omitted.
         """
         if not ids:
             return []
-        db, table = cls._require_binding()
-        docs = await db.find_documents(table, ids)
+        given = db
+        db, table = cls._resolve_binding(db)
+        docs = await _aread_documents(db, table, ids)
         if not docs:
             return []
         # Use queryset's batch resolution
-        qs = cls.query()
+        qs = cls.using(given) if given is not None else cls.query()
         docs = await qs._abatch_resolve(docs)
         instances = []
         for doc in docs:
@@ -195,22 +218,13 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
     @classmethod
     async def count(cls: Type[TAModel]) -> int:
         """Return total count of rows in this model's table."""
-        db, table = cls._require_binding()
-        await db._ensure_table(table)
         return await cls.query().count()
 
     @classmethod
     def query(cls: Type[TAModel]) -> "AsyncSQLerQuerySet[TAModel]":
         """Return an async queryset for chaining and execution."""
-        from sqler.models.async_queryset import AsyncSQLerQuerySet
-        from sqler.query.async_query import AsyncSQLerQuery
-
         db, table = cls._require_binding()
-        q = AsyncSQLerQuery(table=table, adapter=db.adapter)
-        promoted = getattr(cls, "__promoted__", None)
-        if promoted:
-            q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TAModel](cls, q)
+        return cls._queryset(db, table)
 
     @classmethod
     def filter(cls: Type[TAModel], expression: Any) -> "AsyncSQLerQuerySet[TAModel]":
@@ -250,7 +264,14 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             return existing, False
         merged = {**lookup, **(defaults or {})}
         inst = cls(**merged)
-        await inst.save(db=db)
+        try:
+            await inst.save(db=db)
+        except UniqueConstraintError:
+            # another caller inserted the same lookup between the read and the insert
+            existing = await qs.first()
+            if existing is None:
+                raise  # refused by a unique index on a field outside the lookup
+            return existing, False
         return inst, True
 
     @classmethod
@@ -340,7 +361,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
         promoted = getattr(cls, "__promoted__", None)
         if promoted and table not in db._promoted_columns:
             checks = getattr(cls, "__checks__", None)
@@ -378,8 +399,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             async_set_null_referrers,
         )
 
-        cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot delete unsaved model (missing _id)")
         if on_delete not in {"restrict", "set_null", "cascade"}:
@@ -402,13 +422,13 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = _instance_binding(self)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = await db.find_document(table, self._id)
+        doc = await _aread_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        doc = await cls._aresolve_relations(doc)
+        doc = await cls._aresolve_relations(doc, db=db)
         # Update fields in-place
         for f in fields(self):
             if f.name.startswith("_"):
@@ -425,15 +445,17 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
 
     # ----- async relationship helpers -----
     @classmethod
-    async def _aresolve_relations(cls, data: dict) -> dict:
+    async def _aresolve_relations(cls, data: dict, db=None) -> dict:
         """Resolve reference dicts to model instances recursively (async)."""
-
         async def adecode(value: Any) -> Any:
             if isinstance(value, dict):
                 if isinstance(value.get("_table"), str) and "_id" in value:
                     table = value["_table"]
                     rid = value["_id"]
                     mdl = registry.resolve(table)
+                    if mdl is not None and getattr(mdl, "_db", None) is None and db is not None:
+                        # a class never bound: read the row from the parent's db
+                        return await _aload_unbound(mdl, db, table, rid)
                     if mdl is not None and hasattr(mdl, "from_id"):
                         fn = getattr(mdl, "from_id")
                         if inspect.iscoroutinefunction(fn):
@@ -468,8 +490,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             if isinstance(value, AsyncSQLerLiteModel):
                 if value._id is None:
                     raise ValueError("Related async model must be saved before saving parent")
-                table = value.__class__._table
-                return {"_table": table, "_id": value._id}
+                return {"_table": _ref_table(value), "_id": value._id}
 
             # Handle sync lite models
             from sqler.models.lite.model import SQLerLiteModel
@@ -477,8 +498,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             if isinstance(value, SQLerLiteModel):
                 if value._id is None:
                     raise ValueError("Related model must be saved before saving parent")
-                table = value.__class__._table
-                return {"_table": table, "_id": value._id}
+                return {"_table": _ref_table(value), "_id": value._id}
 
             # Handle already-encoded ref dicts
             if isinstance(value, dict) and "_table" in value and "_id" in value:

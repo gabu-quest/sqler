@@ -7,8 +7,18 @@ from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
 from sqler.db.sqler_db import SQLerDB
-from sqler.exceptions import NotBoundError
-from sqler.models._table_names import _default_table_name, _pluralize  # noqa: F401
+from sqler.exceptions import NotBoundError, UniqueConstraintError
+from sqler.models._table_names import (  # noqa: F401
+    _default_table_name,
+    _instance_binding,
+    _load_unbound,
+    _model_table_name,
+    _pluralize,
+    _read_document,
+    _read_documents,
+    _ref_table,
+    _register_defined_class,
+)
 from sqler.models.queryset import SQLerQuerySet
 from sqler.query import SQLerExpression
 from sqler.utils import validate_field_name, validate_table_name
@@ -38,6 +48,8 @@ class SQLerModel(BaseModel):
     _id: Optional[int] = PrivateAttr(default=None)
     # snapshot of last-loaded document (for merge strategies in perf mode)
     _snapshot: Optional[dict] = PrivateAttr(default=None)
+    # table this row was read from, when ``using(db, table)`` named one other than the class's
+    _source_table: Optional[str] = PrivateAttr(default=None)
 
     # class-bound db + table metadata
     _db: ClassVar[Optional[SQLerDB]] = None
@@ -48,6 +60,11 @@ class SQLerModel(BaseModel):
         "extra": "ignore",
         "frozen": False,
     }
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        _register_defined_class(cls)
 
     # ----- class methods -----
     @classmethod
@@ -137,8 +154,7 @@ class SQLerModel(BaseModel):
     def _resolve_binding(cls, db=None) -> tuple[SQLerDB, str]:
         """Return (db, table) using the provided db or the class-level binding."""
         if db is not None:
-            table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-            return db, validate_table_name(table)
+            return db, _model_table_name(cls)
         return cls._require_binding()
 
     @classmethod
@@ -152,17 +168,17 @@ class SQLerModel(BaseModel):
             Model instance when found, else ``None``.
         """
         db, table = cls._require_binding()
-        doc = db.find_document(table, id_)
+        doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        doc = cls._resolve_relations(doc)
+        doc = cls._resolve_relations(doc, db=db)
         inst = cls.model_validate(doc)  # type: ignore[call-arg]
         # attach db id stored outside the json payload
         inst._id = doc.get("_id")
         return inst  # type: ignore[return-value]
 
     @classmethod
-    def from_ids(cls: Type[TModel], ids: list[int]) -> list[TModel]:
+    def from_ids(cls: Type[TModel], ids: list[int], *, db=None) -> list[TModel]:
         """Hydrate multiple instances by id list (batch operation).
 
         Fetches all documents in a single query and resolves all relations
@@ -171,6 +187,7 @@ class SQLerModel(BaseModel):
 
         Args:
             ids: List of row ids to load.
+            db: Optional database (overrides class-level binding).
 
         Returns:
             List of model instances (in same order as input ids).
@@ -178,12 +195,13 @@ class SQLerModel(BaseModel):
         """
         if not ids:
             return []
-        db, table = cls._require_binding()
-        docs = db.find_documents(table, ids)
+        given = db
+        db, table = cls._resolve_binding(db)
+        docs = _read_documents(db, table, ids)
         if not docs:
             return []
         # Use queryset's batch resolution for efficient nested ref loading
-        qs = cls.query()
+        qs = cls.using(given) if given is not None else cls.query()
         docs = qs._batch_resolve(docs)
         instances = []
         for doc in docs:
@@ -221,11 +239,21 @@ class SQLerModel(BaseModel):
         return cls.query().first()
 
     @classmethod
-    def using(cls: Type[TModel], db: SQLerDB) -> SQLerQuerySet[TModel]:
-        """Return a queryset bound to a specific DB (no class-level mutation)."""
-        table = validate_table_name(
-            getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-        )
+    def using(
+        cls: Type[TModel], db: SQLerDB, table: Optional[str] = None
+    ) -> SQLerQuerySet[TModel]:
+        """Return a queryset bound to a specific DB (no class-level mutation).
+
+        Args:
+            db: Database to read.
+            table: Optional table to read instead of the class's own. The class
+                binding is not changed. A row read from it remembers the table:
+                ``save()``, ``delete()`` and ``refresh()`` use that table.
+
+        A read creates no table: on a table nobody created, ``all()`` is empty,
+        ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
+        """
+        table = validate_table_name(table) if table is not None else _model_table_name(cls)
         from sqler.query import SQLerQuery
 
         q = SQLerQuery(table=table, adapter=db.adapter)
@@ -272,7 +300,14 @@ class SQLerModel(BaseModel):
             return existing, False
         merged = {**lookup, **(defaults or {})}
         inst = cls(**merged)
-        inst.save(db=db)
+        try:
+            inst.save(db=db)
+        except UniqueConstraintError:
+            # another caller inserted the same lookup between the read and the insert
+            existing = qs.first()
+            if existing is None:
+                raise  # refused by a unique index on a field outside the lookup
+            return existing, False
         return inst, True  # type: ignore[return-value]
 
     @classmethod
@@ -360,9 +395,12 @@ class SQLerModel(BaseModel):
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
+        if promoted and table not in db._promoted_columns:
+            # the bound route creates this table in set_db(); a given db may not have it
+            db.ensure_table(table, promoted=promoted, checks=getattr(cls, "__checks__", None))
         if promoted:
             promoted_fields = list(promoted.keys())
             new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
@@ -386,8 +424,7 @@ class SQLerModel(BaseModel):
             db: Optional database to delete from (overrides class-level binding).
             on_delete: One of "restrict", "set_null", or "cascade".
         """
-        cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot delete unsaved model (missing _id)")
         target = (table, int(self._id))
@@ -422,13 +459,13 @@ class SQLerModel(BaseModel):
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = _instance_binding(self)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = db.find_document(table, self._id)
+        doc = _read_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        doc = cls._resolve_relations(doc)
+        doc = cls._resolve_relations(doc, db=db)
         fresh = cls.model_validate(doc)  # type: ignore[call-arg]
         # update fields in-place (excluding _id which is also present)
         for fname in self.__class__.model_fields:
@@ -518,13 +555,17 @@ class SQLerModel(BaseModel):
         return isinstance(value, dict) and "_table" in value and "_id" in value
 
     @classmethod
-    def _resolve_relations(cls, data: dict) -> dict:
+    def _resolve_relations(cls, data: dict, db=None) -> dict:
         def decode(value: object):
             if isinstance(value, dict):
                 if cls._is_ref_dict(value):
                     table = value.get("_table")
                     rid = value.get("_id")
                     mdl = registry.resolve(table) if isinstance(table, str) else None
+                    if mdl is not None and getattr(mdl, "_db", None) is None and db is not None:
+                        # a class never bound: read the row from the parent's db; only
+                        # a missing table or row is forgiven (it stays a reference)
+                        return _load_unbound(mdl, db, table, rid)
                     if mdl is not None and hasattr(mdl, "from_id"):
                         try:
                             return mdl.from_id(rid)
@@ -551,8 +592,9 @@ class SQLerModel(BaseModel):
                 # avoid recursion: require saved child
                 if value._id is None:
                     raise ValueError("Related model must be saved before saving parent")
-                if (value.__class__._table, int(value._id)) not in visited:  # type: ignore[attr-defined]
-                    visited.add((value.__class__._table, int(value._id)))  # type: ignore[attr-defined]
+                key = (_ref_table(value), int(value._id))
+                if key not in visited:
+                    visited.add(key)
                 return as_ref(value)
             # already a ref dict: validate minimally
             if isinstance(value, dict) and "_table" in value and "_id" in value:
