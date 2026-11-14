@@ -528,7 +528,7 @@ async def test_executescript_inside_a_transaction_raises_and_commits_nothing(mak
     assert adapter._pool.qsize() == 1
 
 
-# ---- WS-R fixes item 1: a cancellation of a statement running in the SQLite thread ----
+# ---- a cancellation of a statement running in the SQLite thread ------------------------
 #
 # A second connection holds a lock, so the statement really waits in aiosqlite's
 # thread (on the 5 s busy timeout). The cancellation must reach the caller at

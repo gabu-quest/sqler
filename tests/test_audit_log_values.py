@@ -205,7 +205,7 @@ def test_date_datetime_and_uuid_fields_two_changed(base):
     ]
 
 
-# ---- unchanged fields of every kind WS-AL stores --------------------------------------------
+# ---- unchanged fields of every kind that has a stored form ----------------------------------
 
 UNCHANGED = {
     "colour": (Colour, Colour.RED, "red"),

@@ -269,7 +269,7 @@ class TestAsyncCreateIndexWhereRejectsInjection:
 
 
 # ---------------------------------------------------------------------------
-# WS-Q: names stored in documents / used as JSON keys never change the statement
+# names stored in documents / used as JSON keys never change the statement
 # ---------------------------------------------------------------------------
 
 from pydantic import Field as _PydField  # noqa: E402

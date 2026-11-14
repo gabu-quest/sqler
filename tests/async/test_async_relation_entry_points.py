@@ -1017,7 +1017,7 @@ async def test_all_runs_the_per_row_pass_only_when_a_row_holds_a_reference(
     assert parent.per_row_calls == calls
 
 
-# ---- typed references keep their row (WS-AG) ----------------------------------------
+# ---- typed references keep their row ------------------------------------------------
 #
 # The async twin of the section in tests/test_relation_entry_points.py. On the base the
 # batch ways gave a child in a typed field ``_id`` None and the safe ``from_id`` built an

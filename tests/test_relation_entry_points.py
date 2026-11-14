@@ -927,7 +927,7 @@ def test_an_id_past_sqlite_integer_range_is_left_as_it_is(make_db, base, way):
     assert [s for s in sel if ct in s] == []
 
 
-# ---- typed references keep their row (WS-AG) ----------------------------------------
+# ---- typed references keep their row ------------------------------------------------
 #
 # A field annotated with a model class holds a model of that row on every way in: its
 # ``_id`` is the row's id and, for a safe class, its ``_version`` the row's version. On

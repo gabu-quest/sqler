@@ -443,7 +443,7 @@ async def test_results_match_the_sync_runner(db, tmp_path):
     assert (await _tables(db)) == stables
 
 
-# --- WS-T fixes -----------------------------------------------------------
+# --- failed reads, a rolled-back version table, executescript in a migration ---
 
 
 def _failing_fetch(db, method: str, message: str):
