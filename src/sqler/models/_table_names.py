@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from sqler.db._missing_table import is_missing_table
+from sqler.query.query import is_missing_table
 
 
 def _pluralize(word: str) -> str:
@@ -133,7 +133,7 @@ def _instance_binding(inst: object, db=None):
     return db, (_source_table_of(inst) or table)
 
 
-# the one check, in the database layer; the old name stays for its callers here
+# the one check, in the query layer; the old name stays for its callers here
 _is_missing_table = is_missing_table
 
 

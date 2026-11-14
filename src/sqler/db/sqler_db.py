@@ -6,6 +6,7 @@ from typing import Any, Optional
 from sqler.adapter import SQLiteAdapter
 from sqler.exceptions import StaleVersionError
 from sqler.query import SQLerQuery
+from sqler.query.query import is_missing_table
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -14,8 +15,6 @@ from sqler.utils import (
     validate_identifier,
     validate_table_name,
 )
-
-from ._missing_table import MissingAsEmpty, is_missing_table
 
 
 class SQLerDB:
@@ -756,12 +755,7 @@ class SQLerDB:
         Returns:
             SQLerQuery: Query object you can chain and execute.
         """
-        table = validate_table_name(table)
-        # a query of a missing table reads as an empty one; it creates no table
-        return SQLerQuery(
-            table=table,
-            adapter=MissingAsEmpty(self.adapter, table, self._promoted_columns),  # type: ignore[arg-type]
-        )
+        return SQLerQuery(table=validate_table_name(table), adapter=self.adapter)
 
     def close(self):
         """Close the underlying adapter connection."""

@@ -274,8 +274,7 @@ def export_csv(
 
     fieldnames = (["_id"] if include_id else []) + fields
 
-    sql, params = query._build_query(include_id=include_id, include_version=False)
-    rows = query._adapter.execute(sql, params).fetchall()
+    rows = query._rows(include_id=include_id)
 
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=delimiter, quoting=quoting)
@@ -319,8 +318,7 @@ def export_csv_string(
 
     fieldnames = (["_id"] if include_id else []) + fields
 
-    sql, params = query._build_query(include_id=include_id, include_version=False)
-    rows = query._adapter.execute(sql, params).fetchall()
+    rows = query._rows(include_id=include_id)
 
     writer = csv.DictWriter(output, fieldnames=fieldnames, delimiter=delimiter)
     writer.writeheader()
@@ -511,8 +509,7 @@ def export_json(
     else:
         all_fields = False
 
-    sql, params = query._build_query(include_id=include_id, include_version=False)
-    rows = query._adapter.execute(sql, params).fetchall()
+    rows = query._rows(include_id=include_id)
 
     data = []
     for row in rows:
@@ -552,8 +549,7 @@ def export_json_string(
     else:
         all_fields = False
 
-    sql, params = query._build_query(include_id=include_id, include_version=False)
-    rows = query._adapter.execute(sql, params).fetchall()
+    rows = query._rows(include_id=include_id)
 
     data = []
     for row in rows:
@@ -685,8 +681,7 @@ def export_jsonl(
                 f.write(raw + "\n")
             count = len(raw_rows)
         else:
-            sql, params = query._build_query(include_id=include_id, include_version=False)
-            rows = query._adapter.execute(sql, params).fetchall()
+            rows = query._rows(include_id=include_id)
             for row in rows:
                 f.write(
                     _jsonl_line_from_row(
@@ -790,8 +785,7 @@ def export_jsonl_string(
         raw_rows = query.all()
         return "\n".join(raw_rows)
 
-    sql, params = query._build_query(include_id=include_id, include_version=False)
-    rows = query._adapter.execute(sql, params).fetchall()
+    rows = query._rows(include_id=include_id)
 
     lines = []
     for row in rows:
@@ -832,20 +826,15 @@ def stream_jsonl(
         yield from raw_rows
         return
 
-    sql, params = query._build_query(include_id=include_id, include_version=False)
-    cur = query._adapter.execute(sql, params)
-    try:
-        for row in cur:
-            if include_id:
-                obj = json.loads(row[1])
-                obj["_id"] = row[0]
-            else:
-                obj = json.loads(row[0])
-            if not all_fields:
-                obj = {k: obj[k] for k in fields if k in obj}
-            yield json.dumps(obj, ensure_ascii=False)
-    finally:
-        cur.close()
+    for row in query._iter_rows(include_id=include_id):
+        if include_id:
+            obj = json.loads(row[1])
+            obj["_id"] = row[0]
+        else:
+            obj = json.loads(row[0])
+        if not all_fields:
+            obj = {k: obj[k] for k in fields if k in obj}
+        yield json.dumps(obj, ensure_ascii=False)
 
 
 def import_jsonl(
@@ -1148,13 +1137,7 @@ async def async_export_jsonl(
     if not include_id and all_fields:
         lines = await query.all()
     else:
-        sql, params = query._build_query(include_id=include_id)
-        cur = await query._adapter.execute(sql, params)
-        try:
-            rows = await cur.fetchall()
-        finally:
-            await cur.close()
-            await query._adapter.auto_commit()
+        rows = await query._rows(include_id=include_id)
         lines = [
             _jsonl_line_from_row(row, include_id=include_id, all_fields=all_fields, fields=fields)
             for row in rows

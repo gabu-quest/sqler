@@ -5,6 +5,7 @@ from typing import Any, Optional
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter
 from sqler.exceptions import StaleVersionError
 from sqler.pool import PoolStats
+from sqler.query.query import is_missing_table
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -13,8 +14,6 @@ from sqler.utils import (
     validate_identifier,
     validate_table_name,
 )
-
-from ._missing_table import AsyncMissingAsEmpty, is_missing_table
 
 
 class AsyncSQLerDB:
@@ -867,12 +866,7 @@ class AsyncSQLerDB:
         """Convenience: return an AsyncSQLerQuery bound to this adapter."""
         from sqler.query.async_query import AsyncSQLerQuery
 
-        table = validate_table_name(table)
-        # a query of a missing table reads as an empty one; it creates no table
-        return AsyncSQLerQuery(
-            table=table,
-            adapter=AsyncMissingAsEmpty(self.adapter, table, self._promoted_columns),  # type: ignore[arg-type]
-        )
+        return AsyncSQLerQuery(table=validate_table_name(table), adapter=self.adapter)
 
     def transaction(self) -> "AsyncTransaction":
         """Return a context manager for explicit transactions.
