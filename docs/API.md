@@ -1347,6 +1347,8 @@ runner = AsyncMigrationRunner(db, migrations)
 result = await runner.migrate()
 ```
 
+Each async migration runs in one transaction with its version row, so inside `up()` and `down()` use one `adapter.execute()` per statement: `adapter.executescript()` fails there with "cannot run inside a transaction" (SQLite commits before a script), and the failed `result.error` says so.
+
 ### [C44] Metrics collection
 
 ```python
