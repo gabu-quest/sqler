@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 from typing import Any, Optional
 
@@ -245,13 +246,6 @@ class SQLerDB:
         if expected_version is None:
             raise ValueError("expected_version required for update")
 
-        # Acquire write lock early
-        if not self.adapter.in_transaction:
-            try:
-                self.adapter.execute("BEGIN IMMEDIATE;")
-            except (RuntimeError, ValueError):
-                pass
-
         set_parts = ["data = json(?)", "_version = _version + 1"]
         params_list: list[Any] = [payload]
         for col, val in promoted_vals.items():
@@ -263,8 +257,7 @@ class SQLerDB:
             f"UPDATE {table} SET {', '.join(set_parts)} "
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;"
         )
-        cur = self.adapter.execute(sql, params_list)
-        self.adapter.auto_commit()
+        cur = self._versioned_update(sql, params_list)
         rc = getattr(cur, "rowcount", -1)
         if rc <= 0:
             self.adapter.execute(
@@ -871,6 +864,33 @@ class SQLerDB:
             # update cache regardless
             self._versioned_tables.add(table)
 
+    def _versioned_update(self, sql: str, params: list[Any]) -> Any:
+        """Run a versioned ``UPDATE`` and commit it unless an explicit transaction is open.
+
+        Outside an explicit transaction the write lock is taken first with
+        ``BEGIN IMMEDIATE`` (less live-lock under contention), and that
+        transaction is ended on every path: committed on success, rolled back
+        when anything raises before the commit.
+        """
+        if self.adapter.in_transaction:
+            cur = self.adapter.execute(sql, params)
+            self.adapter.auto_commit()
+            return cur
+        try:
+            self.adapter.execute("BEGIN IMMEDIATE;")
+        except (RuntimeError, ValueError):
+            pass  # an adapter that cannot run BEGIN here: the UPDATE runs in its own transaction
+        try:
+            cur = self.adapter.execute(sql, params)
+            self.adapter.auto_commit()
+        except BaseException:
+            try:
+                self.adapter.execute("ROLLBACK;")
+            except sqlite3.Error:
+                pass  # already rolled back by the adapter, or nothing open
+            raise
+        return cur
+
     def upsert_with_version(
         self, table: str, _id: Optional[int], doc: dict[str, Any], expected_version: Optional[int]
     ) -> tuple[int, int]:
@@ -905,19 +925,11 @@ class SQLerDB:
             return cur.lastrowid, 0
         if expected_version is None:
             raise ValueError("expected_version required for update")
-        # Acquire write lock early to reduce live-lock under contention (only if not in transaction)
-        if not self.adapter.in_transaction:
-            try:
-                self.adapter.execute("BEGIN IMMEDIATE;")
-            except (RuntimeError, ValueError):
-                # tolerate if already in a transaction
-                pass
-        cur = self.adapter.execute(
+        cur = self._versioned_update(
             f"UPDATE {table} SET data = json(?), _version = _version + 1 "
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
             [payload, _id, expected_version, expected_version, expected_version],
         )
-        self.adapter.auto_commit()
         rc = getattr(cur, "rowcount", -1)
         if rc <= 0:
             # treat non-positive as conflict
