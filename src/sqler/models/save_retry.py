@@ -18,7 +18,8 @@ lock wait like any other (:meth:`SaveRetry.reread`, :meth:`SaveRetry.areread`).
 Time spent on tries that ended in a conflict is not lock time.
 
 The four save loops (sync and async, pydantic and lite) all use
-:class:`SaveRetry`, so they behave the same.
+:class:`SaveRetry`, so they behave the same. A rebased try writes :func:`rebase`, and
+after it succeeds :func:`settle` brings the model up to what was written.
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ from typing import Any, Awaitable, Callable, Optional
 
 from sqler.exceptions import LockTimeoutError, StaleVersionError
 
-from .utils import RebaseConfig
+from . import _dirty, _refs
+from .utils import RebaseConfig, apply_numeric_scalar_deltas
 
 #: Longest sleep between two tries, in seconds.
 MAX_SLEEP_S = 0.05
@@ -153,3 +155,47 @@ class SaveRetry:
                     raise
                 delay = self.after_lock(e)
             await asleep(delay)
+
+    def build(self, stale: StaleVersionError, make: Callable[[], Any]) -> Any:
+        """Build the model of a rebased payload with ``make``, before anything is written.
+
+        A lock met on the reference read is waited out like the re-read's. A row that
+        cannot be loaded as this class cannot be merged: the ``stale`` conflict the caller
+        caught is raised, with the validation error as its cause.
+        """
+        try:
+            return self.reread(make)
+        except ValueError as e:  # pydantic's ValidationError is one; pydantic is optional
+            raise stale from e
+
+    async def abuild(self, stale: StaleVersionError, make: Callable[[], Awaitable[Any]]) -> Any:
+        """Async twin of :meth:`build`."""
+        try:
+            return await self.areread(make)
+        except ValueError as e:  # pydantic's ValidationError is one; pydantic is optional
+            raise stale from e
+
+
+def rebase(latest: dict, held: dict, snap: dict, delta: dict[str, int]) -> dict:
+    """The payload of a save rebased onto the newer row ``latest``.
+
+    It is that row, with the fields the caller changed since its snapshot ``snap`` taken
+    from its payload ``held``, and the counter ``delta`` added. A field only the other
+    writer changed keeps the other writer's value.
+    """
+    out = {k: v for k, v in latest.items() if k not in ("_id", "_version")}
+    for k in _dirty.changed_fields(snap, held) - delta.keys():
+        if k in held:
+            out[k] = held[k]
+    return apply_numeric_scalar_deltas(out, delta)
+
+
+def settle(inst: Any, held: dict, written: Any) -> None:
+    """Bring ``inst``, whose save was rebased, up to the row it wrote.
+
+    ``held`` is the payload of ``inst`` when save() began; ``written`` is the model built
+    (:meth:`SaveRetry.build`) from the payload that was written. Each field where the two differ takes ``written``'s value;
+    the others keep the objects ``inst`` holds.
+    """
+    for name in _dirty.changed_fields(inst._snapshot, held) & held.keys():
+        _refs._set(inst, name, getattr(written, name))
