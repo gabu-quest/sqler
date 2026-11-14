@@ -7,9 +7,9 @@ to pluralization or reserved-word handling lands in one place.
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from functools import lru_cache
+
+from sqler.db._missing_table import is_missing_table
 
 
 def _pluralize(word: str) -> str:
@@ -133,103 +133,28 @@ def _instance_binding(inst: object, db=None):
     return db, (_source_table_of(inst) or table)
 
 
-def _is_missing_table(exc: BaseException, table: str) -> bool:
-    """True when ``exc`` is SQLite's "no such table" for ``table`` itself.
-
-    "no such table" for any other table (a join, a subquery, a search index) and
-    every other error are not this.
-    """
-    if not isinstance(exc, sqlite3.OperationalError):
-        return False
-    return str(exc) in (f"no such table: {table}", f"no such table: main.{table}")
-
-
-def _doc_from_row(row, promoted: list) -> dict:
-    obj = json.loads(row[1])
-    obj["_id"] = row[0]
-    for i, col_name in enumerate(promoted):
-        obj[col_name] = row[2 + i]
-    return obj
-
-
-def _one_row_sql(db, table: str) -> "tuple[str, list]":
-    promoted = list(db._promoted_columns.get(table, []))
-    cols = ", ".join(["_id", "data", *promoted])
-    return f"SELECT {cols} FROM {table} WHERE _id = ?;", promoted
-
-
-def _rows_sql(table: str, ids: list) -> str:
-    placeholders = ",".join("?" for _ in ids)
-    return f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});"
+# the one check, in the database layer; the old name stays for its callers here
+_is_missing_table = is_missing_table
 
 
 def _read_document(db, table: str, rid):
-    """``db.find_document`` for a read through a model: it creates no table.
-
-    The same statement and result, without the ``CREATE TABLE IF NOT EXISTS`` that
-    the database method runs first (on a connection that read the schema before the
-    table existed, that statement waits for the write lock). A missing table is a
-    missing row: ``None``.
-    """
-    sql, promoted = _one_row_sql(db, table)
-    try:
-        cur = db.adapter.execute(sql, [rid])
-    except sqlite3.OperationalError as exc:
-        if _is_missing_table(exc, table):
-            return None
-        raise
-    row = cur.fetchone()
-    return _doc_from_row(row, promoted) if row else None
+    """``db.find_document`` for a read through a model: a missing table is a missing row, ``None``."""
+    return db.find_document(table, rid)
 
 
 def _read_documents(db, table: str, ids: list) -> list:
-    """``db.find_documents`` for a read through a model: it creates no table."""
-    if not ids:
-        return []
-    try:
-        cur = db.adapter.execute(_rows_sql(table, ids), list(ids))
-    except sqlite3.OperationalError as exc:
-        if _is_missing_table(exc, table):
-            return []
-        raise
-    by_id = {row[0]: _doc_from_row(row, []) for row in cur.fetchall()}
-    return [by_id[i] for i in ids if i in by_id]
+    """``db.find_documents`` for a read through a model: a missing table gives ``[]``."""
+    return db.find_documents(table, ids)
 
 
 async def _aread_document(db, table: str, rid):
     """Async twin of :func:`_read_document`."""
-    sql, promoted = _one_row_sql(db, table)
-    try:
-        cur = await db.adapter.execute(sql, [rid])
-    except sqlite3.OperationalError as exc:
-        if _is_missing_table(exc, table):
-            return None
-        raise
-    try:
-        row = await cur.fetchone()
-    finally:
-        await cur.close()
-    await db.adapter.auto_commit()
-    return _doc_from_row(row, promoted) if row else None
+    return await db.find_document(table, rid)
 
 
 async def _aread_documents(db, table: str, ids: list) -> list:
     """Async twin of :func:`_read_documents`."""
-    if not ids:
-        return []
-    try:
-        cur = await db.adapter.execute(_rows_sql(table, ids), list(ids))
-    except sqlite3.OperationalError as exc:
-        if _is_missing_table(exc, table):
-            return []
-        raise
-    try:
-        rows = await cur.fetchall()
-    finally:
-        await cur.close()
-    await db.adapter.auto_commit()
-    by_id = {row[0]: _doc_from_row(row, []) for row in rows}
-    return [by_id[i] for i in ids if i in by_id]
+    return await db.find_documents(table, ids)
 
 
 def _set_row_id(inst: object, rid) -> None:
