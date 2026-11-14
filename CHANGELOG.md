@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **`created_at` and `updated_at` are equal after the first save.** Since 1.2026.4.3 the first save set `updated_at` one microsecond after `created_at`. Every later save still gives a strictly later `updated_at`, now also when the clock has not advanced or has gone backwards, and when two saves follow each other within one clock tick. Applies to `TimestampMixin`, `AuditMixin` and `AsyncAuditMixin`. A stored `updated_at` that lies in the future is not pulled back: the next save is one microsecond after it.
+
+### Changed
+
+- **The PyPI publish workflow runs the linter and the test suite first**, and refuses a tag that does not match the version in `pyproject.toml`.
+
 ## [1.2026.4.2] - 2026-04-18
 
 ### Security
