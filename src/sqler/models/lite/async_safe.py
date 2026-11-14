@@ -18,7 +18,7 @@ from typing import (
 )
 
 from sqler.exceptions import StaleVersionError
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 from sqler.models import save_retry as _retry
 from sqler.models._table_names import _instance_binding
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
@@ -111,9 +111,7 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         doc = await db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        inst = _refs.from_row(cls, await cls._aresolve_relations(doc))
-        object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
-        return inst
+        return _refs.from_row(cls, await cls._aresolve_relations(doc), doc)
 
     @classmethod
     async def asave_many(cls: Type[TASafe], instances: list[TASafe], *, db=None) -> list[TASafe]:  # type: ignore[override]
@@ -157,7 +155,7 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             object.__setattr__(inst, "_id", id_)
             object.__setattr__(inst, "_version", version)
-            object.__setattr__(inst, "_snapshot", {k: v for k, v in payload.items() if k not in {"_id", "_version"}})
+            object.__setattr__(inst, "_snapshot", _dirty.snapshot(payload))
         return instances
 
     async def save(self: TASafe, *, db=None) -> TASafe:
@@ -214,10 +212,7 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
                 object.__setattr__(self, "_id", new_id)
                 object.__setattr__(self, "_version", new_version)
                 target_payload = attempt_payload
-                snap_payload = {
-                    k: v for k, v in target_payload.items() if k not in {"_id", "_version"}
-                }
-                object.__setattr__(self, "_snapshot", snap_payload)
+                object.__setattr__(self, "_snapshot", _dirty.snapshot(target_payload))
                 return self
             except StaleVersionError:
                 if not can_rebase:
@@ -237,7 +232,7 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
                     rebased = apply_numeric_scalar_deltas(rebased, delta)
                 target_payload = rebased
                 object.__setattr__(self, "_version", latest_doc.get("_version", 0))
-                object.__setattr__(self, "_snapshot", latest_payload.copy())
+                object.__setattr__(self, "_snapshot", _dirty.snapshot(latest_doc))
             except sqlite3.OperationalError as e:
                 if not _retry.is_lock_error(e):
                     raise
@@ -266,7 +261,7 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
                 object.__setattr__(self, f.name, doc_resolved[f.name])
         object.__setattr__(self, "_id", doc.get("_id"))
         object.__setattr__(self, "_version", doc.get("_version", 0))
-        object.__setattr__(self, "_snapshot", cls._make_snapshot(doc))
+        object.__setattr__(self, "_snapshot", _dirty.snapshot(doc))
         return self
 
     def __repr__(self) -> str:

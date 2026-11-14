@@ -22,7 +22,7 @@ from typing import (
 
 from sqler import registry
 from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
@@ -194,9 +194,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        inst = _refs.from_row(cls, cls._resolve_relations(doc, db=db))
-        object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
-        return inst
+        return _refs.from_row(cls, cls._resolve_relations(doc, db=db), doc)
 
     @classmethod
     def from_ids(cls: Type[T], ids: list[int], *, db=None) -> list[T]:
@@ -220,12 +218,10 @@ class SQLerLiteModel(SQLerLiteModelBase):
             return []
         # Use queryset's batch resolution
         qs = cls.using(given) if given is not None else cls.query()
-        instances = []
-        for doc in qs._batch_resolve(docs):
-            inst = _refs.from_row(cls, doc)
-            object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
-            instances.append(inst)
-        return instances
+        return [
+            _refs.from_row(cls, doc, row)
+            for row, doc in zip(docs, qs._batch_resolve(docs), strict=True)
+        ]
 
     @classmethod
     def count(cls: Type[T]) -> int:
@@ -366,8 +362,9 @@ class SQLerLiteModel(SQLerLiteModelBase):
         else:
             ids = db.insert_many(table, payloads)
 
-        for inst, id_ in zip(instances, ids):
+        for inst, id_, payload in zip(instances, ids, payloads):
             object.__setattr__(inst, "_id", id_)
+            object.__setattr__(inst, "_snapshot", _dirty.snapshot(payload))
         return instances
 
     def save(self: T, *, db=None) -> T:
@@ -390,7 +387,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         else:
             new_id = db.upsert_document(table, self._id, payload)
         object.__setattr__(self, "_id", new_id)
-        object.__setattr__(self, "_snapshot", payload.copy())
+        object.__setattr__(self, "_snapshot", _dirty.snapshot(payload))
         return self
 
     def delete(self, *, db=None) -> None:
@@ -454,20 +451,15 @@ class SQLerLiteModel(SQLerLiteModelBase):
         doc = _read_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        doc = cls._resolve_relations(doc, db=db)
+        row, doc = doc, cls._resolve_relations(doc, db=db)
         # Update fields in-place
         for f in fields(self):
             if f.name.startswith("_"):
                 continue
             if f.name in doc:
                 object.__setattr__(self, f.name, doc[f.name])
-        object.__setattr__(self, "_snapshot", cls._make_snapshot(doc))
+        object.__setattr__(self, "_snapshot", _dirty.snapshot(row))
         return self
-
-    @classmethod
-    def _make_snapshot(cls, doc: dict) -> dict:
-        """Create snapshot excluding metadata keys."""
-        return {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
 
     # ----- relationship encoding/decoding -----
     @classmethod
@@ -494,8 +486,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
             rid = raw["_id"]
             try:
                 doc = cls._resolve_relations(raw, db=db, _seen=seen | {(table, rid)})
-                inst = _refs.from_row(cls, doc)
-                object.__setattr__(inst, "_snapshot", cls._make_snapshot(raw))
+                inst = _refs.from_row(cls, doc, raw)
             except (LookupError, RuntimeError, ValueError):
                 out[rid] = _refs.KEEP
                 continue
@@ -548,22 +539,3 @@ class SQLerLiteModel(SQLerLiteModelBase):
                 continue
             payload[f.name] = encode(getattr(self, f.name))
         return payload
-
-    # ----- dirty tracking -----
-    def is_dirty(self) -> bool:
-        """Check if instance has unsaved changes."""
-        if self._snapshot is None:
-            return True
-        current = self.model_dump()
-        return current != self._snapshot
-
-    def get_dirty_fields(self) -> set[str]:
-        """Get names of fields that have changed since last save/load."""
-        if self._snapshot is None:
-            return self.get_field_names()
-        current = self.model_dump()
-        dirty = set()
-        for key, value in current.items():
-            if key not in self._snapshot or self._snapshot[key] != value:
-                dirty.add(key)
-        return dirty

@@ -240,10 +240,10 @@ async def test_from_ids_holds_the_version_and_save_moves_it_by_one(db, path, cls
         assert conn.execute(f"SELECT _version FROM {cls.__tablename__} WHERE _id = 1").fetchone() == (3,)
 
 
-async def test_from_ids_of_the_safe_base_sets_what_it_set_before_and_no_snapshot(db):
+async def test_from_ids_of_the_safe_base_sets_what_it_set_before_and_its_snapshot(db):
     await ArbiSafe(name="a").save()
     got = (await ArbiSafe.from_ids([1]))[0]
-    assert (got._id, got.name, got._snapshot) == (1, "a", None)
+    assert (got._id, got.name, got._snapshot) == (1, "a", {"name": "a"})
 
 
 @pytest.mark.parametrize("cls", [ArbiSafe, ArbiLiteSafe])

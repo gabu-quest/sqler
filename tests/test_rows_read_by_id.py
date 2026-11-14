@@ -300,10 +300,10 @@ def test_from_ids_of_the_safe_base_reads_the_version_column_not_the_json_key(db)
     assert [g._version for g in RbiSafe.from_ids([1])] == [5]
 
 
-def test_from_ids_of_the_safe_base_sets_what_it_set_before_and_no_snapshot(db):
+def test_from_ids_of_the_safe_base_sets_what_it_set_before_and_its_snapshot(db):
     RbiSafe(name="a").save()
     got = RbiSafe.from_ids([1])[0]
-    assert (got._id, got.name, got._snapshot) == (1, "a", None)
+    assert (got._id, got.name, got._snapshot) == (1, "a", {"name": "a"})
 
 
 @pytest.mark.parametrize("cls", [RbiSafe, RbiLiteSafe])

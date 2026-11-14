@@ -26,6 +26,7 @@ from sqler import registry
 from sqler.db.async_db import _aselect_rows
 from sqler.db.sqler_db import _in_order, _row_columns, _row_documents, _select_rows
 from sqler.exceptions import InvalidTableNameError
+from sqler.models import _dirty
 from sqler.models._table_names import _aload_unbound, _default_table_name, _load_unbound
 from sqler.utils import validate_table_name
 
@@ -168,7 +169,7 @@ def batch(
             return out
         row = {**out, "_version": versions.get(key, 0)} if mdl._versioned_rows else out
         try:
-            return from_row(mdl, row)
+            return from_row(mdl, row, doc)
         except (TypeError, ValueError):
             return out  # refused by its class: the parent's validation says so, as it did
 
@@ -190,9 +191,13 @@ def _reads(mdl: Any, db: Any) -> bool:
     return bound is None or bound is db
 
 
-def from_row(cls: Any, doc: dict) -> Any:
-    """A model of the row ``doc`` that knows its row: ``_id``, and ``_version`` for a class
-    whose rows are versioned. ``doc`` is a row as the by-id readers give it.
+def from_row(cls: Any, doc: dict, row: dict) -> Any:
+    """A model of the row ``doc`` that knows its row: ``_id``, ``_version`` for a class
+    whose rows are versioned, and its snapshot (:func:`_dirty.snapshot`).
+
+    ``doc`` is the document the model is validated from: the row with its references
+    resolved. ``row`` is the row as it was read, before that: the snapshot is taken from it,
+    so it is what the database held. A site that resolves nothing passes one dict for both.
 
     The one step every way in uses to turn a row into a model, for every model base.
     """
@@ -200,6 +205,7 @@ def from_row(cls: Any, doc: dict) -> Any:
     _set(inst, "_id", doc["_id"])
     if cls._versioned_rows:
         _set(inst, "_version", doc.get("_version") or 0)
+    _set(inst, "_snapshot", _dirty.snapshot(row))
     return inst
 
 

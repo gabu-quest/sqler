@@ -178,7 +178,7 @@ This document enumerates every feature in the sync implementation and tracks par
 | `explain_query_plan(adapter)` | ✅ | ✅ | 🔧 | Async takes no arg |
 | **Batch Resolution** |
 | `_batch_resolve(docs)` | ✅ | ✅ | ✅ | |
-| `_attach_metadata(inst, doc)` | ✅ | ✅ | ✅ | |
+| `_attach_metadata(inst, doc, row, other_table)` | ✅ | ✅ | ✅ | |
 
 ---
 

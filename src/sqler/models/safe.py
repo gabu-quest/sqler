@@ -6,7 +6,7 @@ from typing import ClassVar, Optional, Type, TypeVar
 from pydantic import PrivateAttr
 
 from sqler.exceptions import StaleVersionError
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 from sqler.models._table_names import _instance_binding
 
 from . import save_retry as _retry
@@ -78,8 +78,7 @@ class SQLerSafeModel(SQLerModel):
             rid = doc["_id"]
             try:
                 typed = _refs.resolve(doc, db, seen | {(table, rid)}, _refs.typed_fields(cls))
-                inst = _refs.from_row(cls, typed)
-                inst._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
+                inst = _refs.from_row(cls, typed, doc)
             except (LookupError, RuntimeError, ValueError):
                 out[rid] = _refs.KEEP
                 continue
@@ -92,10 +91,8 @@ class SQLerSafeModel(SQLerModel):
         doc = db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        inst = _refs.from_row(cls, _refs.resolve(doc, db, frozenset(), _refs.typed_fields(cls)))
-        # Capture snapshot for rebasing support
-        inst._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
-        return inst  # type: ignore[return-value]
+        typed = _refs.resolve(doc, db, frozenset(), _refs.typed_fields(cls))
+        return _refs.from_row(cls, typed, doc)  # type: ignore[return-value]
 
     @classmethod
     def query(cls: Type[TSafe]) -> SQLerQuerySet[TSafe]:  # type: ignore[override]
@@ -148,7 +145,7 @@ class SQLerSafeModel(SQLerModel):
         for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             inst._id = id_
             inst._version = version
-            inst._snapshot = {k: v for k, v in payload.items() if k not in {"_id", "_version"}}
+            inst._snapshot = _dirty.snapshot(payload)
         return instances
 
     def save(self: TSafe, *, db=None) -> TSafe:  # type: ignore[override]
@@ -205,13 +202,7 @@ class SQLerSafeModel(SQLerModel):
                 self._id = new_id
                 self._version = new_version
                 target_payload = attempt_payload
-                try:
-                    snap_payload = {
-                        k: v for k, v in target_payload.items() if k not in {"_id", "_version"}
-                    }
-                    self._snapshot = snap_payload  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+                self._snapshot = _dirty.snapshot(target_payload)
                 return self
             except sqlite3.OperationalError as e:
                 if not _retry.is_lock_error(e):
@@ -238,10 +229,7 @@ class SQLerSafeModel(SQLerModel):
                     rebased = apply_numeric_scalar_deltas(rebased, delta)
                 target_payload = rebased
                 self._version = latest_doc.get("_version", 0)
-                try:
-                    self._snapshot = latest_payload.copy()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+                self._snapshot = _dirty.snapshot(latest_doc)
 
             _retry.sleep(delay)
 
@@ -253,15 +241,13 @@ class SQLerSafeModel(SQLerModel):
         doc = db.find_document_with_version(table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        fresh = cls.model_validate(_refs.resolve(doc, db, frozenset(), _refs.typed_fields(cls)))  # type: ignore[call-arg]
+        row, doc = doc, _refs.resolve(doc, db, frozenset(), _refs.typed_fields(cls))
+        fresh = cls.model_validate(doc)  # type: ignore[call-arg]
         for fname in self.__class__.model_fields:
             if fname == "_id":
                 continue
             setattr(self, fname, getattr(fresh, fname))
         self._id = doc.get("_id")
         self._version = doc.get("_version", 0)
-        try:
-            self._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        self._snapshot = _dirty.snapshot(row)
         return self

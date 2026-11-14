@@ -21,7 +21,7 @@ from typing import (
 
 from sqler import registry
 from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 from sqler.models._table_names import (
     _aread_document,
     _aread_documents,
@@ -186,9 +186,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         doc = await _aread_document(db, table, id_)
         if doc is None:
             return None
-        inst = _refs.from_row(cls, await cls._aresolve_relations(doc, db=db))
-        object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
-        return inst
+        return _refs.from_row(cls, await cls._aresolve_relations(doc, db=db), doc)
 
     @classmethod
     async def from_ids(cls: Type[TAModel], ids: list[int], *, db=None) -> list[TAModel]:
@@ -211,12 +209,10 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             return []
         # Use queryset's batch resolution
         qs = cls.using(given) if given is not None else cls.query()
-        instances = []
-        for doc in await qs._abatch_resolve(docs):
-            inst = _refs.from_row(cls, doc)
-            object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
-            instances.append(inst)
-        return instances
+        return [
+            _refs.from_row(cls, doc, row)
+            for row, doc in zip(docs, await qs._abatch_resolve(docs), strict=True)
+        ]
 
     @classmethod
     async def count(cls: Type[TAModel]) -> int:
@@ -378,7 +374,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         else:
             new_id = await db.upsert_document(table, self._id, payload)
         object.__setattr__(self, "_id", new_id)
-        object.__setattr__(self, "_snapshot", payload.copy())
+        object.__setattr__(self, "_snapshot", _dirty.snapshot(payload))
         return self
 
     async def delete(self, *, db=None) -> None:
@@ -431,20 +427,15 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         doc = await _aread_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        doc = await cls._aresolve_relations(doc, db=db)
+        row, doc = doc, await cls._aresolve_relations(doc, db=db)
         # Update fields in-place
         for f in fields(self):
             if f.name.startswith("_"):
                 continue
             if f.name in doc:
                 object.__setattr__(self, f.name, doc[f.name])
-        object.__setattr__(self, "_snapshot", cls._make_snapshot(doc))
+        object.__setattr__(self, "_snapshot", _dirty.snapshot(row))
         return self
-
-    @classmethod
-    def _make_snapshot(cls, doc: dict) -> dict:
-        """Create snapshot excluding metadata keys."""
-        return {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
 
     # ----- async relationship helpers -----
     @classmethod
@@ -466,8 +457,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             rid = raw["_id"]
             try:
                 doc = await cls._aresolve_relations(raw, db=db, _seen=seen | {(table, rid)})
-                inst = _refs.from_row(cls, doc)
-                object.__setattr__(inst, "_snapshot", cls._make_snapshot(raw))
+                inst = _refs.from_row(cls, doc, raw)
             except Exception:
                 out[rid] = _refs.KEEP
                 continue
@@ -476,9 +466,13 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
 
     async def _adump_with_relations(self) -> dict:
         """Serialize model with relationship encoding (async)."""
+        return self._dump_with_relations()
+
+    def _dump_with_relations(self) -> dict:
+        """Serialize model with relationship encoding; it awaits nothing."""
         from datetime import date, datetime
 
-        async def aencode(value: Any) -> Any:
+        def encode(value: Any) -> Any:
             # Handle AsyncSQLerLiteModel instances
             if isinstance(value, AsyncSQLerLiteModel):
                 if value._id is None:
@@ -499,13 +493,13 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
 
             # Handle lists
             if isinstance(value, list):
-                return [await aencode(v) for v in value]
+                return [encode(v) for v in value]
 
             # Handle dicts
             if isinstance(value, dict):
                 out = {}
                 for k, v in value.items():
-                    out[k] = await aencode(v)
+                    out[k] = encode(v)
                 return out
 
             # Handle datetime/date
@@ -520,24 +514,5 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         for f in fields(self):
             if f.name.startswith("_"):
                 continue
-            payload[f.name] = await aencode(getattr(self, f.name))
+            payload[f.name] = encode(getattr(self, f.name))
         return payload
-
-    # ----- dirty tracking -----
-    def is_dirty(self) -> bool:
-        """Check if instance has unsaved changes."""
-        if self._snapshot is None:
-            return True
-        current = self.model_dump()
-        return current != self._snapshot
-
-    def get_dirty_fields(self) -> set[str]:
-        """Get names of fields that have changed since last save/load."""
-        if self._snapshot is None:
-            return self.get_field_names()
-        current = self.model_dump()
-        dirty = set()
-        for key, value in current.items():
-            if key not in self._snapshot or self._snapshot[key] != value:
-                dirty.add(key)
-        return dirty
