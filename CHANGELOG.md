@@ -77,6 +77,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`is_dirty()` does not raise for a model that holds a related model never saved**; every field is dirty.
 - **A safe save that is rebased onto a newer row keeps the other writer's changes.** When a save on a stale version qualified for rebasing (by default a step of 1 on a field named `count`), every field of the saving model was written over the newer row, so a field only the other writer had changed went back to its old value without an error. The rebased save now writes the newer row, the fields the caller changed and the counter step.
 - **After a rebased save the model holds what was written**, typed references included, and `is_dirty()` is False. It kept its values from before the merge, so a second `save()` wrote them back or raised `StaleVersionError`, and writers adding to one counter in turn lost increments.
+- **A value is stored in one form, whichever call writes it, and a filter binds that form.** A `datetime`, `date` or `time` is its `isoformat()`; a `UUID` or a path its `str`; an `Enum` its value; a set a sorted list; a tuple a list; a nested pydantic model its fields; the same at every depth of a list or dict. This holds for `save()` and `save_many()` of every model base, for `update()`, `update_one()` and `update_n()` on a query, for the document writes of `SQLerDB` and `AsyncSQLerDB`, and for the value in `F("field") == value` and the other comparisons. What it fixes:
+  - `save()` raised `TypeError` for a field holding a `UUID`, a `time`, an `Enum`, a path, a set, or a nested model with a `date` in it, on every model base, and for a `date` on `AsyncSQLerModel` and `AsyncSQLerSafeModel`.
+  - `F("happened") == datetime(...)` found no row: the filter bound `2026-11-14 09:30:00`, the row holds `2026-11-14T09:30:00`. `update(happened=datetime(...))` stored the form with the space.
+  - `update(tags=[...])` and `update(meta={...})` stored a string of JSON text instead of a list or an object; a pydantic model could not load the row afterwards, and `contains()` found nothing in it.
+  - `update(flag=True)` stored the integer 1 where `save()` stores `true`.
+  - `is_dirty()` was True straight after loading a model with a tuple field.
 
 ### Changed
 
@@ -102,6 +108,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **A `{"_table", "_id"}` dict that cannot be followed is left whole.** `from_id()`, `refresh()` and async `query().all()` no longer load references nested inside it.
 - **Async `query().all()` no longer walks each row twice** when no document holds a reference.
 - **A rebased save raises `StaleVersionError` when the newer row cannot be loaded as the model class** (a typed list that names a deleted row, on the pydantic safe bases). The validation error is its cause; nothing is written. Before, the save went through and wrote the caller's old values.
+- **Rows that `update()` wrote before this release keep the form they were written in.** A datetime written by `update()` has a space where `save()` writes `T`, and a list or dict written by `update()` is a string of JSON text; filters now bind the `save()` form and do not find the first, and the second was never a list. To rewrite them (table `events`, fields `happened` and `tags`):
+
+  ```sql
+  UPDATE events SET data = json_set(data, '$.happened', replace(json_extract(data, '$.happened'), ' ', 'T'))
+  WHERE json_extract(data, '$.happened') LIKE '____-__-__ __:__:__%';
+
+  UPDATE events SET data = json_set(data, '$.tags', json(json_extract(data, '$.tags')))
+  WHERE json_type(data, '$.tags') = 'text' AND json_valid(json_extract(data, '$.tags'));
+  ```
+
+  The second statement also turns a field that is meant to hold a string of JSON text into the list or object; leave such a field out.
+- **A `Decimal`, a `timedelta` and `bytes` are still refused** by `save()` with `TypeError`; they have no stored form yet.
 - **`is_dirty()` answers what `save()` would change in the stored row.** Two cases now read dirty where they did not. A typed reference whose row is gone and reads `None`: `save()` would write null over the reference. On the lite model bases, a field without a model type that holds a `{"_table", "_id"}` reference, after `query().all()`: the field holds the referenced row's document, and `save()` would write that document over the reference.
 - **One `NoAdapterError`.** The sync and the async query raise `sqler.NoAdapterError`. It is a `QueryError` and still a built-in `ConnectionError`, so `except ConnectionError` keeps working.
 - **`F('')` raises `InvalidFieldNameError`.**
