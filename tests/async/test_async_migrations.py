@@ -447,7 +447,7 @@ async def test_results_match_the_sync_runner(db, tmp_path):
 
 
 def _failing_fetch(db, method: str, message: str):
-    """Make ``adapter.execute`` hand back a cursor whose ``method`` raises (the brief allows it:
+    """Make ``adapter.execute`` hand back a cursor whose ``method`` raises (a stand-in:
     a fetch that fails midway cannot be had from a real database)."""
     real = db.adapter.execute
 

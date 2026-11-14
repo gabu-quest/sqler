@@ -117,9 +117,9 @@ def _bind(rows, table, *classes):
         cls.set_db(rows.db, tbl)
 
 
-# ---- p29: the four models of the planner's probe --------------------------------------------
+# ---- an update of one field reports that field, whatever the other fields hold --------------
 
-P29 = [
+OTHER_FIELDS = [
     pytest.param("plain", {"n": (int, 1)}, {"n": 1}, id="plain"),
     pytest.param("dated", {"when": (Optional[datetime], WHEN)}, {"when": WHEN_TEXT}, id="datetime"),
     pytest.param("dayed", {"day": (Optional[date], DAY)}, {"day": DAY_TEXT}, id="date"),
@@ -127,12 +127,12 @@ P29 = [
 
 
 @pytest.mark.parametrize("base", BASE_IDS)
-@pytest.mark.parametrize("label, fields, stored", P29)
+@pytest.mark.parametrize("label, fields, stored", OTHER_FIELDS)
 def test_update_of_name_reports_only_name(base, label, fields, stored):
     spec = BASES[base]
 
     async def steps(rows):
-        cls = make(spec, "P29" + label, **fields)
+        cls = make(spec, "Other" + label, **fields)
         _bind(rows, "items", cls)
         item = await _aw(cls(name="a", **{k: v[1] for k, v in fields.items()}).save())
         item.name = "b"

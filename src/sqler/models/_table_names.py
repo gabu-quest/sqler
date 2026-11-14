@@ -167,12 +167,12 @@ def _set_row_id(inst: object, rid) -> None:
 def _load_unbound(mdl: type, db, table: str, rid):
     """Hydrate a referenced row of a never-bound class from ``db`` (the parent's database).
 
-    A row that is gone, or whose table is missing, is returned as the reference it
-    was; any other error reaches the caller.
+    None when the row is gone or its table is missing; any other error reaches the
+    caller.
     """
     doc = _read_document(db, table, rid)
     if doc is None:
-        return {"_table": table, "_id": rid}
+        return None
     resolver = getattr(mdl, "_resolve_relations", None)
     if resolver is not None:
         doc = resolver(doc, db=db)
@@ -185,7 +185,7 @@ async def _aload_unbound(mdl: type, db, table: str, rid):
     """Async twin of :func:`_load_unbound`."""
     doc = await _aread_document(db, table, rid)
     if doc is None:
-        return {"_table": table, "_id": rid}
+        return None
     resolver = getattr(mdl, "_aresolve_relations", None)
     if resolver is not None:
         doc = await resolver(doc, db=db)

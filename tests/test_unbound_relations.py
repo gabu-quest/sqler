@@ -290,17 +290,16 @@ def _exists(db, table):
 @pytest.mark.parametrize(
     "box_cls,part_cls", [(UmPyBox, UmPyPart), (UmLiteBox, UmLitePart)], ids=["pydantic", "lite"]
 )
-def test_reference_to_a_missing_table_stays_a_reference(db, box_cls, part_cls):
+def test_reference_to_a_missing_table_reads_as_none(db, box_cls, part_cls):
     _bind(box_cls, db)
     part = part_cls(label="p").save(db=db)
     part_table = part_cls._resolve_binding(db)[1]
     box = box_cls(name="b", part=part).save()
     db.adapter.execute(f"DROP TABLE {part_table}")
 
-    ref = {"_table": part_table, "_id": part._id}
-    assert box_cls.from_id(box._id).part == ref
+    assert box_cls.from_id(box._id).part is None
     box.refresh()
-    assert box.part == ref
+    assert box.part is None
     assert _exists(db, part_table) is False
 
 
@@ -327,7 +326,7 @@ def test_reference_whose_row_does_not_fit_its_class_raises(db, box_cls, part_cls
 @pytest.mark.parametrize(
     "box_cls,part_cls", [(UmAsBox, UmAsPart), (UmALiteBox, UmALitePart)], ids=["async-pydantic", "async-lite"]
 )
-async def test_async_reference_to_a_missing_table_stays_a_reference(adb, box_cls, part_cls):
+async def test_async_reference_to_a_missing_table_reads_as_none(adb, box_cls, part_cls):
     _bind(box_cls, adb)
     part = await part_cls(label="p").save(db=adb)
     part_table = part_cls._resolve_binding(adb)[1]
@@ -335,10 +334,9 @@ async def test_async_reference_to_a_missing_table_stays_a_reference(adb, box_cls
     await adb.adapter.execute(f"DROP TABLE {part_table}")
     await adb.adapter.auto_commit()
 
-    ref = {"_table": part_table, "_id": part._id}
-    assert (await box_cls.from_id(box._id)).part == ref
+    assert (await box_cls.from_id(box._id)).part is None
     await box.refresh()
-    assert box.part == ref
+    assert box.part is None
     cur = await adb.adapter.execute("SELECT 1 FROM sqlite_master WHERE name=?", [part_table])
     assert await cur.fetchone() is None
     await cur.close()

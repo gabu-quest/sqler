@@ -16,9 +16,11 @@ table are read with one statement, then put what they loaded in place.
 from __future__ import annotations
 
 import builtins
+import collections.abc
 import inspect
 import re
 import sys
+import types
 import typing
 from typing import Any, Callable, Generator, Optional
 
@@ -30,7 +32,8 @@ from sqler.models import _dirty
 from sqler.models._table_names import _aload_unbound, _default_table_name, _load_unbound
 from sqler.utils import validate_table_name
 
-# A reference whose row could not be hydrated: it stays the reference it was.
+# A reference that is not replaced (a cycle, or a row its class cannot hydrate): it stays
+# the reference it was.
 KEEP = object()
 
 _SQLITE_INT_MIN = -(2**63)
@@ -67,49 +70,107 @@ def _admits(table: str, admits: tuple) -> bool:
     return mdl is not None and issubclass(mdl, admits)
 
 
-def collect(doc: dict, typed: dict, out: dict[tuple[str, int], None]) -> None:
+class Position(typing.NamedTuple):
+    """What a field's annotation puts at a place in its value: ``admits``, the model classes
+    a reference there may be a row of; ``item``, the position of each entry of a list
+    there; ``value``, the position of each value of a dict there; ``fixed``, True when the
+    list there has one entry per place (``tuple[Child, Child]``), so an entry is never left
+    out. ``Optional[Child]`` is ``Position((Child,), None, None)``, ``list[Child]`` is
+    ``Position((), <that>, None)``."""
+
+    admits: tuple
+    item: Optional["Position"]
+    value: Optional["Position"]
+    fixed: bool = False
+
+
+def collect(doc: dict, typed: dict, out: dict[tuple[str, int], None]) -> bool:
     """Add every reference at a typed position of ``doc`` (in order, once each) to ``out``.
 
     ``typed`` is :func:`typed_fields` of the class of ``doc``. A reference is taken only
-    from a field in ``typed`` and only into a table of a class that field admits; a
-    reference anywhere else is data, and stays the dict it is.
+    where the annotation of its field puts a model (:class:`Position`), and only into a
+    table of a class admitted there; a reference anywhere else is data, and stays the
+    dict it is. True when ``doc`` holds a reference where a model is admitted, taken or
+    not: :func:`replace` has something to put there.
     """
-    for name, admits in typed.items():
+    held = False
+    for name, at in typed.items():
         if name in doc:
-            _collect(doc[name], admits, out)
+            held |= _collect(doc[name], at, out)
+    return held
 
 
-def _collect(value: Any, admits: tuple, out: dict[tuple[str, int], None]) -> None:
+def _collect(value: Any, at: Position, out: dict[tuple[str, int], None]) -> bool:
+    admits, item, inner, _ = at
+    held = False
     if isinstance(value, dict):
         if "_table" in value and "_id" in value:
+            if not admits:
+                return False
             key = ref_key(value)
             if key is not None and _admits(key[0], admits):
                 out[key] = None
-            return
-        for v in value.values():
-            _collect(v, admits, out)
-    elif isinstance(value, list):
+            return True
+        if inner is not None:
+            for v in value.values():
+                held |= _collect(v, inner, out)
+    elif isinstance(value, list) and item is not None:
         for v in value:
-            _collect(v, admits, out)
+            held |= _collect(v, item, out)
+    return held
+
+
+# what stands at a typed position whose reference leads to no row of a class admitted there
+_NO_ROW = object()
 
 
 def replace(doc: dict, typed: dict, get: Callable[[tuple[str, int], Any], Any]) -> dict:
     """A copy of ``doc`` with ``get(key, KEEP)`` in place of each reference :func:`collect`
-    takes from it; ``KEEP`` leaves a reference as it is."""
-    return {k: _replace(v, typed[k], get) if k in typed else v for k, v in doc.items()}
+    takes from it. ``KEEP`` leaves the reference as it is (a row being replaced further
+    up). Every other reference at a place where a model is admitted leads to no row of
+    the field's class: ``get`` gives None for it (the row or its table is gone), or it is
+    not usable or into another class's table; it reads as ``None`` where it is the field's
+    value or an entry of a list with one entry per place (``tuple[Child, Child]``), and is
+    left out where it is an entry of any other list or a value of a dict."""
+    out = {}
+    for k, v in doc.items():
+        at = typed.get(k)
+        if at is not None:
+            v = _replace(v, at, get)
+            if v is _NO_ROW:
+                v = None
+        out[k] = v
+    return out
 
 
-def _replace(value: Any, admits: tuple, get: Callable[[tuple[str, int], Any], Any]) -> Any:
+def _replace(value: Any, at: Position, get: Callable[[tuple[str, int], Any], Any]) -> Any:
+    admits, item, inner, fixed = at
     if isinstance(value, dict):
         if "_table" in value and "_id" in value:
+            if not admits:
+                return value  # data where the annotation puts no model: its validation decides
             key = ref_key(value)
             if key is None or not _admits(key[0], admits):
-                return value
+                return _NO_ROW
             got = get(key, KEEP)
-            return value if got is KEEP else got
-        return {k: _replace(v, admits, get) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_replace(v, admits, get) for v in value]
+            return value if got is KEEP else _NO_ROW if got is None else got
+        if inner is None:
+            return value
+        out = {}
+        for k, v in value.items():
+            v = _replace(v, inner, get)
+            if v is not _NO_ROW:
+                out[k] = v
+        return out
+    if isinstance(value, list) and item is not None:
+        entries = []
+        for v in value:
+            v = _replace(v, item, get)
+            if v is not _NO_ROW:
+                entries.append(v)
+            elif fixed:
+                entries.append(None)  # the places after it keep theirs
+        return entries
     return value
 
 
@@ -126,25 +187,26 @@ def batch(
     that was followed, in a field of that row's class. Yields ``(table, ids)`` for each
     read and is sent what :func:`read_rows` gives: ``(documents, versions)``, or ``None``
     when the table does not exist; one read per table per level. A table whose name is
-    not an identifier is never read, and its references stay as they are.
+    not an identifier is never read.
     Returns ``(documents, found)``: ``found`` is False when no document holds a
     reference to follow, and then the documents are ``docs`` itself; else they are new
-    ones in which a reference that is being replaced further up stays a reference, a row
-    that is gone stays a reference, and one into a missing table of a bound class reads
-    as ``None``. A followed row is replaced by its class's model of the row
+    ones in which a reference that is being replaced further up stays a reference, and
+    one to a row that is not there (gone, or its table missing) leads to no row
+    (:func:`replace`). A followed row is replaced by its class's model of the row
     (:func:`from_row`) when the class reads ``db``: bound to it, or never bound; else by
     the stored document.
     """
     top = typed_fields(cls)
     found: dict[tuple[str, int], None] = {}
+    held = False
     if max_depth > 0 and top:
         for d in docs:
-            collect(d, top, found)
-    if not found:
+            held |= collect(d, top, found)
+    if not held:
         return docs, False
-    resolved: dict[tuple[str, int], dict] = {}
+    # the rows asked for: a document, or None while it is not read (or is not there)
+    resolved: dict[tuple[str, int], Optional[dict]] = {}
     versions: dict[tuple[str, int], Any] = {}
-    missing: set[str] = set()
     for _ in range(max_depth):
         wanted: dict[str, list[int]] = {}
         refused: set[str] = set()
@@ -158,13 +220,13 @@ def batch(
                     continue
                 ids = wanted[table] = []
             ids.append(rid)
+            resolved[(table, rid)] = None
         if not wanted:
             break
         found = {}
         for table, ids in wanted.items():
             got = yield table, ids
             if got is None:
-                missing.add(table)
                 continue
             got, row_versions = got
             typed = typed_fields(registry.resolve(table))
@@ -179,9 +241,11 @@ def batch(
     def expand(key: tuple[str, int], keep: Any) -> Any:
         if key in processing:
             return keep  # a cycle: the row is being replaced further up
-        doc = resolved.get(key)
+        if key not in resolved:
+            return keep  # deeper than ``max_depth``: never read
+        doc = resolved[key]
         if doc is None:
-            return None if key[0] in missing and table_is_bound(key[0]) else keep
+            return None  # the row, or its table, is not there
         mdl = registry.resolve(key[0])  # a class the field admits (see ``collect``)
         processing.add(key)
         out = replace(doc, typed_fields(mdl), expand)
@@ -230,11 +294,7 @@ def _set(inst: Any, name: str, value: Any) -> None:
 
 # ---- typed references -----------------------------------------------------------------
 
-_TYPED: dict[type, dict[str, tuple]] = {}
-# names in a string annotation that are typing constructs, never model classes
-_TYPING_NAMES = frozenset(
-    {"Optional", "Union", "None", "List", "list", "Dict", "dict", "typing", "ClassVar", "Any"}
-)
+_TYPED: dict[type, dict[str, Position]] = {}
 
 
 # the annotation of a field of a pydantic or msgspec class whose annotations are not resolved yet
@@ -242,15 +302,31 @@ _NOT_YET = object()
 
 # ``Literal[...]`` in a string annotation: what it holds are values, never names
 _LITERALS = re.compile(r"Literal\[[^\]]*\]")
+# the parts of a string annotation: names (``typing.Optional``), ``...``, brackets, commas
+# and ``|``
+_TOKENS = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*|\.\.\.|[\[\],|]")
+# names in a string annotation, by what they put at a position: their arguments there, in
+# each entry of a list, in each value of a dict; or nothing (never a model class)
+_UNION_NAMES = frozenset({"Optional", "Union", "Annotated"})
+_ITEM_NAMES = frozenset(
+    {"list", "List", "tuple", "Tuple", "set", "Set", "frozenset", "FrozenSet", "Sequence"}
+    | {"MutableSequence", "Iterable", "Collection", "AbstractSet", "MutableSet"}
+)
+_VALUE_NAMES = frozenset({"dict", "Dict", "Mapping", "MutableMapping"})
+_NOT_A_MODEL = frozenset({"None", "Any", "ClassVar", "typing", "Literal", "..."})
+_ANY_LENGTH = [("...", [])]  # the ``...`` of ``tuple[Child, ...]``, as :func:`_parse` gives it
 
 
-def typed_fields(cls: Any) -> dict[str, tuple]:
-    """``{field: model classes it admits}`` for the fields of ``cls`` whose annotation names
-    a model class (``Child``, ``Optional[Child]``, ``list[Child]``, ``dict[str, Child]``),
-    for the pydantic, the lite and the msgspec bases alike.
+def typed_fields(cls: Any) -> dict[str, Position]:
+    """``{field: Position}`` for the fields of ``cls`` whose annotation puts a model class
+    somewhere in its value (``Child``, ``Optional[Child]``, ``list[Child]``,
+    ``dict[str, list[Child]]``), for the pydantic, the lite and the msgspec bases alike.
 
-    Found once per class; an answer is not kept while a name in an annotation cannot be
-    found yet (a class defined before the class it refers to).
+    The :class:`Position` follows the annotation's shape, and no deeper: a ``Union`` puts
+    its arguments at the same place, a list type its argument in each entry, a dict type
+    its value type in each value. Found once per class; an answer is not kept while a
+    name in an annotation cannot be found yet (a class defined before the class it
+    refers to).
     """
     if not _is_model_class(cls):
         return {}
@@ -258,13 +334,24 @@ def typed_fields(cls: Any) -> dict[str, tuple]:
     if typed is None:
         typed, complete = {}, True
         for name, ann, owner in _annotations(cls):
-            classes: list = []
-            complete &= _model_classes(ann, owner, classes)
-            if classes:
-                typed[name] = tuple(classes)
+            at: dict = {}
+            complete &= _shape(ann, owner, at)
+            position = _position(at)
+            if position is not None:
+                typed[name] = position
         if complete:
             _TYPED[cls] = typed
     return typed
+
+
+def _position(at: dict) -> Optional[Position]:
+    """The :class:`Position` of what :func:`_shape` gathered, or None where it puts no model."""
+    item = _position(at["item"]) if "item" in at else None
+    value = _position(at["value"]) if "value" in at else None
+    admits = tuple(dict.fromkeys(at.get("admits", ())))
+    if not admits and item is None and value is None:
+        return None
+    return Position(admits, item, value, at.get("fixed", False))
 
 
 def _annotations(cls: Any) -> list:
@@ -298,38 +385,104 @@ def _is_model_class(x: Any) -> bool:
     )
 
 
-def _model_classes(ann: Any, owner: Any, out: list) -> bool:
-    """Add the model classes ``ann`` names to ``out``; False when a name is not found."""
+def _shape(ann: Any, owner: Any, at: dict, within: tuple = ()) -> bool:
+    """Gather in ``at`` what ``ann`` puts at a place: the model classes admitted there
+    (``admits``), and what it puts in each entry of a list there (``item``) and in each
+    value of a dict there (``value``). False when a name is not found.
+
+    ``within``: the names a module gives to an annotation that are being read through; one
+    that names itself (``type Tree = dict[str, Tree] | Child``) puts nothing more there.
+    """
     if ann is _NOT_YET:
         return False
+    if isinstance(ann, typing.TypeAliasType):  # ``type Children = list[Child]``
+        if ann in within:
+            return True
+        within += (ann,)
+        try:
+            ann = ann.__value__
+        except NameError:  # it names a class that is not defined yet
+            return False
     if isinstance(ann, typing.ForwardRef):  # ``Optional["Category"]`` in a lite class
         ann = ann.__forward_arg__
-    if typing.get_origin(ann) is typing.Literal:
-        return True  # its arguments are values, not annotations
     if isinstance(ann, str):
-        space = vars(sys.modules.get(owner.__module__, builtins))
-        complete = True
-        for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", _LITERALS.sub("", ann)):
-            if name in _TYPING_NAMES:
-                continue
-            found = space.get(name, getattr(builtins, name, None))
-            if found is None:
-                found = registry.resolve(_default_table_name(name)) or registry.resolve_class_name(
-                    name
-                )
-                if found is None or found.__name__ != name:
-                    complete = False
-                    continue
-            if _is_model_class(found):
-                out.append(found)
-        return complete
+        terms, _ = _parse(_TOKENS.findall(_LITERALS.sub("", ann)), 0)
+        return _shape_terms(terms, owner, at, within)
     if _is_model_class(ann):
-        out.append(ann)
+        at.setdefault("admits", []).append(ann)
         return True
+    origin, args = typing.get_origin(ann), typing.get_args(ann)
+    if origin is typing.Literal or not args:
+        return True  # a ``Literal`` holds values, not annotations
+    if origin in (typing.Union, types.UnionType):
+        return all([_shape(arg, owner, at, within) for arg in args])
+    if origin is typing.Annotated:
+        return _shape(args[0], owner, at, within)
+    if isinstance(origin, type) and issubclass(origin, collections.abc.Mapping):
+        return len(args) != 2 or _shape(args[1], owner, at.setdefault("value", {}), within)
+    if isinstance(origin, type) and issubclass(origin, collections.abc.Collection):
+        item = at.setdefault("item", {})
+        if origin is tuple and Ellipsis not in args:
+            at["fixed"] = True  # ``tuple[Child, Child]``: one entry per place
+        return all([_shape(arg, owner, item, within) for arg in args if arg is not Ellipsis])
+    return True  # ``type[Child]``, a ``Callable``: not a place a stored model is
+
+
+def _parse(tokens: list, i: int) -> tuple[list, int]:
+    """The terms of a string annotation from ``tokens[i]`` up to the ``,`` or ``]`` that
+    ends them: ``[(name, args)]``, each of ``args`` such a list; and where they end."""
+    terms: list = []
+    while i < len(tokens) and tokens[i] not in ",]":
+        name, i = tokens[i], i + 1
+        if name == "|":
+            continue
+        args: list = []
+        if name == "[" or (i < len(tokens) and tokens[i] == "["):
+            i += name != "["
+            while i < len(tokens) and tokens[i] != "]":
+                arg, i = _parse(tokens, i)
+                args.append(arg)
+                i += i < len(tokens) and tokens[i] == ","
+            i += 1
+        terms.append((name if name == "..." else name.rsplit(".", 1)[-1], args))
+    return terms, i
+
+
+def _shape_terms(terms: list, owner: Any, at: dict, within: tuple = ()) -> bool:
+    """:func:`_shape` of the terms of a string annotation (:func:`_parse`)."""
     complete = True
-    for arg in typing.get_args(ann):
-        complete &= _model_classes(arg, owner, out)
+    for name, args in terms:
+        if name in _UNION_NAMES:
+            for arg in args[:1] if name == "Annotated" else args:
+                complete &= _shape_terms(arg, owner, at, within)
+        elif name in _ITEM_NAMES:
+            if name in ("tuple", "Tuple") and args and _ANY_LENGTH not in args:
+                at["fixed"] = True
+            for arg in args:
+                complete &= _shape_terms(arg, owner, at.setdefault("item", {}), within)
+        elif name in _VALUE_NAMES:
+            if len(args) == 2:
+                complete &= _shape_terms(args[1], owner, at.setdefault("value", {}), within)
+        elif name and name not in _NOT_A_MODEL:  # "" is what is left of "typing.Literal[...]"
+            found = _named(name, owner)
+            if found is None:
+                complete = False
+            elif _is_model_class(found):
+                at.setdefault("admits", []).append(found)
+            elif name not in within:  # a name the module gives to an annotation
+                complete &= _shape(found, owner, at, within + (name,))
     return complete
+
+
+def _named(name: str, owner: Any) -> Any:
+    """What ``name`` in a string annotation of ``owner`` is, or None when it is not found."""
+    space = vars(sys.modules.get(owner.__module__, builtins))
+    found = space.get(name, getattr(builtins, name, None))
+    if found is None:
+        found = registry.resolve(_default_table_name(name)) or registry.resolve_class_name(name)
+        if found is None or found.__name__ != name:
+            return None
+    return found
 
 
 def read_rows(adapter: Any, table: str, ids: list, db: Any = None) -> Optional[tuple]:
@@ -381,17 +534,19 @@ def _documents(rows: Any, columns: Any, versioned: bool) -> Optional[tuple]:
 # ---- the per-row resolver -----------------------------------------------------------
 
 
-def plan(data: dict, typed: dict, db: Any, seen: frozenset) -> tuple[dict, list]:
+def plan(data: dict, typed: dict, db: Any, seen: frozenset) -> Optional[tuple[dict, list]]:
     """Sort the references at the typed positions of ``data`` (:func:`collect`) into what
     to load.
 
     Returns ``(groups, unbound)``: ``groups`` maps a table to ``(model, ids)`` for classes
     that are bound; ``unbound`` lists ``(model, table, id)`` for classes never bound,
     which are read from the parent's database. A reference already being loaded further
-    up (``seen``) is left out and stays a reference.
+    up (``seen``) is left out and stays a reference. None when ``data`` holds no
+    reference at a typed position.
     """
     found: dict[tuple[str, int], None] = {}
-    collect(data, typed, found)
+    if not collect(data, typed, found):
+        return None
     groups: dict[str, tuple[Any, list[int]]] = {}
     unbound: list[tuple[Any, str, int]] = []
     for table, rid in found:
@@ -411,17 +566,19 @@ def resolve(data: dict, db: Any, seen: frozenset, cls: Any) -> dict:
 
     The rows of one table are read with one statement, by that class's ``_load_refs``,
     which resolves them by the same rule. A reference to a row being loaded further up
-    (``seen``) stays a reference, which cuts a cycle; a row that is gone reads as
-    ``None``. ``data`` with nothing to load is returned as it is.
+    (``seen``) stays a reference, which cuts a cycle, as does one to a row its class
+    cannot hydrate (``KEEP``); one to a row that is not there leads to no row
+    (:func:`replace`). ``data`` with no reference at a typed position is returned as it is.
     """
     typed = typed_fields(cls)
-    groups, unbound = plan(data, typed, db, seen)
-    if not groups and not unbound:
+    planned = plan(data, typed, db, seen)
+    if planned is None:
         return data
+    groups, unbound = planned
     loaded: dict = {}
     for mdl, table, rid in unbound:
-        # a class never bound: read the row from the parent's db; only
-        # a missing table or row is forgiven (it stays a reference)
+        # a class never bound: read the row from the parent's db; None when the row or
+        # its table is not there
         loaded[(table, rid)] = _load_unbound(mdl, db, table, rid)
     for table, (mdl, ids) in groups.items():
         loader = getattr(mdl, "_load_refs", None)
@@ -445,9 +602,10 @@ def resolve(data: dict, db: Any, seen: frozenset, cls: Any) -> dict:
 async def aresolve(data: dict, db: Any, seen: frozenset, cls: Any) -> dict:
     """Async twin of :func:`resolve`, through each class's ``_aload_refs``."""
     typed = typed_fields(cls)
-    groups, unbound = plan(data, typed, db, seen)
-    if not groups and not unbound:
+    planned = plan(data, typed, db, seen)
+    if planned is None:
         return data
+    groups, unbound = planned
     loaded: dict = {}
     for mdl, table, rid in unbound:
         loaded[(table, rid)] = await _aload_unbound(mdl, db, table, rid)
@@ -490,12 +648,3 @@ async def aread_versioned(db: Any, table: str, ids: list) -> list:
     rows, columns = await db._read_rows(table, ids, versioned=True)
     return _row_documents(_in_order(rows or [], ids), columns)
 
-
-def table_is_bound(table: str) -> bool:
-    """True when the class that owns ``table`` is bound to a database.
-
-    A reference into a missing table of a bound class reads as ``None``, as it does when
-    one row is read; for a class never bound the reference stays as it was.
-    """
-    mdl = registry.resolve(table)
-    return mdl is not None and getattr(mdl, "_db", None) is not None
