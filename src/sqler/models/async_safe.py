@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import random
 import sqlite3
 from typing import ClassVar, Optional, Type, TypeVar
 
@@ -10,6 +8,7 @@ from pydantic import PrivateAttr
 from sqler.exceptions import StaleVersionError
 from sqler.query.async_query import AsyncSQLerQuery
 
+from . import save_retry as _retry
 from .async_model import AsyncSQLerModel
 from .async_queryset import AsyncSQLerQuerySet
 from .utils import (
@@ -169,10 +168,10 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         # Use the configurable rebase checker
         can_rebase = has_snapshot and can_rebase_deltas(delta, rebase_config) if delta else False
 
-        max_retries = rebase_config.max_retries if rebase_config else 128
-        base = 0.002  # seconds
+        retry = _retry.SaveRetry(rebase_config)
 
-        for attempt in range(max_retries):
+        while True:
+            retry.begin_try()
             try:
                 attempt_payload = dict(target_payload)
                 attempt_payload["_version"] = 0 if self._id is None else self._version + 1
@@ -204,7 +203,8 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     raise
                 if self._id is None:
                     raise
-                latest_doc = await db.find_document_with_version(table, self._id)
+                delay = retry.after_conflict()
+                latest_doc = await retry.areread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
                 latest_payload = {k: v for k, v in latest_doc.items() if k not in ("_id", "_version")}
@@ -221,12 +221,10 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                 except Exception:
                     pass
             except sqlite3.OperationalError as e:
-                if "locked" not in str(e).lower():
+                if not _retry.is_lock_error(e):
                     raise
-            # backoff
-            await asyncio.sleep((base * (2 ** min(attempt, 10))) + (random.random() * 0.0005))
-
-        raise StaleVersionError("save retries exhausted")
+                delay = retry.after_lock(e)
+            await _retry.asleep(delay)
 
     async def refresh(self: TASafe) -> TASafe:  # type: ignore[override]
         cls = self.__class__

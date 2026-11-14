@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import random
 import sqlite3
-import time
 from typing import ClassVar, Optional, Type, TypeVar
 
 from pydantic import PrivateAttr
 
 from sqler.exceptions import StaleVersionError
 
+from . import save_retry as _retry
 from .model import SQLerModel
 from .queryset import SQLerQuerySet
 from .utils import (
@@ -166,10 +165,10 @@ class SQLerSafeModel(SQLerModel):
         # Use the configurable rebase checker
         can_rebase = has_snapshot and can_rebase_deltas(delta, rebase_config) if delta else False
 
-        max_retries = rebase_config.max_retries if rebase_config else 128
-        base = 0.002  # seconds
+        retry = _retry.SaveRetry(rebase_config)
 
-        for attempt in range(max_retries):
+        while True:
+            retry.begin_try()
             try:
                 attempt_payload = dict(target_payload)
                 attempt_payload["_version"] = 0 if self._id is None else self._version + 1
@@ -195,16 +194,17 @@ class SQLerSafeModel(SQLerModel):
                     pass
                 return self
             except sqlite3.OperationalError as e:
-                if "locked" not in str(e).lower():
+                if not _retry.is_lock_error(e):
                     raise
-                # fallthrough to backoff
+                delay = retry.after_lock(e)
             except StaleVersionError:
                 # Stale version: only rebase intent for simple counter deltas
                 if not can_rebase:
                     raise
                 if self._id is None:
                     raise
-                latest_doc = db.find_document_with_version(table, self._id)
+                delay = retry.after_conflict()
+                latest_doc = retry.reread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
                 latest_payload = {k: v for k, v in latest_doc.items() if k not in ("_id", "_version")}
@@ -223,11 +223,7 @@ class SQLerSafeModel(SQLerModel):
                 except Exception:
                     pass
 
-            # Exponential backoff with jitter
-            sleep = (base * (2 ** min(attempt, 10))) + (random.random() * 0.0005)
-            time.sleep(sleep)
-
-        raise StaleVersionError("save retries exhausted")
+            _retry.sleep(delay)
 
     def refresh(self: TSafe) -> TSafe:  # type: ignore[override]
         cls = self.__class__

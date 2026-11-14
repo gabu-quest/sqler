@@ -34,6 +34,7 @@ from sqler import (
     SQLerSafeModel,
     StaleVersionError,
 )
+from sqler.exceptions import LockTimeoutError
 from sqler.utils import ReferenceTracker
 
 
@@ -215,6 +216,7 @@ class TestConcurrencyStress:
 
         success_count = [0]
         stale_errors = [0]
+        lock_failures = [0]
         lock = threading.Lock()
 
         unexpected_errors = []
@@ -223,6 +225,14 @@ class TestConcurrencyStress:
             for _ in range(5):
                 try:
                     c = Counter.from_id(counter_id)
+                except sqlite3.OperationalError as e:
+                    # The read before a save (from_id, not a save) can find the
+                    # table locked by a writer; that is not the save's error.
+                    if "locked" not in str(e).lower():
+                        with lock:
+                            unexpected_errors.append(f"read: {e}")
+                    continue
+                try:
                     if c:
                         c.count += 1
                         c.save()
@@ -231,18 +241,21 @@ class TestConcurrencyStress:
                 except StaleVersionError:
                     with lock:
                         stale_errors[0] += 1
+                except LockTimeoutError:
+                    # The save waited its lock_timeout and gave up: a lock failure.
+                    with lock:
+                        lock_failures[0] += 1
                 except sqlite3.OperationalError as e:
-                    msg = str(e).lower()
-                    # "locked" and "transaction" errors are expected under contention
-                    if "locked" not in msg and "transaction" not in msg:
-                        with lock:
-                            unexpected_errors.append(str(e))
+                    # A save waits out every lock (also on its re-read) and ends in
+                    # LockTimeoutError, so no raw SQLite error may leave it.
+                    with lock:
+                        unexpected_errors.append(f"save: {e}")
 
-        # 10 threads each trying to increment 5 times
+        # 10 threads each trying to increment 5 times; a hang fails instead of waiting.
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(increment) for _ in range(10)]
             for f in futures:
-                f.result()
+                f.result(timeout=10)
 
         assert len(unexpected_errors) == 0, f"Unexpected errors: {unexpected_errors}"
         # Check that some increments succeeded
