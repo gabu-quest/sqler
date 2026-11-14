@@ -274,15 +274,33 @@ def test_an_update_that_changes_nothing_writes_no_audit_row(base):
 
 
 @pytest.mark.parametrize("base", BASE_IDS)
-def test_a_decimal_field_raises_and_leaves_nothing(base):
+def test_a_decimal_field_is_saved_and_audited_as_a_number(base):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = make(spec, "Priced", price=(Optional[Decimal], None))
+        _bind(rows, "priced", cls)
+        item = await _aw(cls(name="a", price=Decimal("1.5")).save())
+        item.price = Decimal("2.25")
+        await _aw(item.save())
+        return await rows.audit("priced")
+
+    assert _run(steps, spec.is_async) == [
+        ("create", None, {"name": "a", "price": 1.5}),
+        ("update", {"price": {"old": 1.5, "new": 2.25}}, {"name": "a", "price": 2.25}),
+    ]
+
+
+@pytest.mark.parametrize("base", BASE_IDS)
+def test_a_decimal_a_number_cannot_hold_raises_and_leaves_nothing(base):
     spec = BASES[base]
 
     async def steps(rows):
         cls = make(spec, "Priced", price=(Optional[Decimal], None))
         _bind(rows, "priced", cls)
         await _aw(cls(name="seed").save())
-        item = cls(name="a", price=Decimal("1.5"))
-        with pytest.raises(TypeError, match="Decimal"):
+        item = cls(name="a", price=Decimal("0.1234567890123456789"))
+        with pytest.raises(TypeError, match="a number cannot hold it"):
             await _aw(item.save())
         return (
             item._id,

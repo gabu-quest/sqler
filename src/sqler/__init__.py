@@ -33,6 +33,7 @@ from .exceptions import (
     SQLerError,
     StaleVersionError,
     UniqueConstraintError,
+    UnstorableValueError,
     ValidationError,
 )
 from .export import (
@@ -283,6 +284,7 @@ __all__ = [
     "NotFoundError",
     "NotBoundError",
     "ValidationError",
+    "UnstorableValueError",
     # Errors - Concurrency
     "ConcurrencyError",
     "StaleVersionError",
