@@ -4,7 +4,17 @@ from contextvars import ContextVar
 from typing import Any, Optional
 
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter
-from sqler.db.sqler_db import _Level
+from sqler.db.sqler_db import (
+    _MAX_VARIABLES,
+    _columns_sql,
+    _id_params,
+    _in_order,
+    _Level,
+    _promoted_in,
+    _row_columns,
+    _row_documents,
+    _rows_sql,
+)
 from sqler.exceptions import StaleVersionError
 from sqler.pool import PoolStats
 from sqler.query.query import is_missing_table
@@ -16,6 +26,25 @@ from sqler.utils import (
     validate_identifier,
     validate_table_name,
 )
+
+
+async def _afetch_all(adapter: Any, sql: str, params: list) -> list:
+    cur = await adapter.execute(sql, params)
+    try:
+        return await cur.fetchall()
+    finally:
+        await cur.close()
+
+
+async def _aselect_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) -> Optional[list]:
+    """Async twin of :func:`sqler.db.sqler_db._select_rows`."""
+    n, params = _id_params(ids)
+    try:
+        return await _afetch_all(adapter, _rows_sql(table, columns, n), params)
+    except sqlite3.OperationalError as exc:
+        if is_missing_table(exc, table):
+            return None
+        raise
 
 
 class AsyncSQLerDB:
@@ -98,8 +127,10 @@ class AsyncSQLerDB:
         promoted: dict[str, str],
         checks: Optional[dict[str, str]] = None,
     ) -> None:
-        """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here."""
-        if self._promoted_of(table) is None:
+        """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here
+        with every column of ``promoted``."""
+        known = self._promoted_of(table)
+        if known is None or any(col not in known for col in promoted):
             await self._ensure_table_with_promoted(table, promoted, checks)
 
     async def _ensure_table_with_promoted(
@@ -137,21 +168,18 @@ class AsyncSQLerDB:
             ddl = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
             await self.adapter.execute(ddl)
             await self.adapter.auto_commit()
+            columns = list(promoted)
         else:
-            cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
-            try:
-                rows = await cur.fetchall()
-            finally:
-                await cur.close()
-            existing_cols = {r[1] for r in rows}
-            for col_name, col_def in promoted.items():
-                if col_name not in existing_cols:
-                    await self.adapter.execute(
-                        f'ALTER TABLE "{table}" ADD COLUMN {col_name} {col_def};'
-                    )
+            existing = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
+            added = [col for col in promoted if col not in existing]
+            for col_name in added:
+                await self.adapter.execute(
+                    f'ALTER TABLE "{table}" ADD COLUMN {col_name} {promoted[col_name]};'
+                )
             await self.adapter.auto_commit()
+            columns = _promoted_in(existing) + added
 
-        self._remember(table, promoted=list(promoted))
+        self._remember(table, promoted=columns)
 
     def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]]]]:
         """Where an ensure call keeps what it learned about a table.
@@ -189,6 +217,18 @@ class AsyncSQLerDB:
             if table in level.promoted:
                 return level.promoted[table]
         return self._promoted_columns.get(table)
+
+    async def _columns_of(self, table: str) -> list[str]:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._columns_of`."""
+        promoted = self._promoted_of(table)
+        if promoted is None:
+            names = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
+            promoted = _promoted_in(names)
+            learned = self._learned() if names else None
+            if learned is not None:
+                # an entry made since the statement above (another task's ensure) is newer
+                promoted = learned[1].setdefault(table, promoted)
+        return promoted
 
     async def upsert_document_promoted(
         self,
@@ -325,27 +365,8 @@ class AsyncSQLerDB:
         return _id
 
     async def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
-        table = validate_table_name(table)
-        promoted = self._promoted_of(table) or ()
-        cols = ", ".join(["_id", "data", *promoted])
-        try:
-            cur = await self.adapter.execute(f"SELECT {cols} FROM {table} WHERE _id = ?;", [_id])
-        except sqlite3.OperationalError as exc:
-            if is_missing_table(exc, table):
-                return None  # a read creates no table
-            raise
-        try:
-            row = await cur.fetchone()
-        finally:
-            await cur.close()
-        await self.adapter.auto_commit()
-        if not row:
-            return None
-        obj = json.loads(row[1])
-        obj["_id"] = row[0]
-        for i, col_name in enumerate(promoted):
-            obj[col_name] = row[2 + i]
-        return obj
+        rows, columns = await self._read_rows(table, [_id])
+        return _row_documents(rows, columns)[0] if rows else None
 
     async def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
         """Fetch multiple documents by id list (batch operation).
@@ -362,30 +383,28 @@ class AsyncSQLerDB:
         """
         if not ids:
             return []
+        rows, columns = await self._read_rows(table, ids)
+        return _row_documents(_in_order(rows or [], ids), columns)
+
+    async def _read_rows(
+        self, table: str, ids: list, *, versioned: bool = False
+    ) -> tuple[Optional[list], list[str]]:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._read_rows`."""
         table = validate_table_name(table)
-        placeholders = ",".join("?" for _ in ids)
+        columns = _row_columns(await self._columns_of(table), versioned)
         try:
-            cur = await self.adapter.execute(
-                f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
-                list(ids),
-            )
+            rows = await _aselect_rows(self.adapter, table, columns, ids)
         except sqlite3.OperationalError as exc:
-            if is_missing_table(exc, table):
-                return []  # a read creates no table
-            raise
-        try:
-            rows = await cur.fetchall()
-        finally:
-            await cur.close()
+            if not versioned or "no such column: _version" not in str(exc):
+                raise
+            # a table made before versioning: it gets the column, as it always did
+            self._versioned_tables.discard(table)
+            await self._ensure_versioned_table(table)
+            rows = await _aselect_rows(self.adapter, table, columns, ids)
+        if rows is None:
+            return None, columns  # a read creates no table
         await self.adapter.auto_commit()
-        # Build lookup dict for ordering
-        by_id: dict[int, dict[str, Any]] = {}
-        for row in rows:
-            obj = json.loads(row[1])
-            obj["_id"] = row[0]
-            by_id[row[0]] = obj
-        # Return in input order, skipping missing
-        return [by_id[i] for i in ids if i in by_id]
+        return rows, columns
 
     async def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
@@ -509,7 +528,7 @@ class AsyncSQLerDB:
         promoted_fields = promoted_fields or []
         # params_per_row: 1 for json(?) + 1 per promoted field
         params_per_row = 1 + len(promoted_fields)
-        max_rows_per_chunk = max(1, 999 // params_per_row)
+        max_rows_per_chunk = max(1, _MAX_VARIABLES // params_per_row)
 
         all_ids: list[int] = []
         all_col_names = list(cols)
@@ -791,12 +810,10 @@ class AsyncSQLerDB:
         if self._is_versioned(table):
             return
         await self._ensure_table(table)
-        cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
-        try:
-            cols = [row[1] for row in await cur.fetchall()]
-        finally:
-            await cur.close()
+        cols = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
         await self.adapter.auto_commit()
+        if self._promoted_of(table) is None:
+            self._remember(table, promoted=_promoted_in(cols))
         if "_version" not in cols:
             cur2 = await self.adapter.execute(
                 f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
@@ -840,41 +857,8 @@ class AsyncSQLerDB:
         return _id, expected_version + 1
 
     async def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
-        table = validate_table_name(table)
-        promoted = self._promoted_of(table) or ()
-        if promoted:
-            extra_cols = ", " + ", ".join(promoted)
-        else:
-            extra_cols = ""
-        sql = f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;"
-        try:
-            try:
-                cur = await self.adapter.execute(sql, [_id])
-            except sqlite3.OperationalError as exc:
-                if "no such column: _version" not in str(exc):
-                    raise
-                # a table made before versioning: it gets the column, as it always did
-                self._versioned_tables.discard(table)
-                await self._ensure_versioned_table(table)
-                cur = await self.adapter.execute(sql, [_id])
-        except sqlite3.OperationalError as exc:
-            if is_missing_table(exc, table):
-                return None  # a read creates no table
-            raise
-        try:
-            row = await cur.fetchone()
-        finally:
-            await cur.close()
-        await self.adapter.auto_commit()
-        if not row:
-            return None
-        obj = json.loads(row[1])
-        obj["_id"] = row[0]
-        obj["_version"] = row[2]
-        if promoted:
-            for i, col_name in enumerate(promoted):
-                obj[col_name] = row[3 + i]
-        return obj
+        rows, columns = await self._read_rows(table, [_id], versioned=True)
+        return _row_documents(rows, columns)[0] if rows else None
 
     async def query(self, table: str):
         """Convenience: return an AsyncSQLerQuery bound to this adapter."""

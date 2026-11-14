@@ -61,6 +61,8 @@ class AsyncSQLerModel(BaseModel):
     # class-bound db + table metadata
     _db: ClassVar[Optional[AsyncSQLerDB]] = None
     _table: ClassVar[Optional[str]] = None
+    # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
+    _versioned_rows: ClassVar[bool] = False
 
     # ----- class config -----
     model_config = {
@@ -147,7 +149,8 @@ class AsyncSQLerModel(BaseModel):
             return []
         given = db
         db, table = cls._resolve_binding(db)
-        docs = await _aread_documents(db, table, ids)
+        read = _refs.aread_versioned if cls._versioned_rows else _aread_documents
+        docs = await read(db, table, ids)
         if not docs:
             return []
         # Use queryset's batch resolution for efficient nested ref loading
@@ -157,6 +160,8 @@ class AsyncSQLerModel(BaseModel):
         for doc in docs:
             inst = cls.model_validate(doc)
             inst._id = doc.get("_id")
+            if cls._versioned_rows:
+                inst._version = doc["_version"]
             instances.append(inst)
         return instances
 
@@ -198,7 +203,7 @@ class AsyncSQLerModel(BaseModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TAModel](cls, q)
+        return AsyncSQLerQuerySet[TAModel](cls, q, db)
 
     @classmethod
     def filter(cls: Type[TAModel], expression: SQLerExpression) -> AsyncSQLerQuerySet[TAModel]:

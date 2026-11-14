@@ -82,6 +82,8 @@ class SQLerLiteSafeModel(SQLerLiteModel):
 
     # Configurable intent rebasing (can be overridden in subclasses)
     _rebase_config: ClassVar[RebaseConfig] = DEFAULT_REBASE_CONFIG
+    # from_ids reads each row with its version, as from_id does
+    _versioned_rows: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
         """Initialize private attributes after dataclass __init__."""
@@ -139,41 +141,6 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         return inst
 
     @classmethod
-    def from_ids(cls: Type[TSafe], ids: list[int], *, db=None) -> list[TSafe]:
-        """Hydrate multiple instances by id list with versions.
-
-        Args:
-            ids: List of row ids to load.
-            db: Optional database (overrides class-level binding).
-
-        Returns:
-            List of model instances. Missing ids are omitted.
-        """
-        if not ids:
-            return []
-        given = db
-        db, table = cls._resolve_binding(db)
-        # Use versioned query
-        docs = []
-        for id_ in ids:
-            doc = db.find_document_with_version(table, id_)
-            if doc is not None:
-                docs.append(doc)
-        if not docs:
-            return []
-        # Batch resolve
-        qs = cls.using(given) if given is not None else cls.query()
-        docs = qs._batch_resolve(docs)
-        instances = []
-        for doc in docs:
-            inst = cls.model_validate(doc)
-            object.__setattr__(inst, "_id", doc.get("_id"))
-            object.__setattr__(inst, "_version", doc.get("_version", 0))
-            object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
-            instances.append(inst)
-        return instances
-
-    @classmethod
     def query(cls: Type[TSafe]) -> "SQLerQuerySet[TSafe]":
         """Return a queryset that includes version information."""
         db, table = cls._require_binding()
@@ -183,7 +150,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
             q = q._clone(promoted_fields=list(promoted.keys()))
         from sqler.models.queryset import SQLerQuerySet
 
-        return SQLerQuerySet[TSafe](cls, q)
+        return SQLerQuerySet[TSafe](cls, q, db)
 
     @classmethod
     def save_many(cls: Type[TSafe], instances: list[TSafe], *, db=None) -> list[TSafe]:  # type: ignore[override]

@@ -15,13 +15,13 @@ table are read with one statement, then put what they loaded in place.
 from __future__ import annotations
 
 import inspect
-import json
-import sqlite3
 from typing import Any, Callable, Generator, Optional
 
 from sqler import registry
+from sqler.db.async_db import _aselect_rows
+from sqler.db.sqler_db import _in_order, _row_columns, _row_documents, _select_rows
 from sqler.exceptions import InvalidTableNameError
-from sqler.models._table_names import _aload_unbound, _is_missing_table, _load_unbound
+from sqler.models._table_names import _aload_unbound, _load_unbound
 from sqler.utils import validate_table_name
 
 # A reference whose row could not be hydrated: it stays the reference it was.
@@ -93,8 +93,8 @@ def batch(
 ) -> Generator[tuple[str, list], Any, tuple[list[dict], bool]]:
     """Resolve the references of ``docs`` into stored documents, to ``max_depth`` levels.
 
-    Yields ``(table, ids)`` for each read and is sent the ``(_id, data)`` rows, or
-    ``None`` when the table does not exist; one read per table per level. A table whose
+    Yields ``(table, ids)`` for each read and is sent the documents :func:`read_rows`
+    gives, or ``None`` when the table does not exist; one read per table per level. A table whose
     name is not an identifier is never read, and its references stay as they are.
     Returns ``(documents, found)``: ``found`` is False when no document holds a
     reference, and then the documents are ``docs`` itself; else they are new ones in
@@ -127,14 +127,12 @@ def batch(
             break
         level: list[dict] = []
         for table, ids in wanted.items():
-            rows = yield table, ids
-            if rows is None:
+            got = yield table, ids
+            if got is None:
                 missing.add(table)
                 continue
-            for rid, data in rows:
-                obj = json.loads(data)
-                obj["_id"] = rid
-                resolved[(table, int(rid))] = obj
+            for obj in got:
+                resolved[(table, int(obj["_id"]))] = obj
                 level.append(obj)
         found = {}
         for d in level:
@@ -156,32 +154,30 @@ def batch(
     return [replace(d, expand) for d in docs], True
 
 
-def _rows_sql(table: str, ids: list) -> str:
-    return f"SELECT _id, data FROM {table} WHERE _id IN ({','.join('?' * len(ids))})"
+def read_rows(adapter: Any, table: str, ids: list, db: Any = None) -> Optional[list]:
+    """The documents of the rows ``ids``, or ``None`` when ``table`` does not exist.
+
+    Read through ``db``'s by-id reader, as ``db.find_documents`` reads them. Without a
+    database that has one (a queryset built by hand, ``PooledSQLerDB``) ``adapter`` reads
+    ``_id`` and ``data`` only.
+    """
+    reader = getattr(db, "_read_rows", None)
+    if reader is not None:
+        rows, columns = reader(table, ids)
+    else:
+        columns = _row_columns()
+        rows = _select_rows(adapter, table, columns, ids)
+    return None if rows is None else _row_documents(rows, columns)
 
 
-def read_rows(adapter: Any, table: str, ids: list) -> Optional[list]:
-    """The ``(_id, data)`` rows of ``ids``, or ``None`` when ``table`` does not exist."""
-    try:
-        cur = adapter.execute(_rows_sql(table, ids), ids)
-    except sqlite3.OperationalError as exc:
-        if _is_missing_table(exc, table):
-            return None
-        raise
-    return cur.fetchall()
-
-
-async def aread_rows(adapter: Any, table: str, ids: list) -> Optional[list]:
+async def aread_rows(adapter: Any, table: str, ids: list, db: Any = None) -> Optional[list]:
     """Async twin of :func:`read_rows`."""
-    try:
-        cur = await adapter.execute(_rows_sql(table, ids), ids)
-    except sqlite3.OperationalError as exc:
-        if _is_missing_table(exc, table):
-            return None
-        raise
-    rows = await cur.fetchall()
-    await cur.close()
-    return rows
+    if db is not None:
+        rows, columns = await db._read_rows(table, ids)
+    else:
+        columns = _row_columns()
+        rows = await _aselect_rows(adapter, table, columns, ids)
+    return None if rows is None else _row_documents(rows, columns)
 
 
 # ---- the per-row resolver -----------------------------------------------------------
@@ -278,61 +274,21 @@ async def aresolve(data: dict, db: Any, seen: frozenset) -> dict:
 # ---- versioned rows for the safe bases ----------------------------------------------
 
 
-def _versioned_sql(db: Any, table: str, ids: list) -> tuple[str, list]:
-    promoted = list(db._promoted_of(table) or ())
-    cols = ", ".join(["_id", "data", "_version", *promoted])
-    marks = ",".join("?" for _ in ids)
-    return f"SELECT {cols} FROM {table} WHERE _id IN ({marks});", promoted
-
-
-def _versioned_doc(row: Any, promoted: list) -> dict:
-    obj = json.loads(row[1])
-    obj["_id"] = row[0]
-    obj["_version"] = row[2]
-    for i, col in enumerate(promoted):
-        obj[col] = row[3 + i]
-    return obj
-
-
 def read_versioned(db: Any, table: str, ids: list) -> list:
-    """Documents of ``ids`` with ``_version``, one statement; a missing table has no rows."""
+    """Documents of ``ids`` with ``_version``, in the order of ``ids``, one statement; a
+    missing table has no rows."""
     if not ids:
         return []
-    sql, promoted = _versioned_sql(db, table, ids)
-    try:
-        cur = db.adapter.execute(sql, list(ids))
-    except sqlite3.OperationalError as exc:
-        if _is_missing_table(exc, table):
-            return []
-        if "no such column: _version" not in str(exc):
-            raise
-        # a table made before versioning gets the column, as find_document_with_version
-        # gives it; a missing table is never created
-        db._ensure_versioned_table(table)
-        cur = db.adapter.execute(sql, list(ids))
-    return [_versioned_doc(row, promoted) for row in cur.fetchall()]
+    rows, columns = db._read_rows(table, ids, versioned=True)
+    return _row_documents(_in_order(rows or [], ids), columns)
 
 
 async def aread_versioned(db: Any, table: str, ids: list) -> list:
     """Async twin of :func:`read_versioned`."""
     if not ids:
         return []
-    sql, promoted = _versioned_sql(db, table, ids)
-    try:
-        cur = await db.adapter.execute(sql, list(ids))
-    except sqlite3.OperationalError as exc:
-        if _is_missing_table(exc, table):
-            return []
-        if "no such column: _version" not in str(exc):
-            raise
-        await db._ensure_versioned_table(table)
-        cur = await db.adapter.execute(sql, list(ids))
-    try:
-        rows = await cur.fetchall()
-    finally:
-        await cur.close()
-    await db.adapter.auto_commit()
-    return [_versioned_doc(row, promoted) for row in rows]
+    rows, columns = await db._read_rows(table, ids, versioned=True)
+    return _row_documents(_in_order(rows or [], ids), columns)
 
 
 def table_is_bound(table: str) -> bool:

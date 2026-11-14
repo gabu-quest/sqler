@@ -56,6 +56,8 @@ class SQLerSafeModel(SQLerModel):
 
     # Configurable intent rebasing (can be overridden in subclasses)
     _rebase_config: ClassVar[RebaseConfig] = DEFAULT_REBASE_CONFIG
+    # from_ids reads each row with its version, as from_id does
+    _versioned_rows: ClassVar[bool] = True
 
     @classmethod
     def set_db(cls: Type[TSafe], db, table: Optional[str] = None) -> None:  # type: ignore[override]
@@ -105,7 +107,7 @@ class SQLerSafeModel(SQLerModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return SQLerQuerySet[TSafe](cls, q)
+        return SQLerQuerySet[TSafe](cls, q, db)
 
     @classmethod
     def save_many(cls: Type[TSafe], instances: list[TSafe], *, db=None) -> list[TSafe]:  # type: ignore[override]

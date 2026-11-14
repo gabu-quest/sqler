@@ -1,3 +1,4 @@
+import functools
 import json
 import sqlite3
 import threading
@@ -5,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any, NamedTuple, Optional
 
 from sqler.adapter import SQLiteAdapter
-from sqler.exceptions import StaleVersionError
+from sqler.exceptions import InvalidIdentifierError, StaleVersionError
 from sqler.query import SQLerQuery
 from sqler.query.query import is_missing_table
 from sqler.utils import (
@@ -26,6 +27,97 @@ class _Level(NamedTuple):
     versioned: set[str]
     promoted: dict[str, list[str]]
     depth: int
+
+
+# ---- a stored row read by its id: the one column list and the one row-to-document rule ----
+
+
+_NOT_PROMOTED = frozenset({"_id", "data", "_version"})
+
+
+def _promoted_in(names: Any) -> list[str]:
+    """The promoted columns among a table's column ``names``: every column but ``_id``,
+    ``data`` and ``_version`` whose name sqler accepts for a promoted column. A column
+    added by hand under another name is never read."""
+    out = []
+    for name in names:
+        if name.lower() in _NOT_PROMOTED:
+            continue
+        try:
+            validate_column_name(name)
+        except InvalidIdentifierError:
+            continue
+        out.append(name)
+    return out
+
+
+def _columns_sql(table: str) -> str:
+    """The statement that lists the columns of the validated ``table``: no rows when it is missing."""
+    return f'PRAGMA table_info("{table}");'
+
+
+def _row_columns(promoted: Any = (), versioned: bool = False) -> tuple[str, ...]:
+    """The columns a stored row is read with: ``_id``, ``data``, ``_version`` for a versioned
+    read, then the promoted columns."""
+    return ("_id", "data", "_version", *promoted) if versioned else ("_id", "data", *promoted)
+
+
+# The most variables one statement binds: the bound the bulk inserts chunk by
+# (``_insert_many_chunked``), SQLite's historic default limit of host variables.
+_MAX_VARIABLES = 999
+
+
+@functools.lru_cache(maxsize=512)
+def _rows_sql(table: str, columns: tuple[str, ...], n: int) -> str:
+    """The statement that reads ``n`` ids of the validated ``table`` with ``columns``, one
+    variable per id; for ``n == 0`` the ids come as one JSON array in one variable. Built once
+    per shape, so a one-id read builds no text."""
+    ids = "SELECT value FROM json_each(?)" if n == 0 else ",".join("?" * n)
+    return f"SELECT {', '.join(columns)} FROM {table} WHERE _id IN ({ids});"
+
+
+def _row_documents(rows: Any, columns: list[str]) -> list[dict[str, Any]]:
+    """Each row read with ``columns`` as a document: its JSON, then every column but ``data``
+    set on it by name (a column wins over a JSON key of its name)."""
+    loads = json.loads
+    docs = []
+    for row in rows:
+        doc = loads(row[1])
+        doc["_id"] = row[0]
+        docs.append(doc)
+    extra = columns[2:]
+    if extra:
+        for doc, row in zip(docs, rows):
+            doc.update(zip(extra, row[2:]))
+    return docs
+
+
+def _in_order(rows: Any, ids: list) -> list:
+    """The rows of ``ids`` in the order of ``ids``: an id asked twice gives its row twice, an
+    id with no row gives nothing."""
+    by_id = {row[0]: row for row in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def _id_params(ids: list) -> tuple[int, list]:
+    """The ``n`` of :func:`_rows_sql` and the variables for ``ids``: one per id up to
+    ``_MAX_VARIABLES``, past it the whole list as one JSON array, so a read is one statement
+    whatever the number of ids."""
+    if len(ids) <= _MAX_VARIABLES:
+        return len(ids), ids
+    return 0, [json.dumps(ids)]
+
+
+def _select_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) -> Optional[list]:
+    """The rows of ``ids`` read with ``columns``, in stored order; ``None`` when ``table`` is
+    missing (a read creates no table)."""
+    n, params = _id_params(ids)
+    try:
+        return adapter.execute(_rows_sql(table, columns, n), params).fetchall()
+    except sqlite3.OperationalError as exc:
+        if is_missing_table(exc, table):
+            return None
+        raise
 
 
 class SQLerDB:
@@ -134,8 +226,10 @@ class SQLerDB:
         promoted: dict[str, str],
         checks: Optional[dict[str, str]] = None,
     ) -> None:
-        """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here."""
-        if self._promoted_of(table) is None:
+        """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here
+        with every column of ``promoted``."""
+        known = self._promoted_of(table)
+        if known is None or any(col not in known for col in promoted):
             self._ensure_table_with_promoted(table, promoted, checks)
 
     def _ensure_table_with_promoted(
@@ -156,8 +250,6 @@ class SQLerDB:
                 ``{"status": "TEXT NOT NULL DEFAULT 'pending'"}``.
             checks: Optional ``{name: expression}`` CHECK constraints.
         """
-        import sqlite3 as _sqlite3
-
         table = validate_table_name(table)
         checks = checks or {}
         for col_name, col_def in promoted.items():
@@ -184,29 +276,18 @@ class SQLerDB:
                 ddl = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
                 self.adapter.execute(ddl)
                 self.adapter.auto_commit()
+                columns = list(promoted)
             else:
-                # Get existing columns
-                cur = self.adapter.execute(f'PRAGMA table_info("{table}");')
-                rows = cur.fetchall()
-                existing_cols: set[str] = set()
-                for row in rows:
-                    try:
-                        if isinstance(row, _sqlite3.Row):
-                            existing_cols.add(row["name"])
-                        else:
-                            existing_cols.add(row[1])
-                    except (KeyError, IndexError, TypeError):
-                        continue
-
-                # Add missing promoted columns
-                for col_name, col_def in promoted.items():
-                    if col_name not in existing_cols:
-                        self.adapter.execute(
-                            f'ALTER TABLE "{table}" ADD COLUMN {col_name} {col_def};'
-                        )
+                existing = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+                added = [col for col in promoted if col not in existing]
+                for col_name in added:
+                    self.adapter.execute(
+                        f'ALTER TABLE "{table}" ADD COLUMN {col_name} {promoted[col_name]};'
+                    )
                 self.adapter.auto_commit()
+                columns = _promoted_in(existing) + added
 
-            self._remember(table, promoted=list(promoted))
+            self._remember(table, promoted=columns)
 
     def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]]]]:
         """Where an ensure call keeps what it learned about a table.
@@ -244,6 +325,20 @@ class SQLerDB:
             if table in level.promoted:
                 return level.promoted[table]
         return self._promoted_columns.get(table)
+
+    def _columns_of(self, table: str) -> list[str]:
+        """The promoted columns of the validated ``table``: remembered, or else read from the
+        table once and remembered as an ensure call remembers them (a table without any as
+        having none). A missing table has none and is not remembered."""
+        promoted = self._promoted_of(table)
+        if promoted is None:
+            names = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+            promoted = _promoted_in(names)
+            learned = self._learned() if names else None
+            if learned is not None:
+                # an entry made since the statement above (another thread's ensure) is newer
+                promoted = learned[1].setdefault(table, promoted)
+        return promoted
 
     def upsert_document_promoted(
         self,
@@ -499,7 +594,7 @@ class SQLerDB:
         """
         promoted_fields = promoted_fields or []
         params_per_row = 1 + len(promoted_fields)
-        max_rows_per_chunk = max(1, 999 // params_per_row)
+        max_rows_per_chunk = max(1, _MAX_VARIABLES // params_per_row)
 
         all_ids: list[int] = []
         all_col_names = list(cols)
@@ -641,23 +736,8 @@ class SQLerDB:
             dict | None: Decoded document with ``_id`` merged in, or ``None``
             if not found.
         """
-        table = validate_table_name(table)
-        promoted = self._promoted_of(table) or ()
-        cols = ", ".join(["_id", "data", *promoted])
-        try:
-            cur = self.adapter.execute(f"SELECT {cols} FROM {table} WHERE _id = ?;", [_id])
-        except sqlite3.OperationalError as exc:
-            if is_missing_table(exc, table):
-                return None  # a read creates no table
-            raise
-        row = cur.fetchone()
-        if not row:
-            return None
-        obj = json.loads(row[1])
-        obj["_id"] = row[0]
-        for i, col_name in enumerate(promoted):
-            obj[col_name] = row[2 + i]
-        return obj
+        rows, columns = self._read_rows(table, [_id])
+        return _row_documents(rows, columns)[0] if rows else None
 
     def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
         """Fetch multiple documents by id list (batch operation).
@@ -670,30 +750,34 @@ class SQLerDB:
             ids: List of row ids to fetch.
 
         Returns:
-            list[dict]: Decoded documents with ``_id`` merged in.
+            list[dict]: Decoded documents with ``_id`` and the promoted columns merged
+            in, as :meth:`find_document` gives each.
         """
         if not ids:
             return []
+        rows, columns = self._read_rows(table, ids)
+        return _row_documents(_in_order(rows or [], ids), columns)
+
+    def _read_rows(
+        self, table: str, ids: list, *, versioned: bool = False
+    ) -> tuple[Optional[list], list[str]]:
+        """The by-id read every reader of this database goes through.
+
+        Returns the stored rows of ``ids`` (stored order) and the columns they were read
+        with: the promoted columns of ``table`` (:meth:`_columns_of`), and ``_version`` when
+        ``versioned``. A missing table gives ``None`` rows and is not created; a table made
+        before versioning gets its ``_version`` column on a versioned read, as it always did.
+        """
         table = validate_table_name(table)
-        placeholders = ",".join("?" for _ in ids)
+        columns = _row_columns(self._columns_of(table), versioned)
         try:
-            cur = self.adapter.execute(
-                f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
-                list(ids),
-            )
+            rows = _select_rows(self.adapter, table, columns, ids)
         except sqlite3.OperationalError as exc:
-            if is_missing_table(exc, table):
-                return []  # a read creates no table
-            raise
-        rows = cur.fetchall()
-        # Build lookup dict for ordering
-        by_id: dict[int, dict[str, Any]] = {}
-        for row in rows:
-            obj = json.loads(row[1])
-            obj["_id"] = row[0]
-            by_id[row[0]] = obj
-        # Return in input order, skipping missing
-        return [by_id[i] for i in ids if i in by_id]
+            if not versioned or "no such column: _version" not in str(exc):
+                raise
+            self._ensure_versioned_table(table)
+            rows = _select_rows(self.adapter, table, columns, ids)
+        return rows, columns
 
     def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
@@ -946,39 +1030,15 @@ class SQLerDB:
         """
         self._ensure_table(table)
         # fast path: check without lock
-        import sqlite3 as _sqlite3
-
-        cur = self.adapter.execute(f'PRAGMA table_info("{table}");')
-        rows = cur.fetchall()
-        cols = set()
-        for row in rows:
-            try:
-                if isinstance(row, _sqlite3.Row):
-                    name = row["name"]
-                else:
-                    name = row[1]
-            except (KeyError, IndexError, TypeError):
-                # Skip malformed rows
-                continue
-            cols.add(name)
+        cols = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+        if self._promoted_of(table) is None:
+            self._remember(table, promoted=_promoted_in(cols))
         if "_version" in cols:
             self._remember(table)
             return
         # serialize DDL; re-check inside lock
         with self._ddl_lock:
-            cur = self.adapter.execute(f'PRAGMA table_info("{table}");')
-            rows = cur.fetchall()
-            cols = set()
-            for row in rows:
-                try:
-                    if isinstance(row, _sqlite3.Row):
-                        name = row["name"]
-                    else:
-                        name = row[1]
-                except (KeyError, IndexError, TypeError):
-                    # Skip malformed rows
-                    continue
-                cols.add(name)
+            cols = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
             if "_version" not in cols:
                 self.adapter.execute(
                     f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
@@ -1073,44 +1133,8 @@ class SQLerDB:
         Returns:
             dict | None: Decoded document with ``_id`` and ``_version`` keys, or None.
         """
-        table = validate_table_name(table)
-        promoted = self._promoted_of(table) or ()
-        if promoted:
-            extra_cols = ", " + ", ".join(promoted)
-        else:
-            extra_cols = ""
-        sql = f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;"
-        try:
-            try:
-                cur = self.adapter.execute(sql, [_id])
-            except sqlite3.OperationalError as exc:
-                if "no such column: _version" not in str(exc):
-                    raise
-                # a table made before versioning: it gets the column, as it always did
-                self._ensure_versioned_table(table)
-                cur = self.adapter.execute(sql, [_id])
-        except sqlite3.OperationalError as exc:
-            if is_missing_table(exc, table):
-                return None  # a read creates no table
-            raise
-        row = cur.fetchone()
-        if not row:
-            return None
-        try:
-            obj = json.loads(row["data"])  # type: ignore[index]
-            obj["_id"] = row["_id"]  # type: ignore[index]
-            obj["_version"] = row["_version"]  # type: ignore[index]
-            if promoted:
-                for col_name in promoted:
-                    obj[col_name] = row[col_name]  # type: ignore[index]
-        except (KeyError, TypeError):
-            obj = json.loads(row[1])
-            obj["_id"] = row[0]
-            obj["_version"] = row[2]
-            if promoted:
-                for i, col_name in enumerate(promoted):
-                    obj[col_name] = row[3 + i]
-        return obj
+        rows, columns = self._read_rows(table, [_id], versioned=True)
+        return _row_documents(rows, columns)[0] if rows else None
 
 
 class _OpenLevels(threading.local):
