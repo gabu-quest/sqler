@@ -62,6 +62,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`from_ids` and `query().all()` no longer raise "no such table" when a referenced table is gone.** The reference reads as `None`, as `from_id` gives.
 - **A lite safe model reached through a reference no longer recreates a dropped table.** The reference reads as `None`.
 - **`set_db()` on the safe model classes reports its deprecation warning at your own line**, so Python's default warning filters show it.
+- **`from_ids()` on a model with promoted columns gives the stored values.** The promoted fields came back at their defaults, and a `save()` of such an instance wrote those defaults over the stored columns. `find_documents`, sync and async, now returns promoted columns as `find_document` does.
+- **A referenced row loaded through `from_ids()`, `query().all()` or `first()` carries its promoted columns.**
+- **`from_ids()` on the safe model bases holds the stored `_version`.** It held 0, so saving a row that had been updated before raised `StaleVersionError`.
+- **A database object that did not create a table reads its promoted columns.** A second process, `Model.using(db)` without `set_db()`, or any `SQLerDB` that never created or ensured the table read every row without them, through `find_document` as well. The columns are now read from the table, once per database object.
+- **`resolve(False)` stays in force across chained calls** such as `resolve(False).filter(...)`, and a chained queryset keeps the database it was made from.
+- **A very long id list no longer fails with "too many SQL variables"** in `from_ids()` and `find_documents()`.
 
 ### Changed
 
@@ -93,6 +99,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`import_csv()`'s `batch_size` default is `None`** (one commit per row, as before); it was 100 and ignored. A value below 1 raises `ValueError`.
 - **CSV import removes one leading apostrophe from a cell that looks escaped**: apostrophes followed by nothing or by `=`, `+`, `-`, `@`, tab or CR. Such a cell written by hand or by another program is read without that apostrophe.
 - **`metrics.enable()` raises `ValueError`** for a custom label named `le`, `table` or `operation`, or for two labels that become the same name once cleaned.
+- **A column added to a table by hand shows in documents read by id**, under the column's name, when that name is a valid field name.
+- **Lite safe models: `from_ids()` sends one statement** instead of one per id, and leaves out an id given as a string, as `from_ids()` on the other bases does.
 
 ### Added
 
