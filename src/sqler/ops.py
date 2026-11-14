@@ -289,7 +289,7 @@ def _discard_temp(temp: str) -> None:
 
 def _publish_temp(temp: str, destination: str) -> None:
     """Flush the finished temporary backup and move it over ``destination`` in one step."""
-    fd = os.open(temp, os.O_RDONLY)
+    fd = os.open(temp, os.O_RDWR)  # Windows flushes only a descriptor opened for writing
     try:
         os.fsync(fd)
     finally:

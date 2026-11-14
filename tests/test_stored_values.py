@@ -11,6 +11,7 @@ import asyncio
 import enum
 import inspect
 import json
+import os
 import pathlib
 import sqlite3
 import uuid
@@ -41,6 +42,8 @@ AT = time(9, 30, 0)
 AT_TEXT = "09:30:00"
 UID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 UID_TEXT = "12345678-1234-5678-1234-567812345678"
+PATH = pathlib.Path("a", "b")
+PATH_TEXT = "a\\b" if os.sep == "\\" else "a/b"  # a path is stored as str(path): the writing OS's form
 
 
 class Colour(enum.Enum):
@@ -91,7 +94,7 @@ KINDS = [
     Kind("date", date, DAY, DAY_TEXT, date(2026, 11, 15)),
     Kind("time", time, AT, AT_TEXT, time(10, 0, 0)),
     Kind("uuid", uuid.UUID, UID, UID_TEXT, uuid.UUID(int=7)),
-    Kind("path", pathlib.Path, pathlib.Path("a/b"), "a/b", pathlib.Path("c")),
+    Kind("path", pathlib.Path, PATH, PATH_TEXT, pathlib.Path("c")),
     Kind("enum", Colour, Colour.RED, "red", Colour.BLUE),
     Kind("str_enum", Mood, Mood.CALM, "calm", Mood.LOUD),
     Kind("int_enum", Level, Level.HIGH, 3, Level.LOW),
@@ -550,7 +553,7 @@ RAW = {
     "uid": UID,
     "colour": Colour.RED,
     "level": Level.HIGH,
-    "path": pathlib.Path("a/b"),
+    "path": PATH,
     "set": {2, 1},
     "pair": (1, 2),
     "inner": Inner(day=DAY),
@@ -566,7 +569,7 @@ RAW_STORED = {
     "uid": UID_TEXT,
     "colour": "red",
     "level": 3,
-    "path": "a/b",
+    "path": PATH_TEXT,
     "set": [1, 2],
     "pair": [1, 2],
     "inner": {"day": DAY_TEXT},

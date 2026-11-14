@@ -9,6 +9,7 @@ sync function on the same file.
 
 import asyncio
 import sqlite3
+import sys
 
 import pytest
 import pytest_asyncio
@@ -374,6 +375,7 @@ def _assert_returned_n(d: AsyncSQLerDB) -> None:
     assert stats.available_connections == stats.total_connections, stats
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows refuses to delete a file that is open")
 @pytest.mark.asyncio
 async def test_health_check_on_a_database_file_deleted_after_connecting_returns_a_status(tmp_path):
     path = tmp_path / "gone.db"

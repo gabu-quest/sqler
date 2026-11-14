@@ -9,6 +9,7 @@ import asyncio
 import enum
 import inspect
 import json
+import os
 import pathlib
 import uuid
 from dataclasses import dataclass
@@ -212,7 +213,8 @@ UNCHANGED = {
     "tags": (set, {"b", "a"}, ["a", "b"]),
     "pair": (tuple, (1, 2), [1, 2]),
     "inner": (Inner, Inner(day=DAY), {"day": DAY_TEXT}),
-    "path": (pathlib.Path, pathlib.Path("a/b"), "a/b"),
+    # a path is stored as str(path): the form of the OS that wrote it
+    "path": (pathlib.Path, pathlib.Path("a", "b"), "a\\b" if os.sep == "\\" else "a/b"),
     "at": (time, time(9, 30), "09:30:00"),
 }
 
