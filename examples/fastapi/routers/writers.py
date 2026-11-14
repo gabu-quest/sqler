@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fastapi import APIRouter, HTTPException, status
 
+from ..db import get_db, get_row
 from ..models import Article, City, Writer
 from ..utils import db_call, hydrate_ref
 
@@ -64,7 +65,7 @@ async def list_writers():
     """
 
     def _list():
-        return Writer.query().all()
+        return Writer.using(get_db()).all()
 
     writers = await db_call(_list)
     return [_writer_to_out(w) for w in writers]
@@ -81,14 +82,14 @@ async def create_writer(payload: WriterCreate):
         writer = Writer(name=payload.name, bio=payload.bio)
 
         if payload.city_id:
-            city = City.from_id(payload.city_id)
+            city = get_row(City, payload.city_id)
             if not city:
                 raise HTTPException(status_code=404, detail="City not found")
             writer.set_city(city)
 
-        writer.save()
+        writer.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return Writer.from_id(writer._id)
+        return get_row(Writer, writer._id)
 
     writer = await db_call(_create)
     return _writer_to_out(writer)
@@ -100,7 +101,7 @@ async def get_writer(writer_id: int):
 
     日本語: IDでライターを取得。
     """
-    writer = await db_call(lambda: Writer.from_id(writer_id))
+    writer = await db_call(lambda: get_row(Writer, writer_id))
     if not writer:
         raise HTTPException(status_code=404, detail="Writer not found")
     return _writer_to_out(writer)
@@ -114,7 +115,7 @@ async def patch_writer(writer_id: int, patch: WriterPatch):
     """
 
     def _patch():
-        writer = Writer.from_id(writer_id)
+        writer = get_row(Writer, writer_id)
         if not writer:
             raise HTTPException(status_code=404, detail="Writer not found")
 
@@ -126,7 +127,7 @@ async def patch_writer(writer_id: int, patch: WriterPatch):
             if city_id is None:
                 writer.city = None
             else:
-                city = City.from_id(city_id)
+                city = get_row(City, city_id)
                 if not city:
                     raise HTTPException(status_code=404, detail="City not found")
                 writer.set_city(city)
@@ -134,9 +135,9 @@ async def patch_writer(writer_id: int, patch: WriterPatch):
         for key, value in data.items():
             setattr(writer, key, value)
 
-        writer.save()
+        writer.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return Writer.from_id(writer._id)
+        return get_row(Writer, writer._id)
 
     writer = await db_call(_patch)
     return _writer_to_out(writer)
@@ -152,12 +153,12 @@ async def delete_writer(writer_id: int):
     from sqler.query import SQLerField as F
 
     def _delete():
-        writer = Writer.from_id(writer_id)
+        writer = get_row(Writer, writer_id)
         if not writer:
             raise HTTPException(status_code=404, detail="Writer not found")
 
         # Check for dependent articles
-        dependent_articles = Article.query().filter(F("writer._id") == writer_id).count()
+        dependent_articles = Article.using(get_db()).filter(F(["writer", "_id"]) == writer_id).count()
         if dependent_articles > 0:
             raise HTTPException(
                 status_code=409,
@@ -165,7 +166,7 @@ async def delete_writer(writer_id: int):
             )
 
         try:
-            writer.delete()
+            writer.delete(db=get_db())
         except ReferentialIntegrityError as e:
             raise HTTPException(status_code=409, detail=str(e))
 
@@ -186,11 +187,11 @@ async def get_writer_audit_log(writer_id: int):
     """
 
     def _get_log():
-        writer = Writer.from_id(writer_id)
+        writer = get_row(Writer, writer_id)
         if not writer:
             raise HTTPException(status_code=404, detail="Writer not found")
 
-        log = writer.get_audit_log()
+        log = writer.get_audit_log(db=get_db())
         return [
             {
                 "timestamp": entry["timestamp"],
@@ -217,11 +218,11 @@ async def get_writer_articles(writer_id: int):
     from sqler.query import SQLerField as F
 
     def _get_articles():
-        writer = Writer.from_id(writer_id)
+        writer = get_row(Writer, writer_id)
         if not writer:
             raise HTTPException(status_code=404, detail="Writer not found")
 
-        articles = Article.query().filter(F("writer._id") == writer_id).all()
+        articles = Article.using(get_db()).filter(F(["writer", "_id"]) == writer_id).all()
         return [
             {
                 "_id": a._id,

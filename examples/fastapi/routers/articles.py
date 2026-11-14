@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from ..db import get_db, get_row
 from ..models import Article, Writer
 from ..utils import db_call, hydrate_ref
 
@@ -78,14 +79,14 @@ async def create_article(payload: ArticleCreate):
         )
 
         if payload.writer_id:
-            writer = Writer.from_id(payload.writer_id)
+            writer = get_row(Writer, payload.writer_id)
             if not writer:
                 raise HTTPException(status_code=404, detail="Writer not found")
             article.set_writer(writer)
 
-        article.save()
+        article.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return Article.from_id(article._id)
+        return get_row(Article, article._id)
 
     article = await db_call(_create)
     return _article_to_out(article)
@@ -104,9 +105,9 @@ async def list_articles(
     from sqler.query import SQLerField as F
 
     def _list():
-        q = Article.query()
+        q = Article.using(get_db())
         if writer_id:
-            q = q.filter(F("writer._id") == writer_id)
+            q = q.filter(F(["writer", "_id"]) == writer_id)
         return q.limit(limit).offset(offset).all()
 
     articles = await db_call(_list)
@@ -119,7 +120,7 @@ async def get_article(article_id: int):
 
     日本語: IDで記事を取得。
     """
-    article = await db_call(lambda: Article.from_id(article_id))
+    article = await db_call(lambda: get_row(Article, article_id))
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
     return _article_to_out(article)
@@ -133,7 +134,7 @@ async def patch_article(article_id: int, patch: ArticlePatch):
     """
 
     def _patch():
-        article = Article.from_id(article_id)
+        article = get_row(Article, article_id)
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
 
@@ -145,7 +146,7 @@ async def patch_article(article_id: int, patch: ArticlePatch):
             if writer_id is None:
                 article.writer = None
             else:
-                writer = Writer.from_id(writer_id)
+                writer = get_row(Writer, writer_id)
                 if not writer:
                     raise HTTPException(status_code=404, detail="Writer not found")
                 article.set_writer(writer)
@@ -153,9 +154,9 @@ async def patch_article(article_id: int, patch: ArticlePatch):
         for key, value in data.items():
             setattr(article, key, value)
 
-        article.save()
+        article.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return Article.from_id(article._id)
+        return get_row(Article, article._id)
 
     article = await db_call(_patch)
     return _article_to_out(article)
@@ -169,10 +170,10 @@ async def delete_article(article_id: int):
     """
 
     def _delete():
-        article = Article.from_id(article_id)
+        article = get_row(Article, article_id)
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
-        article.delete()
+        article.delete(db=get_db())
 
     await db_call(_delete)
     return {"success": True}
@@ -191,11 +192,11 @@ async def get_article_audit_log(article_id: int):
     """
 
     def _get_log():
-        article = Article.from_id(article_id)
+        article = get_row(Article, article_id)
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
 
-        log = article.get_audit_log()
+        log = article.get_audit_log(db=get_db())
         return [
             {
                 "timestamp": entry["timestamp"],
@@ -279,7 +280,7 @@ async def fts_stats():
     from sqler.fts import FTSIndex
 
     def _stats():
-        fts = FTSIndex(Article, fields=["title", "content"])
+        fts = FTSIndex(Article, fields=["title", "content"], db=get_db())
         stats = fts.stats()
         return {
             "table_name": stats.table_name,

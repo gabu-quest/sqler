@@ -23,6 +23,9 @@ English: Create/close a process-wide SQLerDB and bind models.
 
 _db: Optional[SQLerDB] = None
 
+# Children before parents: the order a reset deletes in
+MODELS = (Article, Writer, City, Country)
+
 
 def init_db(path: str | None = None):
     """Initialize the global DB (on-disk by default for WAL support).
@@ -41,20 +44,18 @@ def init_db(path: str | None = None):
         db_path = str(Path(__file__).parent / "sqler_demo.db")
     _db = SQLerDB.on_disk(db_path)
 
-    # Register models
-    Country.set_db(_db)
-    City.set_db(_db)
-    Writer.set_db(_db)
-    Article.set_db(_db)
+    # Tables for the models; the models are not bound, every call below names the database
+    for model in MODELS:
+        _db.ensure_table(model._table, versioned=True)
 
     # Indexes for efficient queries
-    Country.ensure_index("code", unique=True)
-    City.ensure_index("country._id")
-    Writer.ensure_index("city._id")
-    Article.ensure_index("writer._id")
+    _db.create_index(Country._table, "code", unique=True)
+    _db.create_index(City._table, "country._id")
+    _db.create_index(Writer._table, "city._id")
+    _db.create_index(Article._table, "writer._id")
 
     # Initialize FTS index for Article
-    Article.create_search_index()
+    Article.create_search_index(_db)
 
     # Configure global cache (100 entries, 5 min TTL)
     configure_cache(max_size=100, default_ttl_seconds=300)
@@ -88,9 +89,20 @@ def close_db() -> None:
         # Disable metrics and logging
         metrics.disable()
         query_logger.disable()
+        # The cache back to the library's defaults, empty
+        configure_cache()
 
         _db.close()
         _db = None
+
+
+def get_row(model, row_id: int):
+    """Load one row of ``model`` by id from the example's database, or ``None``.
+
+    日本語: 例のデータベースから ``model`` の 1 行を id で読み込みます。
+    """
+    rows = model.from_ids([row_id], db=get_db())
+    return rows[0] if rows else None
 
 
 def is_db_empty() -> bool:
@@ -99,25 +111,21 @@ def is_db_empty() -> bool:
     日本語: データベースにデータがないか確認（シード必要か）。
     """
     db = get_db()
-    result = db.execute_sql("SELECT COUNT(*) as cnt FROM countries")
-    return result[0]["cnt"] == 0
+    return Country.using(db).count() == 0
 
 
 def seed_db() -> dict:
     """Seed the database with sample data. Clears existing data first.
 
-    日本語: サンプルデータでデータベースをシード。既存データは削除。
+    The audit log is history and is kept: a reset leaves the entries of the rows it deleted.
+
+    日本語: サンプルデータでデータベースをシード。既存データは削除（監査ログは履歴として残ります）。
     """
     db = get_db()
 
     # Clear existing data in reverse dependency order
-    for table in ["articles", "writers", "cities", "countries"]:
-        db.execute_sql(f"DELETE FROM {table}")
-        # Also clear audit tables if they exist
-        try:
-            db.execute_sql(f"DELETE FROM {table}_audit")
-        except Exception:
-            pass
+    for model in MODELS:
+        model.using(db).delete_all()
 
     # Seed countries
     countries = {}
@@ -130,7 +138,7 @@ def seed_db() -> dict:
     ]
     for name, code in country_data:
         c = Country(name=name, code=code)
-        c.save()
+        c.save(db=db)
         countries[code] = c
 
     # Seed cities
@@ -150,7 +158,7 @@ def seed_db() -> dict:
     for name, country_code in city_data:
         c = City(name=name)
         c.set_country(countries[country_code])
-        c.save()
+        c.save(db=db)
         cities[name] = c
 
     # Seed writers
@@ -168,7 +176,7 @@ def seed_db() -> dict:
     for name, city_name, bio in writer_data:
         w = Writer(name=name, bio=bio)
         w.set_city(cities[city_name])
-        w.save()
+        w.save(db=db)
         writers[name] = w
 
     # Seed articles
@@ -238,7 +246,7 @@ def seed_db() -> dict:
     for title, writer_name, content, tags in articles_data:
         a = Article(title=title, content=content, tags=tags)
         a.set_writer(writers[writer_name])
-        a.save()
+        a.save(db=db)
 
     return {
         "countries": len(countries),

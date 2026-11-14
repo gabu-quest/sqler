@@ -100,16 +100,14 @@ def _get_schema() -> dict[str, Any]:
         else:
             category = "data"
 
-        # Get column info using adapter.execute for PRAGMA
+        # Column info from PRAGMA (a read, so execute_sql takes it)
         columns = []
-        pragma_result = db.adapter.execute(f"PRAGMA table_info({table_name})")
-        for col in pragma_result:
-            # col: (cid, name, type, notnull, default, pk)
+        for col in db.execute_sql(f"PRAGMA table_info({table_name})"):
             columns.append({
-                "name": col[1],
-                "type": col[2] or "BLOB",
-                "pk": bool(col[5]),
-                "nullable": not bool(col[3]),
+                "name": col["name"],
+                "type": col["type"] or "BLOB",
+                "pk": bool(col["pk"]),
+                "nullable": not bool(col["notnull"]),
             })
 
         # Get row count (skip for FTS internal tables)
@@ -129,12 +127,10 @@ def _get_schema() -> dict[str, Any]:
         })
 
     # Get indices - include expression-based indices
-    indices_result = db.execute_sql(
-        "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY tbl_name, name"
-    )
+    indices_result = db.list_indexes()
     indices = []
     for row in indices_result:
-        index_name, table_name, sql = row["name"], row["tbl_name"], row.get("sql", "")
+        index_name, table_name, sql = row["name"], row["table"], row["sql"]
         if not sql:
             continue
 
@@ -147,8 +143,8 @@ def _get_schema() -> dict[str, Any]:
 
         # Also try PRAGMA for regular indices
         if not columns:
-            index_info = list(db.adapter.execute(f"PRAGMA index_info({index_name})"))
-            columns = [col[2] for col in index_info if col[2]]
+            index_info = db.execute_sql(f"PRAGMA index_info({index_name})")
+            columns = [col["name"] for col in index_info if col["name"]]
 
         if columns:
             indices.append({
@@ -160,14 +156,12 @@ def _get_schema() -> dict[str, Any]:
     # Build relationships from foreign keys
     relationships = []
     for table_name in table_names:
-        fk_result = list(db.adapter.execute(f"PRAGMA foreign_key_list({table_name})"))
-        for fk in fk_result:
-            # fk: (id, seq, table, from, to, on_update, on_delete, match)
+        for fk in db.execute_sql(f"PRAGMA foreign_key_list({table_name})"):
             relationships.append({
                 "from_table": table_name,
-                "from_column": fk[3],
-                "to_table": fk[2],
-                "to_column": fk[4],
+                "from_column": fk["from"],
+                "to_table": fk["table"],
+                "to_column": fk["to"],
             })
 
     # If no explicit foreign keys, infer from SQLer RefField patterns
