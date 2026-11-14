@@ -461,11 +461,11 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         reference to its row."""
         cls = type(self)
         payload = {
-            f.name: stored(getattr(self, f.name), SQLerMsgspecModel) for f in _public_fields(cls)
+            f.name: stored(getattr(self, f.name), SQLerMsgspecModel, f.name) for f in _public_fields(cls)
         }
         # Include mixin fields (not visible to msgspec.structs.fields)
         for name in _mixin_field_names(cls):
-            payload[name] = stored(getattr(self, name, None), SQLerMsgspecModel)
+            payload[name] = stored(getattr(self, name, None), SQLerMsgspecModel, name)
         return payload
 
     # ----- dirty tracking -----

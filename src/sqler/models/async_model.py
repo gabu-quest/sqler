@@ -463,7 +463,7 @@ class AsyncSQLerModel(BaseModel):
         """The document ``save()`` writes: each field in stored form, a related model (async
         or sync) as the reference to its row."""
         return {
-            name: stored(getattr(self, name), (AsyncSQLerModel, SQLerModel))
+            name: stored(getattr(self, name), (AsyncSQLerModel, SQLerModel), name)
             for name in type(self).model_fields
             if name != "_id"
         }

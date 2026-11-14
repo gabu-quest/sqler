@@ -915,7 +915,7 @@ def test_a_decimal_a_number_cannot_hold_is_refused_on_save(base, given):
         cls = spec.make(spec.cls, None)
         cls.set_db(rows.db, "t")
         await _aw(cls(v=1).save())
-        with pytest.raises(TypeError, match=rf"^Decimal {re.escape(str(Decimal(given)))} cannot be stored: a number cannot hold it$"):
+        with pytest.raises(TypeError, match=rf"^Decimal {re.escape(str(Decimal(given)))} cannot be stored: a number cannot hold it \(at v\)$"):
             await _aw(cls(v=Decimal(given)).save())
         return await rows.sql("SELECT count(*) FROM t")
 
@@ -1216,7 +1216,7 @@ def test_a_timedelta_no_number_holds_is_refused_on_save(base, given):
         cls = spec.make(spec.cls, None)
         cls.set_db(rows.db, "t")
         await _aw(cls(v=1).save())
-        with pytest.raises(UnstorableValueError, match=rf"^timedelta {re.escape(str(given))} cannot be stored: a number of seconds cannot hold it$"):
+        with pytest.raises(UnstorableValueError, match=rf"^timedelta {re.escape(str(given))} cannot be stored: a number of seconds cannot hold it \(at v\)$"):
             await _aw(cls(v=given).save())
         return await rows.sql("SELECT count(*) FROM t")
 
@@ -1445,6 +1445,26 @@ def test_bytes_in_an_update_of_a_document_field_are_refused(is_async, call):
     assert _run(steps, is_async) == [None]
 
 
+@dataclass
+class _LiteBlob(SQLerLiteModel):
+    __promoted__ = {"blob": "BLOB"}
+    name: str = ""
+    blob: Optional[bytes] = None
+
+
+@dataclass
+class _LiteAsyncBlob(AsyncSQLerLiteModel):
+    __promoted__ = {"blob": "BLOB"}
+    name: str = ""
+    blob: Optional[bytes] = None
+
+
+class _MsgspecBlob(SQLerMsgspecModel, kw_only=True):
+    __promoted__ = {"blob": "BLOB"}
+    name: str = ""
+    blob: Optional[bytes] = None
+
+
 class BlobRow(SQLerModel):
     __promoted__ = {"blob": "BLOB"}
     name: str = ""
@@ -1474,6 +1494,9 @@ _BLOB_MODELS = {
     "safe": (BlobSafeRow, False),
     "async": (BlobAsyncRow, True),
     "async-safe": (BlobAsyncSafeRow, True),
+    "lite": (_LiteBlob, False),
+    "async-lite": (_LiteAsyncBlob, True),
+    "msgspec": (_MsgspecBlob, False),
 }
 
 
@@ -1503,6 +1526,136 @@ def test_a_promoted_blob_column_takes_bytes_in_a_document_write(is_async):
         return await rows.sql("SELECT blob, typeof(blob) FROM raw")
 
     assert _run(steps, is_async) == [(BLOB, "blob")]
+
+
+def _promoted(spec):
+    """A model of the base with ``v`` in the document and ``col`` as a promoted column."""
+    attrs = {"__annotations__": {"v": Any, "col": Any}, "v": None, "col": None, "__promoted__": {"col": "TEXT"}}
+    if spec.cls is SQLerMsgspecModel:
+        return type("SvP", (spec.cls,), attrs, kw_only=True)
+    cls = type("SvP", (spec.cls,), attrs)
+    return cls if spec.validates else dataclass(cls)
+
+
+def _nan():
+    return Decimal("NaN")
+
+
+REFUSED = [
+    pytest.param(lambda: BLOB, f"{_BYTES_MESSAGE}", id="bytes"),
+    pytest.param(_nan, "Decimal NaN cannot be stored: a number cannot hold it", id="decimal"),
+    pytest.param(
+        lambda: timedelta.max,
+        f"timedelta {timedelta.max} cannot be stored: a number of seconds cannot hold it",
+        id="timedelta",
+    ),
+    pytest.param(object, "Object of type object is not JSON serializable", id="object"),
+]
+
+
+def _refusal(spec, make_doc, promoted=False):
+    """The error a save of ``make_doc(cls)`` raises, and how many rows the table holds after it."""
+
+    async def steps(rows):
+        cls = _promoted(spec) if promoted else spec.make(spec.cls, None)
+        cls.set_db(rows.db, "t")
+        with pytest.raises(UnstorableValueError) as err:
+            await _aw(make_doc(cls).save())
+        if not await rows.sql("SELECT 1 FROM sqlite_master WHERE name = 't'"):
+            return err.value, 0
+        return err.value, (await rows.sql("SELECT count(*) FROM t"))[0][0]
+
+    return _run(steps, spec.is_async)
+
+
+_PLACED = [
+    pytest.param(lambda cls, bad: cls(v=bad), "v", id="field"),
+    pytest.param(lambda cls, bad: cls(v=[{"price": 1}, {"price": bad}]), "v[1].price", id="nested"),
+    pytest.param(lambda cls, bad: cls(v=[1, bad, bad]), "v[1]", id="second-after-good"),
+    pytest.param(lambda cls, bad: cls(v={"a": {"b": [bad]}, "c": bad}), "v.a.b[0]", id="first-in-order"),
+]
+
+
+@pytest.mark.parametrize("make_bad, message", REFUSED)
+@pytest.mark.parametrize("build, place", _PLACED)
+@pytest.mark.parametrize("base", list(BASES))
+def test_a_refused_value_in_a_model_save_names_its_place(base, build, place, make_bad, message):
+    spec = BASES[base]
+    bad = make_bad()
+    error, count = _refusal(spec, lambda cls: build(cls, bad))
+    assert (error.field, str(error), count) == (place, f"{message} (at {place})", 0)
+    assert error.value is bad
+
+
+@pytest.mark.parametrize("base", list(BASES))
+def test_a_refused_value_after_a_saved_row_is_named_and_not_the_row(base):
+    """A row of its own in the value is stored as a reference; the place is the refused
+    value's, one entry further on."""
+    spec = BASES[base]
+    bad = Decimal("NaN")
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, None)
+        cls.set_db(rows.db, "t")
+        row = cls(v=1)
+        await _aw(row.save())
+        with pytest.raises(UnstorableValueError) as err:
+            await _aw(cls(v=[row, bad]).save())
+        return err.value, (await rows.sql("SELECT count(*) FROM t"))[0][0]
+
+    error, count = _run(steps, spec.is_async)
+    assert (error.field, str(error), count) == (
+        "v[1]",
+        "Decimal NaN cannot be stored: a number cannot hold it (at v[1])",
+        1,
+    )
+    assert error.value is bad
+
+
+@pytest.mark.parametrize("make_bad, message, inner, attr", [
+    pytest.param(lambda: Decimal("1e30"), "Decimal 1E+30 cannot be stored: a number cannot hold it", Priced, "price", id="decimal"),
+    pytest.param(lambda: timedelta.max, REFUSED[2].values[1], Lasted, "took", id="timedelta"),
+])
+@pytest.mark.parametrize("base", list(BASES))
+def test_a_refused_value_in_a_model_held_by_the_saved_model_names_the_holders_field(base, make_bad, message, inner, attr):
+    spec = BASES[base]
+    held = inner(**{attr: make_bad()})
+    error, count = _refusal(spec, lambda cls: cls(v=held))
+    place = f"v.{attr}"
+    assert (error.field, str(error), count) == (place, f"{message} (at {place})", 0)
+
+
+@pytest.mark.parametrize("base", list(BASES))
+def test_a_dict_key_that_is_not_text_is_jsons_own_error_with_no_place(base):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, None)
+        cls.set_db(rows.db, "t")
+        with pytest.raises(TypeError) as err:
+            await _aw(cls(v={(1, 2): 1}).save())
+        return type(err.value), await rows.sql("SELECT count(*) FROM t")
+
+    assert _run(steps, spec.is_async) == (TypeError, [(0,)])
+
+
+@pytest.mark.parametrize("make_bad, message", REFUSED[1:3])
+@pytest.mark.parametrize("base", list(BASES))
+def test_a_refused_value_in_a_promoted_column_names_the_column(base, make_bad, message):
+    spec = BASES[base]
+    bad = make_bad()
+    error, count = _refusal(spec, lambda cls: cls(col=bad), promoted=True)
+    assert (error.field, str(error), count) == ("col", f"{message} (at col)", 0)
+    assert error.value is bad
+
+
+@pytest.mark.parametrize("make_bad, message", REFUSED[1:3])
+@pytest.mark.parametrize("base", [b for b in BASES if "safe" in b])
+def test_a_refused_value_in_a_promoted_column_of_a_versioned_save_names_the_column(base, make_bad, message):
+    spec = BASES[base]
+    bad = make_bad()
+    error, count = _refusal(spec, lambda cls: cls(col=bad), promoted=True)
+    assert (error.field, str(error), count) == ("col", f"{message} (at col)", 0)
 
 
 class TagRow(SQLerModel):

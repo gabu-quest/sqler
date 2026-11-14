@@ -41,21 +41,32 @@ _AS_IS = frozenset({str, int, float, bool, type(None)})
 _BINARY = (bytes, bytearray, memoryview)
 
 
-def stored(value: Any, models: Any = ()) -> Any:
+def stored(value: Any, models: Any = (), field: str = "") -> Any:
     """The stored form of ``value``. An instance of ``models`` (a class or a tuple of them)
-    is stored as the reference to its row."""
+    is stored as the reference to its row. ``field`` is where ``value`` sits in the document
+    or table, so that a refused value is named by its place."""
+    try:
+        return _stored(value, models)
+    except UnstorableValueError as err:  # the place is looked for only now that the value is refused
+        place = _locate(value, field, models)
+        if not place:
+            raise
+        raise UnstorableValueError(f"{err.message} (at {place})", field=place, value=err.value) from None
+
+
+def _stored(value: Any, models: Any) -> Any:
     if type(value) in _AS_IS:
         return value
     if isinstance(value, dict):
         if "_table" in value and "_id" in value:  # a stored reference holds nothing else
             return {"_table": value["_table"], "_id": value["_id"]}
-        return {k: stored(v, models) for k, v in value.items()}
+        return {k: _stored(v, models) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [stored(v, models) for v in value]
+        return [_stored(v, models) for v in value]
     if isinstance(value, models):
         return _reference(value)
     plain = _plain(value)
-    return value if plain is value else stored(plain, models)
+    return value if plain is value else _stored(plain, models)
 
 
 def dumps(doc: Any) -> str:
@@ -140,30 +151,30 @@ def _seconds(value: timedelta) -> int | float:
     raise UnstorableValueError(f"timedelta {value} cannot be stored: a number of seconds cannot hold it", value=value)
 
 
-def _locate(value: Any, path: str = "") -> str | None:
+def _locate(value: Any, path: str = "", models: Any = ()) -> str | None:
     """The path of the first value in ``value`` that has no stored form, like ``lines[2].price``.
 
     It walks in the order the encoder does, so it reaches that value before anything the
     encoder had not yet accepted."""
     if isinstance(value, dict):
         for key, item in value.items():
-            found = _locate(item, f"{path}.{key}" if path else str(key))
+            found = _locate(item, f"{path}.{key}" if path else str(key), models)
             if found is not None:
                 return found
         return None
     if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
-            found = _locate(item, f"{path}[{index}]")
+            found = _locate(item, f"{path}[{index}]", models)
             if found is not None:
                 return found
         return None
-    if isinstance(value, (str, int, float, type(None))):
+    if isinstance(value, (str, int, float, type(None), models)):  # a row of its own is a reference
         return None
     try:
         plain = _plain(value)
     except UnstorableValueError:
         return path
-    return path if plain is value else _locate(plain, path)
+    return path if plain is value else _locate(plain, path, models)
 
 
 def _refuse_binary(value: Any) -> None:
