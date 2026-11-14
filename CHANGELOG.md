@@ -44,6 +44,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`first_or_create` under a unique index no longer fails when two callers race.** The caller whose insert is refused gets the other's row with `created` false. A refusal from a unique index on a field that is not in the lookup still raises `UniqueConstraintError`.
 - **`save(db=db)` on a model with promoted columns creates its table** on a fresh database instead of raising "no such table" (sync bases).
 
+- **A read of a missing table keeps your uncommitted work.** Both adapters rolled back the connection after any failed statement, so a raw statement left uncommitted outside a transaction was dropped when the same thread or task then read a table that does not exist. A read that fails with "no such table" now rolls back nothing; a failing write still does.
+- **A table created in a transaction that rolled back is created again by the next write.** The database object kept remembering the promoted or versioned table, and the next write failed with "no such table".
+- **Async adapter: a fetch that fails or is cancelled returns its connection.** `fetchone`, `fetchall`, `fetchmany` and `async for` on the cursor from `execute()`, outside a transaction. `execute()` now returns a wrapper around the `aiosqlite` cursor with the same methods and attributes; `isinstance(cursor, aiosqlite.Cursor)` is false.
+- **Async adapter: a statement cancelled inside a transaction no longer holds the caller.** The cancellation reaches the caller at once instead of after the statement has finished in its thread; the connection returns to the pool, rolled back, when SQLite is done with it.
+- **Ending a transaction by rollback raises nothing of its own.** The caller sees its own exception, also when the adapter was closed inside the block or the pool's only connection is still busy.
+- **A failed `backup()` or `async_backup()` leaves the destination as it was.** The copy is made in a temporary file beside the destination and moved into place when complete; before, a failure left an empty or half-written file. A destination that is a symlink is written through, and an existing destination keeps its mode.
+- **`metrics.disable()` puts the query logger back as it was before `enable()`.**
+- **`metrics.prometheus_export()` gives valid output.** Label values and table names are escaped, and the duration histogram is declared once under `sqler_query_duration_ms` with `_bucket`, `_sum` and `_count` samples.
+- **Two migration runners started together no longer report a failure.** The slower runner skips a version the other already recorded (`migrate`) or already removed (`rollback`) and reports success with nothing applied; each `up()` and `down()` runs once. Sync and async.
+- **CSV export and import return every string unchanged.** The empty string, strings starting with `=`, `+`, `-`, `@`, tab or CR, and cells with line breaks round-trip. Export puts one apostrophe in front of such a string and import removes it; a cell such as `'90s` written by another program is read as written.
+- **`import_csv(batch_size=N)` works.** An import that fails at a row keeps the full batches before it and nothing of the failed batch.
+- **`AuditLogMixin` and `AsyncAuditLogMixin` write a change and its audit row together.** Outside a transaction a save or delete whose audit row is refused leaves no saved change, and a refused delete leaves no audit row. After a failed save the instance keeps its earlier `_id` and `_version`.
+- **A safe model reached through a reference keeps its stored version**, so saving it does not raise `StaleVersionError` (never released; found while batching `from_id`).
+- **`from_ids` and `query().all()` no longer raise "no such table" when a referenced table is gone.** The reference reads as `None`, as `from_id` gives.
+- **`set_db()` on the safe model classes reports its deprecation warning at your own line**, so Python's default warning filters show it.
+
 ### Changed
 
 - **The PyPI publish workflow runs the linter and the test suite first**, and refuses a tag that does not match the version in `pyproject.toml`.
@@ -59,10 +75,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **A violated unique index or primary key raises `UniqueConstraintError`**, sync and async, from every write path including a raw `adapter.execute`. It names the table and columns SQLite reported (or the index, for an index on an expression) and has the driver error as its cause. It is still a `sqlite3.IntegrityError`, so `except sqlite3.IntegrityError` keeps working; NOT NULL, CHECK and FOREIGN KEY errors are unchanged.
 
 - **Every route uses one rule for a model's table**: the table bound with `set_db()`, else `__tablename__`, else the plural of the class name. For a class that was never bound, `FTSIndex` now reads `articles` instead of `article`, so its default index name changes from `article_fts` to `articles_fts`.
-- **A read through a model creates no table.** `using(db)`, async `query()`, `from_id`, `from_ids` and `refresh` on a table that does not exist give the empty answer (`[]`, `None`, 0, false; a queryset `update()` or `delete()` changes 0 rows) instead of creating the table or raising "no such table". "no such table" for another table in the query still raises. Sync `query()` on a bound class still creates its table.
+- **A read creates no table.** `find_document`, `find_documents`, `find_document_with_version` and `query()` of `SQLerDB` and `AsyncSQLerDB`, and through a model `query()`, `using(db)`, `from_id`, `from_ids` and `refresh`, give the empty answer on a table that does not exist (`[]`, `None`, 0, false; a queryset `update()` or `delete()` changes 0 rows) instead of creating the table or raising "no such table". A read no longer needs the write lock. "no such table" for another table in the query still raises. `find_document_with_version` still adds a missing `_version` column to an existing table.
 - **Model classes are registered when they are defined**, so `sqler.registry.tables()` lists classes that were never bound, and the integrity scans look at their tables. A class bound with `set_db()` is never replaced by a class that is only defined.
 - **`as_ref()` on an unsaved model** now says "model must be saved"; a saved model no longer has to be bound.
 - **Lite models: a reference to a row that no longer exists stays the `{"_table", "_id"}` dict when it is read through a query.** Before, the field held a model built from those two keys alone, with every other field at its default.
+
+- **`from_id()` and `refresh()` read each referenced table with one query** instead of one query per reference (a row with 20 references: 2 queries, was 21), and a cycle of references is cut at the first row seen again, as `from_ids()` cuts it, instead of after about 160 levels.
+- **One `NoAdapterError`.** The sync and the async query raise `sqler.NoAdapterError`. It is a `QueryError` and still a built-in `ConnectionError`, so `except ConnectionError` keeps working.
+- **`F('')` raises `InvalidFieldNameError`.**
+- **`FTSIndex` refuses a search field with a dot** (`meta.title`) with `InvalidIdentifierError` in the constructor and the `fields` setter; before, `create()` failed with an SQLite parse error.
+- **`import_csv()`'s `batch_size` default is `None`** (one commit per row, as before); it was 100 and ignored. A value below 1 raises `ValueError`.
+- **CSV import removes one leading apostrophe from a cell that looks escaped**: apostrophes followed by nothing or by `=`, `+`, `-`, `@`, tab or CR. Such a cell written by hand or by another program is read without that apostrophe.
+- **`metrics.enable()` raises `ValueError`** for a custom label named `le`, `table` or `operation`, or for two labels that become the same name once cleaned.
 
 ### Added
 
