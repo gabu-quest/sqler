@@ -125,15 +125,6 @@ WAYS = ["from_id", "from_ids", "refresh", "all", "first"]
 # ---- helpers ------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _empty_query_log():
-    """The query log keeps at most 1000 entries and ``capture()`` reads from its length, so a
-    full log captures nothing: start and leave each test with it empty."""
-    query_logger.clear()
-    yield
-    query_logger.clear()
-
-
 async def aw(x: Any) -> Any:
     return await x if inspect.isawaitable(x) else x
 

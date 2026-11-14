@@ -981,6 +981,47 @@ def test_rebase_onto_a_row_naming_a_deleted_child(kind):
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_rebase_onto_a_row_the_class_cannot_load_raises_stale_and_writes_nothing(kind):
+    # the other writer left text where the class has a list of strings
+    async def scenario():
+        rows = await Rows(kind).open()
+        try:
+            mine = await rows.load()
+            await _aw(
+                rows.db.adapter.execute(
+                    "UPDATE rb_doc SET data = json_set(data, '$.tags', 'text', '$._version', _version + 1),"
+                    " _version = _version + 1 WHERE _id = 1"
+                )
+            )
+            await _aw(rows.db.adapter.commit())
+            mine.count += 1
+            error = None
+            try:
+                await _aw(mine.save())
+            except Exception as exc:  # noqa: BLE001 - the type is the assertion below
+                error = exc
+            row = await rows.row()
+            return (
+                None if error is None else (type(error).__name__, type(error.__cause__).__name__),
+                row["count"],
+                row["tags"],
+                row["_version"],
+                mine.count,
+                mine._version,
+            )
+        finally:
+            await rows.close()
+
+    got = asyncio.run(scenario())
+    if kind in ("sync", "async"):
+        # the merged row is not a model of the class: the conflict is raised, nothing is written
+        assert got == (("StaleVersionError", "ValidationError"), 10, "text", 1, 11, 0)
+    else:
+        # a lite class checks no type: the save is rebased onto the row as it is
+        assert got == (None, 11, "text", 2, 11, 2)
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_two_rebases_inside_one_save_keep_both_foreign_saves(kind):
     async def steps(rows, mine, theirs):
         theirs.title = "theirs"

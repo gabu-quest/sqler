@@ -709,14 +709,7 @@ def rdb():
 
 class TestBatchResolveRejectsHostileRefs:
     # a reference the walk refuses leads to no row of the field's class: it is left out of
-    # the dict, and no statement is sent for it (the log is emptied first: ``capture()``
-    # reads from its length, and a full log captures nothing)
-
-    @pytest.fixture(autouse=True)
-    def _empty_query_log(self):
-        query_logger.clear()
-        yield
-        query_logger.clear()
+    # the dict, and no statement is sent for it
 
     @pytest.mark.parametrize("table", HOSTILE_TABLES)
     def test_hostile_table_left_out(self, rdb, table):
