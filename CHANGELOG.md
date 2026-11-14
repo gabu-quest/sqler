@@ -68,6 +68,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **A database object that did not create a table reads its promoted columns.** A second process, `Model.using(db)` without `set_db()`, or any `SQLerDB` that never created or ensured the table read every row without them, through `find_document` as well. The columns are now read from the table, once per database object.
 - **`resolve(False)` stays in force across chained calls** such as `resolve(False).filter(...)`, and a chained queryset keeps the database it was made from.
 - **A very long id list no longer fails with "too many SQL variables"** in `from_ids()` and `find_documents()`.
+- **A model loaded through `from_ids()`, `query().all()` or `first()` can be saved when it holds a typed reference.** A field typed as a model (`Child`, `Optional[Child]`, `list[Child]`) held a child without an `_id`, and `save()` raised "Related model must be saved before saving parent". The child is now the model of its row and can be saved itself.
+- **Lite models: a typed list loaded through `from_ids()`, `query().all()` or `first()` holds models.** It held dicts, and `save()` replaced the stored references with copies of the rows.
+- **A child of a safe model class loaded through `from_ids()`, `query().all()` or `first()` holds the version of its row**, so saving it no longer raises `StaleVersionError`.
+- **`SQLerSafeModel.from_id()` and `refresh()` follow typed references**, sync and async. They gave an empty child without an `_id`.
 
 ### Changed
 
@@ -101,6 +105,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`metrics.enable()` raises `ValueError`** for a custom label named `le`, `table` or `operation`, or for two labels that become the same name once cleaned.
 - **A column added to a table by hand shows in documents read by id**, under the column's name, when that name is a valid field name.
 - **Lite safe models: `from_ids()` sends one statement** instead of one per id, and leaves out an id given as a string, as `from_ids()` on the other bases does.
+- **`SQLerSafeModel.from_id()` and `refresh()` raise `ValidationError` for a typed list that names a deleted row**, as `SQLerModel.from_id()` does. They gave an empty child in its place.
+- **A `mode="before"` validator on a typed reference field receives the child model** through `from_ids()`, `query().all()` and `first()`, as it does through `from_id()`. It received the stored dict.
+- **Async `query().all()` cuts a cycle of typed references where the other ways do**, one level earlier than before, with fewer statements.
 
 ### Added
 
