@@ -7,6 +7,7 @@ from sqler.exceptions import (
     InvalidColumnDefError,
     InvalidFieldNameError,
     InvalidIdentifierError,
+    InvalidTableNameError,
 )
 from sqler.fts import FTSIndex
 from sqler.ops import checkpoint
@@ -16,6 +17,7 @@ from sqler.utils import (
     validate_column_name,
     validate_field_name,
     validate_identifier,
+    validate_table_name,
 )
 
 # ---------------------------------------------------------------------------
@@ -651,3 +653,223 @@ class TestReservedWordProtection:
         ddl = row[0]
         assert "status" in ddl
         assert "priority" in ddl
+
+
+# ---------------------------------------------------------------------------
+# WS-Q: names stored in documents / used as JSON keys never change the statement
+# ---------------------------------------------------------------------------
+
+from pydantic import Field as _PydField  # noqa: E402
+from sqler import SQLerDB as _SQLerDB  # noqa: E402
+from sqler.models import SQLerModel  # noqa: E402
+from sqler.query import SQLerField as F  # noqa: E402
+
+HOSTILE_TABLES = [
+    "'; DROP TABLE users; --",
+    "users WHERE 1=1 UNION SELECT _id, data FROM secrets --",
+    "secrets WHERE 1 UNION SELECT _id, data FROM secrets",
+    "users where",
+    "",
+    "a b",
+    "a\nb",
+    "t\x00",
+    "名前",
+    "x" * 10000 + "'",
+]
+
+BAD_IDS = ["1 OR 1=1", None, 1.5, [1], True, {"a": 1}, "1", 2**63, -(2**63) - 1, 10**20]
+EDGE_IDS = [2**63 - 1, -(2**63)]
+TRAILING_NEWLINE_NAMES = ["users\n", "users\r\n", "\nusers", "a\n", "_\n"]
+
+
+class Holder(SQLerModel):
+    payload: dict = _PydField(default_factory=dict)
+
+
+@pytest.fixture
+def rdb():
+    d = _SQLerDB.in_memory(shared=False)
+    Holder.set_db(d)
+    d.insert_document("secrets", {"secret": "s3"})
+    d.insert_document("users", {"name": "u1"})
+    yield d
+    d.close()
+
+
+class TestBatchResolveRejectsHostileRefs:
+    @pytest.mark.parametrize("table", HOSTILE_TABLES)
+    def test_hostile_table_left_unchanged(self, rdb, table):
+        ref = {"_table": table, "_id": 1}
+        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.parametrize("bad", BAD_IDS, ids=repr)
+    def test_bad_id_left_unchanged(self, rdb, bad):
+        ref = {"_table": "users", "_id": bad}
+        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.parametrize("edge", EDGE_IDS, ids=repr)
+    def test_edge_id_without_row_left_unchanged(self, rdb, edge):
+        ref = {"_table": "users", "_id": edge}
+        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.parametrize("table", ["users\n", "users\r\n", "\nusers"], ids=repr)
+    def test_newline_table_left_unchanged(self, rdb, table):
+        ref = {"_table": table, "_id": 1}
+        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    def test_bad_ref_does_not_stop_good_ref(self, rdb):
+        bad = {"_table": "users; x", "_id": 1}
+        good = {"_table": "users", "_id": 1}
+        out = Holder.query()._batch_resolve([{"payload": {"a": bad, "b": good}}])
+        assert out[0]["payload"]["a"] == bad
+        assert out[0]["payload"]["b"]["name"] == "u1"
+
+    def test_end_to_end_all(self, rdb):
+        ref = {"_table": "secrets WHERE 1 UNION SELECT _id, data FROM secrets", "_id": 1}
+        Holder(payload={"k": ref}).save()
+        got = Holder.query().all()
+        assert got[0].payload == {"k": ref}
+
+
+# --- JSON path literals -----------------------------------------------------
+
+LITERAL_NAMES = [
+    "x') OR 1=1 --",
+    "it's",
+    'a"b',
+    "'; DROP TABLE users; --",
+    "",
+    "n" * 10000,
+    "名前",
+    "two words"
+]
+UNMATCHABLE_NAMES = ['a\\"b', "a\\'b", "a\\b", "a\x00b", "a\nb", "a\tb", "a\u00a0b", "a  b"]
+
+
+@pytest.fixture
+def jdb():
+    d = _SQLerDB.in_memory(shared=False)
+    yield d
+    d.close()
+
+
+def _ids(db, expr):
+    return sorted(r["_id"] for r in db.query("docs").filter(expr).all_dicts())
+
+
+class TestJsonPathLiteralEscaping:
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_field_matches_key_literally(self, jdb, name):
+        a = jdb.insert_document("docs", {name: 1})
+        jdb.insert_document("docs", {"plain": 1})
+        assert _ids(jdb, F(name) == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_nested_key_matches_literally(self, jdb, name):
+        a = jdb.insert_document("docs", {"o": {name: 1}})
+        jdb.insert_document("docs", {"o": {"plain": 1}})
+        assert _ids(jdb, F("o")[name] == 1) == [a]
+
+    @pytest.mark.parametrize("name", UNMATCHABLE_NAMES, ids=repr)
+    def test_unrepresentable_name_raises_sqler_error(self, jdb, name):
+        jdb.insert_document("docs", {"plain": 1})
+        with pytest.raises(InvalidFieldNameError):
+            _ids(jdb, F(name) == 1)
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_any_last_field(self, jdb, name):
+        a = jdb.insert_document("docs", {"arr": [{name: 1}]})
+        jdb.insert_document("docs", {"arr": [{"plain": 1}]})
+        assert _ids(jdb, F("arr").any()[name] == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_any_array_key(self, jdb, name):
+        a = jdb.insert_document("docs", {name: [{"v": 1}]})
+        jdb.insert_document("docs", {"plain": [{"v": 1}]})
+        assert _ids(jdb, F(name).any()["v"] == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_any_nested_array_key(self, jdb, name):
+        a = jdb.insert_document("docs", {"o": [{name: [{"v": 1}]}]})
+        jdb.insert_document("docs", {"o": [{"plain": [{"v": 1}]}]})
+        assert _ids(jdb, F("o").any()[name].any()["v"] == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_any_context_where_nested_key(self, jdb, name):
+        a = jdb.insert_document("docs", {"o": [{name: 1}]})
+        jdb.insert_document("docs", {"o": [{"plain": 1}]})
+        expr = F("o").any().where(F(name) == 1)
+        assert _ids(jdb, expr.to_expression()) == [a]
+
+    @pytest.mark.parametrize("name", UNMATCHABLE_NAMES, ids=repr)
+    def test_any_unrepresentable_raises(self, jdb, name):
+        with pytest.raises(InvalidFieldNameError):
+            _ids(jdb, F("arr").any()[name] == 1)
+        with pytest.raises(InvalidFieldNameError):
+            _ids(jdb, F(name).any()["v"] == 1)
+
+    @pytest.mark.parametrize("name", UNMATCHABLE_NAMES, ids=repr)
+    def test_statement_refused_for_unmatchable_name(self, name):
+        with pytest.raises(InvalidFieldNameError):
+            (F(name) == 1).sql  # noqa: B018
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_statement_text_has_no_bare_quote(self, name):
+        sql = (F(name) == 1).sql
+        literal = sql.split("JSON_EXTRACT(data, ", 1)[1].rsplit(") = ?", 1)[0]
+        assert literal.startswith("'") and literal.endswith("'")
+        assert "'" not in literal[1:-1].replace("''", "")
+
+    def test_ordinary_names_keep_their_sql(self):
+        assert (F("a") == 1).sql == "JSON_EXTRACT(data, '$.a') = ?"
+        assert (F(["a", "b", 1, "c"]) == 1).sql == "JSON_EXTRACT(data, '$.a.b[1].c') = ?"
+        assert (F("a-b") == 1).sql == "JSON_EXTRACT(data, '$.\"a-b\"') = ?"
+        assert (F("a b") == 1).sql == "JSON_EXTRACT(data, '$.\"a b\"') = ?"
+        assert (F("a.b") == 1).sql == "JSON_EXTRACT(data, '$.\"a.b\"') = ?"
+        assert (F("arr").any()["val"] == 1).sql == (
+            "EXISTS (SELECT 1 FROM json_each(data, '$.arr') AS a "
+            "WHERE json_extract(a.value, '$.val') = ?)"
+        )
+        assert (F("l1").any()["arr2"].any()["f"] > 1).sql == (
+            "EXISTS (SELECT 1 FROM json_each(data, '$.l1') AS a "
+            "JOIN json_each(a.value, '$.arr2') AS b "
+            "WHERE json_extract(b.value, '$.f') > ?)"
+        )
+
+    def test_expression_index_still_used(self, jdb):
+        jdb.insert_document("docs", {"a-b": 1})
+        jdb.adapter.execute("CREATE INDEX ix ON docs (JSON_EXTRACT(data, '$.\"a-b\"'))")
+        plan = jdb.query("docs").filter(F("a-b") == 1).explain_query_plan(jdb.adapter)
+        assert any("ix" in str(tuple(r)) for r in plan)
+
+
+class TestValidatorsRefuseTrailingNewline:
+    @pytest.mark.parametrize("name", TRAILING_NEWLINE_NAMES, ids=repr)
+    def test_table_name(self, name):
+        with pytest.raises(InvalidTableNameError):
+            validate_table_name(name)
+
+    @pytest.mark.parametrize("name", TRAILING_NEWLINE_NAMES, ids=repr)
+    def test_identifier(self, name):
+        with pytest.raises(InvalidIdentifierError):
+            validate_identifier(name)
+
+    @pytest.mark.parametrize("name", TRAILING_NEWLINE_NAMES, ids=repr)
+    def test_column_name(self, name):
+        with pytest.raises(InvalidIdentifierError):
+            validate_column_name(name)
+
+    @pytest.mark.parametrize("name", TRAILING_NEWLINE_NAMES + ["a.b\n", "a\n.b"], ids=repr)
+    def test_field_name(self, name):
+        with pytest.raises(InvalidFieldNameError):
+            validate_field_name(name)
+
+    @pytest.mark.parametrize("name", ["users", "_a1", "A"])
+    def test_valid_names_stay_valid(self, name):
+        assert validate_table_name(name) == name
+        assert validate_identifier(name) == name
+        assert validate_field_name(name + ".b_2") == name + ".b_2"

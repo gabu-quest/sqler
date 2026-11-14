@@ -266,3 +266,167 @@ class TestAsyncCreateIndexWhereRejectsInjection:
             "name",
             where="json_extract(data,'$.name') IS NOT NULL",
         )
+
+
+# ---------------------------------------------------------------------------
+# WS-Q: names stored in documents / used as JSON keys never change the statement
+# ---------------------------------------------------------------------------
+
+from pydantic import Field as _PydField  # noqa: E402
+from sqler import AsyncSQLerModel  # noqa: E402
+from sqler.query import SQLerField as F  # noqa: E402
+
+HOSTILE_TABLES = [
+    "'; DROP TABLE users; --",
+    "users WHERE 1=1 UNION SELECT _id, data FROM secrets --",
+    "secrets WHERE 1 UNION SELECT _id, data FROM secrets",
+    "users where",
+    "",
+    "a b",
+    "a\nb",
+    "t\x00",
+    "名前",
+    "x" * 10000 + "'",
+]
+
+BAD_IDS = ["1 OR 1=1", None, 1.5, [1], True, {"a": 1}, "1", 2**63, -(2**63) - 1, 10**20]
+EDGE_IDS = [2**63 - 1, -(2**63)]
+
+
+class AHolder(AsyncSQLerModel):
+    payload: dict = _PydField(default_factory=dict)
+
+
+@pytest_asyncio.fixture
+async def rdb():
+    db = AsyncSQLerDB.in_memory(shared=False)
+    await db.connect()
+    AHolder.set_db(db)
+    await db.insert_document("secrets", {"secret": "s3"})
+    await db.insert_document("users", {"name": "u1"})
+    try:
+        yield db
+    finally:
+        AHolder.set_db(None)
+        await db.close()
+
+
+class TestAsyncBatchResolveRejectsHostileRefs:
+    @pytest.mark.parametrize("table", HOSTILE_TABLES)
+    @pytest.mark.asyncio
+    async def test_hostile_table_left_unchanged(self, rdb, table):
+        ref = {"_table": table, "_id": 1}
+        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.parametrize("bad", BAD_IDS, ids=repr)
+    @pytest.mark.asyncio
+    async def test_bad_id_left_unchanged(self, rdb, bad):
+        ref = {"_table": "users", "_id": bad}
+        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.parametrize("edge", EDGE_IDS, ids=repr)
+    @pytest.mark.asyncio
+    async def test_edge_id_without_row_left_unchanged(self, rdb, edge):
+        ref = {"_table": "users", "_id": edge}
+        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.parametrize("table", ["users\n", "users\r\n", "\nusers"], ids=repr)
+    @pytest.mark.asyncio
+    async def test_newline_table_left_unchanged(self, rdb, table):
+        ref = {"_table": table, "_id": 1}
+        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.asyncio
+    async def test_bad_ref_does_not_stop_good_ref(self, rdb):
+        bad = {"_table": "users; x", "_id": 1}
+        good = {"_table": "users", "_id": 1}
+        out = await AHolder.query()._abatch_resolve([{"payload": {"a": bad, "b": good}}])
+        assert out[0]["payload"]["a"] == bad
+        assert out[0]["payload"]["b"]["name"] == "u1"
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_all(self, rdb):
+        ref = {"_table": "secrets WHERE 1 UNION SELECT _id, data FROM secrets", "_id": 1}
+        await AHolder(payload={"k": ref}).save()
+        got = await AHolder.query().all()
+        assert got[0].payload == {"k": ref}
+
+
+LITERAL_NAMES = [
+    "x') OR 1=1 --",
+    "it's",
+    'a"b',
+    "'; DROP TABLE users; --",
+    "",
+    "n" * 10000,
+    "名前",
+    "two words",
+]
+UNMATCHABLE_NAMES = ['a\\"b', "a\\'b", "a\\b", "a\x00b", "a\nb", "a\tb", "a b", "a  b"]
+
+
+@pytest_asyncio.fixture
+async def jdb():
+    db = AsyncSQLerDB.in_memory(shared=False)
+    await db.connect()
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
+async def _ids(db, expr):
+    q = (await db.query("docs")).filter(expr)
+    return sorted(r["_id"] for r in await q.all_dicts())
+
+
+class TestAsyncJsonPathLiteralEscaping:
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    @pytest.mark.asyncio
+    async def test_field_matches_key_literally(self, jdb, name):
+        a = await jdb.insert_document("docs", {name: 1})
+        await jdb.insert_document("docs", {"plain": 1})
+        assert await _ids(jdb, F(name) == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    @pytest.mark.asyncio
+    async def test_any_last_field(self, jdb, name):
+        a = await jdb.insert_document("docs", {"arr": [{name: 1}]})
+        await jdb.insert_document("docs", {"arr": [{"plain": 1}]})
+        assert await _ids(jdb, F("arr").any()[name] == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    @pytest.mark.asyncio
+    async def test_any_nested_array_key(self, jdb, name):
+        a = await jdb.insert_document("docs", {"o": [{name: [{"v": 1}]}]})
+        await jdb.insert_document("docs", {"o": [{"plain": [{"v": 1}]}]})
+        assert await _ids(jdb, F("o").any()[name].any()["v"] == 1) == [a]
+
+    @pytest.mark.parametrize("name", UNMATCHABLE_NAMES, ids=repr)
+    @pytest.mark.asyncio
+    async def test_unrepresentable_name_raises_sqler_error(self, jdb, name):
+        await jdb.insert_document("docs", {"plain": 1})
+        with pytest.raises(InvalidFieldNameError):
+            await _ids(jdb, F(name) == 1)
+        with pytest.raises(InvalidFieldNameError):
+            await _ids(jdb, F("arr").any()[name] == 1)
+        with pytest.raises(InvalidFieldNameError):
+            await _ids(jdb, F(name).any()["v"] == 1)
+
+
+class TestAsyncStatementText:
+    @pytest.mark.parametrize("name", UNMATCHABLE_NAMES, ids=repr)
+    def test_statement_refused_for_unmatchable_name(self, name):
+        with pytest.raises(InvalidFieldNameError):
+            (F(name) == 1).sql  # noqa: B018
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_statement_text_has_no_bare_quote(self, name):
+        sql = (F(name) == 1).sql
+        literal = sql.split("JSON_EXTRACT(data, ", 1)[1].rsplit(") = ?", 1)[0]
+        assert literal.startswith("'") and literal.endswith("'")
+        assert "'" not in literal[1:-1].replace("''", "")

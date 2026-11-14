@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, Optional, Type, TypeVar
 
+from sqler.models.queryset import _ref_key
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
 
@@ -296,9 +297,11 @@ class AsyncSQLerQuerySet(Generic[T]):
 
             def collect(value):
                 if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    key = (value["_table"], int(value["_id"]))
+                    key = _ref_key(value)
+                    if key is None:  # Not a usable ref: left as it is, never sent to SQL
+                        return
                     if key not in resolved:  # Don't re-fetch already resolved
-                        refs_by_table.setdefault(value["_table"], set()).add(int(value["_id"]))
+                        refs_by_table.setdefault(key[0], set()).add(key[1])
                 elif isinstance(value, dict):
                     for v in value.values():
                         collect(v)
@@ -345,7 +348,9 @@ class AsyncSQLerQuerySet(Generic[T]):
 
             def replace(value):
                 if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    key = (value["_table"], int(value["_id"]))
+                    key = _ref_key(value)
+                    if key is None:
+                        return value  # Not a usable ref, keep original
                     if key in processing:
                         return value  # Circular ref - we're already processing this
                     fetched = resolved.get(key)

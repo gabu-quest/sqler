@@ -14,7 +14,8 @@ if TYPE_CHECKING:
     pass
 
 # Compiled regex for table name validation
-_TABLE_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+# Used with fullmatch: ``$`` alone would accept a name ending in a newline.
+_TABLE_NAME_PATTERN = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 # SQLite reserved words that produce invalid SQL when used as unquoted column names.
 # Source: https://www.sqlite.org/lang_keywords.html
@@ -64,7 +65,7 @@ def validate_table_name(table: str) -> str:
             f"Table name must be a non-empty string, got: {type(table).__name__}",
             table=table,
         )
-    if not _TABLE_NAME_PATTERN.match(table):
+    if not _TABLE_NAME_PATTERN.fullmatch(table):
         raise InvalidTableNameError(
             f"Invalid table name: {table!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*",
             table=table,
@@ -95,7 +96,7 @@ def validate_field_name(name: str) -> str:
         )
     segments = name.split(".")
     for segment in segments:
-        if not _TABLE_NAME_PATTERN.match(segment):
+        if not _TABLE_NAME_PATTERN.fullmatch(segment):
             raise InvalidFieldNameError(
                 f"Invalid field name: {name!r}. "
                 f"Each segment must match [a-zA-Z_][a-zA-Z0-9_]*",
@@ -125,7 +126,7 @@ def validate_identifier(name: str) -> str:
             f"Identifier must be a non-empty string, got: {type(name).__name__}",
             identifier=name,
         )
-    if not _TABLE_NAME_PATTERN.match(name):
+    if not _TABLE_NAME_PATTERN.fullmatch(name):
         raise InvalidIdentifierError(
             f"Invalid identifier: {name!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*",
             identifier=name,

@@ -3,11 +3,38 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, Iterator, Optional, Type, TypeVar
 
+from sqler.exceptions import InvalidTableNameError
 from sqler.query import SQLerExpression, SQLerQuery
+from sqler.utils import validate_table_name
 
 T = TypeVar("T")
 
 logger = logging.getLogger("sqler.queryset")
+
+
+_SQLITE_INT_MIN = -(2**63)
+_SQLITE_INT_MAX = 2**63 - 1
+
+
+def _ref_key(value: dict) -> Optional[tuple[str, int]]:
+    """Return ``(table, id)`` for a stored reference dict, or None if it is not a usable one.
+
+    ``_table`` of a stored document is data, not an identifier we wrote: it must pass
+    ``validate_table_name`` before it can name a table in SQL, and ``_id`` must be an
+    integer (not a bool, float, string or list) that fits SQLite's 64-bit INTEGER.
+    Anything else is left unresolved.
+    """
+    table = value.get("_table")
+    rid = value.get("_id")
+    if isinstance(rid, bool) or not isinstance(rid, int):
+        return None
+    if not _SQLITE_INT_MIN <= rid <= _SQLITE_INT_MAX:
+        return None  # sqlite3 raises OverflowError when binding it
+    try:
+        validate_table_name(table)  # type: ignore[arg-type]
+    except InvalidTableNameError:
+        return None
+    return (table, rid)  # type: ignore[return-value]
 
 
 class SQLerQuerySet(Generic[T]):
@@ -309,9 +336,11 @@ class SQLerQuerySet(Generic[T]):
 
             def collect(value):
                 if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    key = (value["_table"], int(value["_id"]))
+                    key = _ref_key(value)
+                    if key is None:  # Not a usable ref: left as it is, never sent to SQL
+                        return
                     if key not in resolved:  # Don't re-fetch already resolved
-                        refs_by_table.setdefault(value["_table"], set()).add(int(value["_id"]))
+                        refs_by_table.setdefault(key[0], set()).add(key[1])
                 elif isinstance(value, dict):
                     for v in value.values():
                         collect(v)
@@ -357,7 +386,9 @@ class SQLerQuerySet(Generic[T]):
 
             def replace(value):
                 if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    key = (value["_table"], int(value["_id"]))
+                    key = _ref_key(value)
+                    if key is None:
+                        return value  # Not a usable ref, keep original
                     if key in processing:
                         return value  # Circular ref - we're already processing this
                     fetched = resolved.get(key)
