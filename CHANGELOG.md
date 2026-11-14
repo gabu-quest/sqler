@@ -75,6 +75,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`is_dirty()` is False for a model nobody changed, on every way it is loaded or saved.** It was True for a `SQLerModel` after `save()`, `save_many()`, `from_id()` and `from_ids()`, for a `SQLerSafeModel` after `from_ids()`, and on every model base as soon as a typed reference field was set. `get_dirty_fields()` names the fields `save()` would write differently, and no others.
 - **`is_dirty()` sees a list or dict edited in place** (`model.tags.append(...)`, `model.meta["k"] = ...`) on the lite model bases, where it answered False. `save()` always wrote the edit.
 - **`is_dirty()` does not raise for a model that holds a related model never saved**; every field is dirty.
+- **A safe save that is rebased onto a newer row keeps the other writer's changes.** When a save on a stale version qualified for rebasing (by default a step of 1 on a field named `count`), every field of the saving model was written over the newer row, so a field only the other writer had changed went back to its old value without an error. The rebased save now writes the newer row, the fields the caller changed and the counter step.
+- **After a rebased save the model holds what was written**, typed references included, and `is_dirty()` is False. It kept its values from before the merge, so a second `save()` wrote them back or raised `StaleVersionError`, and writers adding to one counter in turn lost increments.
 
 ### Changed
 
@@ -99,6 +101,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`from_id()` and `refresh()` read each referenced table with one query** instead of one query per reference (a row with 20 references: 2 queries, was 21), and a cycle of references is cut at the first row seen again, as `from_ids()` cuts it, instead of after about 160 levels.
 - **A `{"_table", "_id"}` dict that cannot be followed is left whole.** `from_id()`, `refresh()` and async `query().all()` no longer load references nested inside it.
 - **Async `query().all()` no longer walks each row twice** when no document holds a reference.
+- **A rebased save raises `StaleVersionError` when the newer row cannot be loaded as the model class** (a typed list that names a deleted row, on the pydantic safe bases). The validation error is its cause; nothing is written. Before, the save went through and wrote the caller's old values.
 - **`is_dirty()` answers what `save()` would change in the stored row.** Two cases now read dirty where they did not. A typed reference whose row is gone and reads `None`: `save()` would write null over the reference. On the lite model bases, a field without a model type that holds a `{"_table", "_id"}` reference, after `query().all()`: the field holds the referenced row's document, and `save()` would write that document over the reference.
 - **One `NoAdapterError`.** The sync and the async query raise `sqler.NoAdapterError`. It is a `QueryError` and still a built-in `ConnectionError`, so `except ConnectionError` keeps working.
 - **`F('')` raises `InvalidFieldNameError`.**
