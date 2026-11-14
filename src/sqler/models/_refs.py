@@ -279,7 +279,7 @@ async def aresolve(data: dict, db: Any, seen: frozenset) -> dict:
 
 
 def _versioned_sql(db: Any, table: str, ids: list) -> tuple[str, list]:
-    promoted = list(db._promoted_columns.get(table, []))
+    promoted = list(db._promoted_of(table) or ())
     cols = ", ".join(["_id", "data", "_version", *promoted])
     marks = ",".join("?" for _ in ids)
     return f"SELECT {cols} FROM {table} WHERE _id IN ({marks});", promoted

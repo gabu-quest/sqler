@@ -1,7 +1,7 @@
 """A table created inside a transaction that rolls back is not remembered as existing.
 
 ``ensure_table`` remembers a table's promoted columns and its ``_version`` column. After a
-rollback removed the table, the next promoted write and the next versioned write create it
+rollback removed the table, the next promoted save and the next versioned write create it
 again and work; a table that still exists keeps what is remembered about it.
 """
 

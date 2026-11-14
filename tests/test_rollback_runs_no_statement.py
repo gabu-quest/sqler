@@ -1,8 +1,8 @@
 """Ending a sync transaction by rollback raises nothing of its own: the caller sees its exception.
 
-The rollback marks what the database object remembers about its tables as due for a check;
-the next write that trusts it runs the check. With the adapter closed inside the ``with``
-block, the caller's exception is the one that leaves the block.
+What the transaction taught the database object about its tables is dropped with it; no
+statement runs for that. With the adapter closed inside the ``with`` block, the caller's
+exception is the one that leaves the block.
 """
 
 import os

@@ -376,7 +376,7 @@ class SQLerModel(BaseModel):
 
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            db._ensure_table_with_promoted(table, promoted, checks)
+            db._ensure_promoted(table, promoted, checks)
 
         payloads = [inst._dump_with_relations() for inst in instances]
 
@@ -403,10 +403,8 @@ class SQLerModel(BaseModel):
         db, table = _instance_binding(self, db)
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
-        if promoted and table not in db._promoted_columns:
-            # the bound route creates this table in set_db(); a given db may not have it
-            db.ensure_table(table, promoted=promoted, checks=getattr(cls, "__checks__", None))
         if promoted:
+            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
             promoted_fields = list(promoted.keys())
             new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
         else:
