@@ -10,6 +10,7 @@
 - [Safe Models & Concurrency](#safe-models--concurrency)
 - [Bulk Operations & Transactions](#bulk-operations--transactions)
 - [Data Integrity](#data-integrity)
+- [Database](#database)
 - [Mixins](#mixins)
 - [Raw SQL](#raw-sql)
 - [Advanced Features](#advanced-features)
@@ -874,6 +875,90 @@ assert sku_idx["unique"] == True
 
 ---
 
+## Database
+
+The database classes `SQLerDB` and `AsyncSQLerDB` have the same methods; the async
+ones are awaited. The layout they write on disk is in [STORAGE.md](STORAGE.md).
+
+### [D01] `ensure_table`: promoted columns, checks, version
+
+```python
+from sqler import SQLerDB
+
+db = SQLerDB.in_memory()
+db.ensure_table(
+    "jobs",
+    promoted={"status": "TEXT NOT NULL DEFAULT 'pending'", "priority": "INTEGER NOT NULL DEFAULT 0"},
+    checks={"status_valid": "status IN ('pending', 'running', 'done')"},
+    versioned=True,
+)
+db.ensure_table("jobs", promoted={"status": "TEXT NOT NULL DEFAULT 'pending'"}, versioned=True)  # safe to repeat
+_id, version = db.upsert_with_version_promoted(
+    "jobs", None, {"status": "running", "payload": 1}, None, ["status", "priority"]
+)
+assert db.find_document_with_version("jobs", _id)["status"] == "running"
+```
+
+`promoted` maps a column name to a definition (`TYPE [NOT NULL] [DEFAULT literal]`),
+`checks` maps a name to a CHECK expression (written only when the table is created),
+and `versioned=True` adds the `_version` column, also to a table that exists
+without it. Table names, column names, definitions and checks are checked before
+any SQL runs; the write methods with promoted columns check the table and the
+promoted field names the same way.
+
+### [D02] A unique index that refuses a row raises `UniqueConstraintError`
+
+```python
+import sqlite3
+from sqler import SQLerDB, UniqueConstraintError
+
+db = SQLerDB.in_memory()
+db.create_index("users", "email", unique=True)
+db.insert_document("users", {"email": "a@example.com"})
+try:
+    db.insert_document("users", {"email": "a@example.com"})
+except UniqueConstraintError as err:
+    assert err.index == "idx_users_email"     # an index on a JSON field: SQLite names the index
+    assert isinstance(err, sqlite3.IntegrityError)
+    assert isinstance(err.__cause__, sqlite3.IntegrityError)
+else:
+    raise AssertionError("expected UniqueConstraintError")
+```
+
+Every write raises it when SQLite reports `UNIQUE constraint failed` (a unique
+index or a primary key): document writes, the promoted and versioned writes,
+`insert_many`, a model's `save()`, and raw `adapter.execute`, `executemany` and
+`executescript`, sync and async. It is also a `sqlite3.IntegrityError`, so
+`except sqlite3.IntegrityError` still catches it. It carries what SQLite named:
+`table` and `columns` (`field` when there is one column), or `index` for an index
+on an expression. NOT NULL, CHECK and FOREIGN KEY violations stay
+`sqlite3.IntegrityError`. A safe model's save does not retry it.
+
+### [D03] Async: the wait for a pooled connection
+
+```python
+import asyncio
+from sqler import AsyncSQLerDB
+
+async def main():
+    db = AsyncSQLerDB.in_memory(acquire_timeout=5.0)   # seconds; None waits forever
+    await db.connect()
+    await db.insert_document("t", {"a": 1})
+    stats = db.pool_stats()
+    assert (stats.max_connections, stats.in_use_connections) == (1, 0)
+    await db.close()
+
+asyncio.run(main())
+```
+
+`AsyncSQLerDB.in_memory()` and `on_disk()` take `acquire_timeout` (default 30
+seconds) and hand it to the adapter; a wait that runs out raises
+`ConnectionPoolExhaustedError`. `AsyncAdapterABC` declares `pool_stats()`; an
+adapter written outside sqler that has no pool need not define it, and calling it
+then raises `NotImplementedError`.
+
+---
+
 ## Mixins
 
 ### [C26] Timestamps
@@ -1525,7 +1610,7 @@ SQLer provides a unified exception hierarchy under `sqler.exceptions`:
   - `LockTimeoutError` — unable to acquire lock
 - **Integrity errors**
   - `ReferentialIntegrityError` — foreign key constraint violated
-  - `UniqueConstraintError` — unique constraint violated
+  - `UniqueConstraintError` — unique constraint violated (also a `sqlite3.IntegrityError`; see [D02](#d02-a-unique-index-that-refuses-a-row-raises-uniqueconstrainterror))
 - **Model errors**
   - `NotBoundError` — model not bound to database
   - `NotFoundError` — model instance not found

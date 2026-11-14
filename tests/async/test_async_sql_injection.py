@@ -539,3 +539,63 @@ class TestAsyncIntegrityReviewFixes:
                 await _async_integrity.async_cascade_delete(amfdb, referrers, set())
         cur = await amfdb.adapter.execute("SELECT COUNT(*) FROM users")
         assert (await cur.fetchone())[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Database write methods with promoted columns check table and field names
+# ---------------------------------------------------------------------------
+
+from sqler.exceptions import InvalidIdentifierError as _InvalidIdentifierError  # noqa: E402
+
+_ASYNC_PROMOTED_WRITES = {
+    "upsert_document_promoted": lambda d, t, f: d.upsert_document_promoted(t, None, {"s": "a"}, f),
+    "upsert_document_promoted_update": lambda d, t, f: d.upsert_document_promoted(t, 1, {"s": "a"}, f),
+    "insert_many_promoted": lambda d, t, f: d.insert_many_promoted(t, [{"s": "a"}], f),
+    "upsert_with_version_promoted": lambda d, t, f: d.upsert_with_version_promoted(t, None, {"s": "a"}, None, f),
+    "upsert_with_version_promoted_update": lambda d, t, f: d.upsert_with_version_promoted(t, 1, {"s": "a"}, 0, f),
+}
+
+
+class TestAsyncPromotedWriteNames:
+    @pytest_asyncio.fixture
+    async def pdb(self):
+        d = AsyncSQLerDB.in_memory(shared=False)
+        await d.connect()
+        await d.ensure_table("jobs", promoted={"s": "TEXT"}, versioned=True)
+        await d.upsert_with_version_promoted("jobs", None, {"s": "first"}, None, ["s"])
+        yield d
+        await d.close()
+
+    async def _state(self, d):
+        out = []
+        for sql in (
+            "SELECT _id, s, _version FROM jobs",
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+        ):
+            cur = await d.adapter.execute(sql)
+            out.append([tuple(r) for r in await cur.fetchall()])
+            await cur.close()
+        await d.adapter.auto_commit()
+        return out
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", list(_ASYNC_PROMOTED_WRITES))
+    async def test_table_ending_in_newline_is_refused(self, pdb, method):
+        before = await self._state(pdb)
+        with pytest.raises(_InvalidTableNameError):
+            await _ASYNC_PROMOTED_WRITES[method](pdb, "jobs\n", ["s"])
+        assert await self._state(pdb) == before == [[(1, "first", 0)], [("jobs",), ("sqlite_sequence",)]]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", list(_ASYNC_PROMOTED_WRITES))
+    async def test_hostile_promoted_field_is_refused(self, pdb, method):
+        before = await self._state(pdb)
+        with pytest.raises(_InvalidIdentifierError):
+            await _ASYNC_PROMOTED_WRITES[method](pdb, "jobs", ["s", 'x"; DROP TABLE t; --'])
+        assert await self._state(pdb) == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", list(_ASYNC_PROMOTED_WRITES))
+    async def test_valid_names_still_work(self, pdb, method):
+        await _ASYNC_PROMOTED_WRITES[method](pdb, "jobs", ["s"])
+        assert (await self._state(pdb))[0][-1][1] == "a"
