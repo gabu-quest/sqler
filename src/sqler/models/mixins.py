@@ -5,7 +5,7 @@ and lifecycle hooks.
 """
 
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Optional, Self
 
 from sqler.utils import validate_table_name
@@ -15,6 +15,30 @@ _current_user_var: ContextVar[Optional[str]] = ContextVar("audit_current_user", 
 _async_current_user_var: ContextVar[Optional[str]] = ContextVar(
     "async_audit_current_user", default=None
 )
+
+
+_ONE_MICROSECOND = timedelta(microseconds=1)
+
+
+def _stamp_times(created_at: Optional[datetime], updated_at: Optional[datetime]) -> tuple[datetime, datetime]:
+    """The one timestamp rule: return the ``(created_at, updated_at)`` to store on save.
+
+    * First save of a new object (no ``created_at``): both are the same ``now``.
+    * A caller-set ``created_at`` is kept; ``updated_at`` is ``now``, or one microsecond
+      after ``created_at`` when ``now`` is not later.
+    * Any save of an object that already has an ``updated_at`` gives a value strictly
+      later than it, even when the clock has not advanced or has gone backwards.
+
+    A naive datetime already on the object raises ``TypeError`` (it cannot be compared
+    with the aware ``now``); that is unchanged.
+    """
+    now = datetime.now(timezone.utc)
+    if created_at is None:
+        created_at = now
+        if updated_at is None:
+            return created_at, now
+    floor = created_at if updated_at is None else max(created_at, updated_at)
+    return created_at, max(now, floor + _ONE_MICROSECOND)
 
 
 class TimestampMixin:
@@ -35,13 +59,7 @@ class TimestampMixin:
 
     def _set_timestamps(self) -> None:
         """Set timestamp fields before save."""
-        from datetime import timedelta
-
-        now = datetime.now(timezone.utc)
-        if self.created_at is None:  # type: ignore[attr-defined]
-            self.created_at = now  # type: ignore[attr-defined]
-        # Guarantee updated_at is strictly after created_at on fast clocks
-        self.updated_at = max(now, self.created_at + timedelta(microseconds=1))  # type: ignore[attr-defined]
+        self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
 
     def save(self, *, db=None) -> Self:
         """Save with automatic timestamp updates."""
@@ -570,16 +588,11 @@ class AuditMixin:
 
     def _set_audit_fields(self) -> None:
         """Set audit fields before save."""
-        from datetime import timedelta
-
-        now = datetime.now(timezone.utc)
         user = self.get_current_user()
 
         if self.created_at is None:  # type: ignore[attr-defined]
-            self.created_at = now  # type: ignore[attr-defined]
             self.created_by = user  # type: ignore[attr-defined]
-
-        self.updated_at = max(now, self.created_at + timedelta(microseconds=1))  # type: ignore[attr-defined]
+        self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
         self.updated_by = user  # type: ignore[attr-defined]
 
     def save(self, *, db=None) -> Self:
@@ -630,16 +643,11 @@ class AsyncAuditMixin:
 
     def _set_audit_fields(self) -> None:
         """Set audit fields before save."""
-        from datetime import timedelta
-
-        now = datetime.now(timezone.utc)
         user = self.get_current_user()
 
         if self.created_at is None:  # type: ignore[attr-defined]
-            self.created_at = now  # type: ignore[attr-defined]
             self.created_by = user  # type: ignore[attr-defined]
-
-        self.updated_at = max(now, self.created_at + timedelta(microseconds=1))  # type: ignore[attr-defined]
+        self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
         self.updated_by = user  # type: ignore[attr-defined]
 
     async def save(self, *, db=None) -> Self:
