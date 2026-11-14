@@ -14,6 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Field and key names used in queries are escaped.** A name with a quote could end the SQL string that held its JSON path, in `F("...")` comparisons and in `any()` on nested arrays. Names are now carried as data. A name with a backslash, a NUL, or whitespace other than single spaces raises `InvalidFieldNameError`.
 - **Names ending in a newline are rejected.** `validate_table_name`, `validate_field_name` and `validate_identifier` accepted `"users\n"`.
 - **Model field paths, the search index and the integrity helpers check what they put into SQL.** A key in a model field path (`any()` and filters on related models) is carried as data; the key `a'` no longer matches the key `a`, and an empty key raises `InvalidFieldNameError`. `FTSIndex` checks its fields, `tokenizer` and `index_table` when they are assigned as well as in the constructor, checks the model's table name, and `snippet()` raises `TypeError` for a `max_tokens` that is not an integer. `find_referrers`, `validate_references`, `set_null_referrers`, `cascade_delete` and their async versions raise `InvalidTableNameError` for a table name that is not a plain identifier, before any SQL runs.
+- **The promoted write methods check their names.** `upsert_document_promoted`, `upsert_with_version_promoted` and `insert_many_promoted`, sync and async, raise `InvalidTableNameError` or `InvalidIdentifierError` for a bad table or promoted field name before any SQL runs.
 
 ### Fixed
 
@@ -51,12 +52,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Sync adapter: `executescript` inside a transaction raises `QueryError`**, as the async adapter does.
 - **`RebaseConfig.max_retries` counts version conflicts only**, and a safe save sleeps at most 50 ms between two tries.
 - **`FTSIndex.fields` returns a copy.** Appending to it no longer changes the index; assign a new list instead.
+- **A violated unique index or primary key raises `UniqueConstraintError`**, sync and async, from every write path including a raw `adapter.execute`. It names the table and columns SQLite reported (or the index, for an index on an expression) and has the driver error as its cause. It is still a `sqlite3.IntegrityError`, so `except sqlite3.IntegrityError` keeps working; NOT NULL, CHECK and FOREIGN KEY errors are unchanged.
 
 ### Added
 
 - **`AsyncSQLiteAdapter.pool_stats()` and `AsyncSQLerDB.pool_stats()`** return `PoolStats`: pool size, free and in-use connections, checkouts, timeouts, average and longest wait.
 - **`AsyncMigrationRunner.applied_migrations()`**, and `status()` returns `applied_count` and `applied` as the sync runner does.
 - **`RebaseConfig.lock_timeout`** (seconds, default 5), and `LockTimeoutError` can be imported from `sqler`.
+- **`SQLerDB.ensure_table()` and `AsyncSQLerDB.ensure_table()`** create a table with promoted columns, CHECK constraints and a version column (`table, *, promoted=None, checks=None, versioned=False`). They can be called again and add a missing version column to an existing table.
+- **`AsyncSQLerDB.in_memory()` and `on_disk()` take `acquire_timeout`**, how long to wait for a free connection.
+- **`AsyncAdapterABC.pool_stats()`** is part of the adapter interface; an adapter without a pool need not define it.
+- **`docs/STORAGE.md`** describes how sqler lays out its tables on disk, for code that reads a database with plain SQL.
 
 ## [1.2026.4.2] - 2026-04-18
 
