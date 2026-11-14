@@ -246,7 +246,7 @@ class AsyncSQLerDB:
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = stored(v)
+                promoted_vals[k] = stored(v, field=k)
             else:
                 json_doc[k] = v
 
@@ -297,7 +297,7 @@ class AsyncSQLerDB:
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = stored(v)
+                promoted_vals[k] = stored(v, field=k)
             else:
                 json_doc[k] = v
 
@@ -554,7 +554,7 @@ class AsyncSQLerDB:
 
                 for doc in chunk:
                     if promoted_fields:
-                        promoted_vals = {k: stored(doc[k]) for k in promoted_fields if k in doc}
+                        promoted_vals = {k: stored(doc[k], field=k) for k in promoted_fields if k in doc}
                         json_doc = {k: v for k, v in doc.items() if k not in promoted_fields}
                     else:
                         json_doc = doc

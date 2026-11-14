@@ -473,7 +473,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """The document ``save()`` writes: each field in stored form, a related model (async
         or sync) as the reference to its row. It awaits nothing."""
         return {
-            f.name: stored(getattr(self, f.name), (AsyncSQLerLiteModel, SQLerLiteModel))
+            f.name: stored(getattr(self, f.name), (AsyncSQLerLiteModel, SQLerLiteModel), f.name)
             for f in fields(self)
             if not f.name.startswith("_")
         }

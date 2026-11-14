@@ -497,7 +497,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         """The document ``save()`` writes: each field in stored form, a related model as the
         reference to its row."""
         return {
-            f.name: stored(getattr(self, f.name), SQLerLiteModel)
+            f.name: stored(getattr(self, f.name), SQLerLiteModel, f.name)
             for f in fields(self)
             if not f.name.startswith("_")
         }
