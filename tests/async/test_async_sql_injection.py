@@ -430,3 +430,112 @@ class TestAsyncStatementText:
         literal = sql.split("JSON_EXTRACT(data, ", 1)[1].rsplit(") = ?", 1)[0]
         assert literal.startswith("'") and literal.endswith("'")
         assert "'" not in literal[1:-1].replace("''", "")
+
+
+# ---------------------------------------------------------------------------
+# Model fields and integrity checks (async database)
+# ---------------------------------------------------------------------------
+
+from sqler.exceptions import InvalidTableNameError as _InvalidTableNameError  # noqa: E402
+from sqler.models import AsyncSQLerModel as _AsyncModel  # noqa: E402
+from sqler.models import SQLerModelField as _MF  # noqa: E402
+from sqler.models import async_integrity as _async_integrity  # noqa: E402
+
+_ACARRIABLE_KEYS = ["a'b", 'a"b', "a.b", "a[0]", "x') OR 1=1 --"]
+_AUNCARRIABLE_KEYS = ["a\n", "a\x00b", "", "a\\b"]
+
+
+class _AMFOwner(_AsyncModel):
+    name: str = ""
+
+
+@pytest_asyncio.fixture
+async def amfdb():
+    db = AsyncSQLerDB.in_memory(shared=False)
+    await db.connect()
+    _AMFOwner.set_db(db, table="mfowners")
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
+class TestAsyncModelFieldAndIntegrityNames:
+    @pytest.mark.parametrize("key", _ACARRIABLE_KEYS, ids=repr)
+    @pytest.mark.parametrize("position", ["last", "middle"])
+    @pytest.mark.parametrize("any_", [False, True])
+    @pytest.mark.asyncio
+    async def test_model_field_matches_only_the_document_with_that_key(
+        self, amfdb, key, position, any_
+    ):
+        if position == "last":
+            hit, miss, rest = {key: 5}, {"zzz": 5}, [key]
+        else:
+            hit, miss, rest = {key: {"v": 5}}, {"zzz": {"v": 5}}, [key, "v"]
+        a_hit = await amfdb.insert_document("addresses", hit)
+        a_miss = await amfdb.insert_document("addresses", miss)
+        decoy = None
+        if "." in key:
+            head, tail = key.split(".", 1)
+            decoy = {head: {tail: 5}} if position == "last" else {head: {tail: {"v": 5}}}
+        elif key == "a[0]":
+            decoy = {"a": [5]} if position == "last" else {"a": [{"v": 5}]}
+        a_decoy = await amfdb.insert_document("addresses", decoy) if decoy is not None else None
+        wrap = (lambda i: [{"_table": "addresses", "_id": i}]) if any_ else (
+            lambda i: {"_table": "addresses", "_id": i}
+        )
+        u_hit = await amfdb.insert_document("mfowners", {"addresses": wrap(a_hit)})
+        await amfdb.insert_document("mfowners", {"addresses": wrap(a_miss)})
+        if a_decoy is not None:
+            await amfdb.insert_document("mfowners", {"addresses": wrap(a_decoy)})
+        expr = _MF(_AMFOwner, ["addresses"] + rest, array_any=any_) == 5
+        cur = await amfdb.adapter.execute(
+            f"SELECT _id FROM mfowners WHERE {expr.sql} ORDER BY _id", list(expr.params)
+        )
+        assert [r[0] for r in await cur.fetchall()] == [u_hit]
+
+    @pytest.mark.parametrize("key", _AUNCARRIABLE_KEYS, ids=repr)
+    @pytest.mark.parametrize("position", ["last", "middle"])
+    def test_model_field_refuses_uncarriable_key_before_sql(self, key, position):
+        rest = [key] if position == "last" else [key, "v"]
+        with pytest.raises(InvalidFieldNameError):
+            (_MF(_AMFOwner, ["addresses"] + rest) == 1).sql  # noqa: B018
+
+    @pytest.mark.parametrize("key", _ACARRIABLE_KEYS + _AUNCARRIABLE_KEYS, ids=repr)
+    def test_model_field_first_segment_that_is_no_table_name_is_refused(self, key):
+        with pytest.raises((InvalidFieldNameError, _InvalidTableNameError)):
+            (_MF(_AMFOwner, [key, "v"]) == 1).sql  # noqa: B018
+
+    def test_integrity_has_no_pattern_of_its_own(self):
+        import inspect
+
+        assert "a-zA-Z" not in inspect.getsource(_async_integrity)
+
+    @pytest.mark.parametrize("bad", ["users\n", "users; --", "a b"], ids=repr)
+    @pytest.mark.asyncio
+    async def test_validate_references_reports_bad_table_name_as_broken(self, amfdb, bad):
+        await amfdb.insert_document("users", {"name": "u"})
+        await amfdb.insert_document("mfowners", {"r": {"_table": bad, "_id": 1}})
+        broken = await _async_integrity.async_validate_references(amfdb)
+        assert [(b.table, b.target_table) for b in broken] == [("mfowners", bad)]
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: integrity helpers refuse referrer table names the owner refuses
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncIntegrityReviewFixes:
+    @pytest.mark.parametrize("fn", ["set_null", "cascade"])
+    @pytest.mark.parametrize("bad", ["users\n", "users; --", "a b", ""], ids=repr)
+    @pytest.mark.asyncio
+    async def test_integrity_helpers_refuse_bad_referrer_table(self, amfdb, fn, bad):
+        await amfdb.insert_document("users", {"name": "u"})
+        referrers = [("users", 1, {}), (bad, 1, {})]
+        with pytest.raises(_InvalidTableNameError):
+            if fn == "set_null":
+                await _async_integrity.async_set_null_referrers(amfdb, "users", 1, referrers)
+            else:
+                await _async_integrity.async_cascade_delete(amfdb, referrers, set())
+        cur = await amfdb.adapter.execute("SELECT COUNT(*) FROM users")
+        assert (await cur.fetchone())[0] == 1

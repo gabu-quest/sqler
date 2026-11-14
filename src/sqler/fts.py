@@ -34,7 +34,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
 
-from sqler.utils import validate_field_name, validate_identifier
+from sqler.utils import validate_field_name, validate_identifier, validate_table_name
 
 if TYPE_CHECKING:
     from sqler import SQLerDB
@@ -43,7 +43,16 @@ if TYPE_CHECKING:
 # Tokenizer values: alphanumeric, spaces, underscores only.
 # Covers all standard FTS5 tokenizers (porter, unicode61, ascii, trigram)
 # and numeric options (e.g. "unicode61 remove_diacritics 2").
-_TOKENIZER_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_ ]*$")
+_TOKENIZER_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9_ ]*")
+
+
+def _check_tokenizer(tokenizer: object) -> str:
+    if not isinstance(tokenizer, str) or not _TOKENIZER_PATTERN.fullmatch(tokenizer):
+        raise ValueError(
+            f"Invalid tokenizer: {tokenizer!r}. "
+            f"Must contain only alphanumeric characters, spaces, and underscores."
+        )
+    return tokenizer
 
 
 @dataclass
@@ -124,15 +133,11 @@ class FTSIndex:
             validate_field_name(f)
         if index_name is not None:
             validate_identifier(index_name)
-        if not _TOKENIZER_PATTERN.match(tokenizer):
-            raise ValueError(
-                f"Invalid tokenizer: {tokenizer!r}. "
-                f"Must contain only alphanumeric characters, spaces, and underscores."
-            )
+        _check_tokenizer(tokenizer)
 
         self.model_class = model_class
         self.fields = fields
-        self.tokenizer = tokenizer
+        self.tokenizer = tokenizer  # checked by the setter
         self.content_sync = content_sync
 
         # Get table name - _table is set via set_db() or using()
@@ -146,10 +151,34 @@ class FTSIndex:
         """Get the table name from the model class."""
         # Try _table first (set by set_db or using)
         table = getattr(self.model_class, "_table", None)
-        if table:
-            return table
-        # Fallback to lowercase class name
-        return self.model_class.__name__.lower()
+        if not table:
+            # Fallback to lowercase class name
+            table = self.model_class.__name__.lower()
+        # a class's ``_table`` can be set by hand: it goes into SQL as an identifier
+        return validate_table_name(table)
+
+    @property
+    def fields(self) -> list[str]:
+        """The indexed field names (a copy: changing it changes nothing)."""
+        return list(self._fields)
+
+    @fields.setter
+    def fields(self, value: list[str]) -> None:
+        """Set the indexed field names (checked like the constructor's ``fields``)."""
+        names = list(value)
+        for f in names:
+            validate_field_name(f)
+        self._fields = tuple(names)
+
+    @property
+    def tokenizer(self) -> str:
+        """The FTS5 tokenizer."""
+        return self._tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, value: str) -> None:
+        """Set the tokenizer (checked like the constructor's ``tokenizer``)."""
+        self._tokenizer = _check_tokenizer(value)
 
     @property
     def index_table(self) -> str:
@@ -160,7 +189,9 @@ class FTSIndex:
 
     @index_table.setter
     def index_table(self, value: Optional[str]) -> None:
-        """Set the index table name."""
+        """Set the index table name (checked like the constructor's ``index_name``)."""
+        if value is not None:
+            validate_identifier(value)
         self._index_table = value
 
     def _get_db(self) -> "SQLerDB":
@@ -489,6 +520,8 @@ class FTSIndex:
         Returns:
             Highlighted snippet string
         """
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
+            raise TypeError(f"max_tokens must be an integer, got {type(max_tokens).__name__}")
         db = self._get_db()
         field_idx = 0 if field is None else self.fields.index(field)
 
