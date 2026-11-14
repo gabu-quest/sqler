@@ -1140,3 +1140,52 @@ class TestFtsAndIntegrityReviewFixes:
         # refused before any SQL ran: the valid first entry was not touched either
         assert d.adapter.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
         d.close()
+
+
+# ---------------------------------------------------------------------------
+# Database write methods with promoted columns check table and field names
+# ---------------------------------------------------------------------------
+
+from sqler.exceptions import InvalidIdentifierError as _InvalidIdentifierError  # noqa: E402
+
+_PROMOTED_WRITES = {
+    "upsert_document_promoted": lambda d, t, f: d.upsert_document_promoted(t, None, {"s": "a"}, f),
+    "upsert_document_promoted_update": lambda d, t, f: d.upsert_document_promoted(t, 1, {"s": "a"}, f),
+    "insert_many_promoted": lambda d, t, f: d.insert_many_promoted(t, [{"s": "a"}], f),
+    "upsert_with_version_promoted": lambda d, t, f: d.upsert_with_version_promoted(t, None, {"s": "a"}, None, f),
+    "upsert_with_version_promoted_update": lambda d, t, f: d.upsert_with_version_promoted(t, 1, {"s": "a"}, 0, f),
+}
+
+
+class TestPromotedWriteNames:
+    @pytest.fixture
+    def pdb(self):
+        d = SQLerDB.in_memory(shared=False)
+        d.ensure_table("jobs", promoted={"s": "TEXT"}, versioned=True)
+        d.upsert_with_version_promoted("jobs", None, {"s": "first"}, None, ["s"])
+        yield d
+        d.close()
+
+    def _untouched(self, d):
+        rows = d.adapter.execute("SELECT _id, s, _version FROM jobs").fetchall()
+        tables = d.adapter.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+        return [tuple(r) for r in rows], [r[0] for r in tables]
+
+    @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
+    def test_table_ending_in_newline_is_refused(self, pdb, method):
+        before = self._untouched(pdb)
+        with pytest.raises(InvalidTableNameError):
+            _PROMOTED_WRITES[method](pdb, "jobs\n", ["s"])
+        assert self._untouched(pdb) == before == ([(1, "first", 0)], ["jobs", "sqlite_sequence"])
+
+    @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
+    def test_hostile_promoted_field_is_refused(self, pdb, method):
+        before = self._untouched(pdb)
+        with pytest.raises(_InvalidIdentifierError):
+            _PROMOTED_WRITES[method](pdb, "jobs", ["s", 'x"; DROP TABLE t; --'])
+        assert self._untouched(pdb) == before
+
+    @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
+    def test_valid_names_still_work(self, pdb, method):
+        _PROMOTED_WRITES[method](pdb, "jobs", ["s"])
+        assert pdb.adapter.execute("SELECT s FROM jobs WHERE s = 'a'").fetchone()[0] == "a"

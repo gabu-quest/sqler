@@ -1,7 +1,7 @@
 import json
 from typing import Any, Optional
 
-from sqler.adapter.asynchronous import AsyncSQLiteAdapter
+from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter
 from sqler.exceptions import StaleVersionError
 from sqler.pool import PoolStats
 from sqler.utils import (
@@ -18,13 +18,23 @@ class AsyncSQLerDB:
     """Async document store for JSON blobs on SQLite."""
 
     @classmethod
-    def in_memory(cls, shared: bool = True, *, name: Optional[str] = None) -> "AsyncSQLerDB":
-        adapter = AsyncSQLiteAdapter.in_memory(shared=shared, name=name)
+    def in_memory(
+        cls,
+        shared: bool = True,
+        *,
+        name: Optional[str] = None,
+        acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S,
+    ) -> "AsyncSQLerDB":
+        """In-memory database; ``acquire_timeout`` bounds the wait for a pooled connection (seconds, ``None`` = forever)."""
+        adapter = AsyncSQLiteAdapter.in_memory(shared=shared, name=name, acquire_timeout=acquire_timeout)
         return cls(adapter)
 
     @classmethod
-    def on_disk(cls, path: str = "sqler.db") -> "AsyncSQLerDB":
-        adapter = AsyncSQLiteAdapter.on_disk(path)
+    def on_disk(
+        cls, path: str = "sqler.db", *, acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S
+    ) -> "AsyncSQLerDB":
+        """Database file at ``path``; ``acquire_timeout`` bounds the wait for a pooled connection (seconds, ``None`` = forever)."""
+        adapter = AsyncSQLiteAdapter.on_disk(path, acquire_timeout=acquire_timeout)
         return cls(adapter)
 
     def __init__(self, adapter: AsyncSQLiteAdapter):
@@ -43,6 +53,25 @@ class AsyncSQLerDB:
     def pool_stats(self) -> PoolStats:
         """Return the adapter's connection pool statistics (synchronous, cheap)."""
         return self.adapter.pool_stats()
+
+    async def ensure_table(
+        self,
+        table: str,
+        *,
+        promoted: Optional[dict[str, str]] = None,
+        checks: Optional[dict[str, str]] = None,
+        versioned: bool = False,
+    ) -> None:
+        """Create a table if it is missing, with promoted columns, CHECK constraints and a version.
+
+        The async twin of ``SQLerDB.ensure_table``; same arguments, same schema.
+        """
+        if promoted or checks:
+            await self._ensure_table_with_promoted(table, promoted or {}, checks)
+        else:
+            await self._ensure_table(table)
+        if versioned:
+            await self._ensure_versioned_table(table)
 
     async def _ensure_table(self, table: str) -> None:
         table = validate_table_name(table)
@@ -114,6 +143,9 @@ class AsyncSQLerDB:
         promoted_fields: list[str],
     ) -> int:
         """Insert or update, splitting promoted fields into real columns (async)."""
+        table = validate_table_name(table)
+        for field in promoted_fields:
+            validate_column_name(field)
         promoted_vals = {}
         json_doc = {}
         for k, v in doc.items():
@@ -160,6 +192,9 @@ class AsyncSQLerDB:
         promoted_fields: list[str],
     ) -> tuple[int, int]:
         """Insert or update with optimistic locking, splitting promoted columns (async)."""
+        table = validate_table_name(table)
+        for field in promoted_fields:
+            validate_column_name(field)
         await self._ensure_versioned_table(table)
 
         promoted_vals = {}
@@ -342,6 +377,7 @@ class AsyncSQLerDB:
         """
         if not docs:
             return []
+        table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
         cols = ["data"] + promoted_fields

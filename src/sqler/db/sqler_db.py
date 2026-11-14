@@ -64,6 +64,40 @@ class SQLerDB:
         # promoted columns per table: table -> list of column names
         self._promoted_columns: dict[str, list[str]] = {}
 
+    def ensure_table(
+        self,
+        table: str,
+        *,
+        promoted: Optional[dict[str, str]] = None,
+        checks: Optional[dict[str, str]] = None,
+        versioned: bool = False,
+    ) -> None:
+        """Create a table if it is missing, with promoted columns, CHECK constraints and a version.
+
+        Safe to call again: on an existing table it adds the promoted columns
+        and the ``_version`` column that are missing, and changes nothing else
+        (CHECK constraints are only written when the table is created).
+
+        Args:
+            table: Table name (``[a-zA-Z_][a-zA-Z0-9_]*``).
+            promoted: ``{column: definition}`` for real columns beside ``data``,
+                e.g. ``{"status": "TEXT NOT NULL DEFAULT 'pending'"}``.
+            checks: ``{name: expression}`` CHECK constraints for a new table.
+            versioned: Add the ``_version INTEGER NOT NULL DEFAULT 0`` column
+                used by the versioned writes.
+
+        Raises:
+            InvalidTableNameError: The table name is not accepted.
+            InvalidIdentifierError: A promoted column name is not accepted.
+            InvalidColumnDefError: A column definition or CHECK expression is not accepted.
+        """
+        if promoted or checks:
+            self._ensure_table_with_promoted(table, promoted or {}, checks)
+        else:
+            self._ensure_table(table)
+        if versioned:
+            self._ensure_versioned_table(table)
+
     def _ensure_table(self, table: str) -> None:
         """Create the target table if it doesn't exist.
 
@@ -168,6 +202,9 @@ class SQLerDB:
         Returns:
             int: The existing or newly assigned ``_id``.
         """
+        table = validate_table_name(table)
+        for field in promoted_fields:
+            validate_column_name(field)
         # Split promoted from JSON
         promoted_vals = {}
         json_doc = {}
@@ -221,6 +258,9 @@ class SQLerDB:
         Returns:
             tuple[int, int]: The row id and new version.
         """
+        table = validate_table_name(table)
+        for field in promoted_fields:
+            validate_column_name(field)
         if table not in self._versioned_tables:
             self._ensure_versioned_table(table)
 
@@ -336,6 +376,7 @@ class SQLerDB:
         """
         if not docs:
             return []
+        table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
         cols = ["data"] + promoted_fields

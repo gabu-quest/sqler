@@ -99,3 +99,11 @@ class AsyncAdapterABC(ABC):
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Exit async context manager."""
         pass
+
+    def pool_stats(self) -> Any:
+        """Return the adapter's connection-pool statistics.
+
+        Not abstract: an adapter without a pool need not define it. The default
+        raises ``NotImplementedError``; ``AsyncSQLiteAdapter`` returns a ``PoolStats``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement pool_stats()")
