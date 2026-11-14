@@ -9,9 +9,12 @@ This module provides production-ready operations for SQLer databases including:
 import os
 import sqlite3
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
+
+from sqler.exceptions import QueryError
 
 if TYPE_CHECKING:
     from sqler.db.async_db import AsyncSQLerDB
@@ -502,6 +505,19 @@ def checkpoint(db: "SQLerDB", mode: str = "PASSIVE") -> dict[str, int]:
 # ============================================================================
 
 
+@asynccontextmanager
+async def _connection_returned(db: "AsyncSQLerDB") -> AsyncIterator[None]:
+    """Whatever the body does, the calling task holds no pooled connection afterwards.
+
+    Ends with the adapter's ``auto_commit()``: it commits and returns the connection, and does
+    nothing inside the caller's own transaction, which keeps its connection.
+    """
+    try:
+        yield
+    finally:
+        await db.adapter.auto_commit()
+
+
 async def async_health_check(db: "AsyncSQLerDB", timeout_ms: int = 5000) -> HealthStatus:
     """Perform an async health check on the database.
 
@@ -513,6 +529,22 @@ async def async_health_check(db: "AsyncSQLerDB", timeout_ms: int = 5000) -> Heal
         HealthStatus with check results.
     """
     start = time.perf_counter()
+    status = await _probe(db, start)
+    try:
+        # a probe that read and returned, or failed, leaves no connection with this task
+        await db.adapter.auto_commit()
+    except Exception as e:
+        return HealthStatus(
+            healthy=False,
+            latency_ms=(time.perf_counter() - start) * 1000,
+            message=f"could not return the connection: {e}",
+            timestamp=datetime.now(),
+            details=status.details,
+        )
+    return status
+
+
+async def _probe(db: "AsyncSQLerDB", start: float) -> HealthStatus:
     details: dict[str, Any] = {}
 
     try:
@@ -592,6 +624,11 @@ async def async_get_stats(db: "AsyncSQLerDB") -> DatabaseStats:
     Returns:
         DatabaseStats with size, page info, table/index counts.
     """
+    async with _connection_returned(db):
+        return await _read_stats(db)
+
+
+async def _read_stats(db: "AsyncSQLerDB") -> DatabaseStats:
     path = db.adapter.path
 
     # Get file size
@@ -723,11 +760,21 @@ async def async_backup(
 
 
 async def async_vacuum(db: "AsyncSQLerDB") -> float:
-    """Async vacuum to reclaim unused space."""
+    """Async vacuum to reclaim unused space.
+
+    Raises:
+        QueryError: Inside a transaction (SQLite refuses a VACUUM there); the transaction is
+            untouched and still usable.
+    """
+    if db.adapter.in_transaction:
+        raise QueryError(
+            "VACUUM cannot run inside a transaction: end the transaction first",
+            sql="VACUUM;",
+        )
     start = time.perf_counter()
-    cursor = await db.adapter.execute("VACUUM;")
-    await cursor.close()
-    await db.adapter.commit()
+    async with _connection_returned(db):
+        cursor = await db.adapter.execute("VACUUM;")
+        await cursor.close()
     return (time.perf_counter() - start) * 1000
 
 
@@ -743,9 +790,12 @@ async def async_checkpoint(db: "AsyncSQLerDB", mode: str = "PASSIVE") -> dict[st
             f"Invalid checkpoint mode: {mode!r}. "
             f"Must be one of: {', '.join(sorted(_VALID_CHECKPOINT_MODES))}"
         )
-    cursor = await db.adapter.execute(f"PRAGMA wal_checkpoint({mode_upper});")
-    row = await cursor.fetchone()
-    await cursor.close()
+    async with _connection_returned(db):
+        cursor = await db.adapter.execute(f"PRAGMA wal_checkpoint({mode_upper});")
+        try:
+            row = await cursor.fetchone()
+        finally:
+            await cursor.close()
     return {
         "busy": row[0],
         "log": row[1],
