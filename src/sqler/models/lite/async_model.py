@@ -186,9 +186,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         doc = await _aread_document(db, table, id_)
         if doc is None:
             return None
-        doc = await cls._aresolve_relations(doc, db=db)
-        inst = cls.model_validate(doc)
-        object.__setattr__(inst, "_id", doc.get("_id"))
+        inst = _refs.from_row(cls, await cls._aresolve_relations(doc, db=db))
         object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
         return inst
 
@@ -213,13 +211,9 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             return []
         # Use queryset's batch resolution
         qs = cls.using(given) if given is not None else cls.query()
-        docs = await qs._abatch_resolve(docs)
         instances = []
-        for doc in docs:
-            inst = cls.model_validate(doc)
-            object.__setattr__(inst, "_id", doc.get("_id"))
-            if cls._versioned_rows:
-                object.__setattr__(inst, "_version", doc["_version"])
+        for doc in await qs._abatch_resolve(docs):
+            inst = _refs.from_row(cls, doc)
             object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
             instances.append(inst)
         return instances
@@ -467,13 +461,12 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """
         db, table = cls._require_binding()
         out: dict = {}
-        for doc in await _aread_documents(db, table, ids):
-            rid = doc["_id"]
-            raw = doc
+        read = _refs.aread_versioned if cls._versioned_rows else _aread_documents
+        for raw in await read(db, table, ids):
+            rid = raw["_id"]
             try:
-                doc = await cls._aresolve_relations(doc, db=db, _seen=seen | {(table, rid)})
-                inst = cls.model_validate(doc)
-                object.__setattr__(inst, "_id", doc.get("_id"))
+                doc = await cls._aresolve_relations(raw, db=db, _seen=seen | {(table, rid)})
+                inst = _refs.from_row(cls, doc)
                 object.__setattr__(inst, "_snapshot", cls._make_snapshot(raw))
             except Exception:
                 out[rid] = _refs.KEEP

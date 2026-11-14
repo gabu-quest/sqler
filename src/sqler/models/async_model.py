@@ -124,10 +124,7 @@ class AsyncSQLerModel(BaseModel):
         doc = await _aread_document(db, table, id_)
         if doc is None:
             return None
-        doc = await cls._aresolve_relations(doc, db=db)
-        inst = cls.model_validate(doc)
-        inst._id = doc.get("_id")
-        return inst  # type: ignore[return-value]
+        return _refs.from_row(cls, await cls._aresolve_relations(doc, db=db))
 
     @classmethod
     async def from_ids(cls: Type[TAModel], ids: list[int], *, db=None) -> list[TAModel]:
@@ -155,15 +152,7 @@ class AsyncSQLerModel(BaseModel):
             return []
         # Use queryset's batch resolution for efficient nested ref loading
         qs = cls.using(given) if given is not None else cls.query()
-        docs = await qs._abatch_resolve(docs)
-        instances = []
-        for doc in docs:
-            inst = cls.model_validate(doc)
-            inst._id = doc.get("_id")
-            if cls._versioned_rows:
-                inst._version = doc["_version"]
-            instances.append(inst)
-        return instances
+        return [_refs.from_row(cls, doc) for doc in await qs._abatch_resolve(docs)]
 
     @classmethod
     async def count(cls: Type[TAModel]) -> int:
@@ -457,8 +446,7 @@ class AsyncSQLerModel(BaseModel):
             rid = doc["_id"]
             try:
                 doc = await cls._aresolve_relations(doc, db=db, _seen=seen | {(table, rid)})
-                inst = cls.model_validate(doc)  # type: ignore[call-arg]
-                inst._id = doc.get("_id")
+                inst = _refs.from_row(cls, doc)
             except Exception:
                 out[rid] = _refs.KEEP
                 continue

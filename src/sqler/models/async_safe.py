@@ -87,9 +87,8 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         for doc in await _refs.aread_versioned(db, table, ids):
             rid = doc["_id"]
             try:
-                inst = cls.model_validate(doc)  # type: ignore[call-arg]
-                inst._id = rid
-                inst._version = doc.get("_version", 0)
+                typed = await _refs.aresolve(doc, db, seen | {(table, rid)}, _refs.typed_fields(cls))
+                inst = _refs.from_row(cls, typed)
                 inst._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
             except (LookupError, RuntimeError, ValueError):
                 out[rid] = _refs.KEEP
@@ -103,9 +102,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         doc = await db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        inst = cls.model_validate(doc)  # type: ignore[call-arg]
-        inst._id = doc.get("_id")
-        inst._version = doc.get("_version", 0)
+        inst = _refs.from_row(cls, await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls)))
         try:
             inst._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
         except Exception:
@@ -255,7 +252,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         doc = await db.find_document_with_version(table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        fresh = cls.model_validate(doc)  # type: ignore[call-arg]
+        fresh = cls.model_validate(await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls)))  # type: ignore[call-arg]
         for fname in self.__class__.model_fields:
             if fname == "_id":
                 continue

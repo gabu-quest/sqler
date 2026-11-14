@@ -101,25 +101,6 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         db._ensure_versioned_table(cls._table)  # type: ignore[arg-type]
 
     @classmethod
-    def _load_refs(cls, ids: list, seen: frozenset) -> dict:
-        """Load the rows ``ids`` with their versions, one statement for the table."""
-        db, table = cls._require_binding()
-        out: dict = {}
-        for raw in _refs.read_versioned(db, table, ids):
-            rid = raw["_id"]
-            try:
-                doc = cls._resolve_relations(raw, db=db, _seen=seen | {(table, rid)})
-                inst = cls.model_validate(doc)
-                object.__setattr__(inst, "_id", rid)
-                object.__setattr__(inst, "_version", raw["_version"] or 0)
-                object.__setattr__(inst, "_snapshot", cls._make_snapshot(raw))
-            except (LookupError, RuntimeError, ValueError):
-                out[rid] = _refs.KEEP
-                continue
-            out[rid] = inst
-        return out
-
-    @classmethod
     def from_id(cls: Type[TSafe], id_: int) -> Optional[TSafe]:
         """Hydrate an instance by ``_id`` including version.
 
@@ -133,10 +114,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         doc = db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        doc_resolved = cls._resolve_relations(doc)
-        inst = cls.model_validate(doc_resolved)
-        object.__setattr__(inst, "_id", doc.get("_id"))
-        object.__setattr__(inst, "_version", doc.get("_version", 0))
+        inst = _refs.from_row(cls, cls._resolve_relations(doc))
         object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
         return inst
 
