@@ -6,10 +6,10 @@ enforcing deletion policies, and validating reference consistency.
 """
 
 import json
-import re
 from typing import TYPE_CHECKING
 
 from sqler import registry
+from sqler.utils import validate_table_name
 
 if TYPE_CHECKING:
     from sqler.db.sqler_db import SQLerDB
@@ -24,7 +24,13 @@ def _is_valid_table_name(table: str) -> bool:
     Returns:
         bool: True if the table name is valid.
     """
-    return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table))
+    from sqler.exceptions import InvalidTableNameError
+
+    try:
+        validate_table_name(table)
+    except InvalidTableNameError:
+        return False
+    return True
 
 
 def find_referrers(db: "SQLerDB", target_table: str, target_id: int) -> list[tuple[str, int, dict]]:
@@ -119,6 +125,8 @@ def set_null_referrers(
             :func:`find_referrers`.
     """
     # Use cached table name resolution for better performance
+    for table, _row_id, _meta in referrers:
+        validate_table_name(table)
     allowed_tables = registry.get_allowed_tables(target_table)
 
     for table, row_id, meta in referrers:
@@ -161,6 +169,8 @@ def cascade_delete(
         visited: Set of ``(table, row_id)`` tuples already processed to
             prevent infinite loops.
     """
+    for table, _row_id, _ in referrers:
+        validate_table_name(table)
     for table, row_id, _ in referrers:
         key = (table, row_id)
         if key in visited:
