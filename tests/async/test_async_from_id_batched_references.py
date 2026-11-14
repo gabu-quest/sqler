@@ -1,8 +1,11 @@
-"""Async ``from_id`` and ``refresh`` load references with the batched loader ``from_ids`` uses."""
+"""Async ``from_id`` and ``refresh`` load references with the batched loader ``from_ids`` uses.
+
+``other`` is typed: it admits both classes, alone, in a list or inside a dict.
+"""
 
 import warnings
 from dataclasses import dataclass
-from typing import Any
+from typing import Optional, Union
 
 import pytest
 import pytest_asyncio
@@ -15,42 +18,45 @@ from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 class AxPA(AsyncSQLerModel):
     __tablename__ = "afx_px_a"
     name: str
-    other: Any = None
+    other: "Optional[Union[AxPA, AxPB, list, dict]]" = None
 
 
 class AxPB(AsyncSQLerModel):
     __tablename__ = "afx_px_b"
     name: str
-    other: Any = None
+    other: "Optional[Union[AxPA, AxPB, list, dict]]" = None
 
 
 @dataclass
 class AxLA(AsyncSQLerLiteModel):
     __tablename__ = "afx_lx_a"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[AxLA, AxLB, list, dict]]" = None
 
 
 @dataclass
 class AxLB(AsyncSQLerLiteModel):
     __tablename__ = "afx_lx_b"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[AxLA, AxLB, list, dict]]" = None
 
 
 @dataclass
 class AxSA(AsyncSQLerLiteSafeModel):
     __tablename__ = "afx_ls_a"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[AxSA, AxSB, list, dict]]" = None
 
 
 @dataclass
 class AxSB(AsyncSQLerLiteSafeModel):
     __tablename__ = "afx_ls_b"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[AxSA, AxSB, list, dict]]" = None
 
+
+AxPA.model_rebuild()
+AxPB.model_rebuild()
 
 BASES = {"pydantic": (AxPA, AxPB), "lite": (AxLA, AxLB), "lite-safe": (AxSA, AxSB)}
 

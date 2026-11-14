@@ -1,4 +1,5 @@
-"""Async: from_ids and query().all() read a reference into a dropped table as from_id does: ``None``."""
+"""Async: from_ids and query().all() read a reference into a dropped table as from_id does:
+``None`` in a typed field; an untyped field is never followed and keeps the stored reference."""
 
 import warnings
 from dataclasses import dataclass
@@ -67,23 +68,25 @@ async def world(request, tmp_path):
     await h.save()
     await db.adapter.execute(f"DROP TABLE {target_cls.__tablename__}")
     await db.adapter.commit()
-    yield holder_cls, h._id
+    untyped = request.param.endswith("-untyped")
+    stored = {"_table": target_cls.__tablename__, "_id": t._id}
+    yield holder_cls, h._id, stored if untyped else None
     await db.close()
 
 
 @pytest.mark.asyncio
 async def test_from_id_value_is_none(world):
-    cls, rid = world
-    assert (await cls.from_id(rid)).owner is None
+    cls, rid, expected = world
+    assert (await cls.from_id(rid)).owner == expected
 
 
 @pytest.mark.asyncio
 async def test_from_ids_matches_from_id(world):
-    cls, rid = world
-    assert (await cls.from_ids([rid]))[0].owner is None
+    cls, rid, expected = world
+    assert (await cls.from_ids([rid]))[0].owner == expected
 
 
 @pytest.mark.asyncio
 async def test_query_all_matches_from_id(world):
-    cls, rid = world
-    assert (await cls.query().all())[0].owner is None
+    cls, rid, expected = world
+    assert (await cls.query().all())[0].owner == expected

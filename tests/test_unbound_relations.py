@@ -8,7 +8,7 @@ index given the database finds the row.
 import sqlite3
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional, Union
 
 import pytest
 import pytest_asyncio
@@ -235,7 +235,7 @@ class UmPyPart(SQLerModel):
 
 class UmPyBox(SQLerModel):
     name: str = ""
-    part: Any = None
+    part: Union[dict, UmPyPart, None] = None  # a typed position that also takes a stored reference
 
 
 @dataclass
@@ -246,7 +246,7 @@ class UmLitePart(SQLerLiteModel):
 @dataclass
 class UmLiteBox(SQLerLiteModel):
     name: str = ""
-    part: Any = None
+    part: Union[dict, UmLitePart, None] = None  # a typed position that also takes a stored reference
 
 
 class UmAsPart(AsyncSQLerModel):
@@ -255,7 +255,7 @@ class UmAsPart(AsyncSQLerModel):
 
 class UmAsBox(AsyncSQLerModel):
     name: str = ""
-    part: Any = None
+    part: Union[dict, UmAsPart, None] = None  # a typed position that also takes a stored reference
 
 
 @dataclass
@@ -266,7 +266,7 @@ class UmALitePart(AsyncSQLerLiteModel):
 @dataclass
 class UmALiteBox(AsyncSQLerLiteModel):
     name: str = ""
-    part: Any = None
+    part: Union[dict, UmALitePart, None] = None  # a typed position that also takes a stored reference
 
 
 def _exists(db, table):

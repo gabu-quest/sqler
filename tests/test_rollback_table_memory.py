@@ -10,7 +10,7 @@ driver's trace callback.
 import threading
 import warnings
 from dataclasses import dataclass
-from typing import Any
+from typing import Optional
 
 import pytest
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel, SQLiteAdapter
@@ -38,7 +38,7 @@ class MemRefChild(SQLerLiteSafeModel):
 class MemRefParent(SQLerLiteModel):
     __tablename__ = "mem_ref_parents"
     name: str = ""
-    child: Any = None
+    child: Optional[MemRefChild] = None
 
 
 @pytest.fixture

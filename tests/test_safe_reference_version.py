@@ -1,7 +1,7 @@
 """A safe model reached through a reference keeps its stored version and snapshot."""
 
 import warnings
-from typing import Any, Optional
+from typing import Optional
 
 import pytest
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
@@ -16,7 +16,7 @@ class SrvPlain(SQLerModel):
     __tablename__ = "srv_plains"
     title: str = ""
     owner: Optional[SrvSafe] = None
-    many: Any = None
+    many: Optional[list[SrvSafe]] = None
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ def test_refresh_of_parent_keeps_nested_version(world):
 
 def test_list_of_three_references_at_different_versions_one_select(world):
     rows = [_bump(SrvSafe(name=f"r{n}"), bumps) for n, bumps in enumerate((0, 1, 3))]
-    p = SrvPlain(title="t", many=[{"_table": "srv_safes", "_id": r._id} for r in rows])
+    p = SrvPlain(title="t", many=rows)
     p.save()
     got, selects = _count_selects(world, lambda: SrvPlain.from_id(p._id), "srv_safes")
     assert [x._version for x in got.many] == [0, 1, 3]

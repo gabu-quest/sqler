@@ -442,7 +442,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
     @classmethod
     async def _aresolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
         """Replace the references in ``data`` by the rows they point to (see ``_refs.aresolve``)."""
-        return await _refs.aresolve(data, db, _seen)
+        return await _refs.aresolve(data, db, _seen, cls)
 
     @classmethod
     async def _aload_refs(cls, ids: list, seen: frozenset) -> dict:

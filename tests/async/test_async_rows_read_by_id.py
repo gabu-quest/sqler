@@ -7,7 +7,7 @@ promoted columns, and for a versioned table its version, as ``find_document`` gi
 import sqlite3
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional, Union
 
 import pytest
 import pytest_asyncio
@@ -34,7 +34,7 @@ class ArbiHolder(AsyncSQLerModel):
     __tablename__ = "arbi_holders"
     name: str = ""
     typed: Optional[ArbiJob] = None
-    untyped: Any = None
+    held: "Union[dict, ArbiJob, None]" = None
 
 
 class ArbiSafeJob(AsyncSQLerSafeModel):
@@ -48,7 +48,7 @@ class ArbiSafeHolder(AsyncSQLerModel):
     __tablename__ = "arbi_safe_holders"
     name: str = ""
     typed: Optional[ArbiSafeJob] = None
-    untyped: Any = None
+    held: "Union[dict, ArbiSafeJob, None]" = None
 
 
 @dataclass
@@ -63,7 +63,7 @@ class ArbiLiteJob(AsyncSQLerLiteModel):
 class ArbiLiteHolder(AsyncSQLerLiteModel):
     __tablename__ = "arbi_lite_holders"
     name: str = ""
-    untyped: Any = None
+    held: "Union[dict, ArbiLiteJob, None]" = None
 
 
 @dataclass
@@ -78,7 +78,7 @@ class ArbiLiteSafeJob(AsyncSQLerLiteSafeModel):
 class ArbiLiteSafeHolder(AsyncSQLerLiteModel):
     __tablename__ = "arbi_lite_safe_holders"
     name: str = ""
-    untyped: Any = None
+    held: "Union[dict, ArbiLiteSafeJob, None]" = None
 
 
 class ArbiPlain(AsyncSQLerModel):
@@ -108,7 +108,7 @@ class ArbiLate(AsyncSQLerModel):
 
 class ArbiLateHolder(AsyncSQLerModel):
     __tablename__ = "arbi_late_holders"
-    untyped: Any = None
+    held: "Union[dict, ArbiLate, None]" = None
 
 
 FAMILIES = {
@@ -179,10 +179,10 @@ async def test_a_class_that_declares_a_column_its_table_was_made_without(db):
     one = await ArbiLate.from_id(1)
     assert one.status == "json"
     assert [r.status for r in await ArbiLate.from_ids([1])] == ["json"]
-    await ArbiLateHolder(untyped={"_table": "arbi_lates", "_id": 1}).save()
-    assert (await ArbiLateHolder.from_id(1)).untyped.status == "json"
-    assert (await ArbiLateHolder.from_ids([1]))[0].untyped["status"] == "json"
-    assert (await ArbiLateHolder.query().all())[0].untyped["status"] == "json"
+    await ArbiLateHolder(held={"_table": "arbi_lates", "_id": 1}).save()
+    assert (await ArbiLateHolder.from_id(1)).held.status == "json"
+    assert (await ArbiLateHolder.from_ids([1]))[0].held.status == "json"
+    assert (await ArbiLateHolder.query().all())[0].held.status == "json"
 
 
 WAYS = ["from_id", "from_ids", "all", "first"]
@@ -204,12 +204,12 @@ async def test_a_referenced_row_carries_its_promoted_column(db, family, way):
     job_cls, holder_cls = FAMILIES[family]
     job = job_cls(name="j", status="ready")
     await job.save()
-    fields = {"untyped": job}
+    fields = {"held": job}
     if "typed" in getattr(holder_cls, "model_fields", {}):
         fields["typed"] = job
     await holder_cls(name="h", **fields).save()
     got = await _load(holder_cls, way)
-    assert _status(got.untyped) == "ready"
+    assert _status(got.held) == "ready"
     if "typed" in fields:
         assert got.typed.status == "ready"
 
@@ -302,7 +302,7 @@ async def fresh(path, db):
 async def _with_ready_job(status="ready"):
     job = ArbiJob(name="j", status=status)
     await job.save()
-    await ArbiHolder(name="h", typed=job, untyped=job).save()
+    await ArbiHolder(name="h", typed=job, held=job).save()
 
 
 def _reads(captured):
@@ -327,7 +327,7 @@ async def test_a_referenced_row_read_through_using_a_fresh_database_object_is_wh
     await _with_ready_job()
     got = await ArbiHolder.using(fresh).first()
     assert got.typed.status == "ready"
-    assert got.untyped == {"name": "j", "_id": 1, "status": "ready"}
+    assert got.held == {"name": "j", "_id": 1, "status": "ready"}
     assert [h.typed.status for h in await ArbiHolder.using(fresh).all()] == ["ready"]
 
 
@@ -385,12 +385,12 @@ async def test_two_querysets_of_one_class_on_two_databases_read_their_own_child_
     try:
         job = ArbiJob(name="o", status="there")
         await job.save(db=other)
-        await ArbiHolder(name="h2", typed=job, untyped=job).save(db=other)
+        await ArbiHolder(name="h2", typed=job, held=job).save(db=other)
         mine, theirs = await ArbiHolder.using(db).first(), await ArbiHolder.using(other).first()
     finally:
         await other.close()
-    assert (mine.typed.name, mine.typed.status, mine.untyped["status"]) == ("j", "here", "here")
-    assert (theirs.typed.name, theirs.typed.status, theirs.untyped["status"]) == ("o", "there", "there")
+    assert (mine.typed.name, mine.typed.status, _status(mine.held)) == ("j", "here", "here")
+    assert (theirs.typed.name, theirs.typed.status, _status(theirs.held)) == ("o", "there", "there")
 
 
 async def test_a_queryset_built_by_hand_reads_child_rows_as_before(db):
@@ -400,7 +400,7 @@ async def test_a_queryset_built_by_hand_reads_child_rows_as_before(db):
 
     await _with_ready_job()
     qs = AsyncSQLerQuerySet(ArbiHolder, AsyncSQLerQuery(table="arbi_holders", adapter=db.adapter))
-    assert (await qs.first()).untyped == {"name": "j", "_id": 1}
+    assert (await qs.first()).held == {"name": "j", "_id": 1}
 
 
 # --- a queryset's copy carries everything the queryset holds -------------------------------
@@ -419,7 +419,7 @@ CHAINS = {
     "exclude": lambda qs: qs.exclude(_name_is("x")),
     "or_filter": lambda qs: qs.or_filter(_name_is("h")),
     "distinct": lambda qs: qs.distinct(),
-    "select": lambda qs: qs.select("name", "untyped"),
+    "select": lambda qs: qs.select("name", "held"),
     "order_by": lambda qs: qs.order_by("name"),
     "limit": lambda qs: qs.limit(5),
     "offset": lambda qs: qs.limit(5).offset(0),
@@ -437,8 +437,8 @@ async def test_every_chaining_method_keeps_resolve_off(db, method):
     assert qs._resolve is False
     assert qs._db is db
     if method in ROWS:
-        assert (await qs.first()).untyped == _REF
-        assert [h.untyped for h in await qs.all()] == [_REF]
+        assert (await qs.first()).held == _REF
+        assert [h.held for h in await qs.all()] == [_REF]
 
 
 @pytest.mark.parametrize("method", list(CHAINS))
@@ -448,7 +448,7 @@ async def test_every_chaining_method_keeps_the_database_of_using(db, fresh, meth
     assert qs._resolve is True
     assert qs._db is fresh
     if method in ROWS:
-        assert (await qs.first()).untyped == {"name": "j", "_id": 1, "status": "ready"}
+        assert (await qs.first()).held == {"name": "j", "_id": 1, "status": "ready"}
 
 
 # --- the async reader's own path: the shapes the sync file pins ---------------------------
@@ -469,10 +469,10 @@ async def test_a_null_column_and_a_json_key_of_its_name_read_as_find_document_re
         {"name": "m", "status": "col", "_id": 2},
     ]
     assert await db.find_documents("arbi_jobs", [1, 2]) == one
-    await ArbiHolder(untyped={"_table": "arbi_jobs", "_id": 1}).save()
-    await ArbiHolder(untyped={"_table": "arbi_jobs", "_id": 2}).save()
-    assert [h.untyped["status"] for h in await ArbiHolder.query().all()] == [None, "col"]
-    assert [h.untyped["status"] for h in await ArbiHolder.from_ids([1, 2])] == [None, "col"]
+    await ArbiHolder(held={"_table": "arbi_jobs", "_id": 1}).save()
+    await ArbiHolder(held={"_table": "arbi_jobs", "_id": 2}).save()
+    assert [_status(h.held) for h in await ArbiHolder.query().all()] == [None, "col"]
+    assert [_status(h.held) for h in await ArbiHolder.from_ids([1, 2])] == [None, "col"]
 
 
 class ArbiBare(AsyncSQLerModel):
@@ -485,7 +485,7 @@ class ArbiBare(AsyncSQLerModel):
 
 class ArbiBareHolder(AsyncSQLerModel):
     __tablename__ = "arbi_bare_holders"
-    untyped: Any = None
+    held: "Union[dict, ArbiBare, None]" = None
 
 
 async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_none(db):
@@ -497,10 +497,10 @@ async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_
         ArbiBareHolder.set_db(db)
     assert (await ArbiBare.from_id(1)).status == "ready"
     assert [b.status for b in await ArbiBare.from_ids([1])] == ["ready"]
-    await ArbiBareHolder(untyped={"_table": "arbi_bares", "_id": 1}).save()
-    assert (await ArbiBareHolder.from_id(1)).untyped.status == "ready"
-    assert (await ArbiBareHolder.from_ids([1]))[0].untyped["status"] == "ready"
-    assert (await ArbiBareHolder.query().first()).untyped["status"] == "ready"
+    await ArbiBareHolder(held={"_table": "arbi_bares", "_id": 1}).save()
+    assert (await ArbiBareHolder.from_id(1)).held.status == "ready"
+    assert (await ArbiBareHolder.from_ids([1]))[0].held.status == "ready"
+    assert (await ArbiBareHolder.query().first()).held.status == "ready"
 
 
 @pytest.mark.parametrize(

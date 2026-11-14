@@ -477,7 +477,7 @@ def test_hydration_with_missing_target():
 
     class Book(SQLerModel):
         title: str
-        author: dict | None = None
+        author: Author | None = None
 
     db = SQLerDB.in_memory()
     Author.set_db(db)
@@ -485,7 +485,7 @@ def test_hydration_with_missing_target():
 
     # Create author and book
     author = Author(name="Writer").save()
-    book = Book(title="Story", author={"_table": "authors", "_id": author._id}).save()
+    book = Book(title="Story", author=author).save()
 
     # Delete author directly (bypass referential integrity)
     db.delete_document("authors", author._id)

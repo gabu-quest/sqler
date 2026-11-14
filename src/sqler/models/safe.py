@@ -76,7 +76,7 @@ class SQLerSafeModel(SQLerModel):
         for doc in _refs.read_versioned(db, table, ids):
             rid = doc["_id"]
             try:
-                typed = _refs.resolve(doc, db, seen | {(table, rid)}, _refs.typed_fields(cls))
+                typed = _refs.resolve(doc, db, seen | {(table, rid)}, cls)
                 inst = _refs.from_row(cls, typed, doc)
             except (LookupError, RuntimeError, ValueError):
                 out[rid] = _refs.KEEP
@@ -90,7 +90,7 @@ class SQLerSafeModel(SQLerModel):
         doc = db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        typed = _refs.resolve(doc, db, frozenset(), _refs.typed_fields(cls))
+        typed = _refs.resolve(doc, db, frozenset(), cls)
         return _refs.from_row(cls, typed, doc)  # type: ignore[return-value]
 
     @classmethod
@@ -217,7 +217,7 @@ class SQLerSafeModel(SQLerModel):
                     raise
                 payload = _retry.rebase(latest_doc, held, snap, delta)
                 written = retry.build(
-                    stale, lambda: cls.model_validate(_refs.resolve(payload, db, frozenset(), _refs.typed_fields(cls)))
+                    stale, lambda: cls.model_validate(_refs.resolve(payload, db, frozenset(), cls))
                 )
                 self._version = latest_doc.get("_version", 0)
                 self._snapshot = _dirty.snapshot(latest_doc)
@@ -232,7 +232,7 @@ class SQLerSafeModel(SQLerModel):
         doc = db.find_document_with_version(table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        row, doc = doc, _refs.resolve(doc, db, frozenset(), _refs.typed_fields(cls))
+        row, doc = doc, _refs.resolve(doc, db, frozenset(), cls)
         fresh = cls.model_validate(doc)  # type: ignore[call-arg]
         for fname in self.__class__.model_fields:
             if fname == "_id":

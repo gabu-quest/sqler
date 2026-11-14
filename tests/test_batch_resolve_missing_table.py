@@ -1,4 +1,5 @@
-"""from_ids and query().all() read a reference into a dropped table as from_id does: ``None``."""
+"""from_ids and query().all() read a reference into a dropped table as from_id does: ``None``
+in a typed field; an untyped field is never followed and keeps the stored reference."""
 
 import warnings
 from dataclasses import dataclass
@@ -64,20 +65,22 @@ def world(request, tmp_path):
     h.save()
     db.adapter.execute(f"DROP TABLE {target_cls.__tablename__}")
     db.adapter.commit()
-    yield holder_cls, h._id
+    untyped = request.param.endswith("-untyped")
+    stored = {"_table": target_cls.__tablename__, "_id": t._id}
+    yield holder_cls, h._id, stored if untyped else None
     db.close()
 
 
 def test_from_id_value_is_none(world):
-    cls, rid = world
-    assert cls.from_id(rid).owner is None
+    cls, rid, expected = world
+    assert cls.from_id(rid).owner == expected
 
 
 def test_from_ids_matches_from_id(world):
-    cls, rid = world
-    assert cls.from_ids([rid])[0].owner is None
+    cls, rid, expected = world
+    assert cls.from_ids([rid])[0].owner == expected
 
 
 def test_query_all_matches_from_id(world):
-    cls, rid = world
-    assert cls.query().all()[0].owner is None
+    cls, rid, expected = world
+    assert cls.query().all()[0].owner == expected

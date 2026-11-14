@@ -1,7 +1,7 @@
 """Async: a safe model reached through a reference keeps its stored version and snapshot."""
 
 import warnings
-from typing import Any, Optional
+from typing import Optional
 
 import pytest
 import pytest_asyncio
@@ -18,7 +18,7 @@ class AsrvPlain(AsyncSQLerModel):
     __tablename__ = "asrv_plains"
     title: str = ""
     owner: Optional[AsrvSafe] = None
-    many: Any = None
+    many: Optional[list[AsrvSafe]] = None
 
 
 @pytest_asyncio.fixture
@@ -70,7 +70,7 @@ async def test_refresh_of_parent_keeps_nested_version(db):
 @pytest.mark.asyncio
 async def test_list_of_three_references_at_different_versions_one_select(db):
     rows = [await _bump(AsrvSafe(name=f"r{n}"), bumps) for n, bumps in enumerate((0, 1, 3))]
-    p = AsrvPlain(title="t", many=[{"_table": "asrv_safes", "_id": r._id} for r in rows])
+    p = AsrvPlain(title="t", many=rows)
     await p.save()
     seen: list[str] = []
     conns = list(db.adapter._all_conns)

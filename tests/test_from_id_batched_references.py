@@ -1,11 +1,13 @@
 """``from_id`` and ``refresh`` load references with the batched loader ``from_ids`` uses.
 
+``other`` is typed: it admits both classes, alone, in a list or inside a dict.
+
 Counted through the driver's trace callback: a two-row cycle takes 3 SELECTs, a row
 holding 20 references takes 2, whichever way the row is loaded.
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Optional, Union
 
 import pytest
 from sqler import SQLerDB, SQLerModel
@@ -16,42 +18,45 @@ from sqler.models.lite.safe import SQLerLiteSafeModel
 class PxA(SQLerModel):
     __tablename__ = "fx_px_a"
     name: str
-    other: Any = None
+    other: "Optional[Union[PxA, PxB, list, dict]]" = None
 
 
 class PxB(SQLerModel):
     __tablename__ = "fx_px_b"
     name: str
-    other: Any = None
+    other: "Optional[Union[PxA, PxB, list, dict]]" = None
 
 
 @dataclass
 class LxA(SQLerLiteModel):
     __tablename__ = "fx_lx_a"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[LxA, LxB, list, dict]]" = None
 
 
 @dataclass
 class LxB(SQLerLiteModel):
     __tablename__ = "fx_lx_b"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[LxA, LxB, list, dict]]" = None
 
 
 @dataclass
 class LsA(SQLerLiteSafeModel):
     __tablename__ = "fx_ls_a"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[LsA, LsB, list, dict]]" = None
 
 
 @dataclass
 class LsB(SQLerLiteSafeModel):
     __tablename__ = "fx_ls_b"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[LsA, LsB, list, dict]]" = None
 
+
+PxA.model_rebuild()
+PxB.model_rebuild()
 
 BASES = {"pydantic": (PxA, PxB), "lite": (LxA, LxB), "lite-safe": (LsA, LsB)}
 
