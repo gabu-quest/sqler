@@ -18,7 +18,7 @@ from typing import (
 )
 
 from sqler.exceptions import StaleVersionError
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 from sqler.models import save_retry as _retry
 from sqler.models._table_names import _instance_binding
 from sqler.models.lite.model import SQLerLiteModel
@@ -114,9 +114,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         doc = db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        inst = _refs.from_row(cls, cls._resolve_relations(doc))
-        object.__setattr__(inst, "_snapshot", cls._make_snapshot(doc))
-        return inst
+        return _refs.from_row(cls, cls._resolve_relations(doc), doc)
 
     @classmethod
     def query(cls: Type[TSafe]) -> "SQLerQuerySet[TSafe]":
@@ -172,7 +170,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             object.__setattr__(inst, "_id", id_)
             object.__setattr__(inst, "_version", version)
-            object.__setattr__(inst, "_snapshot", {k: v for k, v in payload.items() if k not in {"_id", "_version"}})
+            object.__setattr__(inst, "_snapshot", _dirty.snapshot(payload))
         return instances
 
     def save(self: TSafe, *, db=None) -> TSafe:
@@ -229,10 +227,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
                 object.__setattr__(self, "_id", new_id)
                 object.__setattr__(self, "_version", new_version)
                 target_payload = attempt_payload
-                snap_payload = {
-                    k: v for k, v in target_payload.items() if k not in {"_id", "_version"}
-                }
-                object.__setattr__(self, "_snapshot", snap_payload)
+                object.__setattr__(self, "_snapshot", _dirty.snapshot(target_payload))
                 return self
             except sqlite3.OperationalError as e:
                 if not _retry.is_lock_error(e):
@@ -259,7 +254,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
                     rebased = apply_numeric_scalar_deltas(rebased, delta)
                 target_payload = rebased
                 object.__setattr__(self, "_version", latest_doc.get("_version", 0))
-                object.__setattr__(self, "_snapshot", latest_payload.copy())
+                object.__setattr__(self, "_snapshot", _dirty.snapshot(latest_doc))
 
             _retry.sleep(delay)
 
@@ -289,7 +284,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
                 object.__setattr__(self, f.name, doc_resolved[f.name])
         object.__setattr__(self, "_id", doc.get("_id"))
         object.__setattr__(self, "_version", doc.get("_version", 0))
-        object.__setattr__(self, "_snapshot", cls._make_snapshot(doc))
+        object.__setattr__(self, "_snapshot", _dirty.snapshot(doc))
         return self
 
     def __repr__(self) -> str:

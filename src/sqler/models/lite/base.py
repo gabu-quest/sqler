@@ -13,7 +13,7 @@ from dataclasses import fields
 from datetime import date, datetime
 from typing import Any, ClassVar, Optional, Type, TypeVar
 
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 
 T = TypeVar("T", bound="SQLerLiteModelBase")
 
@@ -197,6 +197,10 @@ class SQLerLiteModelBase:
     def get_field_names(cls) -> set[str]:
         """Return set of public field names."""
         return {f.name for f in fields(cls) if not f.name.startswith("_")}  # type: ignore[arg-type]
+
+    # ----- dirty tracking -----
+    is_dirty = _dirty.is_dirty
+    get_dirty_fields = _dirty.get_dirty_fields
 
     def __repr__(self) -> str:
         """Return string representation."""

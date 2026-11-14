@@ -9,7 +9,7 @@ from pydantic import BaseModel, PrivateAttr
 from sqler import registry
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 from sqler.models._table_names import (
     _aread_document,
     _aread_documents,
@@ -124,7 +124,7 @@ class AsyncSQLerModel(BaseModel):
         doc = await _aread_document(db, table, id_)
         if doc is None:
             return None
-        return _refs.from_row(cls, await cls._aresolve_relations(doc, db=db))
+        return _refs.from_row(cls, await cls._aresolve_relations(doc, db=db), doc)
 
     @classmethod
     async def from_ids(cls: Type[TAModel], ids: list[int], *, db=None) -> list[TAModel]:
@@ -152,7 +152,10 @@ class AsyncSQLerModel(BaseModel):
             return []
         # Use queryset's batch resolution for efficient nested ref loading
         qs = cls.using(given) if given is not None else cls.query()
-        return [_refs.from_row(cls, doc) for doc in await qs._abatch_resolve(docs)]
+        return [
+            _refs.from_row(cls, doc, row)
+            for row, doc in zip(docs, await qs._abatch_resolve(docs), strict=True)
+        ]
 
     @classmethod
     async def count(cls: Type[TAModel]) -> int:
@@ -348,8 +351,9 @@ class AsyncSQLerModel(BaseModel):
         else:
             ids = await db.insert_many(table, payloads)
 
-        for inst, id_ in zip(instances, ids):
+        for inst, id_, payload in zip(instances, ids, payloads):
             inst._id = id_
+            inst._snapshot = _dirty.snapshot(payload)
         return instances
 
     async def save(self: TAModel, *, db=None) -> TAModel:
@@ -368,6 +372,7 @@ class AsyncSQLerModel(BaseModel):
         else:
             new_id = await db.upsert_document(table, self._id, payload)
         self._id = new_id
+        self._snapshot = _dirty.snapshot(payload)
         return self
 
     async def delete(self, *, db=None) -> None:
@@ -445,8 +450,8 @@ class AsyncSQLerModel(BaseModel):
         for doc in await _aread_documents(db, table, ids):
             rid = doc["_id"]
             try:
-                doc = await cls._aresolve_relations(doc, db=db, _seen=seen | {(table, rid)})
-                inst = _refs.from_row(cls, doc)
+                resolved = await cls._aresolve_relations(doc, db=db, _seen=seen | {(table, rid)})
+                inst = _refs.from_row(cls, resolved, doc)
             except Exception:
                 out[rid] = _refs.KEEP
                 continue

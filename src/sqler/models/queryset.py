@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, Iterator, Optional, Type, TypeVar
 
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 from sqler.models._table_names import _unchecked_table_name
 from sqler.query import SQLerExpression, SQLerQuery
 
@@ -83,10 +83,10 @@ class SQLerQuerySet(Generic[T]):
     # execution
     def all(self) -> list[T]:
         """Execute and return a list of model instances."""
-        docs = self._query.all_dicts()
+        rows = docs = self._query.all_dicts()
         if self._resolve:
             try:
-                docs = self._batch_resolve(docs)
+                docs = self._batch_resolve(rows)
             except RecursionError:
                 # Circular reference detected - log and continue with unresolved refs.
                 # We tolerate this specifically because resolution is bounded-depth and
@@ -98,10 +98,10 @@ class SQLerQuerySet(Generic[T]):
                 )
         results: list[T] = []
         other_table = self._reads_other_table()
-        for d in docs:
+        for row, d in zip(rows, docs, strict=True):
             inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
             # attach db id if present but excluded from schema
-            self._attach_metadata(inst, d, other_table)
+            self._attach_metadata(inst, d, row, other_table)
             results.append(inst)
         return results
 
@@ -127,17 +127,17 @@ class SQLerQuerySet(Generic[T]):
         other_table = self._reads_other_table()
         for doc in self._query.iter_dicts():
             inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-            self._attach_metadata(inst, doc, other_table)
+            self._attach_metadata(inst, doc, doc, other_table)
             yield inst
 
     def first(self) -> Optional[T]:
         """Execute with LIMIT 1 and return the first model instance, if any."""
-        d = self._query.first_dict()
+        row = d = self._query.first_dict()
         if d is None:
             return None
         if self._resolve:
             try:
-                d = self._batch_resolve([d])[0]
+                d = self._batch_resolve([row])[0]
             except RecursionError:
                 # See note in all() — bounded-depth circular refs are tolerated;
                 # any other resolution error is a real bug and re-raises.
@@ -146,7 +146,7 @@ class SQLerQuerySet(Generic[T]):
                     f"{self._model_cls.__name__}. Returning partially resolved document."
                 )
         inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
-        self._attach_metadata(inst, d, self._reads_other_table())
+        self._attach_metadata(inst, d, row, self._reads_other_table())
         return inst
 
     def _reads_other_table(self) -> bool:
@@ -159,21 +159,21 @@ class SQLerQuerySet(Generic[T]):
         table = self._query._table
         return table is not None and table != _unchecked_table_name(self._model_cls)
 
-    def _attach_metadata(self, inst: T, doc: dict, other_table: bool) -> None:
+    def _attach_metadata(self, inst: T, doc: dict, row: dict, other_table: bool) -> None:
         """Attach database metadata (_id, _version, _snapshot) to an instance.
 
         Args:
             inst: The model instance to attach metadata to.
-            doc: The document dictionary containing the metadata.
+            doc: The document the instance was built from (``_id``, ``_version``).
+            row: The row as it was read, before its references were resolved: the snapshot
+                is taken from it. The same dict as ``doc`` when nothing was resolved.
             other_table: The run's ``_reads_other_table()`` answer.
         """
         try:
             inst._id = doc.get("_id")  # type: ignore[attr-defined]
             if "_version" in doc:
                 inst._version = doc.get("_version")  # type: ignore[attr-defined]
-            # capture snapshot of loaded state (excluding private keys)
-            snap = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
-            inst._snapshot = snap  # type: ignore[attr-defined]
+            inst._snapshot = _dirty.snapshot(row)  # type: ignore[attr-defined]
             if other_table:
                 inst._source_table = self._query._table  # type: ignore[attr-defined]
         except AttributeError as e:
@@ -239,7 +239,7 @@ class SQLerQuerySet(Generic[T]):
         if doc is None:
             return None
         inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-        self._attach_metadata(inst, doc, self._reads_other_table())
+        self._attach_metadata(inst, doc, doc, self._reads_other_table())
         return inst
 
     def update_n(self, n: int, **fields) -> list[T]:
@@ -257,7 +257,7 @@ class SQLerQuerySet(Generic[T]):
         other_table = self._reads_other_table()
         for doc in docs:
             inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-            self._attach_metadata(inst, doc, other_table)
+            self._attach_metadata(inst, doc, doc, other_table)
             results.append(inst)
         return results
 

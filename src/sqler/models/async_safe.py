@@ -6,7 +6,7 @@ from typing import ClassVar, Optional, Type, TypeVar
 from pydantic import PrivateAttr
 
 from sqler.exceptions import StaleVersionError
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 from sqler.models._table_names import _instance_binding
 from sqler.query.async_query import AsyncSQLerQuery
 
@@ -88,8 +88,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
             rid = doc["_id"]
             try:
                 typed = await _refs.aresolve(doc, db, seen | {(table, rid)}, _refs.typed_fields(cls))
-                inst = _refs.from_row(cls, typed)
-                inst._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
+                inst = _refs.from_row(cls, typed, doc)
             except (LookupError, RuntimeError, ValueError):
                 out[rid] = _refs.KEEP
                 continue
@@ -102,12 +101,8 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         doc = await db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        inst = _refs.from_row(cls, await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls)))
-        try:
-            inst._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        return inst  # type: ignore[return-value]
+        typed = await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls))
+        return _refs.from_row(cls, typed, doc)  # type: ignore[return-value]
 
     @classmethod
     async def asave_many(cls: Type[TASafe], instances: list[TASafe], *, db=None) -> list[TASafe]:  # type: ignore[override]
@@ -151,7 +146,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             inst._id = id_
             inst._version = version
-            inst._snapshot = {k: v for k, v in payload.items() if k not in {"_id", "_version"}}
+            inst._snapshot = _dirty.snapshot(payload)
         return instances
 
     async def save(self: TASafe, *, db=None) -> TASafe:  # type: ignore[override]
@@ -208,13 +203,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                 self._id = new_id
                 self._version = new_version
                 target_payload = attempt_payload
-                try:
-                    snap_payload = {
-                        k: v for k, v in target_payload.items() if k not in {"_id", "_version"}
-                    }
-                    self._snapshot = snap_payload  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+                self._snapshot = _dirty.snapshot(target_payload)
                 return self
             except StaleVersionError:
                 if not can_rebase:
@@ -234,10 +223,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     rebased = apply_numeric_scalar_deltas(rebased, delta)
                 target_payload = rebased
                 self._version = latest_doc.get("_version", 0)
-                try:
-                    self._snapshot = latest_payload.copy()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+                self._snapshot = _dirty.snapshot(latest_doc)
             except sqlite3.OperationalError as e:
                 if not _retry.is_lock_error(e):
                     raise
@@ -252,15 +238,13 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         doc = await db.find_document_with_version(table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        fresh = cls.model_validate(await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls)))  # type: ignore[call-arg]
+        row, doc = doc, await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls))
+        fresh = cls.model_validate(doc)  # type: ignore[call-arg]
         for fname in self.__class__.model_fields:
             if fname == "_id":
                 continue
             setattr(self, fname, getattr(fresh, fname))
         self._id = doc.get("_id")
         self._version = doc.get("_version", 0)
-        try:
-            self._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        self._snapshot = _dirty.snapshot(row)
         return self

@@ -9,7 +9,7 @@ from pydantic import BaseModel, PrivateAttr
 from sqler import registry
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _refs
+from sqler.models import _dirty, _refs
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
@@ -178,7 +178,7 @@ class SQLerModel(BaseModel):
         doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        return _refs.from_row(cls, cls._resolve_relations(doc, db=db))
+        return _refs.from_row(cls, cls._resolve_relations(doc, db=db), doc)
 
     @classmethod
     def from_ids(cls: Type[TModel], ids: list[int], *, db=None) -> list[TModel]:
@@ -206,7 +206,10 @@ class SQLerModel(BaseModel):
             return []
         # Use queryset's batch resolution for efficient nested ref loading
         qs = cls.using(given) if given is not None else cls.query()
-        return [_refs.from_row(cls, doc) for doc in qs._batch_resolve(docs)]
+        return [
+            _refs.from_row(cls, doc, row)
+            for row, doc in zip(docs, qs._batch_resolve(docs), strict=True)
+        ]
 
     @classmethod
     def count(cls: Type[TModel]) -> int:
@@ -379,8 +382,9 @@ class SQLerModel(BaseModel):
         else:
             ids = db.insert_many(table, payloads)
 
-        for inst, id_ in zip(instances, ids):
+        for inst, id_, payload in zip(instances, ids, payloads):
             inst._id = id_
+            inst._snapshot = _dirty.snapshot(payload)
         return instances
 
     def save(self: TModel, *, db=None) -> TModel:
@@ -403,6 +407,7 @@ class SQLerModel(BaseModel):
         else:
             new_id = db.upsert_document(table, self._id, payload)
         self._id = new_id
+        self._snapshot = _dirty.snapshot(payload)
         return self
 
     def delete(self, *, db=None) -> None:
@@ -461,7 +466,7 @@ class SQLerModel(BaseModel):
         doc = _read_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        doc = cls._resolve_relations(doc, db=db)
+        row, doc = doc, cls._resolve_relations(doc, db=db)
         fresh = cls.model_validate(doc)  # type: ignore[call-arg]
         # update fields in-place (excluding _id which is also present)
         for fname in self.__class__.model_fields:
@@ -470,32 +475,12 @@ class SQLerModel(BaseModel):
             setattr(self, fname, getattr(fresh, fname))
         # set db id explicitly
         self._id = doc.get("_id")
-        # refresh the dirty-tracking snapshot so is_dirty() reflects the new loaded state
-        self._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
+        self._snapshot = _dirty.snapshot(row)
         return self
 
     # ----- dirty tracking -----
-    def is_dirty(self) -> bool:
-        """Return True if any field differs from the last loaded/refreshed state.
-
-        The snapshot is captured by the queryset hydration path and refreshed
-        by ``refresh()``. Instances created directly (not loaded from DB) have
-        no snapshot and are considered dirty until first save.
-        """
-        if self._snapshot is None:
-            return True
-        return self.model_dump() != self._snapshot
-
-    def get_dirty_fields(self) -> set[str]:
-        """Return names of fields that differ from the last loaded/refreshed state."""
-        if self._snapshot is None:
-            return set(self.__class__.model_fields.keys())
-        current = self.model_dump()
-        dirty: set[str] = set()
-        for key, value in current.items():
-            if key not in self._snapshot or self._snapshot[key] != value:
-                dirty.add(key)
-        return dirty
+    is_dirty = _dirty.is_dirty
+    get_dirty_fields = _dirty.get_dirty_fields
 
     # ----- ref integrity utils -----
     @classmethod
@@ -567,7 +552,9 @@ class SQLerModel(BaseModel):
         for doc in _read_documents(db, table, ids):
             rid = doc["_id"]
             try:
-                inst = _refs.from_row(cls, cls._resolve_relations(doc, db=db, _seen=seen | {(table, rid)}))
+                inst = _refs.from_row(
+                    cls, cls._resolve_relations(doc, db=db, _seen=seen | {(table, rid)}), doc
+                )
             except (LookupError, RuntimeError, ValueError):
                 out[rid] = _refs.KEEP
                 continue

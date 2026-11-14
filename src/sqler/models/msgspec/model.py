@@ -19,6 +19,7 @@ from typing import (
 
 from sqler import registry
 from sqler.exceptions import NotBoundError, UniqueConstraintError
+from sqler.models import _dirty
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
@@ -190,7 +191,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             return None
         inst = cls.model_validate(doc)
         inst._id = doc.get("_id")
-        inst._snapshot = cls._make_snapshot(doc)
+        inst._snapshot = _dirty.snapshot(doc)
         return inst
 
     @classmethod
@@ -218,7 +219,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         for doc in docs:
             inst = cls.model_validate(doc)
             inst._id = doc.get("_id")
-            inst._snapshot = cls._make_snapshot(doc)
+            inst._snapshot = _dirty.snapshot(doc)
             instances.append(inst)
         return instances
 
@@ -361,8 +362,9 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         else:
             ids = db.insert_many(table, payloads)
 
-        for inst, id_ in zip(instances, ids):
+        for inst, id_, payload in zip(instances, ids, payloads):
             inst._id = id_
+            inst._snapshot = _dirty.snapshot(payload)
         return instances
 
     def save(self: T, *, db=None) -> T:
@@ -385,7 +387,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         else:
             new_id = db.upsert_document(table, self._id, payload)
         self._id = new_id
-        self._snapshot = payload.copy()
+        self._snapshot = _dirty.snapshot(payload)
         return self
 
     def delete(self, *, db=None) -> None:
@@ -441,7 +443,6 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         Returns:
             self: The same instance (for chaining).
         """
-        cls = self.__class__
         db, table = _instance_binding(self)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
@@ -452,13 +453,8 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         for f in _public_fields(type(self)):
             if f.name in doc:
                 setattr(self, f.name, doc[f.name])
-        self._snapshot = cls._make_snapshot(doc)
+        self._snapshot = _dirty.snapshot(doc)
         return self
-
-    @classmethod
-    def _make_snapshot(cls, doc: dict) -> dict:
-        """Create snapshot excluding metadata keys."""
-        return {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
 
     def _dump_with_relations(self) -> dict:
         """Serialize model with relationship encoding.
@@ -503,20 +499,5 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         return payload
 
     # ----- dirty tracking -----
-    def is_dirty(self) -> bool:
-        """Check if instance has unsaved changes."""
-        if self._snapshot is None:
-            return True
-        current = self.model_dump()
-        return current != self._snapshot
-
-    def get_dirty_fields(self) -> set[str]:
-        """Get names of fields that have changed since last save/load."""
-        if self._snapshot is None:
-            return self.get_field_names()
-        current = self.model_dump()
-        dirty = set()
-        for key, value in current.items():
-            if key not in self._snapshot or self._snapshot[key] != value:
-                dirty.add(key)
-        return dirty
+    is_dirty = _dirty.is_dirty
+    get_dirty_fields = _dirty.get_dirty_fields
