@@ -23,7 +23,7 @@ from typing import (
 from sqler import registry
 from sqler._stored import stored
 from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _dirty, _refs
+from sqler.models import _dirty, _refs, _write_rules
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
@@ -321,6 +321,9 @@ class SQLerLiteModel(SQLerLiteModelBase):
 
         Uses multi-row INSERT for significantly better throughput than
         calling ``save()`` in a loop. Only supports new (unsaved) instances.
+        Each instance meets the rules of its class as ``save()`` does: hooks,
+        timestamps and audit rows (see the mixins); with an audit log the batch
+        and its audit rows are one transaction.
 
         Args:
             instances: List of model instances with ``_id is None``.
@@ -332,13 +335,11 @@ class SQLerLiteModel(SQLerLiteModelBase):
         Raises:
             ValueError: If any instance already has an ``_id``.
         """
-        if not instances:
-            return instances
-        for inst in instances:
-            if inst._id is not None:
-                raise ValueError("save_many() only accepts new instances (_id must be None)")
+        return _write_rules.save_many(cls, instances, db, cls._insert_rows)
 
-        db, table = cls._resolve_binding(db)
+    @classmethod
+    def _insert_rows(cls, db, table: str, instances: list) -> None:
+        """Write new instances in one batch; each takes its ``_id`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
 
         if promoted:
@@ -356,7 +357,6 @@ class SQLerLiteModel(SQLerLiteModelBase):
         for inst, id_, payload in zip(instances, ids, payloads):
             object.__setattr__(inst, "_id", id_)
             object.__setattr__(inst, "_snapshot", _dirty.snapshot(payload))
-        return instances
 
     def save(self: T, *, db=None, _partial: bool = False) -> T:
         """Insert or update this instance and update ``_id``.
@@ -370,8 +370,14 @@ class SQLerLiteModel(SQLerLiteModelBase):
         Returns:
             self: The same instance (for chaining).
         """
-        cls = self.__class__
         db, table = _instance_binding(self, db)
+        return _write_rules.save(
+            self, db, table, _partial, lambda: self._write(db, table, _partial)
+        )
+
+    def _write(self: T, db, table: str, _partial: bool) -> T:
+        """Write this instance's row (``save()`` without the rules of its class)."""
+        cls = self.__class__
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
@@ -400,16 +406,23 @@ class SQLerLiteModel(SQLerLiteModelBase):
     def delete_with_policy(self, *, db=None, on_delete: str = "restrict") -> None:
         """Delete this instance with a specified integrity policy.
 
+        The delete and what the policy does to referring rows are one transaction
+        (the caller's, if one is open), and the instance meets the rules of its class
+        as ``delete()`` does: hooks and the audit row.
+
         Args:
             db: Optional database to delete from (overrides class-level binding).
             on_delete: One of "restrict", "set_null", or "cascade".
         """
         db, table = _instance_binding(self, db)
-        if self._id is None:
-            raise ValueError("Cannot delete unsaved model (missing _id)")
+        _write_rules.delete(
+            self, db, table, on_delete, lambda: self._delete_row(db, table, on_delete)
+        )
+
+    def _delete_row(self, db, table: str, on_delete: str) -> None:
+        """Delete this instance's row under ``on_delete`` (``delete_with_policy()`` without
+        the rules of its class)."""
         target = (table, int(self._id))
-        if on_delete not in {"restrict", "set_null", "cascade"}:
-            raise ValueError("on_delete must be 'restrict','set_null', or 'cascade'")
 
         # Find referrers
         from sqler.models import ReferentialIntegrityError

@@ -1,4 +1,4 @@
-"""Tests for AsyncSQLerLiteModel.asave_many() and AsyncSQLerLiteSafeModel.asave_many()."""
+"""Tests for AsyncSQLerLiteModel.save_many() and AsyncSQLerLiteSafeModel.save_many()."""
 
 import sqlite3
 from dataclasses import dataclass
@@ -62,14 +62,14 @@ async def db():
         await db.close()
 
 
-# ---- AsyncSQLerLiteModel.asave_many tests ----
+# ---- AsyncSQLerLiteModel.save_many tests ----
 
 @pytest.mark.asyncio
-async def test_asave_many_basic(db):
+async def test_save_many_basic(db):
     ALItem.set_db(db)
     try:
         items = [ALItem(name=f"item-{i}", value=i) for i in range(5)]
-        result = await ALItem.asave_many(items)
+        result = await ALItem.save_many(items)
 
         assert result is items
         assert len(result) == 5
@@ -83,10 +83,10 @@ async def test_asave_many_basic(db):
 
 
 @pytest.mark.asyncio
-async def test_asave_many_empty_list(db):
+async def test_save_many_empty_list(db):
     ALItem.set_db(db)
     try:
-        result = await ALItem.asave_many([])
+        result = await ALItem.save_many([])
         assert result == []
     finally:
         ALItem._db = None
@@ -94,7 +94,7 @@ async def test_asave_many_empty_list(db):
 
 
 @pytest.mark.asyncio
-async def test_asave_many_rejects_existing(db):
+async def test_save_many_rejects_existing(db):
     ALItem.set_db(db)
     try:
         item = ALItem(name="existing")
@@ -102,14 +102,14 @@ async def test_asave_many_rejects_existing(db):
         assert item._id is not None
 
         with pytest.raises(ValueError, match="only accepts new instances"):
-            await ALItem.asave_many([item])
+            await ALItem.save_many([item])
     finally:
         ALItem._db = None
         ALItem._table = None
 
 
 @pytest.mark.asyncio
-async def test_asave_many_with_promoted(db):
+async def test_save_many_with_promoted(db):
     ALPromotedItem.set_db(db)
     try:
         items = [
@@ -117,7 +117,7 @@ async def test_asave_many_with_promoted(db):
             ALPromotedItem(name="b", status="inactive", priority=2),
             ALPromotedItem(name="c", status="archived", priority=3),
         ]
-        await ALPromotedItem.asave_many(items)
+        await ALPromotedItem.save_many(items)
 
         ids = [item._id for item in items]
         assert ids == list(range(ids[0], ids[0] + 3))
@@ -138,7 +138,7 @@ async def test_asave_many_with_promoted(db):
 
 
 @pytest.mark.asyncio
-async def test_asave_many_atomicity_promoted(db):
+async def test_save_many_atomicity_promoted(db):
     """If one row violates a CHECK constraint, no rows should be saved."""
     ALPromotedItem.set_db(db)
     try:
@@ -147,7 +147,7 @@ async def test_asave_many_atomicity_promoted(db):
             ALPromotedItem(name="bad", status="INVALID_STATUS", priority=2),
         ]
         with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
-            await ALPromotedItem.asave_many(items)
+            await ALPromotedItem.save_many(items)
 
         count = await ALPromotedItem.query().count()
         assert count == 0
@@ -157,11 +157,11 @@ async def test_asave_many_atomicity_promoted(db):
 
 
 @pytest.mark.asyncio
-async def test_asave_many_roundtrip(db):
+async def test_save_many_roundtrip(db):
     ALItem.set_db(db)
     try:
         items = [ALItem(name=f"rt-{i}", value=i * 10) for i in range(3)]
-        await ALItem.asave_many(items)
+        await ALItem.save_many(items)
 
         for item in items:
             loaded = await ALItem.from_id(item._id)
@@ -175,13 +175,13 @@ async def test_asave_many_roundtrip(db):
 
 
 @pytest.mark.asyncio
-async def test_asave_many_with_db_param(db):
-    """Verify asave_many works with explicit db= parameter instead of class binding."""
+async def test_save_many_with_db_param(db):
+    """Verify save_many works with explicit db= parameter instead of class binding."""
     table = ALItem.__tablename__
     items = [ALItem(name=f"db-{i}", value=i) for i in range(3)]
     ALItem._table = table
     try:
-        await ALItem.asave_many(items, db=db)
+        await ALItem.save_many(items, db=db)
         assert all(item._id is not None for item in items)
         ids = [item._id for item in items]
         assert ids == list(range(ids[0], ids[0] + 3))
@@ -190,7 +190,7 @@ async def test_asave_many_with_db_param(db):
 
 
 @pytest.mark.asyncio
-async def test_asave_many_atomicity(db):
+async def test_save_many_atomicity(db):
     """If one row violates a UNIQUE constraint, no rows should be saved."""
     ALItem.set_db(db)
     try:
@@ -203,7 +203,7 @@ async def test_asave_many_atomicity(db):
             ALItem(name="duplicate", value=2),
         ]
         with pytest.raises(sqlite3.IntegrityError):
-            await ALItem.asave_many(items)
+            await ALItem.save_many(items)
 
         count = await ALItem.query().count()
         assert count == 1
@@ -213,12 +213,12 @@ async def test_asave_many_atomicity(db):
 
 
 @pytest.mark.asyncio
-async def test_asave_many_chunking(db):
+async def test_save_many_chunking(db):
     """Insert enough rows to trigger chunking (>999 params)."""
     ALItem.set_db(db)
     try:
         items = [ALItem(name=f"chunk-{i}", value=i) for i in range(1005)]
-        await ALItem.asave_many(items)
+        await ALItem.save_many(items)
 
         assert all(item._id is not None for item in items)
         ids = [item._id for item in items]
@@ -229,14 +229,14 @@ async def test_asave_many_chunking(db):
         ALItem._table = None
 
 
-# ---- AsyncSQLerLiteSafeModel.asave_many tests ----
+# ---- AsyncSQLerLiteSafeModel.save_many tests ----
 
 @pytest.mark.asyncio
-async def test_asave_many_safe_model(db):
+async def test_save_many_safe_model(db):
     ALSafeItem.set_db(db)
     try:
         items = [ALSafeItem(name=f"safe-{i}", value=i) for i in range(5)]
-        result = await ALSafeItem.asave_many(items)
+        result = await ALSafeItem.save_many(items)
 
         assert result is items
         assert len(result) == 5
@@ -257,14 +257,14 @@ async def test_asave_many_safe_model(db):
 
 
 @pytest.mark.asyncio
-async def test_asave_many_safe_model_with_promoted(db):
+async def test_save_many_safe_model_with_promoted(db):
     ALSafePromotedItem.set_db(db)
     try:
         items = [
             ALSafePromotedItem(name="x", status="pending"),
             ALSafePromotedItem(name="y", status="pending"),
         ]
-        await ALSafePromotedItem.asave_many(items)
+        await ALSafePromotedItem.save_many(items)
 
         ids = [item._id for item in items]
         assert ids == list(range(ids[0], ids[0] + 2))
@@ -284,7 +284,7 @@ async def test_asave_many_safe_model_with_promoted(db):
 
 
 @pytest.mark.asyncio
-async def test_asave_many_safe_model_rejects_existing(db):
+async def test_save_many_safe_model_rejects_existing(db):
     ALSafeItem.set_db(db)
     try:
         item = ALSafeItem(name="existing")
@@ -292,7 +292,7 @@ async def test_asave_many_safe_model_rejects_existing(db):
         assert item._id is not None
 
         with pytest.raises(ValueError, match="only accepts new instances"):
-            await ALSafeItem.asave_many([item])
+            await ALSafeItem.save_many([item])
     finally:
         ALSafeItem._db = None
         ALSafeItem._table = None
