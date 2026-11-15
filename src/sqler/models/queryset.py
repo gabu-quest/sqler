@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, Iterator, Optional, Type, TypeVar
 
-from sqler.models import _refs
+from sqler.models import _refs, _write_rules
 from sqler.models._table_names import _unchecked_table_name
 from sqler.query import SQLerExpression, SQLerQuery
 
@@ -177,19 +177,30 @@ class SQLerQuerySet(Generic[T]):
     def update(self, **fields) -> int:
         """Update matching rows with the given field values.
 
+        A set-based write meets the rules of the class as ``save()`` does, but for its
+        hooks: on a versioned class each row's version moves; a class that stamps sets
+        ``updated_at`` (and ``updated_by``) on each row, at the statement's one time, unless
+        the caller names the field; an audit log gets an ``update`` row per row changed, in
+        one transaction with the write. It calls no hook; use a loop of ``save()`` where a
+        hook must run.
+
         Args:
-            **fields: Field names and values to update in the JSON data.
+            **fields: Field names and values (or F-expressions) to update.
 
         Returns:
             int: Number of rows updated.
         """
-        return self._checked().update(**fields)
+        fields = _write_rules.stamped(self._model_cls, fields)
+        if not _write_rules.row_rules(self._model_cls):
+            return self._checked().update(**fields)
+        return len(self._written(lambda q: q._changed(fields)))
 
     def update_one(self, **fields) -> Optional[T]:
         """Atomically update one matching row and return it as a model instance.
 
         Uses the query's WHERE and ORDER BY to select the row, then updates
-        and returns it in a single atomic operation.
+        and returns it in a single atomic operation. The class's rules apply as in
+        :meth:`update`; no hook is called.
 
         Args:
             **fields: Field names and values (or F-expressions) to update.
@@ -197,14 +208,15 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             Model instance or None if no row matched.
         """
-        doc = self._checked().update_one(**fields)
-        if doc is None:
+        docs = self._updated(fields, 1, "=")
+        if not docs:
             return None
-        inst = self._sourced(_refs.from_row(self._model_cls, doc, doc), self._reads_other_table())
-        return inst
+        return self._sourced(_refs.from_row(self._model_cls, docs[0], docs[0]), self._reads_other_table())
 
     def update_n(self, n: int, **fields) -> list[T]:
         """Atomically update up to *n* matching rows and return them as model instances.
+
+        The class's rules apply as in :meth:`update`; no hook is called.
 
         Args:
             n: Maximum number of rows to update.
@@ -213,24 +225,37 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             list: Model instances, or empty list if no rows matched.
         """
-        docs = self._checked().update_n(n, **fields)
-        results: list[T] = []
+        docs = self._updated(fields, n, "IN")
         other_table = self._reads_other_table()
-        for doc in docs:
-            inst = self._sourced(_refs.from_row(self._model_cls, doc, doc), other_table)
-            results.append(inst)
-        return results
+        return [self._sourced(_refs.from_row(self._model_cls, doc, doc), other_table) for doc in docs]
 
     def delete_all(self) -> int:
         """Delete all matching rows (bulk delete).
 
         Note: This is named delete_all to avoid confusion with model.delete().
-        It does NOT trigger referential integrity checks or hooks.
+        It runs no referential integrity check (a row that refers to a deleted one keeps
+        its reference) and calls no hook. An audit log gets a ``delete`` row per row
+        deleted, with the row as it was stored, in one transaction with the delete.
 
         Returns:
             int: Number of rows deleted.
         """
-        return self._checked().delete()
+        if not _write_rules.row_rules(self._model_cls):
+            return self._checked().delete()
+        return len(self._written(lambda q: [(doc, None) for doc in q._deleted()]))
+
+    def _updated(self, fields: dict, n: int, op: str) -> list[dict]:
+        """The documents ``update_one`` (``op`` ``=``) and ``update_n`` (``IN``) return, as
+        written."""
+        fields = _write_rules.stamped(self._model_cls, fields)
+        if not _write_rules.row_rules(self._model_cls):
+            return self._checked()._update_picked(fields, n, op)
+        return [after for _, after in self._written(lambda q: q._changed(fields, n))]
+
+    def _written(self, write) -> list:
+        """``write(query)`` and the rules of the class's audit log, as one unit."""
+        query = self._checked()
+        return _write_rules.set_write(self._model_cls, self._db, query._table, lambda: write(query))
 
     def offset(self, n: int) -> "SQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""

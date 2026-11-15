@@ -70,6 +70,10 @@ class TimestampMixin(WriteRules):
         self._set_timestamps()
         super()._stamp()
 
+    @classmethod
+    def _update_stamps(cls) -> dict[str, Any]:
+        return {**super()._update_stamps(), "updated_at": datetime.now(timezone.utc)}
+
 
 class SoftDeleteMixin:
     """Mixin that provides soft delete functionality.
@@ -648,6 +652,14 @@ class AuditMixin(WriteRules):
         self._set_audit_fields()
         super()._stamp()
 
+    @classmethod
+    def _update_stamps(cls) -> dict[str, Any]:
+        return {
+            **super()._update_stamps(),
+            "updated_at": datetime.now(timezone.utc),
+            "updated_by": cls.get_current_user(),
+        }
+
 
 class AsyncAuditMixin(WriteRules):
     """Async version of AuditMixin for async models.
@@ -702,6 +714,14 @@ class AsyncAuditMixin(WriteRules):
         self._set_audit_fields()
         super()._stamp()
 
+    @classmethod
+    def _update_stamps(cls) -> dict[str, Any]:
+        return {
+            **super()._update_stamps(),
+            "updated_at": datetime.now(timezone.utc),
+            "updated_by": cls.get_current_user(),
+        }
+
 
 def _audit_table_ddl(audit_table: str) -> str:
     return f"""
@@ -750,13 +770,15 @@ def _audit_changes(old_row: Optional[dict], written: dict) -> dict[str, dict[str
 
 def _audit_statements(audit_table: str, user, rows) -> list[tuple[str, list]]:
     """The audit rows for rows a write changed (see ``_write_rules``): a create and a
-    delete each one, an update one where its stored document changed."""
+    delete each one, an update one where its stored document changed. A delete's snapshot
+    is the row as it was stored."""
     statements = []
     for action, record_id, before, after in rows:
         if action == "create":
             statements.append(_audit_insert(audit_table, record_id, action, user, None, after))
         elif action == "delete":
-            statements.append(_audit_insert(audit_table, record_id, action, user, None, before))
+            snapshot = _dirty.snapshot(before)
+            statements.append(_audit_insert(audit_table, record_id, action, user, None, snapshot))
         elif changes := _audit_changes(before, after):
             statements.append(_audit_insert(audit_table, record_id, action, user, changes, after))
     return statements

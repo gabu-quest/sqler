@@ -9,6 +9,7 @@ import json
 from typing import TYPE_CHECKING
 
 from sqler import registry
+from sqler.models import _write_rules
 from sqler.utils import validate_table_name
 
 if TYPE_CHECKING:
@@ -126,7 +127,8 @@ async def async_set_null_referrers(
     """Nullify all references to the target row in referring documents.
 
     For each referring row, replaces reference dictionaries pointing to
-    the target with ``None`` before the target is deleted.
+    the target with ``None`` before the target is deleted. A row whose table has a
+    registered class meets that class's rules: its update stamps and its audit row.
 
     Args:
         db: The async database instance.
@@ -161,12 +163,7 @@ async def async_set_null_referrers(
                 return [replace(v) for v in value]
             return value
 
-        new_obj = replace(obj)
-        payload = json.dumps(new_obj)
-        await db.adapter.execute(
-            f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, row_id]
-        )
-        await db.adapter.auto_commit()
+        await _write_rules.anull_referrer(db, table, row_id, replace(obj))
 
 
 async def async_cascade_delete(
@@ -177,7 +174,8 @@ async def async_cascade_delete(
     """Recursively delete referring rows and their dependents.
 
     Implements cascade deletion by recursively finding and deleting all
-    rows that reference deleted rows, preventing orphaned references.
+    rows that reference deleted rows, preventing orphaned references. A row
+    whose table has a registered class with an audit log gets its ``delete`` row.
 
     Args:
         db: The async database instance.
@@ -195,7 +193,7 @@ async def async_cascade_delete(
         # recurse
         kid_refs = await async_find_referrers(db, table, row_id)
         await async_cascade_delete(db, kid_refs, visited)
-        await db.delete_document(table, row_id)
+        await _write_rules.adelete_referrer(db, table, row_id)
 
 
 async def async_validate_references(db: "AsyncSQLerDB"):

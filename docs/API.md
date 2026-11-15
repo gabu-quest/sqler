@@ -628,6 +628,10 @@ else:
     raise AssertionError("stale writes must raise")
 ```
 
+A queryset's `update()`, `update_one()` and `update_n()` move the version of each row they
+change, so a later `save()` of an instance loaded before them raises `StaleVersionError`
+too, as after another instance's `save()`.
+
 ### [C13] Safe model collision handling
 
 ```python
@@ -1273,6 +1277,25 @@ unit. An unsaved instance or an unknown policy raises `ValueError` before any ho
 
 A write that fails leaves the instance as it was before the call (`_id`, the stored snapshot
 and, on a safe model, `_version`), so it can be made again once the cause is gone.
+
+A delete's audit row holds the row as it was stored: an instance edited and not saved before
+its `delete()` logs the stored values, not its edits.
+
+### The set-based ways and the rows a delete's policy changes
+
+A queryset's `update()`, `update_one()`, `update_n()` and `delete_all()`, and the rows that
+`delete_with_policy(on_delete="set_null")` nulls or `on_delete="cascade"` deletes (each by
+the rules of its own table's registered class), meet the same rules but the hooks:
+
+| Rule | Set-based ways and a policy's rows |
+|------|------------------------------------|
+| version (safe models) | every update moves `_version` by one, in the same statement, and so does the update that nulls a reference (a holder who loaded the row before cannot save the reference back); `_version` cannot be named in an update (`ValueError`) |
+| `TimestampMixin` / `AuditMixin` | each updated (or nulled) row gets `updated_at` (and `updated_by`) in the same statement, stored as `save()` stores it; one time for all rows of the statement (the strictly-later promise of `save()` is per instance). A field you name in the update is yours: `update(updated_at=x)` writes `x` |
+| `AuditLogMixin` | one `update` row per row changed (`changes` holds the old and new of each key that differs; the new value is what the row holds afterwards, F-expressions included) and one `delete` row per row deleted, in one unit with the write; each row is read and written inside that unit, so no other connection writes it in between |
+| `HooksMixin` | calls no hook; use a loop of `save()` where a hook must run |
+
+A class with no rule sends the one statement it sent before. `delete_all()` runs no
+referential check: a row that refers to a deleted row keeps its reference.
 
 A write made with `db.*` directly (`db.bulk_upsert`, `db.insert_document`, `db.execute`) is
 below the model and meets no rule of any class.

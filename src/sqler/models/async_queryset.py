@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, Optional, Type, TypeVar
 
-from sqler.models import _refs
+from sqler.models import _refs, _write_rules
 from sqler.models._table_names import _unchecked_table_name
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
@@ -148,7 +148,8 @@ class AsyncSQLerQuerySet(Generic[T]):
         return await (await self._checked()).distinct_values(field)
 
     async def update(self, **fields) -> int:
-        """Update matching rows with the given field values.
+        """Update matching rows with the given field values; the class's rules apply as in
+        :meth:`SQLerQuerySet.update` (version, stamps, audit rows; no hook is called).
 
         Args:
             **fields: Field names and values to update in the JSON data.
@@ -156,10 +157,14 @@ class AsyncSQLerQuerySet(Generic[T]):
         Returns:
             int: Number of rows updated.
         """
-        return await (await self._checked()).update(**fields)
+        fields = _write_rules.stamped(self._model_cls, fields)
+        if not _write_rules.row_rules(self._model_cls):
+            return await (await self._checked()).update(**fields)
+        return len(await self._written(lambda q: q._changed(fields)))
 
     async def update_one(self, **fields) -> Optional[T]:
-        """Atomically update one matching row and return it as a model instance.
+        """Atomically update one matching row and return it as a model instance; the
+        class's rules apply as in :meth:`update`.
 
         Args:
             **fields: Field names and values (or F-expressions) to update.
@@ -167,14 +172,14 @@ class AsyncSQLerQuerySet(Generic[T]):
         Returns:
             Model instance or None if no row matched.
         """
-        doc = await (await self._checked()).update_one(**fields)
-        if doc is None:
+        docs = await self._updated(fields, 1, "=")
+        if not docs:
             return None
-        inst = self._sourced(_refs.from_row(self._model_cls, doc, doc), self._reads_other_table())
-        return inst
+        return self._sourced(_refs.from_row(self._model_cls, docs[0], docs[0]), self._reads_other_table())
 
     async def update_n(self, n: int, **fields) -> list[T]:
-        """Atomically update up to *n* matching rows and return them as model instances.
+        """Atomically update up to *n* matching rows and return them as model instances; the
+        class's rules apply as in :meth:`update`.
 
         Args:
             n: Maximum number of rows to update.
@@ -183,24 +188,40 @@ class AsyncSQLerQuerySet(Generic[T]):
         Returns:
             list: Model instances, or empty list if no rows matched.
         """
-        docs = await (await self._checked()).update_n(n, **fields)
-        results: list[T] = []
+        docs = await self._updated(fields, n, "IN")
         other_table = self._reads_other_table()
-        for doc in docs:
-            inst = self._sourced(_refs.from_row(self._model_cls, doc, doc), other_table)
-            results.append(inst)
-        return results
+        return [self._sourced(_refs.from_row(self._model_cls, doc, doc), other_table) for doc in docs]
 
     async def delete_all(self) -> int:
         """Delete all matching rows (bulk delete).
 
         Note: This is named delete_all to avoid confusion with model.delete().
-        It does NOT trigger referential integrity checks or hooks.
+        It runs no referential integrity check and calls no hook; an audit log gets a
+        ``delete`` row per row deleted, as :meth:`SQLerQuerySet.delete_all` writes them.
 
         Returns:
             int: Number of rows deleted.
         """
-        return await (await self._checked()).delete()
+        if not _write_rules.row_rules(self._model_cls):
+            return await (await self._checked()).delete()
+        return len(await self._written(self._deleted_rows))
+
+    @staticmethod
+    async def _deleted_rows(query: AsyncSQLerQuery) -> list:
+        return [(doc, None) for doc in await query._deleted()]
+
+    async def _updated(self, fields: dict, n: int, op: str) -> list[dict]:
+        """The documents ``update_one`` (``op`` ``=``) and ``update_n`` (``IN``) return, as
+        written."""
+        fields = _write_rules.stamped(self._model_cls, fields)
+        if not _write_rules.row_rules(self._model_cls):
+            return await (await self._checked())._update_picked(fields, n, op)
+        return [after for _, after in await self._written(lambda q: q._changed(fields, n))]
+
+    async def _written(self, write) -> list:
+        """``write(query)`` and the rules of the class's audit log, as one unit."""
+        query = await self._checked()
+        return await _write_rules.aset_write(self._model_cls, self._db, query._table, lambda: write(query))
 
     def offset(self, n: int) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""
