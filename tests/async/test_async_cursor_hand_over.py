@@ -482,9 +482,9 @@ async def test_execute_then_fetchall_sends_one_statement_and_reads_nothing_ahead
             rows = await cur.fetchall()
             await mem.auto_commit()
     assert ([q.sql for q in captured], [r[0] for r in rows]) == (["SELECT n FROM t WHERE n < 3"] * 3, [0, 1, 2])
-    # the trips to the connection's thread: the statement and the read, as aiosqlite's own
-    # execute and fetchall make them, then auto_commit's commit
-    assert (trips, read_ahead) == (["execute", "fetchall", "commit"] * 3, [])
+    # the trips to the connection's thread: the statement and the read, one each as aiosqlite's
+    # own execute and fetchall make them, then auto_commit's commit
+    assert (trips, read_ahead) == (["execute", "fetch", "commit"] * 3, [])
 
 
 # --- two statements sent at the same moment on one connection ------------------------------

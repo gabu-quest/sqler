@@ -17,9 +17,11 @@ nested transaction of another task is open is rolled back, and both sides are to
 
 import asyncio
 import contextvars
+import gc
 import os
 import sqlite3
 import tempfile
+import threading
 
 import pytest
 import pytest_asyncio
@@ -2626,3 +2628,204 @@ async def test_a_raw_end_whose_await_was_cancelled_and_caught_breaks_the_transac
     await t.insert("after")
     assert await t.rows() == sorted([*kept, "after"])
     await assert_pool_clean(t)
+
+
+# A read of a cursor's rows can end the transaction: here a function of the statement sends a
+# ``ROLLBACK`` on its own connection when it reaches row ``AT`` and raises. What SQLite says
+# after the read is read in the connection's thread, before anything queued behind it runs.
+AT = 3
+ROLL_BACK_AT = (
+    f"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {AT}) "
+    f"SELECT x FROM c WHERE x < {AT} OR roll_back_at(x)"
+)
+# rows 1 and 2, then row ``SLOW_AT`` after about a second of work in SQLite
+SLOW_AT = 3000000
+SLOW_ROLL_BACK_AT = (
+    f"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {SLOW_AT}) "
+    f"SELECT x FROM c WHERE x < 3 OR (x = {SLOW_AT} AND roll_back_at(x))"
+)
+
+
+async def roll_back_at(t: Traced, at: int, then=lambda: None) -> None:
+    """Make ``roll_back_at(x)`` on every connection of ``t``: at ``x == at`` it rolls its
+    connection back, calls ``then()`` (in the connection's thread) and raises."""
+    for conn in t.adapter._all_conns:
+        db = conn._conn
+
+        def fn(x, db=db):
+            if x == at:
+                db.execute("ROLLBACK")
+                then()
+                raise ValueError("rolled back")
+            return 1
+
+        await conn.create_function("roll_back_at", 1, fn)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lazy_fetch_that_ended_the_transaction_is_seen_with_another_tasks_insert_queued_behind(make_db):
+    """Inside one transaction a task's lazy ``fetchall`` fails with the transaction rolled back,
+    and another task's INSERT, queued behind it, opens a transaction of its own before the
+    failure reaches the loop: the fetch raises ``TransactionStateError``, so does the block's
+    end, and nothing of either task is kept. The loop is held from the rollback until the
+    INSERT has begun in the connection's thread, so the reader resumes after it."""
+    t = await make_db()
+    loop = asyncio.get_running_loop()
+    inserting = threading.Event()
+    # queued on the loop from the connection's thread before the fetch's error is
+    await roll_back_at(t, AT, then=lambda: loop.call_soon_threadsafe(inserting.wait, BOUND_S))
+    for conn in t.adapter._all_conns:
+        await conn.set_trace_callback(lambda sql: inserting.set() if sql == "INSERT INTO t (v) VALUES ('b')" else None)
+    fetching = asyncio.Event()
+
+    async def reader() -> None:
+        cur = await t.adapter.execute(ROLL_BACK_AT)
+        assert await cur.fetchone() == (1,)
+        fetching.set()
+        await cur.fetchall()  # queued now, in this step
+
+    with pytest.raises(TransactionStateError) as ended:
+        async with t.db.transaction():
+            await t.adapter.execute(INSERT, ["a"])
+            task = asyncio.create_task(reader())
+            await asyncio.wait_for(fetching.wait(), BOUND_S)
+            await t.adapter.execute(INSERT, ["b"])  # queued behind the fetch, before the reader resumes
+            with pytest.raises(TransactionStateError) as at_fetch:
+                await asyncio.wait_for(task, BOUND_S)
+    assert [(str(e.value), str(e.value.__cause__)) for e in (at_fetch, ended)] == [
+        (ENDED_BEHIND, "user-defined function raised exception"),
+        (ENDED_BEHIND, "user-defined function raised exception"),
+    ]
+    await t.insert("after")
+    assert await t.rows() == ["after"]
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_lazy_fetch_whose_read_ended_the_transaction_breaks_it(make_db):
+    """A task's lazy ``fetchall`` is cancelled while it runs; the read goes on in the
+    connection's thread and ends the transaction. The next statement of the block and the
+    block's end raise ``TransactionStateError``, and nothing written after it is kept."""
+    t = await make_db()
+    await roll_back_at(t, SLOW_AT)
+    fetching = asyncio.Event()
+
+    async def reader() -> None:
+        cur = await t.adapter.execute(SLOW_ROLL_BACK_AT)
+        assert await cur.fetchone() == (1,)
+        fetching.set()
+        await cur.fetchall()
+
+    later: list[BaseException] = []
+    with pytest.raises(TransactionStateError) as ended:
+        async with t.db.transaction():
+            await t.adapter.execute(INSERT, ["a"])
+            task = asyncio.create_task(reader())
+            await asyncio.wait_for(fetching.wait(), BOUND_S)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, BOUND_S)
+            try:
+                await asyncio.wait_for(t.adapter.execute(INSERT, ["b"]), BOUND_S)
+            except TransactionStateError as exc:
+                later.append(exc)
+    assert [str(e) for e in (*later, ended.value)] == [ENDED_BEHIND, ENDED_BEHIND]
+    await t.insert("after")
+    assert await t.rows() == ["after"]
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_a_read_ahead_that_failed_with_the_transaction_rolled_back_raises_at_the_read_that_reaches_it(make_db):
+    """Another task's INSERT reads the cursor's rows ahead first; that read fails with the
+    transaction rolled back, and the INSERT opens a transaction of its own: the read that
+    reaches the error raises ``TransactionStateError``, and so does the block's end."""
+    t = await make_db()
+    await roll_back_at(t, AT)
+    made = asyncio.Event()
+    read = asyncio.Event()
+
+    async def reader() -> None:
+        cur = await t.adapter.execute(ROLL_BACK_AT)
+        made.set()
+        await asyncio.wait_for(read.wait(), BOUND_S)
+        await cur.fetchall()
+
+    with pytest.raises(TransactionStateError) as ended:
+        async with t.db.transaction():
+            await t.adapter.execute(INSERT, ["a"])
+            task = asyncio.create_task(reader())
+            await asyncio.wait_for(made.wait(), BOUND_S)
+            await t.adapter.execute(INSERT, ["b"])  # its rows are read ahead first
+            read.set()
+            with pytest.raises(TransactionStateError) as at_fetch:
+                await asyncio.wait_for(task, BOUND_S)
+    assert [str(e.value) for e in (at_fetch, ended)] == [ENDED_BEHIND, ENDED_BEHIND]
+    await t.insert("after")
+    assert await t.rows() == ["after"]
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_inside_a_transaction_that_leaves_it_open_ends_nothing(make_db):
+    """Passes on base: a read whose error SQLite does not answer with a rollback leaves the
+    transaction to its caller."""
+    t = await make_db()
+    async with t.db.transaction():
+        await t.adapter.execute(INSERT, ["a"])
+        cur = await t.adapter.execute("SELECT column1, json(column1) FROM (VALUES ('1'), ('2'), ('{'))")
+        assert await cur.fetchone() == ("1", "1")
+        with pytest.raises(sqlite3.OperationalError, match="^malformed JSON$"):
+            await cur.fetchall()
+        await t.adapter.execute(INSERT, ["b"])
+    assert await t.rows() == ["a", "b"]
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_a_statement_cancelled_after_its_connection_closed_leaves_no_wait_behind(make_db):
+    """A sibling's statement is queued behind the close of the transaction's connection and
+    cancelled once the close is done, so the wait for it finishes in its first step: no
+    later statement of the transaction waits on it. Bounded by the test's own timeout."""
+    t = await make_db()
+    await t.adapter.begin_transaction()
+    conn = t.adapter._pinned()
+    sibling = asyncio.create_task(t.adapter.execute(INSERT, ["b"]))  # runs before the close is done
+    await conn.close()
+    sibling.cancel()  # in the step the close came back in: before the sibling sees its error
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(sibling, BOUND_S)
+    with pytest.raises(ValueError, match="^no active connection$"):
+        await asyncio.wait_for(t.adapter.execute(INSERT, ["c"]), BOUND_S)
+
+
+@pytest.mark.asyncio
+async def test_closing_while_a_cancelled_statements_wait_is_settling_leaves_nothing_running(make_db):
+    """Passes on base: a sibling's statement queued behind a slow read is cancelled, and the
+    adapter is closed while the wait for it settles. The close waits for it: no task is left
+    running and no error is left unretrieved."""
+    t = await make_db()
+    loop = asyncio.get_running_loop()
+    unretrieved: list[dict] = []
+    loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+    try:
+        await t.adapter.begin_transaction()
+        lease = t.adapter._task_lease.get()
+        slow = asyncio.create_task(t.adapter.execute(SLOW))
+        await asyncio.sleep(0)  # its statement is queued first
+        sibling = asyncio.create_task(t.adapter.execute(INSERT, ["b"]))
+        await asyncio.sleep(0)
+        sibling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(sibling, BOUND_S)
+        settling = lease.settling
+        assert (settling is not None, settling.done()) == (True, False)
+        await asyncio.wait_for(t.db.close(), BOUND_S)
+        assert (settling.done(), lease.settling, t.adapter._reclaims) == (True, None, set())
+        await asyncio.wait_for(slow, BOUND_S)  # it had run before the close
+        del slow, sibling, settling
+        gc.collect()
+        await asyncio.sleep(0)
+        assert unretrieved == []
+    finally:
+        loop.set_exception_handler(None)

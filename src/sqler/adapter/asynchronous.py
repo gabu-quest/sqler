@@ -198,8 +198,8 @@ class _Lease:
 
 class _Sent:
     """A statement queued on a connection's thread. ``_open``: whether SQLite counted a
-    transaction open there right after it ran or failed, before anything another context
-    queued behind it (None until then)."""
+    transaction open there right after it (for a cursor: the last read of its rows) ran or
+    failed, before anything another context queued behind it (None until then)."""
 
     __slots__ = ("_open",)
 
@@ -235,6 +235,15 @@ class _InThread:
             sent._open = db.in_transaction
 
     @staticmethod
+    def fetch(db: sqlite3.Connection, cursor: "weakref.ref[_Cursor]", fetch, *args) -> Any:
+        """Read a cursor's rows lazily (``fetch``: a method of its sqlite3 cursor), held weakly as in ``execute``."""
+        try:
+            return fetch(*args)
+        finally:
+            if (held := cursor()) is not None:
+                held._open = db.in_transaction
+
+    @staticmethod
     def after(db: sqlite3.Connection) -> None:
         """Nothing: it runs once every call queued before it has."""
 
@@ -254,6 +263,7 @@ class _InThread:
                     return [], None
                 rows.append(row)
         except Exception as exc:
+            cursor._open = db.in_transaction
             return rows, exc
         return rows, None
 
@@ -337,14 +347,11 @@ class _Cursor(_Sent):
     async def _failed(self, exc: BaseException) -> None:
         # a pin that is not this statement's (already given back, or a later one) is not ours to drop
         if self._lease is not None and self._adapter._task_lease.get(None) is self._lease:
-            if self._lease.txn and isinstance(exc, Exception):
-                # a read of the rows is aiosqlite's own call: what SQLite says after it is read here
-                self._open = self._lease.conn.in_transaction
             await self._adapter._release_after_failure(exc, self, self._judged)
 
     async def _lazy(self, fetch, *args):
         try:
-            return await fetch(*args)
+            return await _in_thread(self._lease.conn, _InThread.fetch, weakref.ref(self), fetch, *args)
         except BaseException as exc:
             await self._failed(exc)
             raise
@@ -370,7 +377,7 @@ class _Cursor(_Sent):
 
     async def fetchone(self):
         if self._taking is None and self._gone is None:
-            row = await self._lazy(self._cursor.fetchone)
+            row = await self._lazy(self._raw.fetchone)
             if row is None:
                 self._done()
             return row
@@ -379,7 +386,7 @@ class _Cursor(_Sent):
 
     async def fetchmany(self, size: Optional[int] = None):
         if self._taking is None and self._gone is None:
-            rows = await self._lazy(self._cursor.fetchmany, size)
+            rows = await self._lazy(self._raw.fetchmany, *(() if size is None else (size,)))
             if len(rows) < (self._cursor.arraysize if size is None else size):
                 self._done()
             return rows
@@ -387,7 +394,7 @@ class _Cursor(_Sent):
 
     async def fetchall(self):
         if self._taking is None and self._gone is None:
-            rows = await self._lazy(self._cursor.fetchall)
+            rows = await self._lazy(self._raw.fetchall)
             self._done()
             return rows
         return await self._served(None)
@@ -757,7 +764,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             if not isinstance(exc, Exception):  # cancelled: the statement may still be running
                 lease.interrupted = True
                 if sent is not None and lease.settling is None:
-                    lease.settling = self._background(self._after_interrupt(lease, sent), eager=True)
+                    self._background(self._after_interrupt(lease, sent), eager=True)
             elif sent is not None and sent._open is False:
                 raise self._ended_behind(lease, exc)
             return
@@ -777,7 +784,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     async def _after_interrupt(self, lease: _Lease, sent: _Sent) -> None:
         """Wait in the background until the cancelled statement ``sent`` of ``lease``'s
         transaction has run in the connection's thread; if it ended the transaction, the
-        transaction is broken. A statement or an end of it waits for this first."""
+        transaction is broken. A statement or an end of it waits for this first (``lease.settling``
+        is this task while it waits: one that ends in its first step leaves none behind)."""
+        lease.settling = asyncio.current_task()
         try:
             await _in_thread(lease.conn, _InThread.after)  # queued behind the cancelled statement
         except Exception:
