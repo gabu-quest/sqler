@@ -27,6 +27,7 @@ import re
 import sys
 import types
 import typing
+import weakref
 from typing import Any, Callable, Generator, Optional
 
 from sqler import registry
@@ -410,10 +411,51 @@ async def arun(walk: Generator[Read, Any, Any], adapter: Any = None) -> Any:
 
 # ---- building a model ---------------------------------------------------------------
 
-# is the model class a dataclass (a lite model)? Asked once per class: a pydantic class takes
-# longer to say it lacks an attribute than a row's home takes to store
-_DATACLASS: dict[type, bool] = {}
 
+class _Kind:
+    """What a class is, found once per class (:func:`_kind`): a pydantic class takes longer
+    to say it lacks an attribute than a row takes to build, so no row asks the class.
+
+    ``model``: a class sqler stores the rows of; ``struct``: a msgspec class; ``lite``: a
+    dataclass; ``pydantic``: a class with a pydantic validator; ``set``: how an attribute
+    of one of its objects is set, frozen or not (:func:`_set`); ``gone``: a weak reference
+    to the class that takes the answer out of :data:`_KINDS` as the class goes, and that
+    :func:`_kind` checks an answer against (an id is used again once its class is gone).
+    """
+
+    __slots__ = ("model", "struct", "lite", "pydantic", "set", "gone")
+
+    def __init__(self, cls: type) -> None:
+        key = id(cls)
+        self.gone = weakref.ref(cls, lambda _: _KINDS.pop(key, None))
+        self.struct = hasattr(cls, "__struct_fields__")
+        self.lite = dataclasses.is_dataclass(cls)
+        self.pydantic = hasattr(cls, "__pydantic_validator__")
+        # every pydantic and lite base has ``_versioned_rows``; a msgspec class stores its rows too
+        self.model = hasattr(cls, "_versioned_rows") or (self.struct and hasattr(cls, "from_id"))
+        if self.struct:
+            from msgspec.structs import force_setattr  # only a msgspec class gets here
+
+            self.set = force_setattr
+        elif getattr(getattr(cls, "__dataclass_params__", None), "frozen", False):
+            # not ``setattr`` and its refusal: with ``slots=True`` a frozen dataclass's
+            # ``__setattr__`` raises ``TypeError`` for a name that is not a field
+            self.set = object.__setattr__
+        else:
+            self.set = setattr
+
+
+# {id(class): its :class:`_Kind`}: by id, not by the class, so a class nothing else holds
+# leaves it (``_Kind.gone``), and an ask costs a third of a ``WeakKeyDictionary``'s
+_KINDS: dict[int, _Kind] = {}
+
+
+def _kind(cls: type) -> _Kind:
+    """The :class:`_Kind` of ``cls``; the first ask finds it, and every ask after reads it."""
+    kind = _KINDS.get(id(cls))
+    if kind is None or kind.gone() is not cls:  # an id is used again once its class is gone
+        kind = _KINDS[id(cls)] = _Kind(cls)
+    return kind
 
 
 def from_row(cls: Any, doc: dict, row: dict, home: Optional[_Home], into: Any = None) -> Any:
@@ -429,14 +471,13 @@ def from_row(cls: Any, doc: dict, row: dict, home: Optional[_Home], into: Any = 
     The one step every way in uses to turn a row into a model, for every model base.
     """
     inst = validate(cls, doc, into)
-    _set(inst, "_id", doc["_id"])
+    kind = _kind(cls)
+    put = (kind if type(inst) is cls else _kind(type(inst))).set  # as :func:`_set` sets
+    put(inst, "_id", doc["_id"])
     if getattr(cls, "_versioned_rows", False):
-        _set(inst, "_version", doc.get("_version") or 0)
-    _set(inst, "_snapshot", _dirty.snapshot(row))
-    plain = _DATACLASS.get(cls)
-    if plain is None:
-        plain = _DATACLASS[cls] = dataclasses.is_dataclass(cls)
-    if plain:
+        put(inst, "_version", doc.get("_version") or 0)
+    put(inst, "_snapshot", _dirty.snapshot(row))
+    if kind.lite:
         # not vars(): that makes a dict for the instance, a tenth of a lite model's read time
         object.__setattr__(inst, "_home", home)
     else:
@@ -464,7 +505,7 @@ def validate(cls: Any, doc: dict, into: Any = None) -> Any:
         return cls.model_validate(doc)
     held = {}
     kept: dict = {}
-    if not dataclasses.is_dataclass(cls):
+    if not _kind(cls).lite:
         for name, at in typed.items():
             if name in doc:
                 try:
@@ -494,11 +535,11 @@ def _build_on(into: Any, cls: Any, data: dict) -> Any:
     ``model_validate``; a pydantic validator that returns another object than it was given.
     """
     obj = None
-    if not _own_model_validate(cls):
-        validator = getattr(cls, "__pydantic_validator__", None)
-        if validator is not None:
-            obj = validator.validate_python(data, self_instance=into)
-        elif dataclasses.is_dataclass(cls):
+    kind = _kind(cls)
+    if not _own_model_validate(cls):  # asked each time: a class can be given one later
+        if kind.pydantic:
+            obj = cls.__pydantic_validator__.validate_python(data, self_instance=into)
+        elif kind.lite:
             into.__init__(**cls._init_fields(data))
             if "_id" in data:
                 object.__setattr__(into, "_id", data["_id"])
@@ -556,10 +597,9 @@ def _put_back(value: Any, kept: dict) -> Any:
 
 def _put(inst: Any, name: str, value: Any) -> None:
     """Set field ``name`` of ``inst`` to ``value`` as it is: no validation, frozen or not."""
-    if hasattr(type(inst), "__struct_fields__"):
-        from msgspec.structs import force_setattr  # only a msgspec model gets here
-
-        force_setattr(inst, name, value)
+    kind = _kind(type(inst))
+    if kind.struct:
+        kind.set(inst, name, value)  # msgspec's ``force_setattr``
     else:
         inst.__dict__[name] = value
 
@@ -578,7 +618,8 @@ def _blank(mdl: Any) -> Any:
     validated. On pydantic its fields with a default hold it; on lite no field is set; on
     msgspec every field holds ``None``.
     """
-    if hasattr(mdl, "__struct_fields__"):
+    kind = _kind(mdl)
+    if kind.struct:
         from msgspec import Struct  # only a msgspec model gets here
 
         empty = _EMPTY.get(mdl)
@@ -586,7 +627,7 @@ def _blank(mdl: Any) -> Any:
             empty = _EMPTY[mdl] = _empty(mdl)
         return Struct.__copy__(empty)  # a Struct's copy runs no ``__post_init__``
     obj = object.__new__(mdl)
-    if hasattr(mdl, "__pydantic_validator__"):
+    if kind.pydantic:
         # each field that has a default holds it, as ``model_construct()`` gives (which
         # also runs ``model_post_init``)
         defaults = {
@@ -647,12 +688,10 @@ def _become(shell: Any, obj: Any) -> None:
             f"{type(shell).__name__}: its row was built as {type(obj).__name__}, which cannot"
             " take the place of the object its cycle holds"
         )
-    fields = getattr(type(obj), "__struct_fields__", None)
-    if fields is not None:
-        from msgspec.structs import force_setattr  # only a msgspec model gets here
-
-        for name in fields:
-            force_setattr(shell, name, getattr(obj, name))
+    kind = _kind(type(obj))
+    if kind.struct:
+        for name in type(obj).__struct_fields__:
+            kind.set(shell, name, getattr(obj, name))  # msgspec's ``force_setattr``
         state = getattr(obj, "__dict__", None)
         if state is not None:
             shell.__dict__.clear()
@@ -676,19 +715,14 @@ def _become(shell: Any, obj: Any) -> None:
 def _set(inst: Any, name: str, value: Any) -> None:
     """Set attribute ``name`` of the model ``inst``, frozen or not."""
     cls = type(inst)
-    if hasattr(cls, "__struct_fields__"):
-        _put(inst, name, value)
-    elif getattr(getattr(cls, "__dataclass_params__", None), "frozen", False):
-        # not ``setattr`` and its refusal: with ``slots=True`` a frozen dataclass's
-        # ``__setattr__`` raises ``TypeError`` for a name that is not a field
-        object.__setattr__(inst, name, value)
-    else:
-        setattr(inst, name, value)
+    _kind(cls).set(inst, name, value)
 
 
 # ---- typed references -----------------------------------------------------------------
 
-_TYPED: dict[type, dict[str, Position]] = {}
+# {model class: its typed fields}; the class is held weakly, so one nothing else holds leaves it
+# (a class with a typed field that refers to itself is held by that field's position)
+_TYPED: "weakref.WeakKeyDictionary[type, dict[str, Position]]" = weakref.WeakKeyDictionary()
 
 
 # the annotation of a field of a pydantic or msgspec class whose annotations are not resolved yet
@@ -733,11 +767,11 @@ def known_typed_fields(cls: Any) -> Optional[dict[str, Position]]:
 
 
 def _typed_fields(cls: Any) -> tuple[dict[str, Position], bool]:
-    if not _is_model_class(cls):
-        return {}, True
-    typed = _TYPED.get(cls)
+    typed = _TYPED.get(cls)  # it holds model classes only
     if typed is not None:
         return typed, True
+    if not _is_model_class(cls):
+        return {}, True
     typed, complete = {}, True
     for name, ann, owner in _annotations(cls):
         at: dict = {}
@@ -762,10 +796,11 @@ def _position(at: dict) -> Optional[Position]:
 
 def _annotations(cls: Any) -> list:
     """``(field, annotation, class that declares it)`` for each field of ``cls``."""
-    fields = getattr(cls, "__dataclass_fields__", None)
-    if fields is not None:  # a lite class: a string annotation is read where it was written
+    kind = _kind(cls)
+    if kind.lite:  # a string annotation is read where it was written
+        fields = cls.__dataclass_fields__
         return [(n, f.type, _declarer(cls, n)) for n, f in fields.items() if not n.startswith("_")]
-    if hasattr(cls, "__struct_fields__"):  # a msgspec class
+    if kind.struct:  # a msgspec class
         names = [n for n in cls.__struct_fields__ if not n.startswith("_")]
         try:
             hints = typing.get_type_hints(cls)
@@ -787,10 +822,7 @@ def _declarer(cls: Any, name: str) -> Any:
 
 
 def _is_model_class(x: Any) -> bool:
-    # every pydantic and lite base has ``_versioned_rows``; a msgspec class stores its rows too
-    return isinstance(x, type) and (
-        hasattr(x, "_versioned_rows") or (hasattr(x, "__struct_fields__") and hasattr(x, "from_id"))
-    )
+    return isinstance(x, type) and _kind(x).model
 
 
 def _shape(ann: Any, owner: Any, at: dict, within: tuple = ()) -> bool:

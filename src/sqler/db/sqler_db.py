@@ -99,6 +99,8 @@ class _TableMemory:
     def _merge(self, level: _Level) -> None:
         """``level`` committed: what it learned goes to the level above, or at the outermost
         level to the shared memory."""
+        if not level.layouts:
+            return  # it learned nothing: nothing to move
         above = self._learned()
         if above is not None:
             for table, names in level.layouts.items():
