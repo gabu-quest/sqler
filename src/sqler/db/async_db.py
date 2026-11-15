@@ -16,7 +16,7 @@ from sqler.db.sqler_db import (
     _row_documents,
     _rows_sql,
 )
-from sqler.exceptions import StaleVersionError
+from sqler.exceptions import StaleVersionError, TransactionStateError
 from sqler.pool import PoolStats
 from sqler.query.query import is_missing_table
 from sqler.utils import (
@@ -191,7 +191,7 @@ class AsyncSQLerDB:
         the single ``":memory:"`` connection): nowhere. Forgetting costs a repeated
         ``CREATE TABLE IF NOT EXISTS``, remembering wrongly loses a write.
         """
-        depth = self.adapter._txn_depth.get(0)
+        depth = self.adapter._depth()
         levels = self._open.get()
         if levels:
             level = levels[-1]
@@ -904,7 +904,7 @@ class AsyncSQLerDB:
 
     async def _begin_level(self) -> None:
         await self.adapter.begin_transaction()
-        self._open.set((*self._open.get(), _Level(set(), {}, self.adapter._txn_depth.get(0))))
+        self._open.set((*self._open.get(), _Level(set(), {}, self.adapter._depth())))
 
     async def _end_level(self, commit: bool, *, quiet: bool = False) -> None:
         """End this task's innermost level; the async twin of ``SQLerDB._end_level``."""
@@ -945,9 +945,21 @@ class AsyncTransaction:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Commit on success, rollback on exception."""
-        if self._active:
-            await self._end(exc_type is None, quiet=exc_type is not None)
+        """Commit on success, rollback on exception.
+
+        When the block raised and the transaction it was nested in had already ended, the
+        block's exception goes on with a note that nothing written in it was committed.
+        """
+        if not self._active:
+            return False
+        if exc_type is None:
+            await self._end(True)
+            return False
+        try:
+            await self._end(False)
+        except TransactionStateError as ended:
+            if not isinstance(exc_val, TransactionStateError):
+                exc_val.add_note(str(ended))
         return False
 
     async def commit(self):

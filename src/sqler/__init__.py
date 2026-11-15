@@ -32,6 +32,7 @@ from .exceptions import (
     SchemaError,
     SQLerError,
     StaleVersionError,
+    TransactionStateError,
     UniqueConstraintError,
     ValidationError,
 )
@@ -287,6 +288,7 @@ __all__ = [
     "ConcurrencyError",
     "StaleVersionError",
     "LockTimeoutError",
+    "TransactionStateError",
     # Errors - Integrity
     "IntegrityError",
     "UniqueConstraintError",

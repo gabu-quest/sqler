@@ -14,6 +14,7 @@ from sqler.exceptions import (
     LockTimeoutError,
     NotConnectedError,
     QueryError,
+    TransactionStateError,
     unique_violation_from,
 )
 from sqler.logging import query_logger
@@ -26,16 +27,63 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ACQUIRE_TIMEOUT_S: Optional[float] = 30.0
 
+_ENDED = "the transaction this nested transaction was part of has ended; nothing written in it was committed"
+_BROKEN = (
+    "a nested transaction could not be {}, so the transaction it is part of ends rolled back: "
+    "nothing written in it is committed"
+)
+
+
+def _broken(failed: tuple[str, Exception]) -> TransactionStateError:
+    """The error for a statement or an end in a transaction where a nested end failed ``(how, error)``."""
+    error = TransactionStateError(_BROKEN.format(failed[0]))
+    error.__cause__ = failed[1]
+    return error
+
+
+class _Savepoint:
+    """A savepoint on a connection's stack and the task that opened it.
+
+    With no task it holds the height of nested transactions whose end is being sent, by ``closing``.
+    """
+
+    __slots__ = ("task", "closing")
+
+    def __init__(self, task: Optional[asyncio.Task]):
+        self.task = task
+        self.closing: Optional[asyncio.Task] = None
+
+
+class _Turn:
+    """A context waiting on a connection's stack, in the order asked.
+
+    Its ``future`` is done once it has its turn: ``True`` for a statement, the savepoint
+    put on top for a nested transaction. It stays in the queue until its task runs again
+    and hands its statement to the connection, and holds its place until then: no other
+    context opens a nested transaction on top of it.
+    """
+
+    __slots__ = ("inside", "task", "opens", "future")
+
+    def __init__(self, inside: tuple[_Savepoint, ...], task: Optional[asyncio.Task], opens: bool):
+        self.inside = inside  # the savepoints its context is inside
+        self.task = task
+        self.opens = opens  # it opens a nested transaction
+        self.future: asyncio.Future = asyncio.get_running_loop().create_future()
+
+
+_OWN_ENDED = _Savepoint(None)  # the place of a context whose own nested transaction has ended under it
+
 
 class _Lease:
     """One checkout of a pooled connection: the tasks using it, and whether it has gone back.
 
     A connection is pinned in a ``ContextVar``, so a task created while one is pinned
-    inherits the pin. A lease is returned once, when its last holder releases it or ends;
-    a pin whose lease has been returned is stale and is ignored.
+    inherits the pin. A lease is returned once, when its last holder releases it or ends,
+    or when its transaction ends; a pin whose lease has been returned is stale and is ignored.
     """
 
-    __slots__ = ("conn", "holders", "returned", "interrupted", "savepoints", "turns")
+    __slots__ = ("conn", "holders", "returned", "interrupted", "txn", "savepoints", "turns", "broken")
 
     def __init__(self, conn: aiosqlite.Connection):
         self.conn = conn
@@ -44,11 +92,11 @@ class _Lease:
         # a statement of this lease was cancelled inside a transaction: it may still be
         # running in the connection's thread, so a rollback would queue behind it
         self.interrupted = False
-        # the connection's open savepoints, innermost last, one token each
-        self.savepoints: list[object] = []
-        # nested transactions waiting for their turn, in the order they asked:
-        # (the savepoint they are inside, or None, and the future that hands them theirs)
-        self.turns: list[tuple[Optional[object], asyncio.Future]] = []
+        self.txn = False  # a transaction is open on the connection
+        self.savepoints: list[_Savepoint] = []  # the connection's open savepoints, innermost last
+        self.turns: list[_Turn] = []  # contexts waiting for their turn, in the order they asked
+        # a nested transaction's end that failed (how it ended, the error): the transaction ends rolled back
+        self.broken: Optional[tuple[str, Exception]] = None
 
 
 class _Cursor:
@@ -138,6 +186,21 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     ``acquire_timeout`` bounds the wait for a free connection, in seconds
     (``None`` waits forever); a wait that runs out raises
     ``ConnectionPoolExhaustedError``.
+
+    Tasks started inside a transaction share its connection, which has one stack of
+    savepoints. A context's place is its innermost savepoint still open on that stack,
+    else the transaction itself; whether it is in a transaction, how deep, and the name
+    of its next savepoint are read from there. It sends a statement on the connection
+    only while the top of the stack is its place; otherwise it waits its turn, in the
+    order asked, at most ``acquire_timeout`` seconds, then ``LockTimeoutError``. A turn it
+    has been given holds its place until its statement has been handed to the
+    connection: no other context's nested transaction opens on top of it before. A
+    transaction ends for every context that shares it when its ``COMMIT`` or
+    ``ROLLBACK`` is handed to the connection; from then on they are in no transaction.
+    A transaction or nested transaction that ends while another context's nested
+    transaction is open on top of it is rolled back instead, and both get
+    ``TransactionStateError``; so does one in which the end of a nested transaction failed,
+    and from that failure on every statement sent in it raises that error and sends nothing.
     """
 
     def __init__(
@@ -158,9 +221,8 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             "task_conn", default=None
         )
         self._task_lease: ContextVar[Optional[_Lease]] = ContextVar("task_lease", default=None)
-        self._txn_depth: ContextVar[int] = ContextVar("txn_depth", default=0)
         # the savepoints this context opened or was started inside, innermost last
-        self._txn_savepoints: ContextVar[tuple[object, ...]] = ContextVar("txn_savepoints", default=())
+        self._txn_savepoints: ContextVar[tuple[_Savepoint, ...]] = ContextVar("txn_savepoints", default=())
         self._leases: set[_Lease] = set()  # checked out, not yet returned
         self._reclaims: set[asyncio.Task] = set()  # rollbacks of connections left by ended tasks
         self._connected = False
@@ -211,9 +273,11 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
 
     def _give_back(self, lease: _Lease) -> None:
         lease.returned = True
+        lease.txn = False
         self._leases.discard(lease)
-        for _, turn in lease.turns:  # close(): a nested transaction waiting here gets no turn
-            turn.set_result(None)
+        for turn in lease.turns:  # the transaction they wait in has ended: they look again
+            if not turn.future.done():
+                turn.future.set_result(None)
         lease.turns.clear()
         for task in list(lease.holders):
             self._unhold(lease, task)
@@ -237,9 +301,14 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         return lease if self._leave(lease, asyncio.current_task()) else None
 
     def _holder_done(self, lease: _Lease, task: asyncio.Task) -> None:
-        """A task using ``lease`` ended; if it was the last one, roll back and return the connection."""
+        """A task using ``lease`` ended; if it was the last one, roll back and return the connection.
+
+        A nested transaction it left open is rolled back and closed, and the turn passes on.
+        """
         if self._leave(lease, task):
             self._start_reclaim(lease.conn)
+        elif lease.txn and (left := next((sp for sp in lease.savepoints if sp.task is task), None)):
+            self._end_savepoint(lease, left, rollback=True)
 
     async def _reclaim(self, conn: aiosqlite.Connection) -> None:
         """Roll back a connection left by an ended task and return it to the pool.
@@ -279,11 +348,21 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         self._pool.put_nowait(fresh)
 
     async def _acquire(self) -> aiosqlite.Connection:
-        """Return the task-pinned connection, or get one from the pool and pin it."""
+        """Return the task-pinned connection once it is this context's turn, or get one from the pool and pin it."""
         lease = self._task_lease.get(None)
-        if lease is not None and not lease.returned:
+        while lease is not None and not lease.returned:
             self._hold(lease)
-            return lease.conn
+            if not lease.txn:
+                return lease.conn
+            if lease.broken:
+                raise _broken(lease.broken)
+            inside = self._txn_savepoints.get()
+            if self._turn(lease, inside) or await self._wait_turn(lease, inside, opens=False):
+                return lease.conn
+        if inside := self._txn_savepoints.get():  # the transaction it was in has ended: it is in none
+            if self._place((), inside) is _OWN_ENDED:
+                raise TransactionStateError(_ENDED)
+            self._txn_savepoints.set(())
         if not self._connected:
             async with self._connect_lock:
                 if not self._connected:
@@ -381,29 +460,34 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         busy timeout); it is not awaited, so the cancellation reaches the caller at once
         and the reclaim returns the connection when the thread is done.
         """
-        if self._txn_depth.get(0) > 0:
+        if (lease := self._txn()) is not None:
             if not isinstance(exc, Exception):  # cancelled: the statement may still be running
-                lease = self._task_lease.get(None)
-                if lease is not None and not lease.returned:
-                    lease.interrupted = True
+                lease.interrupted = True
             return
         lease = self._drop_pin()
-        if lease is None:
-            return
-        reclaim = self._start_reclaim(lease.conn)
+        if lease is not None:
+            await self._give_up(lease.conn, exc)
+
+    async def _give_up(self, conn: aiosqlite.Connection, exc: BaseException) -> None:
+        """Roll back and return ``conn`` after ``exc``; awaited unless ``exc`` is a cancellation."""
+        reclaim = self._start_reclaim(conn)
         if isinstance(exc, Exception):
             # shielded: a cancellation of this task while it waits must not stop the return
             await asyncio.shield(reclaim)
 
     def _start_reclaim(self, conn: aiosqlite.Connection) -> asyncio.Task:
-        reclaim = asyncio.get_running_loop().create_task(self._reclaim(conn))
-        self._reclaims.add(reclaim)
-        reclaim.add_done_callback(self._reclaims.discard)
-        return reclaim
+        return self._background(self._reclaim(conn))
+
+    def _background(self, work) -> asyncio.Task:
+        """Run ``work`` as a task that ``close()`` waits for."""
+        task = asyncio.get_running_loop().create_task(work)
+        self._reclaims.add(task)
+        task.add_done_callback(self._reclaims.discard)
+        return task
 
     async def _release(self) -> None:
         """If not in a transaction, unpin the connection; the last task using it returns it to the pool."""
-        if self._txn_depth.get(0) > 0:
+        if self._txn() is not None:
             return
         lease = self._drop_pin()
         if lease is not None:
@@ -411,7 +495,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
 
     async def close(self) -> None:
         closing, self._closing = self._closing, asyncio.Event()
-        closing.set()  # tasks waiting for a connection raise NotConnectedError
+        closing.set()  # tasks waiting for a connection or a turn raise NotConnectedError
         for lease in list(self._leases):
             self._give_back(lease)
         if self._reclaims:
@@ -471,9 +555,10 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         them); outside one they are committed and the connection is returned.
         """
         conn = await self._acquire()
+        outside = self._txn() is None
         try:
             cursor = await conn.executemany(query, param_list)
-            if self._txn_depth.get(0) == 0:
+            if outside:
                 await conn.commit()
         except BaseException as exc:
             await self._release_after_failure(exc)
@@ -490,7 +575,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         Raises ``QueryError`` inside an explicit transaction: SQLite's driver commits
         the open transaction before it runs a script, which would end it unseen.
         """
-        if self._txn_depth.get(0) > 0:
+        if self._txn() is not None:
             raise QueryError(
                 "executescript cannot run inside a transaction: "
                 "SQLite commits the open transaction before it runs a script",
@@ -517,7 +602,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
 
     async def auto_commit(self) -> None:
         """Commit only if NOT inside an explicit transaction, then release connection."""
-        if self._txn_depth.get(0) == 0:
+        if self._txn() is None:
             try:
                 await self.commit()
             except BaseException as exc:
@@ -528,149 +613,295 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     @property
     def in_transaction(self) -> bool:
         """Return True if currently inside an explicit transaction."""
-        return self._txn_depth.get(0) > 0
+        return self._txn() is not None
+
+    def _txn(self) -> Optional[_Lease]:
+        """The lease of the transaction this context is in; None outside one, also once it has ended."""
+        lease = self._task_lease.get(None)
+        return lease if lease is not None and lease.txn else None
+
+    @staticmethod
+    def _place(stack: list[_Savepoint], inside: tuple[_Savepoint, ...], task: Optional[asyncio.Task] = None):
+        """The innermost savepoint of ``inside`` still open on ``stack``; None: the transaction itself.
+
+        ``_OWN_ENDED`` if one that ``task`` (default: the current task) opened has ended under it.
+        """
+        task = task or asyncio.current_task()
+        for sp in reversed(inside):
+            if sp in stack:
+                return sp
+            if sp.task is task:
+                return _OWN_ENDED
+        return None
+
+    def _depth(self) -> int:
+        """0 outside a transaction, 1 directly in one, one more for each open savepoint this context is inside."""
+        lease = self._txn()
+        if lease is None:
+            return 0
+        place = self._place(lease.savepoints, self._txn_savepoints.get())
+        return 0 if place is _OWN_ENDED else 1 if place is None else lease.savepoints.index(place) + 2
+
+    def _turn(self, lease: _Lease, inside: tuple[_Savepoint, ...]) -> bool:
+        """Whether the top of ``lease``'s stack is the place of a context inside ``inside``."""
+        stack = lease.savepoints
+        top = stack[-1] if stack else None
+        if top is (inside[-1] if inside else None):
+            return True
+        place = self._place(stack, inside)
+        if place is _OWN_ENDED:
+            raise TransactionStateError(_ENDED)
+        return place is top
+
+    async def _wait_turn(self, lease: _Lease, inside: tuple[_Savepoint, ...], *, opens: bool):
+        """Wait, in the order asked, until the top of ``lease``'s stack is this context's place.
+
+        Returns True, or with ``opens`` the savepoint put on top for it; None when the
+        transaction has ended before it ran. It takes its turn in the step it returns in,
+        so the caller hands its statement to the connection before any other context
+        runs. If its place ended between its turn and its run (a nested transaction it was
+        in ended), it waits again where it was in the order.
+        """
+        loop = asyncio.get_running_loop()
+        closing = self._closing
+        deadline = None if self.acquire_timeout is None else loop.time() + self.acquire_timeout
+        turn = _Turn(inside, asyncio.current_task(), opens)
+        lease.turns.append(turn)
+        while True:
+            try:
+                await asyncio.wait({turn.future}, timeout=None if deadline is None else deadline - loop.time())
+            except BaseException:  # cancelled while waiting, or after its turn and before it ran
+                self._drop_turn(lease, turn)
+                raise
+            if closing.is_set():
+                raise NotConnectedError("the adapter was closed while a statement waited for its turn")
+            if not lease.txn:
+                return None
+            if lease.broken:
+                self._drop_turn(lease, turn)
+                raise _broken(lease.broken)
+            if not turn.future.done():
+                self._drop_turn(lease, turn)
+                raise LockTimeoutError(
+                    f"waited {self.acquire_timeout:g} s for a nested transaction of another task on the same "
+                    "connection to end: either it is still running, or it is waiting for this task and can never end"
+                )
+            granted = turn.future.result()
+            if granted is None:  # a nested transaction of its own has ended under it
+                raise TransactionStateError(_ENDED)
+            stack = lease.savepoints
+            if (granted in stack) if opens else (self._place(stack, inside) is (stack[-1] if stack else None)):
+                lease.turns.remove(turn)
+                if not opens:  # the place it held is free: its statement is handed over before anyone runs
+                    self._hand_turns(lease)
+                return granted
+            turn.future = loop.create_future()
+            self._hand_turns(lease)
+
+    def _drop_turn(self, lease: _Lease, turn: _Turn) -> None:
+        """Take ``turn`` out of the queue; a turn it had and did not take passes on."""
+        if turn not in lease.turns:  # the transaction, or a nested transaction of its own, ended
+            return
+        lease.turns.remove(turn)
+        if turn.future.done():
+            if turn.opens:
+                self._pop_to(lease, turn.future.result())
+            else:
+                self._hand_turns(lease)
+
+    def _hand_turns(self, lease: _Lease) -> None:
+        """Give their turn, in the order asked, to the waiting contexts whose place is the top of the stack.
+
+        One that opens a nested transaction gets a savepoint put on top for it, once every
+        context given its turn has taken it; those that asked after it wait behind it. In a
+        transaction whose nested end failed nobody gets a turn: every waiter is woken to raise.
+        """
+        if lease.broken:
+            for turn in lease.turns:
+                if not turn.future.done():
+                    turn.future.set_result(None)
+            return
+        stack = lease.savepoints
+        top = stack[-1] if stack else None
+        held = any(turn.future.done() for turn in lease.turns)
+        behind = False
+        for turn in list(lease.turns):
+            if turn.future.done():
+                continue
+            place = self._place(stack, turn.inside, turn.task)
+            if place is _OWN_ENDED:
+                lease.turns.remove(turn)
+                turn.future.set_result(None)  # it raises
+            elif behind or place is not top:
+                continue
+            elif not turn.opens:
+                turn.future.set_result(True)
+                held = True
+            elif held:
+                behind = True
+            else:
+                stack.append(top := _Savepoint(turn.task))
+                turn.future.set_result(top)
 
     async def begin_transaction(self) -> None:
-        """Begin an explicit transaction (increments per-task depth counter).
+        """Begin an explicit transaction, or a nested one inside the transaction this context is in.
 
         Uses BEGIN IMMEDIATE to acquire a write lock immediately,
         preventing SQLITE_BUSY errors during the transaction.
         Uses SAVEPOINTs for nested transactions to allow proper inner rollback.
-
-        Tasks started inside a transaction share its connection, and a connection has
-        one stack of savepoints. A nested transaction opens only on top of the savepoint
-        its task is inside: while a sibling task's nested transaction is open, it waits
-        (in the order asked, at most ``acquire_timeout`` seconds) until that one ends.
+        A nested transaction opens on top of this context's place: while another
+        context's nested transaction is open above it, or another context has its turn
+        there and has not taken it, it waits its turn.
         """
-        conn = await self._acquire()
-        depth = self._txn_depth.get(0)
-        if depth > 0:
-            lease = self._task_lease.get()
-            inside = self._txn_savepoints.get()
-            savepoint = await self._take_turn(lease, inside[-1] if inside else None)
-        try:
-            if depth == 0:
+        lease = self._txn()
+        if lease is None:
+            conn = await self._acquire()
+            try:
                 await conn.execute("BEGIN IMMEDIATE")
-            else:
-                await conn.execute(f"SAVEPOINT sp_{depth}")
-        except BaseException as exc:
-            if depth > 0:
-                self._close_savepoint(lease, savepoint)
-            await self._release_after_failure(exc)  # a failed BEGIN leaves no transaction to end
-            raise
-        self._txn_depth.set(depth + 1)
-        if depth > 0:
-            self._txn_savepoints.set((*inside, savepoint))
-
-    async def _take_turn(self, lease: _Lease, inside: Optional[object]) -> object:
-        """Put a new savepoint on top of ``lease``'s stack once ``inside`` is the top, and return it.
-
-        ``inside`` is the savepoint the caller's context is in (None: directly in the
-        transaction). A caller inside a savepoint that is no longer open goes on at once.
-        """
-        if self._turn(lease, inside):
-            lease.savepoints.append(savepoint := object())
-            return savepoint
-        turn = asyncio.get_running_loop().create_future()
-        entry = (inside, turn)
-        lease.turns.append(entry)
-        try:
-            await asyncio.wait({turn}, timeout=self.acquire_timeout)
-        except BaseException:  # cancelled while waiting
-            if turn.done():  # handed a savepoint it will not open: the next waiter gets its turn
-                self._close_savepoint(lease, turn.result())
-            else:
-                lease.turns.remove(entry)
-            raise
-        if not turn.done():
-            lease.turns.remove(entry)
-            raise LockTimeoutError(
-                f"a nested transaction waited {self.acquire_timeout:g} s for one of a sibling task "
-                "on the same connection to end; if a task inside that one awaits this task, "
-                "it can never end"
-            )
-        savepoint = turn.result()
-        if savepoint is None:
-            raise NotConnectedError("the adapter was closed while a nested transaction waited")
-        return savepoint
-
-    @staticmethod
-    def _turn(lease: _Lease, inside: Optional[object]) -> bool:
-        stack = lease.savepoints
-        return (stack[-1] if stack else None) is inside or (inside is not None and inside not in stack)
-
-    def _close_savepoint(self, lease: _Lease, savepoint: object) -> None:
-        """``savepoint`` and any opened after it are gone; hand the next waiter whose turn it is its own."""
-        stack = lease.savepoints
-        if savepoint not in stack:
+            except BaseException as exc:
+                await self._release_after_failure(exc)  # a failed BEGIN leaves no transaction to end
+                raise
+            self._task_lease.get().txn = True
             return
-        del stack[stack.index(savepoint):]
-        for entry in lease.turns:
-            if self._turn(lease, entry[0]):
-                lease.turns.remove(entry)
-                stack.append(savepoint := object())
-                entry[1].set_result(savepoint)
+        if lease.broken:
+            raise _broken(lease.broken)
+        self._hold(lease)
+        inside = self._txn_savepoints.get()
+        if self._turn(lease, inside) and not any(turn.future.done() for turn in lease.turns):
+            lease.savepoints.append(sp := _Savepoint(asyncio.current_task()))
+        elif (sp := await self._wait_turn(lease, inside, opens=True)) is None:
+            raise TransactionStateError(_ENDED)
+        try:
+            await lease.conn.execute(f"SAVEPOINT sp_{len(lease.savepoints)}")
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                self._pop_to(lease, sp)  # SQLite refused it: it opened nothing
+            else:
+                self._end_savepoint(lease, sp, rollback=True)  # a cancelled SAVEPOINT still runs
+            await self._release_after_failure(exc)
+            raise
+        self._txn_savepoints.set((*inside, sp))
+
+    def _pop_to(self, lease: _Lease, sp: _Savepoint) -> None:
+        """Take ``sp`` and every savepoint above it off the stack, and hand the turn on."""
+        stack = lease.savepoints
+        if sp in stack:
+            del stack[stack.index(sp) :]
+        self._hand_turns(lease)
+
+    def _end_savepoint(self, lease: _Lease, sp: _Savepoint, *, rollback: bool) -> Optional[asyncio.Task]:
+        """Close ``sp`` and every savepoint above it, in a task that a cancelled caller does not stop.
+
+        Their height is held until the end has been sent, so no context sends a statement
+        there before; ends above it that are being sent go first. The task returns how the
+        end failed, or None.
+        """
+        stack = lease.savepoints
+        if sp not in stack:
+            return None
+        index = stack.index(sp)
+        before = [above.closing for above in stack[index:] if above.closing]
+        stack[index:] = [held := _Savepoint(None)]
+        name = f"sp_{index + 1}"
+        statements = [f"ROLLBACK TO SAVEPOINT {name}"] * rollback + [f"RELEASE SAVEPOINT {name}"]
+        how = "rolled back" if rollback else "committed"
+        held.closing = self._background(self._send_and_close(lease, held, statements, before, how))
+        return held.closing
+
+    async def _send_and_close(self, lease: _Lease, held: _Savepoint, statements: list[str], before, how: str):
+        """Send ``statements`` in order, then take ``held`` off the stack; return ``(how, error)`` if one failed.
+
+        A failure stops them (a RELEASE after a failed ROLLBACK TO would keep the rows it
+        was to undo) and the transaction ends rolled back.
+        """
+        try:
+            if before:
+                await asyncio.wait(before)
+            for sql in statements:
+                if not lease.txn:  # the transaction has ended: the connection is no longer this one's
+                    return None
+                try:
+                    await lease.conn.execute(sql)
+                except Exception as exc:
+                    lease.broken = lease.broken or (how, exc)
+                    return how, exc
+            return None
+        finally:
+            self._pop_to(lease, held)
+
+    async def _settle(self, lease: _Lease, sp: Optional[_Savepoint]) -> None:
+        """Wait until no end of a nested transaction above ``sp`` (None: the transaction) is being sent."""
+        while lease.txn and (sp is None or sp in lease.savepoints):
+            stack = lease.savepoints
+            closing = [above.closing for above in stack[stack.index(sp) + 1 if sp else 0 :] if above.closing]
+            if not closing:
                 return
+            await asyncio.wait(closing)
 
     async def end_transaction(self, *, commit: bool = True) -> None:
-        """End an explicit transaction (decrements per-task depth counter)."""
-        depth = self._txn_depth.get(0)
-        if depth <= 0:
-            return
-        depth -= 1
-        self._txn_depth.set(depth)
-        if depth > 0:
-            inside = self._txn_savepoints.get()
+        """End this context's own innermost nested transaction, or else the transaction itself.
+
+        Ends of nested transactions above it that are being sent go first. Raises
+        ``TransactionStateError`` when the nested transaction has already ended under
+        this context; when it commits while a nested transaction of another context is
+        open on top of it (it is rolled back instead); and when the end of a nested
+        transaction in it failed (the transaction ends rolled back, and a nested
+        transaction ended after that failure sends nothing).
+        """
+        inside = self._txn_savepoints.get()
+        lease = self._txn()
+        own = inside[-1] if inside and inside[-1].task is asyncio.current_task() else None
+        if own is not None:
             self._txn_savepoints.set(inside[:-1])
-
-        conn = self._pinned()
-        if conn is None:
+        if lease is not None and lease.savepoints and lease.savepoints[-1] is not own:
+            await self._settle(lease, own)
+        if own is not None and (lease is None or not lease.txn or own not in lease.savepoints):
+            raise TransactionStateError(_ENDED)
+        if lease is None or not lease.txn:
             return
-
-        if depth == 0:
-            # Outermost: commit or rollback entire transaction
-            # The connection goes back whether the commit or rollback works.
-            if commit:
-                try:
-                    await conn.commit()
-                except BaseException as exc:
-                    await self._release_after_failure(exc)
-                    raise
-            else:
-                lease = self._task_lease.get(None)
-                if lease is not None and lease.interrupted:
-                    # a cancelled statement may still be running in the connection's thread and
-                    # the rollback would queue behind it (up to the busy timeout): the caller
-                    # goes on at once, and the reclaim rolls back and returns the connection
-                    # when the thread is done
-                    dropped = self._drop_pin()
-                    if dropped is not None:
-                        self._start_reclaim(dropped.conn)
-                    return
-                try:
-                    await conn.rollback()
-                except BaseException as exc:
-                    # not raised (the caller may be handling an exception already),
-                    # but the connection is rolled back again or replaced, never reused as is
-                    await self._release_after_failure(exc)
-                    if not isinstance(exc, Exception):
-                        raise
-                    return
-            await self._release()
+        stack = lease.savepoints
+        above = len(stack) - (stack.index(own) + 1 if own is not None else 0)
+        if own is None:
+            failed = lease.broken
+            await self._end(lease, commit and not above and not failed)
+        elif lease.broken:  # the transaction ends rolled back: its end undoes this one too
+            failed = lease.broken
+            self._pop_to(lease, own)
         else:
-            # Nested: release or rollback savepoint
-            sp = f"sp_{depth}"
-            try:
-                if commit:
-                    await conn.execute(f"RELEASE SAVEPOINT {sp}")
-                else:
-                    await conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-                    await conn.execute(f"RELEASE SAVEPOINT {sp}")
-            except Exception:
-                pass
-            finally:  # also when cancelled: a waiter's SAVEPOINT queues behind these statements
-                if inside:
-                    self._close_savepoint(self._task_lease.get(), inside[-1])
+            failed = await asyncio.shield(self._end_savepoint(lease, own, rollback=not commit or above > 0))
+        if failed is not None:
+            raise _broken(failed)
+        if commit and above:
+            raise TransactionStateError(
+                f"the transaction was rolled back: {above} nested transaction"
+                + (" of another task was" if above == 1 else "s of other tasks were")
+                + " still open when it ended; end them before the block ends "
+                "(await the tasks inside the block, or use a TaskGroup)"
+            )
+
+    async def _end(self, lease: _Lease, commit: bool) -> None:
+        """Send ``COMMIT`` or ``ROLLBACK``: the transaction ends for every context, and the connection goes back."""
+        self._give_back(lease)
+        self._task_conn.set(None)
+        self._task_lease.set(None)
+        conn = lease.conn
+        if not commit and lease.interrupted:
+            # a cancelled statement may still be running in the connection's thread and the
+            # rollback would queue behind it (up to the busy timeout): the caller goes on at
+            # once, and the reclaim rolls back and returns the connection when the thread is done
+            self._start_reclaim(conn)
+            return
+        try:
+            await (conn.commit() if commit else conn.rollback())
+        except BaseException as exc:
+            # a failed rollback is not raised (the caller may be handling an exception already),
+            # but the connection is rolled back again or replaced, never reused as is
+            await self._give_up(conn, exc)
+            if commit or not isinstance(exc, Exception):
+                raise
+            return
+        if conn in self._all_conns:  # not a connection the adapter closed meanwhile
+            self._pool.put_nowait(conn)
 
     async def __aenter__(self) -> "AsyncSQLiteAdapter":
         await self._acquire()
