@@ -373,14 +373,11 @@ def _reads(fn):
 
 
 def test_from_ids_of_a_plain_class_reads_with_one_statement(db):
-    """The first read of a table the object ensured without promoted columns also learns its
-    columns, once; every read after it is one statement."""
+    """The first save of a class without promoted columns learns the table's columns, once, so
+    every read after it is one statement."""
     RbiPlain(name="a").save()
     RbiPlain(name="b").save()
-    assert _reads(lambda: RbiPlain.from_ids([1, 2])) == [
-        'PRAGMA table_info("rbi_plains");',
-        "SELECT _id, data FROM rbi_plains WHERE _id IN (?,?);",
-    ]
+    assert _reads(lambda: RbiPlain.from_ids([1, 2])) == ["SELECT _id, data FROM rbi_plains WHERE _id IN (?,?);"]
     assert _reads(lambda: RbiPlain.from_ids([1, 2])) == ["SELECT _id, data FROM rbi_plains WHERE _id IN (?,?);"]
 
 
@@ -395,7 +392,7 @@ def test_a_parent_with_a_referenced_row_reads_one_statement_per_table(db):
     job = RbiJob(name="j", status="ready")
     job.save()
     RbiHolder(name="h", typed=job, held=job).save()
-    assert len(_reads(lambda: RbiHolder.from_ids([1]))) == 3  # the holders' columns learned once
+    assert len(_reads(lambda: RbiHolder.from_ids([1]))) == 2  # the holders' columns learned by its save
     assert len(_reads(lambda: RbiHolder.from_ids([1]))) == 2
     assert len(_reads(lambda: RbiHolder.query().all())) == 2
 

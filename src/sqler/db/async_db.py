@@ -3,16 +3,16 @@ import sqlite3
 from contextvars import ContextVar
 from typing import Any, Optional
 
-from sqler._stored import dumps, stored
+from sqler._stored import dumps
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter, PoolStats
 from sqler.db.sqler_db import (
     _AT_VERSION,
-    _MAX_VARIABLES,
     _columns_sql,
     _ended_while_leaving,
     _fields_update,
     _id_params,
     _in_order,
+    _insert_sql,
     _keep_word,
     _Level,
     _moved,
@@ -20,9 +20,11 @@ from sqler.db.sqler_db import (
     _promotion,
     _record,
     _refuse_unwritten,
+    _row,
     _row_columns,
     _row_documents,
     _rows_sql,
+    _runs,
     _settled,
     _split_promoted,
     _unwritable,
@@ -357,29 +359,18 @@ class AsyncSQLerDB:
         return _id, expected_version + 1
 
     async def insert_document(self, table: str, doc: dict[str, Any]) -> int:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB.insert_document`."""
+        table = validate_table_name(table)
         await self._ensure_table(table)
-        payload = dumps(doc)
-        cur = await self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
-        try:
-            await self.adapter.auto_commit()
-            last_id = cur.lastrowid  # type: ignore[attr-defined]
-        finally:
-            await cur.close()
-        return last_id
+        return await self.upsert_document_promoted(table, None, doc, await self._columns_of(table))
 
     async def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB.upsert_document`."""
+        table = validate_table_name(table)
         await self._ensure_table(table)
-        payload = dumps(doc)
         if _id is None:
             return await self.insert_document(table, doc)
-        cur = await self.adapter.execute(
-            f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id]
-        )
-        try:
-            await self.adapter.auto_commit()
-        finally:
-            await cur.close()
-        return _id
+        return await self.upsert_document_promoted(table, _id, doc, await self._columns_of(table))
 
     async def _update_fields(
         self,
@@ -396,7 +387,7 @@ class AsyncSQLerDB:
             await self._ensure_table(table)
         else:
             await self._ensure_versioned_table(table)
-        update = _fields_update(table, _id, doc, fields, promoted, expected_version)
+        update = _fields_update(table, _id, doc, fields, await self._columns_of(table), expected_version)
         if update is None:
             return None
         cur = await self.adapter.execute(*update)
@@ -495,8 +486,9 @@ class AsyncSQLerDB:
         """
         if not docs:
             return []
+        table = validate_table_name(table)
         await self._ensure_table(table)
-        return await self._insert_many_chunked(table, docs, cols=["data"], versioned=False)
+        return await self._insert_many_chunked(table, docs, versioned=False, promoted_fields=await self._columns_of(table))
 
     async def insert_many_promoted(
         self, table: str, docs: list[dict[str, Any]], promoted_fields: list[str]
@@ -516,8 +508,7 @@ class AsyncSQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
-        cols = ["data"] + promoted_fields
-        return await self._insert_many_chunked(table, docs, cols=cols, versioned=False, promoted_fields=promoted_fields)
+        return await self._insert_many_chunked(table, docs, versioned=False, promoted_fields=promoted_fields)
 
     async def insert_many_with_version(
         self, table: str, docs: list[dict[str, Any]]
@@ -533,8 +524,10 @@ class AsyncSQLerDB:
         """
         if not docs:
             return []
+        table = validate_table_name(table)
+        columns = await self._columns_of(table)
         await self._ensure_versioned_table(table)
-        ids = await self._insert_many_chunked(table, docs, cols=["data"], versioned=True)
+        ids = await self._insert_many_chunked(table, docs, versioned=True, promoted_fields=columns)
         return [(id_, 0) for id_ in ids]
 
     async def insert_many_with_version_promoted(
@@ -555,8 +548,7 @@ class AsyncSQLerDB:
         for field in promoted_fields:
             validate_identifier(field)
         await self._ensure_versioned_table(table)
-        cols = ["data"] + promoted_fields
-        ids = await self._insert_many_chunked(table, docs, cols=cols, versioned=True, promoted_fields=promoted_fields)
+        ids = await self._insert_many_chunked(table, docs, versioned=True, promoted_fields=promoted_fields)
         return [(id_, 0) for id_ in ids]
 
     async def _insert_many_chunked(
@@ -564,79 +556,23 @@ class AsyncSQLerDB:
         table: str,
         docs: list[dict[str, Any]],
         *,
-        cols: list[str],
         versioned: bool,
         promoted_fields: list[str] | None = None,
     ) -> list[int]:
-        """Internal: chunked multi-row INSERT with transaction wrapping.
-
-        Builds ``INSERT INTO t (col1, ...) VALUES (...), (...), ...`` statements,
-        chunking to stay within SQLite's 999-parameter limit.
-
-        Args:
-            table: Validated table name.
-            docs: Documents to insert.
-            cols: Column names for the INSERT.
-            versioned: Whether to include ``_version`` column (literal 0).
-            promoted_fields: If set, split these keys from each doc into columns.
-
-        Returns:
-            list[int]: Assigned ``_id`` for each document.
-        """
-        promoted_fields = promoted_fields or []
-        # params_per_row: 1 for json(?) + 1 per promoted field
-        params_per_row = 1 + len(promoted_fields)
-        max_rows_per_chunk = max(1, _MAX_VARIABLES // params_per_row)
-
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._insert_many_chunked`."""
         all_ids: list[int] = []
-        all_col_names = list(cols)
-        if versioned:
-            all_col_names = ["data", "_version"] + promoted_fields
-
         async with self.transaction():
-            for offset in range(0, len(docs), max_rows_per_chunk):
-                chunk = docs[offset : offset + max_rows_per_chunk]
-                params: list[Any] = []
-                value_groups: list[str] = []
-
-                for doc in chunk:
-                    if promoted_fields:
-                        promoted_vals = {k: stored(doc[k], field=k) for k in promoted_fields if k in doc}
-                        json_doc = {k: v for k, v in doc.items() if k not in promoted_fields}
-                    else:
-                        json_doc = doc
-                        promoted_vals = {}
-
-                    payload = dumps(json_doc)
-                    row_placeholders = ["json(?)"]
-                    params.append(payload)
-
-                    if versioned:
-                        row_placeholders.append("0")  # literal, no param
-
-                    for pf in promoted_fields:
-                        row_placeholders.append("?")
-                        params.append(promoted_vals.get(pf))
-
-                    value_groups.append(f"({', '.join(row_placeholders)})")
-
-                col_list = ", ".join(all_col_names)
-                values_sql = ", ".join(value_groups)
-                sql = f"INSERT INTO {table} ({col_list}) VALUES {values_sql};"
-
-                cur = await self.adapter.execute(sql, params)
+            for held, rows in _runs(docs, promoted_fields or (), 0):
+                params = [p for _, text, values in rows for p in (text, *values)]
+                cur = await self.adapter.execute(_insert_sql(table, held, len(rows), versioned=versioned), params)
                 try:
                     last_id = cur.lastrowid
                 finally:
                     await cur.close()
-
                 # ID range is contiguous because BEGIN IMMEDIATE (from
                 # self.transaction()) holds an exclusive write lock, preventing
                 # concurrent inserts from interleaving AUTOINCREMENT IDs.
-                chunk_size = len(chunk)
-                first_id = last_id - chunk_size + 1
-                all_ids.extend(range(first_id, last_id + 1))
-
+                all_ids.extend(range(last_id - len(rows) + 1, last_id + 1))
         return all_ids
 
     async def bulk_upsert(self, table: str, docs: list[dict[str, Any]]) -> list[int]:
@@ -653,17 +589,15 @@ class AsyncSQLerDB:
         Returns:
             list[int]: The ``_id`` for each input document, preserving order.
         """
+        table = validate_table_name(table)
         await self._ensure_table(table)
+        columns = await self._columns_of(table) if docs else []
         assigned: list[int] = []
         for doc in docs:
             doc_id = doc.get("_id")
-            payload_dict = {k: v for k, v in doc.items() if k != "_id"}
-            payload = dumps(payload_dict)
+            held, text, values = _row({k: v for k, v in doc.items() if k != "_id"}, columns)
             if doc_id is None:
-                cur = await self.adapter.execute(
-                    f"INSERT INTO {table} (data) VALUES (json(?));",
-                    [payload],
-                )
+                cur = await self.adapter.execute(_insert_sql(table, held, 1), [text, *values])
                 try:
                     new_id = int(cur.lastrowid)  # type: ignore[attr-defined]
                 finally:
@@ -671,11 +605,7 @@ class AsyncSQLerDB:
                 assigned.append(new_id)
                 doc["_id"] = new_id
             else:
-                cur = await self.adapter.execute(
-                    f"INSERT INTO {table} (_id, data) VALUES (?, json(?)) "
-                    "ON CONFLICT(_id) DO UPDATE SET data = excluded.data;",
-                    [int(doc_id), payload],
-                )
+                cur = await self.adapter.execute(_insert_sql(table, held, 1, upsert=True), [int(doc_id), text, *values])
                 await cur.close()
                 assigned.append(int(doc_id))
         await self.adapter.auto_commit()
@@ -885,34 +815,9 @@ class AsyncSQLerDB:
     async def upsert_with_version(
         self, table: str, _id: Optional[int], doc: dict[str, Any], expected_version: Optional[int]
     ) -> tuple[int, int]:
-        await self._ensure_versioned_table(table)
-        payload = dumps(doc)
-        if _id is None:
-            cur = await self.adapter.execute(
-                f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",
-                [payload],
-            )
-            try:
-                await self.adapter.auto_commit()
-                last_id = cur.lastrowid  # type: ignore[attr-defined]
-            finally:
-                await cur.close()
-            return last_id, 0
-        if expected_version is None:
-            raise ValueError("expected_version required for update")
-        cur = await self.adapter.execute(
-            f"UPDATE {table} SET data = json(?), _version = _version + 1 "
-            f"WHERE {_AT_VERSION};",
-            [payload, _id, expected_version, expected_version, expected_version],
-        )
-        try:
-            rowcount = cur.rowcount
-        finally:
-            await cur.close()
-        await self.adapter.auto_commit()
-        if rowcount == 0:
-            raise StaleVersionError("Stale version: update rejected")
-        return _id, expected_version + 1
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB.upsert_with_version`."""
+        table = validate_table_name(table)
+        return await self.upsert_with_version_promoted(table, _id, doc, expected_version, await self._columns_of(table))
 
     async def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         rows, columns = await self._read_rows(table, [_id], versioned=True)

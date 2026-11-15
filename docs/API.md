@@ -1146,6 +1146,24 @@ without it. Table names, column names, definitions and checks are checked before
 any SQL runs; the write methods with promoted columns check the table and the
 promoted field names the same way.
 
+**The document writers on a table with columns.** `insert_document`, `upsert_document`,
+`insert_many`, `insert_many_with_version`, `bulk_upsert` and `upsert_with_version` put each
+key the document holds that names a column beside `data` (promoted by a class, by
+`ensure_table`, or added with plain SQL) into that column, the rest into `data`, so a read
+gives back what was written. A column whose key the document does not hold is not written:
+an update leaves its value, an insert gives it the column's `DEFAULT` (or NULL); a key held
+as `None` writes NULL. A model class without `__promoted__` saves through these methods, so
+its saves leave a column it has no field for as it is. In one call, rows that hold different
+keys each get their own (consecutive rows with the same keys share one statement;
+`AsyncSQLerDB.bulk_upsert` sends one statement per row). A value
+a column refuses (`NOT NULL`, `CHECK`) raises SQLite's `IntegrityError` and writes nothing of
+the call; `bulk_upsert` of an existing row whose document lacks the key of a `NOT NULL`
+column without a `DEFAULT` raises it too, because SQLite checks the column before it finds
+the row. A key in another case than the column (`Status`, column `status`) stays in `data`.
+A database object learns a table's columns at its first ensure, read or write of it; a
+column added later by other means is seen by a new database object (see
+[STORAGE.md](STORAGE.md)).
+
 **Promoting a field on a table that has rows.** A column added to an existing table
 (by `ensure_table`, by `set_db()` or the first save of a model class whose
 `__promoted__` names it) takes each row's value out of the row's document and puts it
@@ -1167,11 +1185,11 @@ values in the documents, and a later write may have changed either. sqler record
 table of its own, `_sqler_promoted`, which columns hold their values (see
 [STORAGE.md](STORAGE.md)). A database object checks a table whose columns beside `data`
 are not all recorded there once, at whichever comes first: an ensure (`ensure_table`,
-`set_db()`, the first save of a model class) or a read (`find_document`,
+`set_db()`, the first save of a model class), a read (`find_document`,
 `find_documents`, `from_id`, `from_ids`, and a model query's `all()`, `first()`,
 `iter()`, `count()` and every other call that runs it, `update()` and `delete_all()`
-included). The check reads the table once for documents that still hold a column's key:
-none, and the object remembers the table as settled; some, and the call raises
+included) or a document write (above). The check reads the table once for documents that
+still hold a column's key: none, and the object remembers the table as settled; some, and the call raises
 `SchemaError` (`details["columns"]` holds the rows and the first `_id` per column) and
 changes nothing, because a read sets the column over the document and would hide the
 document's value. That holds for a column added by other means too. Settle each column
