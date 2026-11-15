@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 from starlette.concurrency import run_in_threadpool
 
-from .db import get_row
+from .db import get_db
 
 
 def etag(obj_id: int, version: int | None) -> str:
@@ -46,7 +46,7 @@ def hydrate_ref(ref: Optional[dict], model_class) -> Optional[dict]:
     ref_id = ref.get("_id")
     if ref_id is None:
         return None
-    obj = get_row(model_class, ref_id)
+    obj = model_class.from_id(ref_id, db=get_db())
     if obj is None:
         return None
     result = obj.model_dump()

@@ -19,8 +19,8 @@ from typing import (
 
 from sqler import registry
 from sqler._stored import stored
-from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _dirty, _refs, _write_rules
+from sqler.exceptions import UniqueConstraintError
+from sqler.models import _dirty, _refs, _table_names, _write_rules
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
@@ -72,6 +72,8 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
     # trying to resolve forward references at class creation time
     _db = None
     _table = None
+    # no msgspec base keeps a version on its rows
+    _versioned_rows = False
 
     @classmethod
     def set_db(cls: Type[T], db: "SQLerDB", table: Optional[str] = None) -> None:
@@ -130,17 +132,26 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         Args:
             db: Database to read.
             table: Optional table to read instead of the class's own. The class
-                binding is not changed. A row read from it remembers the table:
-                ``save()``, ``delete()`` and ``refresh()`` use that table.
+                binding is not changed. A row read through the queryset has ``db``
+                and the table as its home: ``save()``, ``delete()`` and ``refresh()``
+                use them.
 
         A read creates no table: on a table nobody created, ``all()`` is empty,
         ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
         """
+        table = validate_table_name(table) if table is not None else _model_table_name(cls)
+        return cls._queryset(db, table)
+
+    @classmethod
+    def _queryset(cls: Type[T], db: "SQLerDB", table: str) -> "SQLerQuerySet[T]":
+        """The queryset on ``table`` of ``db`` that ``query()`` and ``using()`` give: rows
+        read with their version where the class's rows are versioned."""
         from sqler.models.queryset import SQLerQuerySet
         from sqler.query import SQLerQuery
 
-        table = validate_table_name(table) if table is not None else _model_table_name(cls)
         q = SQLerQuery(table=table, adapter=db.adapter)
+        if cls._versioned_rows:
+            q = q.with_version()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
@@ -152,37 +163,23 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         db, _ = cls._require_binding()
         return db
 
-    @classmethod
-    def _require_binding(cls) -> tuple["SQLerDB", str]:
-        """Return the bound DB and table or raise if unbound."""
-        if cls._db is None or cls._table is None:
-            raise NotBoundError(
-                f"Model {cls.__name__} is not bound. "
-                "Use .using(db) for queries or .save(db=db) for writes.",
-                details={"model": cls.__name__},
-            )
-        return cls._db, cls._table
+    _require_binding = classmethod(_table_names._require_binding)
+    _resolve_binding = classmethod(_table_names._resolve_binding)
 
     @classmethod
-    def _resolve_binding(cls, db=None) -> tuple["SQLerDB", str]:
-        """Return (db, table) using the provided db or the class-level binding."""
-        if db is not None:
-            return db, _model_table_name(cls)
-        return cls._require_binding()
-
-    @classmethod
-    def from_id(cls: Type[T], id_: int) -> Optional[T]:
+    def from_id(cls: Type[T], id_: int, *, db=None) -> Optional[T]:
         """Hydrate an instance by ``_id``.
 
         A typed reference is the model of its row, as on every base.
 
         Args:
             id_: Row id to load.
+            db: Optional database (overrides class-level binding).
 
         Returns:
             Model instance when found, else ``None``.
         """
-        db, table = cls._require_binding()
+        db, table = cls._resolve_binding(db)
         doc = _read_document(db, table, id_)
         if doc is None:
             return None
@@ -215,14 +212,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
     @classmethod
     def query(cls: Type[T]) -> "SQLerQuerySet[T]":
         """Return a queryset for chaining and execution."""
-        db, table = cls._require_binding()
-        q = db.query(table)
-        promoted = getattr(cls, "__promoted__", None)
-        if promoted:
-            q = q._clone(promoted_fields=list(promoted.keys()))
-        from sqler.models.queryset import SQLerQuerySet
-
-        return SQLerQuerySet[T](cls, q, db)
+        return cls._queryset(*cls._require_binding())
 
     @classmethod
     def filter(cls: Type[T], expression: Any) -> "SQLerQuerySet[T]":
@@ -409,10 +399,13 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         """
         db, table = _instance_binding(self, db)
         _write_rules.delete(self, db, table, on_delete)
-        self._id = None
 
-    def refresh(self: T) -> T:
+    def refresh(self: T, *, db=None) -> T:
         """Reload this instance's fields from the database.
+
+        Args:
+            db: Optional database to read from (overrides the instance's home); the
+                instance's home moves there.
 
         Raises:
             ValueError: If the instance has not been saved.
@@ -421,7 +414,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         Returns:
             self: The same instance (for chaining).
         """
-        db, table = _instance_binding(self)
+        db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
         doc = _read_document(db, table, self._id)

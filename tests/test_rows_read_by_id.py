@@ -319,19 +319,22 @@ def test_from_ids_of_the_safe_base_sets_what_it_set_before_and_its_snapshot(db):
 
 
 @pytest.mark.parametrize("cls", [RbiSafe, RbiLiteSafe])
-def test_from_ids_on_a_table_made_before_versioning_does_what_from_id_does(db, path, cls):
-    table = cls.__tablename__
-    db.adapter.execute(f"DROP TABLE {table}")
-    db.adapter.execute(f"CREATE TABLE {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)")
-    db.adapter.execute(f"INSERT INTO {table} (data) VALUES (?)", ['{"name": "old"}'])
-    db.adapter.commit()
-    got = cls.from_ids([1])
-    assert [(g.name, g._version) for g in got] == [("old", 0)]
+def test_from_ids_on_a_table_made_before_versioning_does_what_from_id_does(tmp_path, cls):
+    table, path = cls.__tablename__, str(tmp_path / "old.db")
     with sqlite3.connect(path) as conn:
-        assert conn.execute(f"SELECT _version FROM {table} WHERE _id = 1").fetchone() == (0,)
+        conn.execute(f"CREATE TABLE {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)")
+        conn.execute(f"INSERT INTO {table} (data) VALUES (?)", ['{"name": "old"}'])
+    db = SQLerDB.on_disk(path)
+    got = cls.from_ids([1], db=db)
+    assert [(g.name, g._version) for g in got] == [("old", 0)]
+    with sqlite3.connect(path) as conn:  # the read changed no schema
+        assert [r[1] for r in conn.execute(f"PRAGMA table_info({table})")] == ["_id", "data"]
     got[0].name = "new"
-    got[0].save()
+    got[0].save()  # the first versioned write adds the column
     assert got[0]._version == 1
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(f"SELECT _version FROM {table} WHERE _id = 1").fetchone() == (1,)
+    db.close()
 
 
 @pytest.mark.parametrize("cls", [RbiPlain, RbiSafe, RbiLiteSafe])

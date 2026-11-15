@@ -156,21 +156,21 @@ PINS = [
     (
         Safe,
         lambda q: q.filter(F("_id") == 1).update_one(k=6),
-        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
+        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 WHERE "
         "_id = (SELECT _id FROM asw_pin_safe WHERE _id = ? LIMIT 1) RETURNING _id, data, _version",
         [6, 1],
     ),
     (
         Safe,
         lambda q: q.filter(F("_id") >= 1).update_n(3, k=7),
-        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
+        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 WHERE "
         "_id IN (SELECT _id FROM asw_pin_safe WHERE _id >= ? LIMIT 3) RETURNING _id, data, _version",
         [7, 1],
     ),
     (
         Safe,
         lambda q: q.filter(F("_id") == 1).update(k=5),
-        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 "
+        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 "
         "WHERE _id = ?",
         [5, 1],
     ),

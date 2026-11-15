@@ -96,15 +96,6 @@ def close_db() -> None:
         _db = None
 
 
-def get_row(model, row_id: int):
-    """Load one row of ``model`` by id from the example's database, or ``None``.
-
-    日本語: 例のデータベースから ``model`` の 1 行を id で読み込みます。
-    """
-    rows = model.from_ids([row_id], db=get_db())
-    return rows[0] if rows else None
-
-
 def is_db_empty() -> bool:
     """Check if the database has no data (needs seeding).
 

@@ -18,9 +18,8 @@ from typing import (
 )
 
 from sqler.exceptions import StaleVersionError
-from sqler.models import _dirty, _refs
+from sqler.models import _dirty
 from sqler.models import save_retry as _retry
-from sqler.models._table_names import _instance_binding
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.utils import (
     DEFAULT_REBASE_CONFIG,
@@ -31,7 +30,6 @@ from sqler.models.utils import (
 
 if TYPE_CHECKING:
     from sqler.db.sqler_db import SQLerDB
-    from sqler.models.queryset import SQLerQuerySet
 
 TSafe = TypeVar("TSafe", bound="SQLerLiteSafeModel")
 
@@ -98,34 +96,6 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         super().set_db(db, table)
         # Upgrade table to versioned
         db._ensure_versioned_table(cls._table)  # type: ignore[arg-type]
-
-    @classmethod
-    def from_id(cls: Type[TSafe], id_: int) -> Optional[TSafe]:
-        """Hydrate an instance by ``_id`` including version.
-
-        Args:
-            id_: Row id to load.
-
-        Returns:
-            Model instance when found, else ``None``.
-        """
-        db, table = cls._require_binding()
-        doc = db.find_document_with_version(table, id_)
-        if doc is None:
-            return None
-        return _refs.run(_refs.load(cls, [doc], db, table))[0]
-
-    @classmethod
-    def query(cls: Type[TSafe]) -> "SQLerQuerySet[TSafe]":
-        """Return a queryset that includes version information."""
-        db, table = cls._require_binding()
-        q = db.query(table).with_version()
-        promoted = getattr(cls, "__promoted__", None)
-        if promoted:
-            q = q._clone(promoted_fields=list(promoted.keys()))
-        from sqler.models.queryset import SQLerQuerySet
-
-        return SQLerQuerySet[TSafe](cls, q, db)
 
     @classmethod
     def _insert_rows(cls, db, table: str, instances: list) -> None:
@@ -224,26 +194,6 @@ class SQLerLiteSafeModel(SQLerLiteModel):
                 object.__setattr__(self, "_snapshot", _dirty.snapshot(latest_doc))
 
             _retry.sleep(delay)
-
-    def refresh(self: TSafe) -> TSafe:
-        """Reload this instance's fields and version from the database.
-
-        Raises:
-            ValueError: If the instance has not been saved.
-            LookupError: If the row no longer exists.
-
-        Returns:
-            self: The same instance (for chaining).
-        """
-        cls = self.__class__
-        db, table = _instance_binding(self)
-        if self._id is None:
-            raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = db.find_document_with_version(table, self._id)
-        if doc is None:
-            raise LookupError(f"Row {self._id} not found for refresh")
-        own = {(table, self._id): self}
-        return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]
 
     def _refreshed(self: TSafe, doc: dict, row: dict) -> TSafe:
         super()._refreshed(doc, row)

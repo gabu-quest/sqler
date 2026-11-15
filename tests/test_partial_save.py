@@ -290,15 +290,14 @@ class PsNeverBound(PartialUpdateMixin, TrackedModel, SQLerModel):
     name: str = ""
 
 
-def test_a_class_never_bound_is_partially_saved_with_db_and_refused_without(db):
+def test_a_class_never_bound_partially_saves_an_instance_to_its_home(db):
+    """An instance saved with ``db=`` belongs to that database: ``save_partial()`` with no
+    ``db=`` writes there; a new instance has no home and is refused."""
     m = PsNeverBound(name="a").save(db=db)
     m.name = "b"
-    with pytest.raises(NotBoundError) as by_save:
+    with pytest.raises(NotBoundError):
         PsNeverBound(name="x").save()
-    with pytest.raises(NotBoundError) as by_partial:
-        m.save_partial()
-    assert str(by_partial.value) == str(by_save.value)
-    m.save_partial(db=db)
+    m.save_partial()
     assert [d.name for d in PsNeverBound.using(db).all()] == ["b"]
 
 

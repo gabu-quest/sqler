@@ -31,6 +31,7 @@ from sqler import F, SQLerDB, SQLerModel, SQLerMsgspecModel
 from sqler.exceptions import StaleVersionError
 from sqler.logging import query_logger
 from sqler.models import SQLerQuerySet, SQLerSafeModel, _refs
+from sqler.models._table_names import _ref_table
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
 from sqler.query import SQLerQuery
@@ -1304,23 +1305,23 @@ def test_a_validator_that_reshapes_the_children_keeps_each_child_its_row(make_db
 
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", VERSIONED)
-def test_a_child_holds_the_version_of_its_column_not_of_its_json(typed, base, way):
-    """A queryset ``update_one()`` bumps the ``_version`` column only: the JSON keeps the
-    version the last ``save()`` wrote. The child holds the column's, as the row loaded on
-    its own does (and, like it, cannot be saved: the versioned update checks both)."""
+def test_a_child_holds_the_version_its_row_holds_after_a_set_update_and_saves(typed, base, way):
+    """A queryset ``update_one()`` moves the version in the column and in the document's copy
+    that a save checks too. The child holds it, as the row loaded on its own does: the first
+    of the two to save writes, the other then holds a stale version."""
     db, (_, c_cls, p_cls, _), pid = typed(base)
     ct = c_cls.__tablename__
     c_cls.query().filter(F("_id") == 2).update_one(name="u")
     c_cls.query().filter(F("_id") == 2).update_one(name="c2")
     assert version_of(db, ct, 2) == 2
-    assert rows_of(db, ct)[1][1]["_version"] == 0
+    assert rows_of(db, ct)[1][1]["_version"] == 2
     got = load(p_cls, pid, way)
     alone = c_cls.from_id(2)
     assert (got.bag["a"]._version, alone._version) == (2, 2)
-    for inst in (got.bag["a"], alone):
-        with pytest.raises(StaleVersionError):
-            inst.save()
-    assert version_of(db, ct, 2) == 2
+    got.bag["a"].save()
+    with pytest.raises(StaleVersionError):
+        alone.save()
+    assert (version_of(db, ct, 2), rows_of(db, ct)[1][1]["_version"]) == (3, 3)
 
 
 # ---- a child class bound to another database, and one never bound ---------------------
@@ -3118,7 +3119,7 @@ def test_a_frozen_class_read_by_a_queryset_knows_its_row(make_db, kind, how):
     }[how]()
     assert (type(got), got._id, got.name) == (cls, rid, "m" if how.startswith("update") else "n")
     assert cls.is_dirty(got) is False
-    assert getattr(got, "_source_table", None) == (other if how == "other-table" else None)
+    assert _ref_table(got) == (other if how == "other-table" else cls.__tablename__)
 
 
 # ---- msgspec, the inputs its own construction makes hard ---------------------------------

@@ -24,6 +24,7 @@ from sqler.adapter import AsyncSQLiteAdapter
 from sqler.exceptions import StaleVersionError
 from sqler.logging import query_logger
 from sqler.models import AsyncSQLerModel, AsyncSQLerQuerySet, AsyncSQLerSafeModel, _refs
+from sqler.models._table_names import _ref_table
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 from sqler.query.async_query import AsyncSQLerQuery
@@ -1326,21 +1327,21 @@ async def test_a_validator_that_reshapes_the_children_keeps_each_child_its_row(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", VERSIONED)
-async def test_a_child_holds_the_version_of_its_column_not_of_its_json(make_db, base, way):
-    """See the sync twin: ``update_one()`` bumps the column only."""
+async def test_a_child_holds_the_version_its_row_holds_after_a_set_update_and_saves(make_db, base, way):
+    """See the sync twin: ``update_one()`` moves the version in the column and the document."""
     db, (_, c_cls, p_cls, _), pid = await _typed_world(make_db, base)
     ct = c_cls.__tablename__
     await c_cls.query().filter(F("_id") == 2).update_one(name="u")
     await c_cls.query().filter(F("_id") == 2).update_one(name="c2")
     assert await version_of(db, ct, 2) == 2
-    assert (await rows_of(db, ct))[1][1]["_version"] == 0
+    assert (await rows_of(db, ct))[1][1]["_version"] == 2
     got = await load(p_cls, pid, way)
     alone = await c_cls.from_id(2)
     assert (got.bag["a"]._version, alone._version) == (2, 2)
-    for inst in (got.bag["a"], alone):
-        with pytest.raises(StaleVersionError):
-            await inst.save()
-    assert await version_of(db, ct, 2) == 2
+    await got.bag["a"].save()
+    with pytest.raises(StaleVersionError):
+        await alone.save()
+    assert (await version_of(db, ct, 2), (await rows_of(db, ct))[1][1]["_version"]) == (3, 3)
 
 
 # ---- a child class bound to another database, and one never bound ---------------------
@@ -2638,4 +2639,4 @@ async def test_a_frozen_class_read_by_a_queryset_knows_its_row(make_db, kind, ho
     if kind.startswith("lite"):  # the async pydantic base has no synchronous ``is_dirty``
         assert cls.is_dirty(got) is False
     assert got._snapshot == {"name": got.name}
-    assert getattr(got, "_source_table", None) == (other if how == "other-table" else None)
+    assert _ref_table(got) == (other if how == "other-table" else cls.__tablename__)

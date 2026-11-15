@@ -191,7 +191,7 @@ PINS = [
         "safe update_one",
         Safe,
         lambda q: q.filter(F("_id") == 1).update_one(k=6),
-        "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
+        "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 WHERE "
         "_id = (SELECT _id FROM sw_pin_safe WHERE _id = ? LIMIT 1) RETURNING _id, data, _version",
         [6, 1],
     ),
@@ -199,7 +199,7 @@ PINS = [
         "safe update_n",
         Safe,
         lambda q: q.filter(F("_id") >= 1).update_n(3, k=7),
-        "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
+        "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 WHERE "
         "_id IN (SELECT _id FROM sw_pin_safe WHERE _id >= ? LIMIT 3) RETURNING _id, data, _version",
         [7, 1],
     ),
@@ -210,7 +210,8 @@ PINS = [
         .order_by("priority", desc=True)
         .update_one(status="running", attempts=F("attempts") + 1, updated_at=17),
         "UPDATE sw_pin_job SET data = json_set(data, '$.attempts', json_extract(data, '$.attempts') "
-        "+ ?, '$.updated_at', ?), status = ?, _version = _version + 1 WHERE _id = (SELECT _id FROM "
+        "+ ?, '$.updated_at', ?, '$._version', _version + 1), status = ?, _version = _version + 1 WHERE _id = (SELECT "
+        "_id FROM "
         "sw_pin_job WHERE (status = ?) AND (JSON_EXTRACT(data, '$.attempts') < ?) ORDER BY priority "
         "DESC LIMIT 1) RETURNING _id, data, _version, status, priority",
         [1, 17, "running", "pending", 3],
@@ -221,7 +222,8 @@ PINS = [
         lambda q: q.filter(F("status") == "running").order_by("priority").update_n(
             5, status="pending", priority=F("priority") - 1
         ),
-        "UPDATE sw_pin_job SET status = ?, priority = priority - ?, _version = _version + 1 WHERE "
+        "UPDATE sw_pin_job SET data = json_set(data, '$._version', _version + 1), status = ?, priority = priority - ?, "
+        "_version = _version + 1 WHERE "
         "_id IN (SELECT _id FROM sw_pin_job WHERE status = ? ORDER BY priority LIMIT 5) RETURNING "
         "_id, data, _version, status, priority",
         ["pending", 1, "running"],
@@ -250,7 +252,7 @@ def test_update_on_a_versioned_class_gains_only_the_version_term(db):
     _, sent = _sent(lambda: q.filter(F("_id") == 1).update(k=5))
     assert sent == [
         (
-            "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 "
+            "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 "
             "WHERE _id = ?",
             [5, 1],
         )
@@ -262,7 +264,11 @@ def test_job_update_gains_only_the_version_term(db):
     q = bound(Job, db)
     _, sent = _sent(lambda: q.filter(F("status") == "pending").update(priority=3))
     assert sent == [
-        ("UPDATE sw_pin_job SET priority = ?, _version = _version + 1 WHERE status = ?", [3, "pending"])
+        (
+            "UPDATE sw_pin_job SET data = json_set(data, '$._version', _version + 1), priority = ?, "
+            "_version = _version + 1 WHERE status = ?",
+            [3, "pending"],
+        )
     ]
 
 
@@ -831,7 +837,8 @@ def test_set_null_moves_the_version_of_a_versioned_referrer_so_a_stale_save_is_r
     _, sent = _sent(lambda: binder.delete_with_policy(db=db, on_delete="set_null"))
 
     assert [sql for sql, _ in sent if table in sql and not sql.startswith("SELECT")] == [
-        f"UPDATE {table} SET data = json(?), _version = _version + 1 WHERE _id = ?;"
+        f"UPDATE {table} SET data = json_set(json(?), '$._version', _version + 1), "
+        "_version = _version + 1 WHERE _id = ?;"
     ]
     assert _version_column(db, table) == [1]
     held.title = "edited by a holder who loaded it before the delete"
@@ -840,6 +847,12 @@ def test_set_null_moves_the_version_of_a_versioned_referrer_so_a_stale_save_is_r
     [(_, doc)] = _stored(db, table)
     assert (doc["title"], doc["binder"]) == ("s", None)
     assert _version_column(db, table) == [1]
+    after = bound(referrer, db).first()
+    after.title = "edited by a holder who loaded it after the delete"
+    after.save(db=db)
+    [(_, doc)] = _stored(db, table)
+    assert (doc["title"], doc["binder"]) == ("edited by a holder who loaded it after the delete", None)
+    assert _version_column(db, table) == [2]
 
 
 def test_a_cascade_three_levels_deep_logs_the_audited_level_only(db):

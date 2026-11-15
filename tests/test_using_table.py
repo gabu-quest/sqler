@@ -23,6 +23,7 @@ from sqler import (
 )
 from sqler.adapter import AsyncSQLiteAdapter
 from sqler.exceptions import InvalidTableNameError
+from sqler.models._table_names import _ref_table
 from sqler.query import F
 
 
@@ -354,7 +355,7 @@ async def test_async_queryset_run_again_after_the_class_was_rebound_still_writes
 
 
 @pytest.mark.parametrize("run", ["all", "first", "iter"])
-def test_queryset_run_again_after_rebind_reports_its_own_source_table(db, run):
+def test_queryset_run_again_after_rebind_reads_its_own_table_as_home(db, run):
     class UtSrc(SQLerModel):
         __tablename__ = "ut_src"
         name: str = ""
@@ -367,18 +368,18 @@ def test_queryset_run_again_after_rebind_reports_its_own_source_table(db, run):
         "first": lambda: qs.first(),
         "iter": lambda: next(qs.iter()),
     }
-    assert reads[run]()._source_table is None
+    assert _ref_table(reads[run]()) == "ut_src"
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         UtSrc.set_db(db, "ut_src_other")
 
-    assert reads[run]()._source_table == "ut_src"
+    assert _ref_table(reads[run]()) == "ut_src"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("run", ["all", "first"])
-async def test_async_queryset_run_again_after_rebind_reports_its_own_source_table(adb, run):
+async def test_async_queryset_run_again_after_rebind_reads_its_own_table_as_home(adb, run):
     class UtAsSrc(AsyncSQLerModel):
         __tablename__ = "ut_as_src"
         name: str = ""
@@ -392,21 +393,21 @@ async def test_async_queryset_run_again_after_rebind_reports_its_own_source_tabl
             return (await qs.all())[0]
         return await qs.first()
 
-    assert (await read())._source_table is None
+    assert _ref_table(await read()) == "ut_as_src"
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         UtAsSrc.set_db(adb, "ut_as_src_other")
 
-    assert (await read())._source_table == "ut_as_src"
+    assert _ref_table(await read()) == "ut_as_src"
 
 
 # --- a copy of a row read from another table -------------------------------------
 
 
 def test_copy_of_a_row_from_another_table_by_base(db):
-    """A pydantic copy keeps the table it was read from; a lite or msgspec copy made
-    with ``replace`` is a row of the class's own table (docs/API.md says so)."""
+    """A pydantic copy keeps the home it was read from; a lite or msgspec copy made
+    with ``replace`` has none, so it names the class's own table (docs/API.md says so)."""
     import dataclasses
 
     db.ensure_table("ut_copy_archive")
@@ -418,8 +419,8 @@ def test_copy_of_a_row_from_another_table_by_base(db):
     lite = dataclasses.replace(UtLiteJob.using(db, "ut_copy_archive").first())
     ms = msgspec.structs.replace(UtMsJob.using(db, "ut_copy_archive").first())
 
-    assert (py._source_table, lite._source_table, getattr(ms, "_source_table", None)) == (
+    assert (_ref_table(py), _ref_table(lite), _ref_table(ms)) == (
         "ut_copy_archive",
-        None,
-        None,
+        "ut_lite_jobs",
+        "ut_ms_jobs",
     )

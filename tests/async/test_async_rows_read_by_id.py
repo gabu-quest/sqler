@@ -252,8 +252,13 @@ async def test_from_ids_on_a_table_made_before_versioning_does_what_from_id_does
     await db.insert_document(table, {"name": "old"})
     got = await cls.from_ids([1])
     assert [(g.name, g._version) for g in got] == [("old", 0)]
+    with sqlite3.connect(path) as conn:  # the read changed no schema
+        assert [r[1] for r in conn.execute(f"PRAGMA table_info({table})")] == ["_id", "data"]
+    got[0].name = "new"
+    await got[0].save()  # the first versioned write adds the column
+    assert got[0]._version == 1
     with sqlite3.connect(path) as conn:
-        assert conn.execute(f"SELECT _version FROM {table} WHERE _id = 1").fetchone() == (0,)
+        assert conn.execute(f"SELECT _version FROM {table} WHERE _id = 1").fetchone() == (1,)
 
 
 @pytest.mark.parametrize("cls", [ArbiPlain, ArbiSafe, ArbiLiteSafe])

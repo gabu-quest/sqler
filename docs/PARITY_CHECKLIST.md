@@ -178,7 +178,8 @@ This document enumerates every feature in the sync implementation and tracks par
 | `explain_query_plan(adapter)` | ✅ | ✅ | 🔧 | Async takes no arg |
 | **Batch Resolution** |
 | `_batch_resolve(docs)` | ✅ | ✅ | ✅ | |
-| `_sourced(inst, other_table)` | ✅ | ✅ | ✅ | |
+| `_models(docs)` | ✅ | ✅ | ✅ | each model has its home: the queryset's database and table |
+| `_checked(use)` | ✅ | ✅ | ✅ | a versioned query asks `db._has_version_column(table)` for rows it reads or returns |
 
 ---
 

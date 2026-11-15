@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fastapi import APIRouter, HTTPException, status
 
-from ..db import get_db, get_row
+from ..db import get_db
 from ..models import City, Country, Writer
 from ..utils import db_call, hydrate_ref
 
@@ -91,7 +91,7 @@ async def get_country(country_id: int):
 
     日本語: IDで国を取得。
     """
-    country = await db_call(lambda: get_row(Country, country_id))
+    country = await db_call(lambda: Country.from_id(country_id, db=get_db()))
     if not country:
         raise HTTPException(status_code=404, detail="Country not found")
     return _country_to_out(country)
@@ -107,7 +107,7 @@ async def delete_country(country_id: int):
     from sqler.query import SQLerField as F
 
     def _delete():
-        country = get_row(Country, country_id)
+        country = Country.from_id(country_id, db=get_db())
         if not country:
             raise HTTPException(status_code=404, detail="Country not found")
 
@@ -137,7 +137,7 @@ async def list_cities_by_country(country_id: int):
     from sqler.query import SQLerField as F
 
     def _list():
-        country = get_row(Country, country_id)
+        country = Country.from_id(country_id, db=get_db())
         if not country:
             raise HTTPException(status_code=404, detail="Country not found")
         return City.using(get_db()).filter(F(["country", "_id"]) == country_id).all()
@@ -173,7 +173,7 @@ async def create_city(payload: CityCreate):
     """
 
     def _create():
-        country = get_row(Country, payload.country_id)
+        country = Country.from_id(payload.country_id, db=get_db())
         if not country:
             raise HTTPException(status_code=404, detail="Country not found")
 
@@ -181,7 +181,7 @@ async def create_city(payload: CityCreate):
         city.set_country(country)
         city.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return get_row(City, city._id)
+        return City.from_id(city._id, db=get_db())
 
     city = await db_call(_create)
     return _city_to_out(city)
@@ -193,7 +193,7 @@ async def get_city(city_id: int):
 
     日本語: IDで都市を取得。
     """
-    city = await db_call(lambda: get_row(City, city_id))
+    city = await db_call(lambda: City.from_id(city_id, db=get_db()))
     if not city:
         raise HTTPException(status_code=404, detail="City not found")
     return _city_to_out(city)
@@ -209,7 +209,7 @@ async def delete_city(city_id: int):
     from sqler.query import SQLerField as F
 
     def _delete():
-        city = get_row(City, city_id)
+        city = City.from_id(city_id, db=get_db())
         if not city:
             raise HTTPException(status_code=404, detail="City not found")
 

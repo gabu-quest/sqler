@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import ClassVar, Optional, Type, TypeVar
+from typing import ClassVar, Optional, TypeVar
 
 from pydantic import PrivateAttr
 
 from sqler.exceptions import StaleVersionError
 from sqler.models import _dirty, _refs
-from sqler.models._table_names import _instance_binding
-from sqler.query.async_query import AsyncSQLerQuery
 
 from . import save_retry as _retry
 from .async_model import AsyncSQLerModel
-from .async_queryset import AsyncSQLerQuerySet
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     RebaseConfig,
@@ -61,15 +58,6 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
     _versioned_rows: ClassVar[bool] = True
 
     @classmethod
-    def query(cls: Type[TASafe]) -> AsyncSQLerQuerySet[TASafe]:  # type: ignore[override]
-        db, table = cls._require_binding()
-        q = AsyncSQLerQuery(table=table, adapter=db.adapter).with_version()
-        promoted = getattr(cls, "__promoted__", None)
-        if promoted:
-            q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TASafe](cls, q, db)
-
-    @classmethod
     def set_db(cls, db, table: Optional[str] = None) -> None:  # type: ignore[override]
         super().set_db(db, table)
         # ensure versioned schema
@@ -77,14 +65,6 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         # we cannot await here; users should ensure schema via an async helper, or we
         # leave it to first save/refresh paths which call versioned helpers
         # For explicitness, no-op here; version checks happen on use.
-
-    @classmethod
-    async def from_id(cls: Type[TASafe], id_: int) -> Optional[TASafe]:  # type: ignore[override]
-        db, table = cls._require_binding()
-        doc = await db.find_document_with_version(table, id_)
-        if doc is None:
-            return None
-        return (await _refs.arun(_refs.load(cls, [doc], db, table)))[0]  # type: ignore[return-value]
 
     @classmethod
     async def _insert_rows(cls, db, table: str, instances: list) -> None:
@@ -184,17 +164,6 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     raise
                 delay = retry.after_lock(e)
             await _retry.asleep(delay)
-
-    async def refresh(self: TASafe) -> TASafe:  # type: ignore[override]
-        cls = self.__class__
-        db, table = _instance_binding(self)
-        if self._id is None:
-            raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = await db.find_document_with_version(table, self._id)
-        if doc is None:
-            raise LookupError(f"Row {self._id} not found for refresh")
-        own = {(table, self._id): self}
-        return (await _refs.arun(_refs.load(cls, [doc], db, table, self._refreshed, own)))[0]  # type: ignore[return-value]
 
     def _refreshed(self: TASafe, doc: dict, row: dict) -> TASafe:
         super()._refreshed(doc, row)
