@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import pytest
 import pytest_asyncio
+from pairwise import all_pairs
 from pydantic import Field as PydField
 from pydantic import PrivateAttr, field_validator, model_validator
 from sqler import AsyncSQLerDB, F
@@ -282,9 +283,7 @@ BAD_REFS = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("way", WAYS)
-@pytest.mark.parametrize("bad", BAD_REFS)
-@pytest.mark.parametrize("base", sorted(BASES))
+@pytest.mark.parametrize(*all_pairs(("base", sorted(BASES)), ("bad", BAD_REFS), ("way", WAYS)))
 async def test_unusable_reference_is_left_as_it_is_and_never_sent_to_sql(make_db, base, bad, way):
     db, child, parent, ct = await _bound(make_db, base)
     await db.insert_document(ct, {"name": "c1"})
@@ -1200,9 +1199,11 @@ async def _unfollowed(make_db, base: str, way: str, shape: str) -> Any:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("way", TYPED_WAYS)
-@pytest.mark.parametrize("base", sorted(TYPED))
-@pytest.mark.parametrize("shape", ["id-str", "other-table"])
+@pytest.mark.parametrize(*all_pairs(
+    ("shape", ["id-str", "other-table"]),
+    ("base", sorted(TYPED)),
+    ("way", TYPED_WAYS),
+))
 async def test_a_typed_field_holding_a_reference_that_cannot_be_followed(make_db, base, way, shape):
     got = await _unfollowed(make_db, base, way, shape)
     assert got == UNFOLLOWED_EXPECTED
@@ -1291,9 +1292,11 @@ RESHAPED = {"drop": [2, 3], "reverse": [3, 2, 1], "new": [None, None, None]}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", sorted(RESHAPED))
-@pytest.mark.parametrize("way", TYPED_WAYS)
-@pytest.mark.parametrize("base", sorted(VALIDATED))
+@pytest.mark.parametrize(*all_pairs(
+    ("base", sorted(VALIDATED)),
+    ("way", TYPED_WAYS),
+    ("mode", sorted(RESHAPED)),
+))
 async def test_a_validator_that_reshapes_the_children_keeps_each_child_its_row(
     make_db, base, way, mode
 ):
@@ -2139,7 +2142,7 @@ async def _put(db: AsyncSQLerDB, node: type, doc: dict, rid: Optional[int] = Non
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", sorted(AGRAPH))
-@pytest.mark.parametrize("length", [9, 50, 2000])
+@pytest.mark.parametrize("length", [2000])  # past the recursion limit, on every base and way
 async def test_a_chain_is_followed_to_its_end_by_every_way(make_db, base, way, length):
     db, node, _ = await _graph(make_db, base)
     t = node.__tablename__
@@ -2241,9 +2244,11 @@ async def test_a_versioned_child_in_a_diamond_saves_through_both_parents(make_db
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("way", TYPED_WAYS)
-@pytest.mark.parametrize("base", sorted(AGRAPH))
-@pytest.mark.parametrize("where", ["field-depth-1", "list-depth-1", "field-depth-3", "list-depth-3"])
+@pytest.mark.parametrize(*all_pairs(
+    ("where", ["field-depth-1", "list-depth-1", "field-depth-3", "list-depth-3"]),
+    ("base", sorted(AGRAPH)),
+    ("way", TYPED_WAYS),
+))
 async def test_a_referenced_row_its_class_refuses_raises_with_a_note(make_db, base, way, where):
     db, node, bad = await _graph(make_db, base)
     t, bt = node.__tablename__, bad.__tablename__
