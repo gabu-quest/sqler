@@ -119,7 +119,8 @@ class SQLerQuerySet(Generic[T]):
 
         Unlike ``all()`` which loads all rows into memory and resolves
         relations in batch, this method streams row by row. Relation
-        resolution is NOT performed during streaming.
+        resolution is NOT performed during streaming. On a plain ``":memory:"``
+        database the rows are read whole first and held while they are yielded.
 
         Yields:
             T: Model instances.

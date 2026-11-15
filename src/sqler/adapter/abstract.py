@@ -1,12 +1,38 @@
 import sqlite3
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from typing import Any, Iterator, List, Optional, Protocol
 
 
 class AdapterError(Exception):
     """Base exception for database adapter errors."""
 
     pass
+
+
+class CursorLike(Protocol):
+    """What ``execute`` gives back: the part of ``sqlite3.Cursor`` that reads a statement's
+    result. A ``sqlite3.Cursor`` is one; so are the rows an adapter has already read."""
+
+    @property
+    def description(self) -> Any: ...
+
+    @property
+    def rowcount(self) -> int: ...
+
+    @property
+    def lastrowid(self) -> Optional[int]: ...
+
+    def fetchone(self) -> Any: ...
+
+    def fetchmany(self, size: Optional[int] = ...) -> list[Any]: ...
+
+    def fetchall(self) -> list[Any]: ...
+
+    def __iter__(self) -> Iterator[Any]: ...
+
+    def __next__(self) -> Any: ...
+
+    def close(self) -> None: ...
 
 
 class AdapterABC(ABC):
@@ -23,9 +49,9 @@ class AdapterABC(ABC):
         pass
 
     @abstractmethod
-    def execute(self, query: str, params: Optional[List[Any]] = None) -> sqlite3.Cursor:
+    def execute(self, query: str, params: Optional[List[Any]] = None) -> CursorLike:
         """Execute a single query with optional params.
-        returns a sqlite3 cursor
+        returns a cursor: a ``sqlite3.Cursor``, or rows already read that answer as one
         """
         pass
 

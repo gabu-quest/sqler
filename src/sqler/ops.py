@@ -315,6 +315,12 @@ def backup(
     absent, the old file if one was there) and no temporary file is left. On
     success ``destination`` is a complete database.
 
+    A backup does not run inside a transaction of the calling thread: the result
+    says so and nothing is copied. On a plain ``":memory:"`` database, whose one
+    connection every thread shares, the copy waits for another thread's
+    transaction (at most ``timeout_ms``) and holds the connection until it is
+    done, so with ``sleep_ms`` the other threads' statements wait that long.
+
     Args:
         db: SQLerDB instance to backup.
         destination: Path to the backup file (will be created/overwritten).
@@ -355,20 +361,26 @@ def backup(
     try:
         _check_replaceable(destination)
 
-        # Get the source connection
-        source_conn = db.adapter._conn()
-
         # The copy is written to a temporary file beside the destination
         dest_conn = sqlite3.connect(temp)
 
         try:
-            # Perform the backup using SQLite's backup API
-            with dest_conn:
-                source_conn.backup(
-                    dest_conn,
-                    pages=pages_per_step,
-                    sleep=sleep_ms / 1000.0 if sleep_ms > 0 else 0,
-                )
+            # The source connection, held by the adapter's rule: on the one connection of
+            # a plain ":memory:" database the copy waits for another thread's transaction
+            with db.adapter._holding() as source_conn:
+                if source_conn.in_transaction:
+                    # SQLite answers "locked" for a source that writes, and the backup
+                    # would retry for ever
+                    raise sqlite3.OperationalError(
+                        "backup cannot run inside this thread's open transaction"
+                    )
+                # Perform the backup using SQLite's backup API
+                with dest_conn:
+                    source_conn.backup(
+                        dest_conn,
+                        pages=pages_per_step,
+                        sleep=sleep_ms / 1000.0 if sleep_ms > 0 else 0,
+                    )
         finally:
             dest_conn.close()
 
@@ -461,12 +473,12 @@ def restore(
         # Open source connection
         source_conn = sqlite3.connect(source)
 
-        # Get the destination connection
-        dest_conn = db.adapter._conn()
-
         try:
-            # Perform the restore using backup API (source -> dest)
-            with dest_conn:
+            # The destination connection, held by the adapter's rule: on the one connection
+            # of a plain ":memory:" database the restore waits for another thread's
+            # transaction and never commits it
+            with db.adapter._holding() as dest_conn, dest_conn:
+                # Perform the restore using backup API (source -> dest)
                 source_conn.backup(
                     dest_conn,
                     pages=pages_per_step,
