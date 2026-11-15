@@ -195,6 +195,16 @@ class LockTimeoutError(ConcurrencyError):
     pass
 
 
+class TransactionStateError(ConcurrencyError):
+    """Raised when a transaction ended while another task's nested transaction in it was open.
+
+    The transaction is rolled back; the task that ended it and the task whose nested
+    transaction was open both get this error.
+    """
+
+    pass
+
+
 # Integrity Errors
 
 

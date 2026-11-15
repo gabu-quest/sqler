@@ -280,7 +280,7 @@ async def test_pool_exhaustion_blocks_then_completes():
 
 @pytest.mark.asyncio
 async def test_release_suppressed_during_transaction():
-    """_release() is a no-op while _txn_depth > 0 (connection stays pinned)."""
+    """_release() is a no-op while the task is in a transaction (the connection stays pinned)."""
     adapter = AsyncSQLiteAdapter.in_memory(shared=False)
     await adapter.connect()
     try:

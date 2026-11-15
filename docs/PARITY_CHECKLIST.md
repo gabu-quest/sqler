@@ -34,7 +34,7 @@ This document enumerates every feature in the sync implementation and tracks par
 | `in_transaction` property | ✅ | ✅ | ✅ | |
 | `begin_transaction()` | ✅ | ✅ | ✅ | Uses BEGIN IMMEDIATE |
 | `end_transaction(commit=True)` | ✅ | ✅ | ✅ | |
-| `_txn_depth` tracking | ✅ | ✅ | ✅ | Nested transaction support |
+| Nested transaction tracking | ✅ | ✅ | 🔧 | Sync: a depth counter (`_txn_depth`). Async: the connection's stack of savepoints, and in each task the savepoints it is inside; depth and savepoint name are read from them |
 | **Context Managers** |
 | `__enter__/__exit__` | ✅ | ✅ | ✅ | |
 | `__aenter__/__aexit__` | N/A | ✅ | ✅ | |

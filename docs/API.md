@@ -749,6 +749,40 @@ TxItem(name="D").save()
 assert TxItem.query().count() == 2
 ```
 
+### Async transactions shared by tasks
+
+Tasks started inside `async with db.transaction():` share its connection. Each task's
+place in the transaction is its innermost nested transaction that is still open, else the
+transaction itself. A task sends a statement only while no other task's nested transaction
+is open above its place: otherwise the statement waits its turn, in the order asked, for at
+most `acquire_timeout` seconds, then raises `LockTimeoutError` (the other nested transaction
+is still running, or it waits for this task and can never end). A statement that has been
+given its turn is sent before any other task's nested transaction opens on top of it. With
+`acquire_timeout=None` there is no bound: a task inside a nested transaction that awaits a
+statement of a sibling on the same connection waits for ever, because the sibling waits for
+that nested transaction to end.
+
+The transaction ends for every task when its `COMMIT` or `ROLLBACK` is sent. A task that
+outlives it is in no transaction: its statements run on a pooled connection and are
+committed, and its `db.transaction()` starts a new one. Await the tasks inside the block
+(or use a `TaskGroup`) to make their work part of it. If the block ends while a nested
+transaction of another task is still open, the transaction is rolled back; the block raises
+`TransactionStateError` (when it raised an exception of its own, that one goes on), and the
+other task gets `TransactionStateError` at its next statement or at the end of its nested
+block (an exception of its own goes on with a note that nothing in it was committed). A task
+that ends with its own nested transaction open has it rolled back.
+
+If the end of a nested transaction fails in SQLite (for example because a raw `RELEASE`
+statement already ended its savepoint), the transaction can no longer be trusted. After a
+failed `ROLLBACK TO` no `RELEASE` is sent, since that would keep the rows the rollback was to
+undo. The nested block raises `TransactionStateError` with the SQLite error as `__cause__`,
+the transaction ends rolled back whatever its block asks for, and the block that ends it
+raises `TransactionStateError` too. A block that is already raising keeps its own exception,
+and the same sentence is added to it as a note. From the failed end on, every statement sent
+in that transaction by any task (`execute`, `executemany`, a new nested transaction, also one
+that was waiting its turn) raises the same `TransactionStateError` and sends nothing, and a
+nested block that ends in it raises it too.
+
 ---
 
 ## Data Integrity

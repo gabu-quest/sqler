@@ -33,6 +33,7 @@ from .exceptions import (
     SearchQueryError,
     SQLerError,
     StaleVersionError,
+    TransactionStateError,
     UniqueConstraintError,
     UnstorableValueError,
     ValidationError,
@@ -291,6 +292,7 @@ __all__ = [
     "ConcurrencyError",
     "StaleVersionError",
     "LockTimeoutError",
+    "TransactionStateError",
     # Errors - Integrity
     "IntegrityError",
     "UniqueConstraintError",
