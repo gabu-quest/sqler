@@ -141,6 +141,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Async adapter: an `async with db.adapter:` block inside a transaction no longer ends that transaction.** A block that ended normally committed the first half of the transaction; a block whose exception was caught rolled back the rows written before it while the transaction went on and committed the rest, with no error. The block now leaves the transaction to its owner, as the sync `with db.adapter:` block does.
 - **A sync `MigrationRunner` made inside a transaction no longer commits that transaction** while it makes its tracking table; the table belongs to the transaction, as with `AsyncMigrationRunner`.
 - **A delete's look for referring rows no longer rolls back raw work that was pending before it.** On a table with a row SQLite's JSON functions cannot read, the look's first read fails and it reads another way; that failed read used to roll back whatever was uncommitted on the connection, with no error.
+- **Async: a statement of a transaction that was cancelled after its connection had closed no longer makes every later statement of that transaction wait forever.** The next statement raises `ValueError` ("no active connection") at once.
+- **Async: a read of a cursor's rows that ends the transaction is seen even when another task's statement ran behind it.** The read raises `TransactionStateError` and the transaction ends rolled back; before, later statements could go out in a transaction SQLite had opened anew, and the block's `COMMIT` kept them after the earlier writes were gone. A cancelled read and a failed read-ahead are covered too. It takes a function in the statement that rolls back its own connection to reach this.
 
 ### Changed
 
