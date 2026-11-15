@@ -4,7 +4,7 @@ from contextvars import ContextVar
 from typing import Any, Optional
 
 from sqler._stored import dumps, stored
-from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter
+from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter, PoolStats
 from sqler.db.sqler_db import (
     _MAX_VARIABLES,
     _columns_sql,
@@ -17,7 +17,6 @@ from sqler.db.sqler_db import (
     _rows_sql,
 )
 from sqler.exceptions import StaleVersionError, TransactionStateError
-from sqler.pool import PoolStats
 from sqler.query.query import is_missing_table
 from sqler.utils import (
     validate_check_expression,

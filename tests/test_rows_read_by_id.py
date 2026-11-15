@@ -639,20 +639,6 @@ def test_every_chaining_method_keeps_the_database_of_using(db, fresh, method):
         assert qs.first().held == {"name": "j", "_id": 1, "status": "ready"}
 
 
-def test_a_model_bound_to_a_pooled_database_still_resolves_its_references(tmp_path):
-    from sqler.pool import PooledSQLerDB
-
-    pooled = PooledSQLerDB.on_disk(str(tmp_path / "pooled.db"))
-    try:
-        child = RbiPlain(name="p")
-        child.save(db=pooled)
-        RbiHolder(name="h", held=child).save(db=pooled)
-        got = RbiHolder.using(pooled).first()
-    finally:
-        pooled.close()
-    assert got.held == {"name": "p", "_id": 1}
-
-
 # --- a by-id read does not fail on the number of ids -----------------------------------------
 
 MANY = 40_000

@@ -1,4 +1,5 @@
 from .adapter import AsyncSQLiteAdapter, SQLiteAdapter
+from .adapter.asynchronous import PoolStats
 from .cache import (
     CacheAwareModel,
     CacheEntry,
@@ -162,7 +163,6 @@ from .ops import (
     restore,
     vacuum,
 )
-from .pool import ConnectionPool, PooledSQLerDB, PooledSQLiteAdapter, PoolStats
 from .query import F, SQLerExpression, SQLerField, SQLerQuery
 from .query.query import PaginatedResult
 from .registry import register, resolve, tables
@@ -268,9 +268,6 @@ __all__ = [
     "BackupResult",
     "DatabaseStats",
     # Connection Pool
-    "ConnectionPool",
-    "PooledSQLiteAdapter",
-    "PooledSQLerDB",
     "PoolStats",
     # Errors - Base
     "SQLerError",

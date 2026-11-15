@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from typing import Any, List, Optional, Self
@@ -18,7 +19,6 @@ from sqler.exceptions import (
     unique_violation_from,
 )
 from sqler.logging import query_logger
-from sqler.pool import PoolStats
 
 from .abstract import AsyncAdapterABC
 from .synchronous import _read_hit_missing_table
@@ -26,6 +26,35 @@ from .synchronous import _read_hit_missing_table
 logger = logging.getLogger(__name__)
 
 DEFAULT_ACQUIRE_TIMEOUT_S: Optional[float] = 30.0
+
+
+@dataclass
+class PoolStats:
+    """Statistics about connection pool usage."""
+
+    total_connections: int
+    available_connections: int
+    in_use_connections: int
+    max_connections: int
+    total_checkouts: int
+    total_timeouts: int
+    avg_wait_time_ms: float
+    max_wait_time_ms: float
+    created_at: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "total_connections": self.total_connections,
+            "available_connections": self.available_connections,
+            "in_use_connections": self.in_use_connections,
+            "max_connections": self.max_connections,
+            "total_checkouts": self.total_checkouts,
+            "total_timeouts": self.total_timeouts,
+            "avg_wait_time_ms": self.avg_wait_time_ms,
+            "max_wait_time_ms": self.max_wait_time_ms,
+            "created_at": self.created_at.isoformat(),
+        }
 
 _ENDED = "the transaction this nested transaction was part of has ended; nothing written in it was committed"
 _BROKEN = (
