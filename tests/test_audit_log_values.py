@@ -20,6 +20,7 @@ from typing import Any, NamedTuple, Optional
 import pydantic
 import pytest
 from sqler import AsyncSQLerDB, AsyncSQLerSafeModel, SQLerDB, SQLerModel, SQLerSafeModel
+from sqler.exceptions import NotFoundError
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.mixins import AsyncAuditLogMixin, AuditLogMixin, TimestampMixin
@@ -397,7 +398,8 @@ def test_a_row_deleted_behind_the_model_writes_no_update_row(base):
         item = await _aw(cls(name="a").save())
         await rows.sql("DELETE FROM vanished")
         item.name = "b"
-        await _aw(item.save())
+        with pytest.raises(NotFoundError, match="Row 1 of vanished is not there"):
+            await _aw(item.save())
         return [a for a, _, _ in await rows.audit("vanished")]
 
     assert _run(steps, spec.is_async) == ["create"]

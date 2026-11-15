@@ -21,8 +21,9 @@ from sqler import (
     AsyncSQLerModel,
     AsyncSQLerSafeModel,
 )
-from sqler.exceptions import UniqueConstraintError
+from sqler.exceptions import NotFoundError, StaleVersionError, UniqueConstraintError
 from sqler.logging import query_logger
+from sqler.models._table_names import _home_of
 from sqler.models.mixins import (
     AsyncAuditLogMixin,
     AsyncAuditMixin,
@@ -599,3 +600,123 @@ async def test_a_class_with_no_row_rule_sends_the_statements_it_sent(db, kind, m
         sent.append(await _sent(lambda: other.delete_with_policy(db=db, on_delete=policy)))
 
     assert sent == [*(VERSIONED if kind in SAFE else UNVERSIONED), *[A_DELETE] * 4]
+
+
+# ----- a save of a row that is not there ---------------------------------------------------------
+
+
+def _refused(kind):
+    """What a by-id save of a row that is not there raises: a safe class reads it as a row at
+    another version, every other class as a row that is gone."""
+    return StaleVersionError if kind in SAFE else NotFoundError
+
+
+GONE = ["deleted", "never_there", "in_the_callers_transaction"]
+MIXINS = {
+    "none": (),
+    "hooks_audit": (Recorded, AsyncAuditLogMixin),
+    "timestamps": (TimestampMixin,),
+}
+
+
+@pytest.mark.parametrize("gone", GONE)
+@pytest.mark.parametrize("mixins", list(MIXINS))
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_save_of_a_row_that_is_not_there_raises_and_keeps_the_instance(
+    db, kind, mixins, gone
+):
+    Item = make(kind, *MIXINS[mixins])
+    inst = await Item(name="first").save(db=db)
+    if gone == "deleted":
+        await _run(db, f"DELETE FROM {Item.__tablename__};")
+    elif gone == "never_there":
+        inst._id = 41
+    inst.name = "second"
+    before = (_identity(inst), _home_of(inst))
+    audit_before = await _audit(db, Item)
+    CALLS.clear()
+
+    if gone == "in_the_callers_transaction":
+        async with db.transaction():
+            cur = await db.adapter.execute(f"DELETE FROM {Item.__tablename__};")
+            await cur.close()
+            with pytest.raises(_refused(kind)):
+                await inst.save(db=db)
+    else:
+        with pytest.raises(_refused(kind)):
+            await inst.save(db=db)
+
+    kept = [(1, "first")] if gone == "never_there" else []
+    assert [(i, d["name"]) for i, d in await _docs(db, Item)] == kept
+    assert (_identity(inst), _home_of(inst)) == before
+    assert inst.name == "second"
+    assert await _audit(db, Item) == audit_before
+    if mixins == "hooks_audit":
+        assert CALLS == [("before_save", "second")]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_refused_save_the_caller_catches_and_commits_past_writes_nothing(db, kind):
+    Item = make(kind, Recorded, AsyncAuditLogMixin)
+    inst = await Item(name="first").save(db=db)
+    await _run(db, f"DELETE FROM {Item.__tablename__};")
+    inst.name = "second"
+    async with db.transaction():
+        with pytest.raises(_refused(kind)):
+            await inst.save(db=db)
+        await db.insert_document("beside", {"name": "the caller's own row"})
+    assert await _docs(db, Item) == []
+    assert [r[1] for r in await _audit(db, Item)] == ["create"]
+    assert await db.find_document("beside", 1) == {"name": "the caller's own row", "_id": 1}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_save_to_a_database_without_the_row_raises_and_the_home_stays(db, kind):
+    Item = make(kind)
+    inst = await Item(name="first").save(db=db)
+    other = AsyncSQLerDB.in_memory(shared=False)
+    await other.connect()
+    try:
+        inst.name = "second"
+        with pytest.raises(_refused(kind)):
+            await inst.save(db=other)
+        assert await _docs(other, Item) == []
+        await inst.save()
+        assert [(i, d["name"]) for i, d in await _docs(db, Item)] == [(1, "second")]
+        copy = await Item(name=inst.name).save(db=other)
+        assert copy._id == 1
+        assert [(i, d["name"]) for i, d in await _docs(other, Item)] == [(1, "second")]
+    finally:
+        await other.close()
+
+
+async def test_the_refusal_names_the_table_the_id_and_how_to_copy_a_row(db):
+    with pytest.raises(NotFoundError) as caught:
+        await db.upsert_document("awr_named", 7, {"name": "x"})
+    assert str(caught.value) == (
+        "Row 7 of awr_named is not there: a write by _id does not create it; to put a copy "
+        "into another database, save a new instance without the _id"
+    )
+    assert caught.value.id_ == 7
+    assert (await _rows(db, "SELECT count(*) FROM awr_named;"))[0][0] == 0
+
+
+async def test_a_refused_update_sends_what_an_update_that_lands_sends(db):
+    await db.insert_document("awr_counted", {"name": "x"})
+    with query_logger.capture() as landed:
+        await db.upsert_document("awr_counted", 1, {"name": "y"})
+    with query_logger.capture() as refused:
+        with pytest.raises(NotFoundError):
+            await db.upsert_document("awr_counted", 9, {"name": "y"})
+    assert [q.sql for q in refused] == [q.sql for q in landed]
+    assert [q.sql.split()[0] for q in refused] == ["CREATE", "UPDATE"]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_refresh_of_a_row_that_is_gone_raises_lookup_error(db, kind):
+    Item = make(kind)
+    inst = await Item(name="first").save(db=db)
+    await _run(db, f"DELETE FROM {Item.__tablename__};")
+    with pytest.raises(LookupError, match="Row 1 not found for refresh"):
+        await inst.refresh(db=db)
+    assert inst._id == 1

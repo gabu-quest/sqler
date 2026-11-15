@@ -258,10 +258,11 @@ def _fields_update(
 
 
 def _refuse_unwritten(gone: bool, table: str, _id: Any) -> None:
-    """The error of a write of some fields that wrote no row: the row is gone, or at another version."""
+    """The error of a write by ``_id`` that wrote no row: the row is not there, or at another version."""
     if gone:
         raise NotFoundError(
-            f"Row {_id} of {table} is gone: a write of some of its fields cannot recreate it",
+            f"Row {_id} of {table} is not there: a write by _id does not create it; to put a copy "
+            "into another database, save a new instance without the _id",
             id_=_id,
         )
     raise StaleVersionError("Stale version: update rejected")
@@ -839,9 +840,11 @@ class SQLerDB:
                 params.append(val)
             params.append(_id)
             sql = f"UPDATE {table} SET {', '.join(set_parts)} WHERE _id = ?;"
-            self.adapter.execute(sql, params)
+            cur = self.adapter.execute(sql, params)
             self.adapter.auto_commit()
-            return _id
+            if cur.rowcount > 0:
+                return _id
+            _refuse_unwritten(True, table, _id)
 
     def upsert_with_version_promoted(
         self,
@@ -928,6 +931,9 @@ class SQLerDB:
 
         Returns:
             int: The existing or newly assigned ``_id``.
+
+        Raises:
+            NotFoundError: The table has no row ``_id``; nothing is written.
         """
         table = validate_table_name(table)
         self._ensure_table(table)
