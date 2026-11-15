@@ -12,15 +12,12 @@ from dataclasses import fields
 from typing import (
     TYPE_CHECKING,
     ClassVar,
-    Optional,
-    Type,
     TypeVar,
 )
 
 from sqler.exceptions import StaleVersionError
-from sqler.models import _dirty, _refs
+from sqler.models import _dirty
 from sqler.models import save_retry as _retry
-from sqler.models._table_names import _instance_binding
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.utils import (
     DEFAULT_REBASE_CONFIG,
@@ -30,7 +27,7 @@ from sqler.models.utils import (
 )
 
 if TYPE_CHECKING:
-    from sqler.models.async_queryset import AsyncSQLerQuerySet
+    pass
 
 TASafe = TypeVar("TASafe", bound="AsyncSQLerLiteSafeModel")
 
@@ -82,35 +79,6 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         """Initialize private attributes after dataclass __init__."""
         super().__post_init__()
         object.__setattr__(self, "_version", 0)
-
-    @classmethod
-    def query(cls: Type[TASafe]) -> "AsyncSQLerQuerySet[TASafe]":
-        """Return an async queryset that includes version information."""
-        from sqler.models.async_queryset import AsyncSQLerQuerySet
-        from sqler.query.async_query import AsyncSQLerQuery
-
-        db, table = cls._require_binding()
-        q = AsyncSQLerQuery(table=table, adapter=db.adapter).with_version()
-        promoted = getattr(cls, "__promoted__", None)
-        if promoted:
-            q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TASafe](cls, q, db)
-
-    @classmethod
-    async def from_id(cls: Type[TASafe], id_: int) -> Optional[TASafe]:
-        """Hydrate an instance by ``_id`` including version.
-
-        Args:
-            id_: Row id to load.
-
-        Returns:
-            Model instance when found, else ``None``.
-        """
-        db, table = cls._require_binding()
-        doc = await db.find_document_with_version(table, id_)
-        if doc is None:
-            return None
-        return (await _refs.arun(_refs.load(cls, [doc], db, table)))[0]
 
     @classmethod
     async def _insert_rows(cls, db, table: str, instances: list) -> None:
@@ -210,22 +178,6 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
                     raise
                 delay = retry.after_lock(e)
             await _retry.asleep(delay)
-
-    async def refresh(self: TASafe) -> TASafe:
-        """Reload this instance's fields and version from the database.
-
-        Returns:
-            self: The same instance (for chaining).
-        """
-        cls = self.__class__
-        db, table = _instance_binding(self)
-        if self._id is None:
-            raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = await db.find_document_with_version(table, self._id)
-        if doc is None:
-            raise LookupError(f"Row {self._id} not found for refresh")
-        own = {(table, self._id): self}
-        return (await _refs.arun(_refs.load(cls, [doc], db, table, self._refreshed, own)))[0]
 
     def _refreshed(self: TASafe, doc: dict, row: dict) -> TASafe:
         super()._refreshed(doc, row)

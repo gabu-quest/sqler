@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fastapi import APIRouter, HTTPException, status
 
-from ..db import get_db, get_row
+from ..db import get_db
 from ..models import Article, City, Writer
 from ..utils import db_call, hydrate_ref
 
@@ -82,14 +82,14 @@ async def create_writer(payload: WriterCreate):
         writer = Writer(name=payload.name, bio=payload.bio)
 
         if payload.city_id:
-            city = get_row(City, payload.city_id)
+            city = City.from_id(payload.city_id, db=get_db())
             if not city:
                 raise HTTPException(status_code=404, detail="City not found")
             writer.set_city(city)
 
         writer.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return get_row(Writer, writer._id)
+        return Writer.from_id(writer._id, db=get_db())
 
     writer = await db_call(_create)
     return _writer_to_out(writer)
@@ -101,7 +101,7 @@ async def get_writer(writer_id: int):
 
     日本語: IDでライターを取得。
     """
-    writer = await db_call(lambda: get_row(Writer, writer_id))
+    writer = await db_call(lambda: Writer.from_id(writer_id, db=get_db()))
     if not writer:
         raise HTTPException(status_code=404, detail="Writer not found")
     return _writer_to_out(writer)
@@ -115,7 +115,7 @@ async def patch_writer(writer_id: int, patch: WriterPatch):
     """
 
     def _patch():
-        writer = get_row(Writer, writer_id)
+        writer = Writer.from_id(writer_id, db=get_db())
         if not writer:
             raise HTTPException(status_code=404, detail="Writer not found")
 
@@ -127,7 +127,7 @@ async def patch_writer(writer_id: int, patch: WriterPatch):
             if city_id is None:
                 writer.city = None
             else:
-                city = get_row(City, city_id)
+                city = City.from_id(city_id, db=get_db())
                 if not city:
                     raise HTTPException(status_code=404, detail="City not found")
                 writer.set_city(city)
@@ -137,7 +137,7 @@ async def patch_writer(writer_id: int, patch: WriterPatch):
 
         writer.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return get_row(Writer, writer._id)
+        return Writer.from_id(writer._id, db=get_db())
 
     writer = await db_call(_patch)
     return _writer_to_out(writer)
@@ -153,7 +153,7 @@ async def delete_writer(writer_id: int):
     from sqler.query import SQLerField as F
 
     def _delete():
-        writer = get_row(Writer, writer_id)
+        writer = Writer.from_id(writer_id, db=get_db())
         if not writer:
             raise HTTPException(status_code=404, detail="Writer not found")
 
@@ -187,7 +187,7 @@ async def get_writer_audit_log(writer_id: int):
     """
 
     def _get_log():
-        writer = get_row(Writer, writer_id)
+        writer = Writer.from_id(writer_id, db=get_db())
         if not writer:
             raise HTTPException(status_code=404, detail="Writer not found")
 
@@ -218,7 +218,7 @@ async def get_writer_articles(writer_id: int):
     from sqler.query import SQLerField as F
 
     def _get_articles():
-        writer = get_row(Writer, writer_id)
+        writer = Writer.from_id(writer_id, db=get_db())
         if not writer:
             raise HTTPException(status_code=404, detail="Writer not found")
 

@@ -5,6 +5,7 @@ alternative to the dataclass-based lite model that uses msgspec Structs for
 C-level JSON decode+validate speed.
 """
 
+import copy
 import typing
 from datetime import date, datetime
 from typing import Any, ClassVar, Optional, Type, TypeVar
@@ -81,21 +82,32 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
     these optional base fields (msgspec requires required fields before
     optional fields in positional mode).
 
-    ``dict=True`` gives instances a ``__dict__`` for state that is not a field
-    (``_source_table``); it is not encoded and not compared.
+    ``dict=True`` gives instances a ``__dict__`` for state that is not a field (the home
+    of the row, see ``_table_names._Home``); it is not encoded and not compared, and a copy
+    carries it.
     """
 
     _id: Optional[int] = None
     _snapshot: Optional[dict] = None
-    # ``dict=True``: a row read through ``using(db, table)`` from a table other than
-    # its class's keeps that table in ``_source_table``, an instance attribute that is
-    # not a struct field, so it is in neither the encoded bytes nor ``==``.
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         from sqler.models._table_names import _register_defined_class
 
         _register_defined_class(cls)
+
+    def __copy__(self: T) -> T:
+        """A copy that also holds this instance's state that is not a field."""
+        new = msgspec.Struct.__copy__(self)
+        new.__dict__.update(self.__dict__)
+        return new
+
+    def __deepcopy__(self: T, memo: dict) -> T:
+        """A deep copy that also holds a deep copy of this instance's state that is not a field."""
+        rebuild, args = self.__reduce__()
+        new = rebuild(*copy.deepcopy(args, memo))
+        new.__dict__.update(copy.deepcopy(self.__dict__, memo))
+        return new
 
     @classmethod
     def model_validate(cls: Type[T], data: dict) -> T:

@@ -142,6 +142,7 @@ The recommended way to bind models is `using()` (class-level) and `save(db=)` / 
 # Class-level: using() returns a queryset on db (no global mutation)
 users = User.using(db).filter(F("age") > 30).all()
 users = User.from_ids([1, 2], db=db)
+user = User.from_id(1, db=db)
 
 # One query on another table; the class binding is not changed
 archived = User.using(db, "users_archive").all()
@@ -157,6 +158,24 @@ user.delete(db=db2)     # deletes from db2
 
 Both patterns avoid global `set_db()` state and are safe for multi-DB scenarios.
 
+**An instance belongs to the database it was read from or written to.** Every way of
+loading a row (`from_id()`, `from_ids()`, a queryset's `all()`, `first()`, `iter()`,
+`update_one()`, `update_n()`, `refresh()`, a referenced row loaded with its parent, a
+search) gives the instance its home: the database and table of the row. Each successful
+`save()`, `save_partial()` and `save_many()` makes the database and table written to its
+home; a write that fails leaves the home as it was. `save()`, `refresh()`, `delete()`
+and `get_audit_log()` use, in this order: the `db=` given, else the instance's home,
+else the class's `set_db()` database, else they raise `NotBoundError`. So a class bound
+to one database never writes a row read from another into its own, and a class bound to
+none needs `db=` only on the call that first reads or saves an instance. `refresh(db=)`
+reads from that database and moves the home there. A deleted instance has no `_id` and
+keeps its home: a later `save()` inserts it there again. A new instance (`Model(...)`)
+has no home. The home is not a field: it is in no `==`, `hash`, `repr`, dump or stored
+document; `copy.copy()`, `copy.deepcopy()` and `model_copy()` keep the same database
+object; a pickled instance has none. `dataclasses.replace()` (lite) gives a new instance
+with no `_id`; `msgspec.structs.replace()` keeps the `_id` but not the home, so read the
+row again instead of saving such a copy.
+
 **Which table a class uses.** Every route (`save(db=)`, `using(db)`, references,
 `FTSIndex`, the registry) uses one rule: the table bound with `set_db()`, else
 `__tablename__`, else the plural of the class name (`User` → `users`; a name that
@@ -164,16 +183,12 @@ already ends in `s` is kept). A class bound with `set_db(db, "a")` reads `a` fro
 database given to `using()`.
 
 **`using(db, table=None)`.** With `table`, that one query reads the named table; the
-name is checked before any SQL (`InvalidTableNameError`). A row read this way
-remembers its table: `save()`, `delete()` and `refresh()` use it, so a row is never
-written to a different table than it was read from; `row.save(db=other_db)` updates
-the row with the same `_id` in that table of `other_db`. `as_ref(row)`, and the
-reference a model holding it stores, name that table. On the msgspec base the table
-is kept outside the struct fields: it is in neither `msgspec.json.encode(row)` nor `==`.
-A copy made with `model_copy()` (pydantic) keeps the table. A copy made with
-`dataclasses.replace()` (lite) or `msgspec.structs.replace()` does not: it keeps the
-`_id` and is a row of the class's own table, so read the row again instead of saving
-such a copy.
+name is checked before any SQL (`InvalidTableNameError`). The table is part of the
+home of a row read this way, so a row is never written to a different table than it was
+read from; `row.save(db=other_db)` updates the row with the same `_id` in that table of
+`other_db`. `as_ref(row)`, and the reference a model holding it stores, name that table.
+On a versioned (safe) class, `using()` reads each row's version as `query()` does, so a
+set-based update through either moves the version and a stale `save()` is refused.
 
 **A read creates no table.** `using(db)`, `using(db, table)` and `query()` on an async
 bound class run no `CREATE TABLE`: on a table nobody created, `all()` is `[]`,
@@ -630,7 +645,17 @@ else:
 
 A queryset's `update()`, `update_one()` and `update_n()` move the version of each row they
 change, so a later `save()` of an instance loaded before them raises `StaleVersionError`
-too, as after another instance's `save()`.
+too, as after another instance's `save()`; an instance loaded after them, or returned by
+`update_one()` / `update_n()`, holds the new version and saves.
+
+A table made before versioning (by a plain model, by SQL, or copied without its `_version`
+column) is read as it is, through every door (`from_id`, `from_ids`, `refresh`, a
+reference, `query()`, `using(db)`): each row at version 0, and no read changes the schema,
+so it works on a database that cannot be written. The first versioned write adds the
+column: a `save()` (a holder who read at version 0 then saves) or a set-based update. Only
+the sync safe bases' `set_db()` adds it when the class is bound. A database object asks
+once whether a table has the column and remembers it when it does; a table without it costs
+one `PRAGMA table_info` per versioned read until a write adds the column.
 
 ### [C13] Safe model collision handling
 
@@ -1334,7 +1359,7 @@ the rules of its own table's registered class), meet the same rules but the hook
 
 | Rule | Set-based ways and a policy's rows |
 |------|------------------------------------|
-| version (safe models) | every update moves `_version` by one, in the same statement, and so does the update that nulls a reference (a holder who loaded the row before cannot save the reference back); `_version` cannot be named in an update (`ValueError`) |
+| version (safe models) | every update moves `_version` by one, in the same statement (in its column and in the document's copy that a `save()` checks too), and so does the update that nulls a reference (a holder who loaded the row before cannot save the reference back); `_version` cannot be named in an update (`ValueError`) |
 | `TimestampMixin` / `AuditMixin` | each updated (or nulled) row gets `updated_at` (and `updated_by`) in the same statement, stored as `save()` stores it; one time for all rows of the statement (the strictly-later promise of `save()` is per instance). A field you name in the update is yours: `update(updated_at=x)` writes `x` |
 | `AuditLogMixin` | one `update` row per row changed (`changes` holds the old and new of each key that differs; the new value is what the row holds afterwards, F-expressions included) and one `delete` row per row deleted, in one unit with the write; each row is read and written inside that unit, so no other connection writes it in between |
 | `HooksMixin` | calls no hook; use a loop of `save()` where a hook must run |

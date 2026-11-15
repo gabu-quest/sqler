@@ -34,7 +34,7 @@ from sqler.db.async_db import _aselect_rows
 from sqler.db.sqler_db import _in_order, _row_columns, _row_documents, _select_rows
 from sqler.exceptions import InvalidTableNameError
 from sqler.models import _dirty
-from sqler.models._table_names import _default_table_name, _unchecked_table_name
+from sqler.models._table_names import _default_table_name, _Home, _set_home, _unchecked_table_name
 from sqler.utils import validate_table_name
 
 # What a row its class refuses raises, on every base (pydantic's ``ValidationError`` is a
@@ -218,15 +218,20 @@ def load(
     with a note naming the row and the field that referenced it.
 
     Every row is built by :func:`from_row`, but a row whose model is an object that exists
-    already. ``own``: ``{(table, id): object}`` of those rows (``refresh()`` passes the
+    already. Each model's home (:class:`_Home`) is the database and table its row was read
+    from. ``own``: ``{(table, id): object}`` of those rows (``refresh()`` passes the
     instance it refreshes): a reference to the row is that object, and
     ``make(document, row)`` reads one of ``rows`` that ``own`` holds onto its object, from
     its document with references in place and the row as read, and returns the object.
     """
     own = dict(own or {})
     keys = [(table, row["_id"]) for row in rows]
+    home = _Home(db, table)
     if not typed_fields(cls):
-        return [make(row, row) if key in own else from_row(cls, row, row) for key, row in zip(keys, rows)]  # type: ignore[misc]
+        return [
+            _homed(make(row, row), home) if key in own else from_row(cls, row, row, home)  # type: ignore[misc]
+            for key, row in zip(keys, rows)
+        ]
     built = yield from _walk(cls, rows, keys, db, own, make)
     return [built[k] for k in keys]
 
@@ -238,19 +243,20 @@ def _walk(
     row built. ``shells``: ``{key: object}`` of rows whose model is that object (``own``);
     ``make`` reads one of ``rows`` onto it. ``only_linked`` builds none of ``rows``, only
     the rows they lead to."""
-    docs: dict[Key, tuple] = {}  # (class, document with ``_version``, row as read)
+    docs: dict[Key, tuple] = {}  # (class, document with ``_version``, row as read, home)
     links: dict[Key, list] = {}  # the rows each document references, in order
     via: dict[Key, tuple] = {}  # where a row was first referenced: (referring key, field)
     tops: set = set()
     roots: list = []
     frontier: list = []  # (key, the database of the referring row)
+    homes = {table: _Home(db, table) for table in {key[0] for key in keys}}
     for key, row in zip(keys, rows):
         found = _links(key, row, cls, via)
         frontier.extend((k, db) for k in found)
         if only_linked:
             roots.extend(found)
         else:
-            docs[key], links[key] = (cls, row, row), found
+            docs[key], links[key] = (cls, row, row, homes[key[0]]), found
             tops.add(key)
             roots.append(key)
     asked: set = set()
@@ -274,12 +280,13 @@ def _walk(
             if got is None:
                 continue  # the table is missing: its rows are not there
             found, versions = got
+            home = _Home(rdb, table)
             for row in found:
                 rid = row["_id"]
                 key = (table, rid)
                 # a child's version is its column's, never its JSON's
                 doc = {**row, "_version": (versions or {}).get(rid, 0)} if versioned else row
-                docs[key], links[key] = (mdl, doc, row), _links(key, doc, mdl, via)
+                docs[key], links[key] = (mdl, doc, row, home), _links(key, doc, mdl, via)
                 frontier.extend((k, rdb) for k in links[key])
 
     built: dict = {}
@@ -302,14 +309,14 @@ def _walk(
         return got
 
     def build(key: Key) -> None:
-        mdl, doc, row = docs[key]
+        mdl, doc, row, home = docs[key]
         resolved = replace(doc, typed_fields(mdl), get)
         if key in shells:
-            built[key] = make(resolved, row)  # its model exists: the row is read onto it
+            built[key] = _homed(make(resolved, row), home)  # its model exists: the row is read onto it
             return
         try:
             # on the object a cycle holds for the row, when one reached it first
-            built[key] = from_row(mdl, resolved, row, blanks.pop(key, None))
+            built[key] = from_row(mdl, resolved, row, home, blanks.pop(key, None))
         except UNLOADABLE as exc:
             if key not in tops:
                 _note(exc, key, via)
@@ -403,10 +410,16 @@ async def arun(walk: Generator[Read, Any, Any], adapter: Any = None) -> Any:
 
 # ---- building a model ---------------------------------------------------------------
 
+# is the model class a dataclass (a lite model)? Asked once per class: a pydantic class takes
+# longer to say it lacks an attribute than a row's home takes to store
+_DATACLASS: dict[type, bool] = {}
 
-def from_row(cls: Any, doc: dict, row: dict, into: Any = None) -> Any:
+
+
+def from_row(cls: Any, doc: dict, row: dict, home: Optional[_Home], into: Any = None) -> Any:
     """A model of the row ``doc`` that knows its row: ``_id``, ``_version`` for a class
-    whose rows are versioned, and its snapshot (:func:`_dirty.snapshot`).
+    whose rows are versioned, its snapshot (:func:`_dirty.snapshot`) and ``home``, the
+    database and table it was read from.
 
     ``doc`` is the document the model is validated from: the row with its references
     resolved. ``row`` is the row as it was read, before that: the snapshot is taken from it,
@@ -420,6 +433,19 @@ def from_row(cls: Any, doc: dict, row: dict, into: Any = None) -> Any:
     if getattr(cls, "_versioned_rows", False):
         _set(inst, "_version", doc.get("_version") or 0)
     _set(inst, "_snapshot", _dirty.snapshot(row))
+    plain = _DATACLASS.get(cls)
+    if plain is None:
+        plain = _DATACLASS[cls] = dataclasses.is_dataclass(cls)
+    if plain:
+        # not vars(): that makes a dict for the instance, a tenth of a lite model's read time
+        object.__setattr__(inst, "_home", home)
+    else:
+        vars(inst)["_home"] = home  # _set_home, inline: once per row read
+    return inst
+
+
+def _homed(inst: Any, home: Optional[_Home]) -> Any:
+    _set_home(inst, home)
     return inst
 
 
@@ -866,7 +892,7 @@ def read_rows(adapter: Any, db: Any, table: str, ids: list, versioned: bool) -> 
         columns = _row_columns()
         rows = _select_rows(adapter, table, columns, ids)
         return None if rows is None else (_row_documents(rows, columns), None)
-    rows, columns = db._read_rows(table, ids, versioned=versioned, alter=False)
+    rows, columns = db._read_rows(table, ids, versioned=versioned)
     return _documents(rows, columns, versioned)
 
 
@@ -876,7 +902,7 @@ async def aread_rows(adapter: Any, db: Any, table: str, ids: list, versioned: bo
         columns = _row_columns()
         rows = await _aselect_rows(adapter, table, columns, ids)
         return None if rows is None else (_row_documents(rows, columns), None)
-    got = db._read_rows(table, ids, versioned=versioned, alter=False)
+    got = db._read_rows(table, ids, versioned=versioned)
     rows, columns = await got if inspect.isawaitable(got) else got
     return _documents(rows, columns, versioned)
 

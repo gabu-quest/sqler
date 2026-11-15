@@ -29,7 +29,8 @@ from typing import Any, Callable, ClassVar, Optional
 from sqler import registry
 from sqler._stored import column_arg, stored
 from sqler.exceptions import ReferentialIntegrityError
-from sqler.models import _dirty, async_integrity, integrity
+from sqler.models import _dirty, _refs, async_integrity, integrity
+from sqler.models._table_names import _Home, _home_of, _set_home
 
 Row = tuple[str, Any, Optional[dict], Optional[dict]]
 
@@ -89,18 +90,29 @@ _NO_VALUE = object()
 
 
 def _remember_identity(obj) -> dict:
-    """What a failed write must put back: ``_id``, ``_snapshot`` and, where the model has
-    one, ``_version``."""
+    """What a failed write must put back: ``_id``, ``_snapshot``, the home and, where the
+    model has one, ``_version``."""
     kept = {"_id": obj._id, "_snapshot": obj._snapshot}
     version = getattr(obj, "_version", _NO_VALUE)
     if version is not _NO_VALUE:
         kept["_version"] = version
+    kept["_home"] = _home_of(obj)
     return kept
 
 
 def _restore_identity(obj, kept: dict) -> None:
     for name, value in kept.items():
-        setattr(obj, name, value)
+        if name == "_home":
+            _set_home(obj, value)
+        else:
+            setattr(obj, name, value)
+
+
+def _written_to(instances, db, table: str) -> None:
+    """Each of ``instances``, just written to ``table`` of ``db``, has its home there."""
+    home = _Home(db, table)
+    for inst in instances:
+        _set_home(inst, home)
 
 
 def _written(db, table: str, inst, partial: bool) -> dict:
@@ -123,17 +135,19 @@ async def _awritten(db, table: str, inst, partial: bool) -> dict:
 def save(inst, db, table: str, partial: bool, write: Callable[[], Any]):
     """``save()``: stamp, then ``write()`` the row; with row rules, in one transaction with
     them, and a failure puts the instance's identity back."""
-    if not isinstance(inst, WriteRules):
-        return write()
-    inst._stamp()
-    if not inst._row_rules:
-        return write()
+    if isinstance(inst, WriteRules):
+        inst._stamp()
+    if not (isinstance(inst, WriteRules) and inst._row_rules):
+        result = write()
+        _written_to([inst], db, table)
+        return result
     kept = _remember_identity(inst)
     try:
         with db.transaction():
             row_id = inst._id
             before = None if row_id is None else db.find_document(table, row_id)
             result = write()
+            _written_to([inst], db, table)
             action = "create" if row_id is None else "update"
             after = _written(db, table, inst, partial)
             inst._rows_written(db, table, [(action, inst._id, before, after)])
@@ -145,17 +159,19 @@ def save(inst, db, table: str, partial: bool, write: Callable[[], Any]):
 
 async def asave(inst, db, table: str, partial: bool, write):
     """Async twin of :func:`save`; ``write()`` returns an awaitable."""
-    if not isinstance(inst, WriteRules):
-        return await write()
-    inst._stamp()
-    if not inst._row_rules:
-        return await write()
+    if isinstance(inst, WriteRules):
+        inst._stamp()
+    if not (isinstance(inst, WriteRules) and inst._row_rules):
+        result = await write()
+        _written_to([inst], db, table)
+        return result
     kept = _remember_identity(inst)
     try:
         async with db.transaction():
             row_id = inst._id
             before = None if row_id is None else await db.find_document(table, row_id)
             result = await write()
+            _written_to([inst], db, table)
             action = "create" if row_id is None else "update"
             after = await _awritten(db, table, inst, partial)
             await inst._arows_written(db, table, [(action, inst._id, before, after)])
@@ -173,18 +189,18 @@ def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]
         return instances
     new_only(instances)
     db, table = cls._resolve_binding(db)
-    if not issubclass(cls, WriteRules):
+    if issubclass(cls, WriteRules):
+        for inst in instances:
+            inst._stamp()
+    if not row_rules(cls):
         insert(db, table, instances)
-        return instances
-    for inst in instances:
-        inst._stamp()
-    if not cls._row_rules:
-        insert(db, table, instances)
+        _written_to(instances, db, table)
         return instances
     kept = [_remember_identity(inst) for inst in instances]
     try:
         with db.transaction():
             insert(db, table, instances)
+            _written_to(instances, db, table)
             cls._rows_written(
                 db, table, [("create", inst._id, None, inst._snapshot) for inst in instances]
             )
@@ -201,18 +217,18 @@ async def asave_many(cls, instances: list, db, insert) -> list:
         return instances
     new_only(instances)
     db, table = cls._resolve_binding(db)
-    if not issubclass(cls, WriteRules):
+    if issubclass(cls, WriteRules):
+        for inst in instances:
+            inst._stamp()
+    if not row_rules(cls):
         await insert(db, table, instances)
-        return instances
-    for inst in instances:
-        inst._stamp()
-    if not cls._row_rules:
-        await insert(db, table, instances)
+        _written_to(instances, db, table)
         return instances
     kept = [_remember_identity(inst) for inst in instances]
     try:
         async with db.transaction():
             await insert(db, table, instances)
+            _written_to(instances, db, table)
             await cls._arows_written(
                 db, table, [("create", inst._id, None, inst._snapshot) for inst in instances]
             )
@@ -227,7 +243,7 @@ def delete(inst, db, table: str, on_delete: str) -> None:
     """``delete_with_policy()``: delete the row and do what the policy does about the rows
     that refer to it, with the class's row rules. The check for referrers and the delete are
     one unit (``db.transaction()``: no other connection writes a referrer in between), and a
-    failure leaves every row as it was."""
+    failure leaves every row as it was. Then the instance is unsaved (see :func:`_deleted`)."""
     deletable(inst, on_delete)
     row_id = int(inst._id)
     rules = isinstance(inst, WriteRules) and inst._row_rules
@@ -240,6 +256,7 @@ def delete(inst, db, table: str, on_delete: str) -> None:
         db.delete_document(table, row_id)
         if before is not None:
             inst._rows_written(db, table, [("delete", row_id, before, None)])
+    _deleted(inst)
 
 
 async def adelete(inst, db, table: str, on_delete: str) -> None:
@@ -256,6 +273,13 @@ async def adelete(inst, db, table: str, on_delete: str) -> None:
         await db.delete_document(table, row_id)
         if before is not None:
             await inst._arows_written(db, table, [("delete", row_id, before, None)])
+    _deleted(inst)
+
+
+def _deleted(inst) -> None:
+    """A deleted instance has no row: ``_id`` is unset. Its home stays the database and table
+    it was deleted from, so a later ``save()`` writes it back there as a new row."""
+    _refs._set(inst, "_id", None)
 
 
 # ----- what a delete's policy does about the rows that refer to its row ------------------
@@ -355,8 +379,9 @@ def _versioned(table: str) -> bool:
 def _nulled_update(cls, table: str, row_id, doc: dict, versioned: bool) -> tuple[str, list]:
     """The UPDATE that writes ``doc``, a referring row with its reference nulled, with the
     stamps of its class (a promoted one in its column). A ``versioned`` row's version moves,
-    as with every other write of it: a holder who loaded the row before cannot save the
-    reference back."""
+    as with every other write of it, in its column and in the document's copy that a save
+    checks too: a holder who loaded the row before cannot save the reference back, one who
+    loads it after can save it."""
     stamps = cls._update_stamps() if cls is not None else {}
     promoted = getattr(cls, "__promoted__", None) or {}
     columns, params = [", _version = _version + 1"] if versioned else [], []
@@ -366,8 +391,9 @@ def _nulled_update(cls, table: str, row_id, doc: dict, versioned: bool) -> tuple
             params.append(column_arg(value))
         else:
             doc[name] = stored(value)
+    data = "json_set(json(?), '$._version', _version + 1)" if versioned else "json(?)"
     return (
-        f"UPDATE {table} SET data = json(?){''.join(columns)} WHERE _id = ?;",
+        f"UPDATE {table} SET data = {data}{''.join(columns)} WHERE _id = ?;",
         [json.dumps(doc), *params, row_id],
     )
 

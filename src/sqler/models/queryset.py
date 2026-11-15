@@ -4,7 +4,7 @@ import logging
 from typing import Any, Generic, Iterator, Optional, Type, TypeVar
 
 from sqler.models import _refs, _write_rules
-from sqler.models._table_names import _unchecked_table_name
+from sqler.models._table_names import _Home
 from sqler.query import SQLerExpression, SQLerQuery
 
 T = TypeVar("T")
@@ -34,12 +34,29 @@ class SQLerQuerySet(Generic[T]):
         clone._resolve = self._resolve
         return clone
 
-    def _checked(self) -> SQLerQuery:
+    def _checked(self, use: str = "") -> SQLerQuery:
         """The query, once its database has checked the table (``SchemaError`` when a promoted
-        column the rows are read with would hide a value still in a document)."""
-        if self._query._promoted_fields and self._db is not None:
-            self._db._columns_of(self._query._table)
-        return self._query
+        column the rows are read with would hide a value still in a document), for ``use``.
+
+        A versioned query (``with_version()``) asks its database whether the table has the
+        ``_version`` column (``_has_version_column``: no statement once it is remembered)
+        where it needs the column: for ``"rows"`` (rows read or returned) a table without it
+        is read without it, each row at version 0, and its schema stays as it is; for
+        ``"update"`` (a set-based update moves each row's version) the table gets the column
+        first, as the first versioned write of one row adds it; a missing table stays
+        missing, and the update finds no row. Any other use (a count, an aggregate) reads no
+        version and asks nothing."""
+        db, query = self._db, self._query
+        if use and db is not None and query._include_version:
+            has = db._has_version_column(query._table)
+            if use == "update":
+                if has is False:
+                    db._ensure_versioned_table(query._table)
+            elif not has:
+                query = query._clone(include_version=False)
+        if query._promoted_fields and db is not None:
+            db._columns_of(query._table)
+        return query
 
     def resolve(self, flag: bool) -> "SQLerQuerySet[T]":
         """Toggle relation hydration on result materialization (default True)."""
@@ -90,7 +107,7 @@ class SQLerQuerySet(Generic[T]):
     # execution
     def all(self) -> list[T]:
         """Execute and return a list of model instances."""
-        return self._load(self._checked().all_dicts())
+        return self._load(self._checked("rows").all_dicts())
 
     def as_dicts(self) -> list[dict[str, Any]]:
         """Execute and return raw dicts without Pydantic hydration.
@@ -99,7 +116,7 @@ class SQLerQuerySet(Generic[T]):
         limits, and ``.select()`` field projection — but skips model
         validation, type coercion, computed fields, and relation resolution.
         """
-        return self._checked().all_dicts()
+        return self._checked("rows").all_dicts()
 
     def iter(self) -> Iterator[T]:
         """Yield model instances one at a time (memory-efficient streaming).
@@ -112,35 +129,22 @@ class SQLerQuerySet(Generic[T]):
         Yields:
             T: Model instances.
         """
-        other_table = self._reads_other_table()
-        for doc in self._checked().iter_dicts():
-            inst = self._sourced(_refs.from_row(self._model_cls, doc, doc), other_table)
-            yield inst
+        home = _Home(self._db, self._query._table)
+        for doc in self._checked("rows").iter_dicts():
+            yield _refs.from_row(self._model_cls, doc, doc, home)
 
     def first(self) -> Optional[T]:
         """Execute with LIMIT 1 and return the first model instance, if any."""
-        row = self._checked().first_dict()
+        row = self._checked("rows").first_dict()
         if row is None:
             return None
         return (self._load([row]))[0]
 
-    def _reads_other_table(self) -> bool:
-        """True when this queryset reads a table other than its class's own.
-
-        Each run that makes instances asks once and hands the answer to ``_sourced``:
-        the class lookup behind it is slow on a pydantic class, and the class may have been
-        rebound since the queryset was built.
-        """
-        table = self._query._table
-        return table is not None and table != _unchecked_table_name(self._model_cls)
-
-    def _sourced(self, inst: T, other_table: bool) -> T:
-        """``inst``, a model of a row this queryset read, knowing the table it was read from
-        when that is not its class's own (``other_table``: the run's
-        ``_reads_other_table()`` answer)."""
-        if other_table:
-            _refs._set(inst, "_source_table", self._query._table)
-        return inst
+    def _models(self, docs: list[dict]) -> list[T]:
+        """The models of ``docs``, rows this queryset read as they were read (no reference
+        followed), each with its home: this queryset's database and table."""
+        home = _Home(self._db, self._query._table)
+        return [_refs.from_row(self._model_cls, doc, doc, home) for doc in docs]
 
     def count(self) -> int:
         """Return the count of matching rows."""
@@ -172,7 +176,7 @@ class SQLerQuerySet(Generic[T]):
 
     def paginate(self, page: int, per_page: int = 20):
         """Return a paginated result set."""
-        return self._checked().paginate(page, per_page)
+        return self._checked("rows").paginate(page, per_page)
 
     def update(self, **fields) -> int:
         """Update matching rows with the given field values.
@@ -192,8 +196,8 @@ class SQLerQuerySet(Generic[T]):
         """
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
-            return self._checked().update(**fields)
-        return len(self._written(lambda q: q._changed(fields)))
+            return self._checked("update").update(**fields)
+        return len(self._written("update", lambda q: q._changed(fields)))
 
     def update_one(self, **fields) -> Optional[T]:
         """Atomically update one matching row and return it as a model instance.
@@ -211,7 +215,7 @@ class SQLerQuerySet(Generic[T]):
         docs = self._updated(fields, 1, "=")
         if not docs:
             return None
-        return self._sourced(_refs.from_row(self._model_cls, docs[0], docs[0]), self._reads_other_table())
+        return self._models(docs[:1])[0]
 
     def update_n(self, n: int, **fields) -> list[T]:
         """Atomically update up to *n* matching rows and return them as model instances.
@@ -226,8 +230,7 @@ class SQLerQuerySet(Generic[T]):
             list: Model instances, or empty list if no rows matched.
         """
         docs = self._updated(fields, n, "IN")
-        other_table = self._reads_other_table()
-        return [self._sourced(_refs.from_row(self._model_cls, doc, doc), other_table) for doc in docs]
+        return self._models(docs)
 
     def delete_all(self) -> int:
         """Delete all matching rows (bulk delete).
@@ -242,19 +245,20 @@ class SQLerQuerySet(Generic[T]):
         """
         if not _write_rules.row_rules(self._model_cls):
             return self._checked().delete()
-        return len(self._written(lambda q: [(doc, None) for doc in q._deleted()]))
+        return len(self._written("rows", lambda q: [(doc, None) for doc in q._deleted()]))
 
     def _updated(self, fields: dict, n: int, op: str) -> list[dict]:
         """The documents ``update_one`` (``op`` ``=``) and ``update_n`` (``IN``) return, as
         written."""
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
-            return self._checked()._update_picked(fields, n, op)
-        return [after for _, after in self._written(lambda q: q._changed(fields, n))]
+            return self._checked("update")._update_picked(fields, n, op)
+        return [after for _, after in self._written("update", lambda q: q._changed(fields, n))]
 
-    def _written(self, write) -> list:
-        """``write(query)`` and the rules of the class's audit log, as one unit."""
-        query = self._checked()
+    def _written(self, use: str, write) -> list:
+        """``write(query)`` and the rules of the class's audit log, as one unit (``use``: as
+        :meth:`_checked` takes it)."""
+        query = self._checked(use)
         return _write_rules.set_write(self._model_cls, self._db, query._table, lambda: write(query))
 
     def offset(self, n: int) -> "SQLerQuerySet[T]":
@@ -284,11 +288,10 @@ class SQLerQuerySet(Generic[T]):
     def _load(self, rows: list[dict]) -> list[T]:
         """The models of ``rows``, references followed unless ``resolve(False)`` (see
         ``_refs.load``)."""
-        other_table = self._reads_other_table()
         if not self._resolve:
-            return [self._sourced(_refs.from_row(self._model_cls, row, row), other_table) for row in rows]
+            return self._models(rows)
         adapter = self._query._adapter  # type: ignore[attr-defined]
         if adapter is None:
             raise RuntimeError("QuerySet has no adapter bound")
         walk = _refs.load(self._model_cls, rows, self._db, self._query._table)
-        return [self._sourced(inst, other_table) for inst in _refs.run(walk, adapter)]
+        return _refs.run(walk, adapter)

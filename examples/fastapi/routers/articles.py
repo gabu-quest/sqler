@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from ..db import get_db, get_row
+from ..db import get_db
 from ..models import Article, Writer
 from ..utils import db_call, hydrate_ref
 
@@ -79,14 +79,14 @@ async def create_article(payload: ArticleCreate):
         )
 
         if payload.writer_id:
-            writer = get_row(Writer, payload.writer_id)
+            writer = Writer.from_id(payload.writer_id, db=get_db())
             if not writer:
                 raise HTTPException(status_code=404, detail="Writer not found")
             article.set_writer(writer)
 
         article.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return get_row(Article, article._id)
+        return Article.from_id(article._id, db=get_db())
 
     article = await db_call(_create)
     return _article_to_out(article)
@@ -120,7 +120,7 @@ async def get_article(article_id: int):
 
     日本語: IDで記事を取得。
     """
-    article = await db_call(lambda: get_row(Article, article_id))
+    article = await db_call(lambda: Article.from_id(article_id, db=get_db()))
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
     return _article_to_out(article)
@@ -134,7 +134,7 @@ async def patch_article(article_id: int, patch: ArticlePatch):
     """
 
     def _patch():
-        article = get_row(Article, article_id)
+        article = Article.from_id(article_id, db=get_db())
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
 
@@ -146,7 +146,7 @@ async def patch_article(article_id: int, patch: ArticlePatch):
             if writer_id is None:
                 article.writer = None
             else:
-                writer = get_row(Writer, writer_id)
+                writer = Writer.from_id(writer_id, db=get_db())
                 if not writer:
                     raise HTTPException(status_code=404, detail="Writer not found")
                 article.set_writer(writer)
@@ -156,7 +156,7 @@ async def patch_article(article_id: int, patch: ArticlePatch):
 
         article.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return get_row(Article, article._id)
+        return Article.from_id(article._id, db=get_db())
 
     article = await db_call(_patch)
     return _article_to_out(article)
@@ -170,7 +170,7 @@ async def delete_article(article_id: int):
     """
 
     def _delete():
-        article = get_row(Article, article_id)
+        article = Article.from_id(article_id, db=get_db())
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
         article.delete(db=get_db())
@@ -192,7 +192,7 @@ async def get_article_audit_log(article_id: int):
     """
 
     def _get_log():
-        article = get_row(Article, article_id)
+        article = Article.from_id(article_id, db=get_db())
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
 

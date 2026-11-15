@@ -58,8 +58,6 @@ class SQLerLiteModelBase:
     # These are NOT dataclass fields
     _id: Optional[int] = None
     _snapshot: Optional[dict] = None
-    # table this row was read from, when ``using(db, table)`` named one other than the class's
-    _source_table: Optional[str] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Inject annotations from non-dataclass mixin bases.
@@ -100,6 +98,29 @@ class SQLerLiteModelBase:
         # any potential frozen dataclass restrictions
         object.__setattr__(self, "_id", None)
         object.__setattr__(self, "_snapshot", None)
+
+    def __copy__(self: T) -> T:
+        """A copy holding the fields and the state that is not a field (``_id``, the
+        snapshot, the home). Written out because ``@dataclass(frozen=True, slots=True)``
+        gives a class a ``__getstate__`` that holds its fields only."""
+        new = object.__new__(type(self))
+        for f in fields(self):  # type: ignore[arg-type]
+            object.__setattr__(new, f.name, getattr(self, f.name))
+        vars(new).update(vars(self))
+        return new
+
+    def __deepcopy__(self: T, memo: dict) -> T:
+        """A deep copy of the fields and of the state that is not a field, as
+        :meth:`__copy__` takes them (the home is the same object: ``_Home``)."""
+        new = object.__new__(type(self))
+        memo[id(self)] = new
+        for f in fields(self):  # type: ignore[arg-type]
+            object.__setattr__(new, f.name, copy.deepcopy(getattr(self, f.name), memo))
+        state = vars(new)
+        for name, value in vars(self).items():
+            if name not in state:
+                state[name] = copy.deepcopy(value, memo)
+        return new
 
     @classmethod
     def model_validate(cls: Type[T], data: dict) -> T:

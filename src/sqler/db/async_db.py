@@ -425,35 +425,33 @@ class AsyncSQLerDB:
         rows, columns = await self._read_rows(table, ids)
         return _row_documents(_in_order(rows or [], ids), columns)
 
-    async def _read_rows(
-        self, table: str, ids: list, *, versioned: bool = False, alter: bool = True
-    ) -> tuple[Optional[list], list[str]]:
+    async def _read_rows(self, table: str, ids: list, *, versioned: bool = False) -> tuple[Optional[list], list[str]]:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._read_rows`."""
         table = validate_table_name(table)
+        has_version = versioned and await self._has_version_column(table)
         promoted = await self._columns_of(table)
         columns = _row_columns(promoted, versioned)
-        if versioned and not alter and not self._is_versioned(table):
-            names = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
-            if "_version" not in names:
-                plain = await _aselect_rows(self.adapter, table, _row_columns(promoted), ids)
-                if plain is None:  # a missing table stays a missing table
-                    return None, columns
-                await self.adapter.auto_commit()
-                return [(r[0], r[1], 0, *r[2:]) for r in plain], columns
-            self._remember(table)
-        try:
-            rows = await _aselect_rows(self.adapter, table, columns, ids)
-        except sqlite3.OperationalError as exc:
-            if not versioned or "no such column: _version" not in str(exc):
-                raise
-            # a table made before versioning: it gets the column, as it always did
-            self._versioned_tables.discard(table)
-            await self._ensure_versioned_table(table)
+        if versioned and not has_version:
+            rows = await _aselect_rows(self.adapter, table, _row_columns(promoted), ids)
+            rows = None if rows is None else [(r[0], r[1], 0, *r[2:]) for r in rows]
+        else:
             rows = await _aselect_rows(self.adapter, table, columns, ids)
         if rows is None:
             return None, columns  # a read creates no table
         await self.adapter.auto_commit()
         return rows, columns
+
+    async def _has_version_column(self, table: str) -> Optional[bool]:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._has_version_column`."""
+        if self._is_versioned(table):
+            return True
+        names = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
+        if names and self._promoted_of(table) is None and not _promoted_in(names):
+            self._remember(table, promoted=[])
+        if "_version" not in names:
+            return False if names else None
+        self._remember(table)
+        return True
 
     async def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.

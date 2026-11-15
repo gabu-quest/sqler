@@ -1163,38 +1163,43 @@ class SQLerDB:
         rows, columns = self._read_rows(table, ids)
         return _row_documents(_in_order(rows or [], ids), columns)
 
-    def _read_rows(
-        self, table: str, ids: list, *, versioned: bool = False, alter: bool = True
-    ) -> tuple[Optional[list], list[str]]:
-        """The by-id read every reader of this database goes through.
+    def _read_rows(self, table: str, ids: list, *, versioned: bool = False) -> tuple[Optional[list], list[str]]:
+        """The by-id read every reader of this database goes through; it writes nothing.
 
         Returns the stored rows of ``ids`` (stored order) and the columns they were read
         with: the promoted columns of ``table`` (:meth:`_columns_of`), and ``_version`` when
-        ``versioned``. A missing table gives ``None`` rows and is not created; a table made
-        before versioning gets its ``_version`` column on a versioned read, as it always did.
-        With ``alter=False`` it gets none, and nothing is sent that fails for want of it: a
-        table not remembered as versioned is asked for its columns; with ``_version`` that is
-        remembered, without it the rows are read at version 0 and nothing is remembered.
+        ``versioned``. A missing table gives ``None`` rows and is not created. A table without
+        its ``_version`` column (:meth:`_has_version_column`) gives its rows at version 0 and
+        keeps its schema: the first versioned write adds the column.
         """
         table = validate_table_name(table)
+        has_version = versioned and self._has_version_column(table)
         promoted = self._columns_of(table)
         columns = _row_columns(promoted, versioned)
-        if versioned and not alter and not self._is_versioned(table):
-            names = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
-            if "_version" not in names:
-                plain = _select_rows(self.adapter, table, _row_columns(promoted), ids)
-                if plain is None:  # a missing table stays a missing table
-                    return None, columns
-                return [(r[0], r[1], 0, *r[2:]) for r in plain], columns
-            self._remember(table)
-        try:
-            rows = _select_rows(self.adapter, table, columns, ids)
-        except sqlite3.OperationalError as exc:
-            if not versioned or "no such column: _version" not in str(exc):
-                raise
-            self._ensure_versioned_table(table)
-            rows = _select_rows(self.adapter, table, columns, ids)
-        return rows, columns
+        if versioned and not has_version:
+            rows = _select_rows(self.adapter, table, _row_columns(promoted), ids)
+            return (None if rows is None else [(r[0], r[1], 0, *r[2:]) for r in rows]), columns
+        return _select_rows(self.adapter, table, columns, ids), columns
+
+    def _has_version_column(self, table: str) -> Optional[bool]:
+        """Whether the validated ``table`` has its ``_version`` column; writes nothing.
+
+        ``True`` when it has it, ``False`` when the table is there without it, ``None`` when
+        there is no such table. Remembered, or else looked up with one ``PRAGMA table_info``
+        and remembered once it has it (and, as an ensure does, that it has no promoted
+        columns, where it has none). A table without the column, or a missing table, is not
+        remembered: each call looks again, one statement, until a versioned write adds the
+        column.
+        """
+        if self._is_versioned(table):
+            return True
+        names = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+        if names and self._promoted_of(table) is None and not _promoted_in(names):
+            self._remember(table, promoted=[])
+        if "_version" not in names:
+            return False if names else None
+        self._remember(table)
+        return True
 
     def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.

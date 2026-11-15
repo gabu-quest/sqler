@@ -100,10 +100,12 @@ class _WriteStatements:
             else:
                 json_parts.append(f"'$.{field}', {slot}")
                 json_params.extend(params)
+        if self._include_version:
+            # the document keeps its copy of the version in step, which a save checks too
+            json_parts.append("'$._version', _version + 1")
+            columns.append("_version = _version + 1")
         if json_parts:
             columns.insert(0, f"data = json_set(data, {', '.join(json_parts)})")
-        if self._include_version:
-            columns.append("_version = _version + 1")
         return ", ".join(columns), json_params + column_params
 
     def _where(self) -> tuple[str, list[Any]]:

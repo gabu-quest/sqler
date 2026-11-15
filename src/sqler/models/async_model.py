@@ -10,8 +10,8 @@ from pydantic import BaseModel, PrivateAttr
 from sqler import registry
 from sqler._stored import stored
 from sqler.db.async_db import AsyncSQLerDB
-from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _dirty, _refs, _write_rules
+from sqler.exceptions import UniqueConstraintError
+from sqler.models import _dirty, _refs, _table_names, _write_rules
 from sqler.models._table_names import (
     _aread_document,
     _aread_documents,
@@ -57,8 +57,6 @@ class AsyncSQLerModel(BaseModel):
     _id: Optional[int] = PrivateAttr(default=None)
     # snapshot of last-loaded document (for merge strategies in perf mode)
     _snapshot: Optional[dict] = PrivateAttr(default=None)
-    # table this row was read from, when ``using(db, table)`` named one other than the class's
-    _source_table: Optional[str] = PrivateAttr(default=None)
 
     # class-bound db + table metadata
     _db: ClassVar[Optional[AsyncSQLerDB]] = None
@@ -102,22 +100,8 @@ class AsyncSQLerModel(BaseModel):
         # The _ensure_table_with_promoted call happens in the async ensure_schema() or first save/query.
         registry.register(cls._table, cls)
 
-    @classmethod
-    def _require_binding(cls) -> tuple[AsyncSQLerDB, str]:
-        if cls._db is None or cls._table is None:
-            raise NotBoundError(
-                f"Model {cls.__name__} is not bound. "
-                "Use .using(db) for queries or .save(db=db) for writes.",
-                details={"model": cls.__name__},
-            )
-        return cls._db, cls._table
-
-    @classmethod
-    def _resolve_binding(cls, db=None) -> tuple[AsyncSQLerDB, str]:
-        """Return (db, table) using the provided db or the class-level binding."""
-        if db is not None:
-            return db, _model_table_name(cls)
-        return cls._require_binding()
+    _require_binding = classmethod(_table_names._require_binding)
+    _resolve_binding = classmethod(_table_names._resolve_binding)
 
     @classmethod
     def db(cls: Type[TAModel]) -> AsyncSQLerDB:
@@ -126,9 +110,11 @@ class AsyncSQLerModel(BaseModel):
         return db
 
     @classmethod
-    async def from_id(cls: Type[TAModel], id_: int) -> Optional[TAModel]:
-        db, table = cls._require_binding()
-        doc = await _aread_document(db, table, id_)
+    async def from_id(cls: Type[TAModel], id_: int, *, db=None) -> Optional[TAModel]:
+        """Hydrate an instance by ``_id``, from ``db`` or the class's database; ``None`` if
+        the row is not there."""
+        db, table = cls._resolve_binding(db)
+        doc = await _aread_document(db, table, id_, cls._versioned_rows)
         if doc is None:
             return None
         return (await _refs.arun(_refs.load(cls, [doc], db, table)))[0]
@@ -178,8 +164,9 @@ class AsyncSQLerModel(BaseModel):
         Args:
             db: Database to read.
             table: Optional table to read instead of the class's own. The class
-                binding is not changed. A row read from it remembers the table:
-                ``save()``, ``delete()`` and ``refresh()`` use that table.
+                binding is not changed. A row read through the queryset has ``db``
+                and the table as its home: ``save()``, ``delete()`` and ``refresh()``
+                use them.
 
         A read creates no table: on a table nobody created, ``all()`` is empty,
         ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
@@ -190,6 +177,8 @@ class AsyncSQLerModel(BaseModel):
     @classmethod
     def _queryset(cls: Type[TAModel], db: AsyncSQLerDB, table: str) -> AsyncSQLerQuerySet[TAModel]:
         q = AsyncSQLerQuery(table=table, adapter=db.adapter)
+        if cls._versioned_rows:
+            q = q.with_version()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
@@ -430,14 +419,14 @@ class AsyncSQLerModel(BaseModel):
         """
         db, table = _instance_binding(self, db)
         await _write_rules.adelete(self, db, table, on_delete)
-        self._id = None
 
-    async def refresh(self: TAModel) -> TAModel:
+    async def refresh(self: TAModel, *, db=None) -> TAModel:
+        """Reload this instance's fields from ``db`` or its home; its home moves there."""
         cls = self.__class__
-        db, table = _instance_binding(self)
+        db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = await _aread_document(db, table, self._id)
+        doc = await _aread_document(db, table, self._id, cls._versioned_rows)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
         own = {(table, self._id): self}

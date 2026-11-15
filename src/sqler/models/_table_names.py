@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from sqler.exceptions import NotBoundError
 from sqler.query.query import is_missing_table
 
 
@@ -112,33 +113,92 @@ def _register_defined_class(cls: type) -> None:
     registry.register(table, cls)
 
 
-def _source_table_of(inst: object) -> "str | None":
-    """The table a row was read from when it is not its class's table, else None."""
-    return getattr(inst, "_source_table", None)
+def _require_binding(cls) -> tuple:
+    """The database and table bound to ``cls`` with ``set_db()``.
+
+    Raises:
+        NotBoundError: ``set_db()`` was not called.
+    """
+    if cls._db is None or cls._table is None:
+        raise NotBoundError(
+            f"Model {cls.__name__} is not bound. "
+            "Use .using(db) for queries or .save(db=db) for writes.",
+            details={"model": cls.__name__},
+        )
+    return cls._db, cls._table
+
+
+def _resolve_binding(cls, db=None) -> tuple:
+    """``(db, the class's table)`` when ``db`` is given, else the class binding."""
+    if db is not None:
+        return db, _model_table_name(cls)
+    return _require_binding(cls)
+
+
+class _Home:
+    """The database and table of the row an instance stands for: where it was read from or
+    last written to.
+
+    It is kept in the instance's ``__dict__`` as ``_home``, beside the fields, so no dump,
+    ``==``, ``hash`` or ``repr`` sees it. A copy, shallow or deep, holds this same object
+    (the same database object, never a copy of one); a pickle drops it.
+    """
+
+    __slots__ = ("db", "table")
+
+    def __init__(self, db, table: str) -> None:
+        self.db = db
+        self.table = table
+
+    def __copy__(self) -> "_Home":
+        return self
+
+    def __deepcopy__(self, memo) -> "_Home":
+        return self
+
+    def __reduce__(self):
+        return (type(None), ())
+
+
+def _home_of(inst: object) -> "_Home | None":
+    return vars(inst).get("_home")
+
+
+def _set_home(inst: object, home: "_Home | None") -> None:
+    """Make ``home`` the home of ``inst`` (frozen or not, on every base)."""
+    vars(inst)["_home"] = home
 
 
 def _ref_table(inst: object) -> str:
     """The table a stored reference to ``inst`` names: where the row lives."""
-    return _source_table_of(inst) or _model_table_name(type(inst))
+    home = _home_of(inst)
+    return home.table if home is not None else _model_table_name(type(inst))
 
 
 def _instance_binding(inst: object, db=None):
-    """Return ``(db, table)`` for writing or re-reading one row.
+    """Return ``(db, table)`` for writing or re-reading the row of ``inst``.
 
-    The database is ``db`` or the class binding, as ``_resolve_binding`` gives it. The
-    table is the one the row was read from when it came through ``using(db, table)``,
-    so a row is never written to a different table than it was read from.
+    The database is ``db`` when given, else the instance's home, else the class binding
+    (``NotBoundError`` when there is none). The table is the home's: a row is never written
+    to another table than the one it was read from.
     """
-    db, table = type(inst)._resolve_binding(db)  # type: ignore[attr-defined]
-    return db, (_source_table_of(inst) or table)
+    home = _home_of(inst)
+    if home is None:
+        return _resolve_binding(type(inst), db)
+    if db is None:
+        db = home.db if home.db is not None else _require_binding(type(inst))[0]
+    return db, home.table
 
 
 # the one check, in the query layer; the old name stays for its callers here
 _is_missing_table = is_missing_table
 
 
-def _read_document(db, table: str, rid):
-    """``db.find_document`` for a read through a model: a missing table is a missing row, ``None``."""
+def _read_document(db, table: str, rid, versioned: bool = False):
+    """``db.find_document`` for a read through a model: a missing table is a missing row, ``None``.
+    ``versioned``: the row with its ``_version`` (``find_document_with_version``)."""
+    if versioned:
+        return db.find_document_with_version(table, rid)
     return db.find_document(table, rid)
 
 
@@ -147,8 +207,10 @@ def _read_documents(db, table: str, ids: list) -> list:
     return db.find_documents(table, ids)
 
 
-async def _aread_document(db, table: str, rid):
+async def _aread_document(db, table: str, rid, versioned: bool = False):
     """Async twin of :func:`_read_document`."""
+    if versioned:
+        return await db.find_document_with_version(table, rid)
     return await db.find_document(table, rid)
 
 
