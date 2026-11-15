@@ -892,7 +892,7 @@ def _kinds(sent):
     out = []
     for q in sent:
         sql = q.sql.lstrip()
-        if sql.upper().startswith("PRAGMA TABLE_INFO"):
+        if sql.upper().startswith("PRAGMA TABLE_XINFO"):
             out.append("columns")
         elif "_sqler_promoted" in sql:
             out.append("record")
@@ -1659,7 +1659,7 @@ PLAIN_COSTS = {
 
 
 def _cost(sent):
-    return ["columns" if q.sql.lstrip().upper().startswith("PRAGMA TABLE_INFO") else q.sql.split()[0].upper() for q in sent]
+    return ["columns" if q.sql.lstrip().upper().startswith("PRAGMA TABLE_XINFO") else q.sql.split()[0].upper() for q in sent]
 
 
 @IS_ASYNC
@@ -1678,14 +1678,15 @@ def test_a_table_without_columns_costs_one_statement_once(run, is_async, name):
     assert second == PLAIN_STATEMENTS[name]
 
 
-# what each sent on the base, before columns were written: on a table remembered, the same
+# what each sent on the base, before columns were written: on a table remembered, the same,
+# and a bulk write of several rows sends the check of the columns it remembers first (a ``SELECT``)
 PLAIN_STATEMENTS = {
     "insert_document": ["CREATE", "INSERT"],
     "upsert_document insert": ["CREATE", "CREATE", "INSERT"],
-    "upsert_document update": ["CREATE", "UPDATE"],
-    "insert_many": ["CREATE", "INSERT"],
+    "upsert_document update": ["UPDATE"],  # a write by _id makes no table
+    "insert_many": ["CREATE", "SELECT", "INSERT"],
     "bulk_upsert": ["CREATE", "INSERT", "INSERT"],
-    "_update_fields": ["CREATE", "UPDATE"],
+    "_update_fields": ["UPDATE"],
 }
 
 
@@ -1876,15 +1877,14 @@ def _shapes(n):
 )
 def test_2500_rows_of_one_shape_and_of_two_alternating(run, is_async, name, alternating, statements):
     """One shape: the statements each writer sent before (three variables a row, 333 rows a
-    statement). Two shapes alternating: each row is a run of its own, one statement a row. The
-    async ``bulk_upsert`` sends one statement a row whatever the shapes, as before."""
+    statement). Two shapes alternating: each row is a run of its own, one statement a row."""
     run.db.ensure_table(TABLE, promoted={"status": "TEXT DEFAULT 'pending'", "n": "INTEGER"})
     docs = _shapes(2500) if alternating else [{"name": f"r{i}", "status": "s", "n": i} for i in range(2500)]
     with query_logger.capture() as sent:
         out = _call(run, is_async)(name, docs)
     assert out == ([(i, 0) for i in range(1, 2501)] if name == "insert_many_with_version" else list(range(1, 2501)))
     inserts = [q for q in sent if q.sql.lstrip().upper().startswith("INSERT")]
-    assert len(inserts) == (2500 if is_async and name == "bulk_upsert" else statements)
+    assert len(inserts) == statements
     conn = sqlite3.connect(run.path)
     try:
         rows = conn.execute(f"SELECT _id, data, status, n FROM {TABLE} ORDER BY _id").fetchall()
@@ -1900,8 +1900,8 @@ def test_2500_rows_of_one_shape_and_of_two_alternating(run, is_async, name, alte
 @IS_ASYNC
 @pytest.mark.parametrize(("kind", "name"), WRITES, ids=[f"{k} {n}" for k, n in WRITES])
 def test_a_generated_column_is_never_named_and_its_key_stays_in_the_document(run, is_async, kind, name):
-    """``PRAGMA table_info`` (what ``_columns_of`` reads) lists no generated column, so a key of
-    its name is a key of ``data``, as on the releases before."""
+    """``PRAGMA table_xinfo`` (what ``_columns_of`` reads) marks a generated column, which is
+    not a stored column, so a key of its name is a key of ``data``, as on the releases before."""
     conn = sqlite3.connect(run.path)
     conn.execute(
         f"CREATE TABLE {TABLE} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL, "

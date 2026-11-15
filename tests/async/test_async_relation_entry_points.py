@@ -1914,20 +1914,20 @@ async def test_a_batch_read_keeps_a_raw_statement_left_uncommitted(tmp_path, way
 
 
 def _pragmas(sent: list, table: str) -> int:
-    return len([q for q in sent if q.sql == f'PRAGMA table_info("{table}");'])
+    return len([q for q in sent if q.sql == f'PRAGMA table_xinfo("{table}");'])
 
 
 @pytest.mark.asyncio
 async def test_a_second_read_of_a_version_less_table_asks_the_table_once(make_db):
-    """The second batch read by the same object sends one ``PRAGMA`` and one ``SELECT`` on
-    the child table: nothing remembered, no statement that fails."""
+    """The second batch read by the same object sends one ``SELECT`` on the child table: the
+    table is remembered without the column, no statement that fails."""
     db = await make_db()
     await _plain_child_table(db)
     await _batch(db, "from_ids")
     with query_logger.capture() as sent:
         got = await _batch(db, "from_ids")
     assert got.one._version == 0
-    assert (_pragmas(sent, ANcC.__tablename__), sent_to(sent, ANcC.__tablename__)) == (1, 1)
+    assert (_pragmas(sent, ANcC.__tablename__), sent_to(sent, ANcC.__tablename__)) == (0, 1)
 
 
 @pytest.mark.asyncio

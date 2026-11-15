@@ -5,7 +5,6 @@ call the same hooks, on every sync base; and a delete with its policy is one tra
 import itertools
 import json
 import re
-import sqlite3
 import threading
 import types
 from dataclasses import dataclass
@@ -728,8 +727,9 @@ def test_a_refused_target_delete_leaves_the_referrers_as_they_were(
 # statement: a new row, a changed row, a batch of two, and a delete (the same for delete() and
 # each policy). A delete also looks through every registered table for rows that refer to
 # the target; those reads depend on what else is registered and are left out.
-UNVERSIONED = (["CREATE", "CREATE", "INSERT"], ["CREATE", "UPDATE"], ["CREATE", "INSERT"])
-VERSIONED = (["INSERT"], ["BEGIN", "UPDATE"], ["CREATE", "PRAGMA", "CREATE", "PRAGMA", "INSERT"])
+# a write by _id makes no table; a batch of several rows sends the check of the columns first (a ``SELECT``)
+UNVERSIONED = (["CREATE", "CREATE", "INSERT"], ["UPDATE"], ["CREATE", "SELECT", "INSERT"])
+VERSIONED = (["INSERT"], ["BEGIN", "UPDATE"], ["CREATE", "PRAGMA", "CREATE", "PRAGMA", "SELECT", "INSERT"])
 A_DELETE = ["CREATE", "DELETE"]
 
 
@@ -929,6 +929,7 @@ def test_a_save_to_a_database_without_the_row_raises_and_the_home_stays(db, kind
         inst.name = "second"
         with pytest.raises(_refused(kind)):
             inst.save(db=other)
+        assert _exists(other, Item.__tablename__) is False  # a write by _id makes no table, versioned too
         assert _docs(other, Item) == []
         inst.save()
         assert [(i, d["name"]) for i, d in _docs(db, Item)] == [(1, "second")]
@@ -947,7 +948,7 @@ def test_the_refusal_names_the_table_the_id_and_how_to_copy_a_row(db):
         "into another database, save a new instance without the _id"
     )
     assert caught.value.id_ == 7
-    assert db.adapter.execute("SELECT count(*) FROM wr_named;").fetchone()[0] == 0
+    assert _exists(db, "wr_named") is False
 
 
 def test_a_refused_update_sends_what_an_update_that_lands_sends(db):
@@ -958,20 +959,21 @@ def test_a_refused_update_sends_what_an_update_that_lands_sends(db):
         with pytest.raises(NotFoundError):
             db.upsert_document("wr_counted", 9, {"name": "y"})
     assert [q.sql for q in refused] == [q.sql for q in landed]
-    assert [q.sql.split()[0] for q in refused] == ["CREATE", "UPDATE"]
+    assert [q.sql.split()[0] for q in refused] == ["UPDATE"]
 
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_save_after_the_table_was_dropped_raises(db, kind):
-    """A plain class makes the table again and finds no row in it; a safe class's versioned
-    write meets the missing table (pinned as it is)."""
+    """A write by ``_id`` finds no table and makes none: a plain class raises that the row is
+    gone, a safe class that it is at another version."""
     Item = make(kind)
     inst = Item(name="first").save(db=db)
     db.adapter.execute(f"DROP TABLE {Item.__tablename__};")
     db.adapter.auto_commit()
     inst.name = "second"
-    with pytest.raises(sqlite3.OperationalError if kind in SAFE else NotFoundError):
+    with pytest.raises(_refused(kind)):
         inst.save(db=db)
+    assert _exists(db, Item.__tablename__) is False
     assert _docs(db, Item) == []
 
 
@@ -983,3 +985,82 @@ def test_a_refresh_of_a_row_that_is_gone_raises_lookup_error(db, kind):
     with pytest.raises(LookupError, match="Row 1 not found for refresh"):
         inst.refresh(db=db)
     assert inst._id == 1
+
+
+# ----- a set_null write is the database's by-id write: the table as it is now ---------------------
+
+
+class NulledAuthor(SQLerModel):
+    __tablename__ = "wr_nulled_authors"
+    name: str
+
+
+class StampedBook(TimestampMixin, SQLerModel):
+    __tablename__ = "wr_stamped_books"
+    title: str
+    author: Optional[NulledAuthor] = None
+
+
+class SafeBook(SQLerSafeModel):
+    __tablename__ = "wr_safe_books"
+    title: str
+    author: Optional[NulledAuthor] = None
+
+
+def _raw(path, sql):
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+
+def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(tmp_path):
+    """``updated_at`` became a column after ``db`` learned the table: the nulled row's new
+    stamp goes into the column, and the document holds no copy the column would hide."""
+    path = str(tmp_path / "stamped.db")
+    db = SQLerDB.on_disk(path)
+    author = NulledAuthor(name="a").save(db=db)
+    book = StampedBook(title="b", author=author).save(db=db)
+    db.find_document("wr_stamped_books", book._id)
+    other = SQLerDB.on_disk(path)
+    other.ensure_table("wr_stamped_books", promoted={"updated_at": "TEXT"})
+    other.close()
+    [(old,)] = _raw(path, "SELECT updated_at FROM wr_stamped_books")
+    try:
+        author.delete_with_policy(db=db, on_delete="set_null")
+        read = StampedBook.from_id(book._id, db=db).updated_at.isoformat()
+    finally:
+        db.close()
+    [(data, new)] = _raw(path, "SELECT data, updated_at FROM wr_stamped_books")
+    assert json.loads(data) == {"created_at": book.created_at.isoformat(), "title": "b", "author": None}
+    assert (new != old, read) == (True, new)
+
+
+def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_writes_the_row(tmp_path):
+    """The table was dropped and made again without ``_version`` after ``db`` learned it: the
+    write learns it again, gives it the column, and moves the row from version 0 to 1."""
+    import sqlite3
+
+    path = str(tmp_path / "safe.db")
+    db = SQLerDB.on_disk(path)
+    author = NulledAuthor(name="a").save(db=db)
+    book = SafeBook(title="b", author=author).save(db=db)
+    db.find_document_with_version("wr_safe_books", book._id)
+    conn = sqlite3.connect(path)
+    [(data,)] = conn.execute("SELECT data FROM wr_safe_books").fetchall()
+    conn.executescript(
+        "DROP TABLE wr_safe_books; CREATE TABLE wr_safe_books (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL);"
+    )
+    conn.execute("INSERT INTO wr_safe_books (_id, data) VALUES (1, ?)", [data])
+    conn.commit()
+    conn.close()
+    try:
+        author.delete_with_policy(db=db, on_delete="set_null")
+    finally:
+        db.close()
+    [(data, version)] = _raw(path, "SELECT data, _version FROM wr_safe_books")
+    assert (json.loads(data), version) == ({"title": "b", "author": None, "_version": 1}, 1)
+    assert _raw(path, "SELECT count(*) FROM wr_nulled_authors") == [(0,)]

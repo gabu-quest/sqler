@@ -31,6 +31,7 @@ class SQLerQuerySet(Generic[T]):
         self._query = query
         self._db = db
         self._resolve = True
+        self._ready: dict[str, Any] = {}  # the query with its database behind it, per use
         if isinstance(model_cls, type):
             registry.note(query._table, model_cls)
 
@@ -41,31 +42,25 @@ class SQLerQuerySet(Generic[T]):
         clone._query = query
         clone._db = self._db
         clone._resolve = self._resolve
+        clone._ready = {}
         return clone
 
     def _checked(self, use: str = "") -> SQLerQuery:
-        """The query, once its database has checked the table (``SchemaError`` when a promoted
-        column the rows are read with would hide a value still in a document), for ``use``.
+        """The query with its database behind it, for ``use`` (``SQLerQuery._laid_out``): each
+        statement it sends is built from what the database remembers of the table.
 
-        A versioned query (``with_version()``) asks its database whether the table has the
-        ``_version`` column (``_has_version_column``: no statement once it is remembered)
-        where it needs the column: for ``"rows"`` (rows read or returned) a table without it
-        is read without it, each row at version 0, and its schema stays as it is; for
-        ``"update"`` (a set-based update moves each row's version) the table gets the column
-        first, as the first versioned write of one row adds it; a missing table stays
-        missing, and the update finds no row. Any other use (a count, an aggregate) reads no
-        version and asks nothing."""
-        db, query = self._db, self._query
-        if use and db is not None and query._include_version:
-            has = db._has_version_column(query._table)
-            if use == "update":
-                if has is False:
-                    db._ensure_versioned_table(query._table)
-            elif not has:
-                query = query._clone(include_version=False)
-        if query._promoted_fields and db is not None:
-            db._columns_of(query._table)
-        return query
+        A versioned query (``with_version()``) reads ``_version`` where the table has it: for
+        ``"rows"`` (rows read or returned) a table without it is read without it, each row at
+        version 0, and its schema stays as it is; for ``"update"`` (a set-based update moves
+        each row's version) the table gets the column first, as the first versioned write of
+        one row adds it; a missing table stays missing, and the update finds no row. Any other
+        use (a count, an aggregate) reads no version."""
+        if self._db is None:
+            return self._query
+        checked = self._ready.get(use)
+        if checked is None:
+            checked = self._ready[use] = self._query._clone(db=self._db, use=use)
+        return checked
 
     def resolve(self, flag: bool) -> "SQLerQuerySet[T]":
         """Toggle relation hydration on result materialization (default True)."""

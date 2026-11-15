@@ -269,8 +269,8 @@ def test_save_many_of_a_promoted_class_looks_the_table_up_once_for_two_calls(db)
     with query_logger.capture() as second:
         MemPromo.save_many([MemPromo(name="b")], db=db)
     # the first reads the table's columns, then again under the write lock that creates it
-    assert [q.sql for q in first if "table_info" in q.sql] == ['PRAGMA table_info("mem_promos");'] * 2
-    assert [q.sql for q in second if "table_info" in q.sql or "sqlite_master" in q.sql] == []
+    assert [q.sql for q in first if "table_xinfo" in q.sql] == ['PRAGMA table_xinfo("mem_promos");'] * 2
+    assert [q.sql for q in second if "table_xinfo" in q.sql or "sqlite_master" in q.sql] == []
     assert MemPromo.using(db).count() == 2
 
 

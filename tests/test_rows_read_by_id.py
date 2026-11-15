@@ -375,13 +375,18 @@ def _reads(fn):
     return [q.sql for q in captured]
 
 
+# the guard each read built from what the database remembers carries: a branch that never runs
+_G_PLAINS = "CASE WHEN 1 THEN 1 ELSE (SELECT (`_id`, `data`) IN (SELECT * FROM rbi_plains) FROM rbi_plains) END"
+
+
 def test_from_ids_of_a_plain_class_reads_with_one_statement(db):
     """The first save of a class without promoted columns learns the table's columns, once, so
     every read after it is one statement."""
     RbiPlain(name="a").save()
     RbiPlain(name="b").save()
-    assert _reads(lambda: RbiPlain.from_ids([1, 2])) == ["SELECT _id, data FROM rbi_plains WHERE _id IN (?,?);"]
-    assert _reads(lambda: RbiPlain.from_ids([1, 2])) == ["SELECT _id, data FROM rbi_plains WHERE _id IN (?,?);"]
+    read = "SELECT _id, data FROM rbi_plains WHERE _id IN (?,?) AND " + _G_PLAINS + ";"
+    assert _reads(lambda: RbiPlain.from_ids([1, 2])) == [read]
+    assert _reads(lambda: RbiPlain.from_ids([1, 2])) == [read]
 
 
 def test_from_ids_of_the_safe_base_reads_with_one_statement(db):
@@ -503,14 +508,15 @@ def test_a_column_promoted_later_on_the_same_object_is_read_next(db, fresh):
     assert fresh.find_document("rbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready", "note": "n"}
 
 
-def test_a_column_promoted_by_another_object_after_this_one_learned_is_not_seen(db, fresh):
-    """Pinned, not fixed: the object learned the table before the column existed."""
+def test_a_column_promoted_by_another_object_after_this_one_learned_is_seen(db, fresh):
+    """The object learned the table before the column existed: the schema moved since, so it
+    learns the table again."""
     _with_ready_job()
     assert fresh.find_document("rbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready"}
     db.ensure_table("rbi_jobs", promoted={"note": "TEXT"})
     db.adapter.execute("UPDATE rbi_jobs SET note = 'n' WHERE _id = 1")
     db.adapter.commit()
-    assert fresh.find_document("rbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready"}
+    assert fresh.find_document("rbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready", "note": "n"}
     assert db.find_document("rbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready", "note": "n"}
 
 
@@ -680,7 +686,7 @@ def test_ids_up_to_the_bound_are_one_variable_each_and_past_it_one_json_array(db
     under = _reads(lambda: db.find_documents("rbi_plains", list(range(1, 1000))))
     assert [s.count("?") for s in under] == [999]
     over = _reads(lambda: db.find_documents("rbi_plains", list(range(1, 1001))))
-    assert over == ["SELECT _id, data FROM rbi_plains WHERE _id IN (SELECT value FROM json_each(?));"]
+    assert over == ["SELECT _id, data FROM rbi_plains WHERE _id IN (SELECT value FROM json_each(?)) AND " + _G_PLAINS + ";"]
 
 
 # --- a save inside a transaction that rolls back ------------------------------------------

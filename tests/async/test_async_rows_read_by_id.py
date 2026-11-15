@@ -347,6 +347,11 @@ async def test_set_db_on_a_fresh_database_object_then_from_id_gives_the_column(d
     assert _stored(path, "arbi_jobs", 1) == "ready"
 
 
+# the guard each read built from what the database remembers carries: a branch that never runs
+_G_JOBS = "CASE WHEN 1 THEN 1 ELSE (SELECT (`_id`, `data`, `status`) IN (SELECT * FROM arbi_jobs) FROM arbi_jobs) END"
+_G_PLAINS = "CASE WHEN 1 THEN 1 ELSE (SELECT (`_id`, `data`) IN (SELECT * FROM arbi_plains) FROM arbi_plains) END"
+
+
 async def test_a_table_is_learned_once_and_a_known_table_asks_nothing(db, fresh):
     await _with_ready_job()
     with query_logger.capture() as first:
@@ -354,11 +359,11 @@ async def test_a_table_is_learned_once_and_a_known_table_asks_nothing(db, fresh)
     with query_logger.capture() as second:
         await fresh.find_document("arbi_jobs", 1)
     assert _reads(first) == [
-        'PRAGMA table_info("arbi_jobs");',
+        'PRAGMA table_xinfo("arbi_jobs");',
         "SELECT col FROM _sqler_promoted WHERE tbl = ?;",  # its record of settled columns, read once
-        "SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?);",
+        "SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";",
     ]
-    assert _reads(second) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?);"]
+    assert _reads(second) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";"]
 
 
 async def test_what_is_learned_inside_a_transaction_that_rolls_back_is_dropped(db, fresh, path):
@@ -384,7 +389,7 @@ async def test_what_is_learned_inside_a_transaction_that_commits_is_kept(db, fre
         assert (await fresh.find_document("arbi_jobs", 1))["status"] == "ready"
     with query_logger.capture() as captured:
         await fresh.find_document("arbi_jobs", 1)
-    assert _reads(captured) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?);"]
+    assert _reads(captured) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";"]
 
 
 async def test_a_child_of_a_bound_class_is_read_from_its_class_database_through_any_queryset(db, tmp_path):
@@ -636,7 +641,7 @@ async def test_ids_up_to_the_bound_are_one_variable_each_and_past_it_one_json_ar
     with query_logger.capture() as over:
         await db.find_documents("arbi_plains", list(range(1, 1001)))
     assert [s.count("?") for s in _reads(under)] == [999]
-    assert _reads(over) == ["SELECT _id, data FROM arbi_plains WHERE _id IN (SELECT value FROM json_each(?));"]
+    assert _reads(over) == ["SELECT _id, data FROM arbi_plains WHERE _id IN (SELECT value FROM json_each(?)) AND " + _G_PLAINS + ";"]
 
 
 # --- a save inside a transaction that rolls back ------------------------------------------

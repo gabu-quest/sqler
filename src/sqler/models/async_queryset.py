@@ -28,6 +28,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         self._query = query
         self._db = db
         self._resolve = True
+        self._ready: dict[str, Any] = {}  # the query with its database behind it, per use
         if isinstance(model_cls, type):
             registry.note(query._table, model_cls)
 
@@ -38,21 +39,17 @@ class AsyncSQLerQuerySet(Generic[T]):
         clone._query = query
         clone._db = self._db
         clone._resolve = self._resolve
+        clone._ready = {}
         return clone
 
-    async def _checked(self, use: str = "") -> AsyncSQLerQuery:
+    def _checked(self, use: str = "") -> AsyncSQLerQuery:
         """Async twin of :meth:`sqler.models.queryset.SQLerQuerySet._checked`."""
-        db, query = self._db, self._query
-        if use and db is not None and query._include_version:
-            has = await db._has_version_column(query._table)
-            if use == "update":
-                if has is False:
-                    await db._ensure_versioned_table(query._table)
-            elif not has:
-                query = query._clone(include_version=False)
-        if query._promoted_fields and db is not None:
-            await db._columns_of(query._table)
-        return query
+        if self._db is None:
+            return self._query
+        checked = self._ready.get(use)
+        if checked is None:
+            checked = self._ready[use] = self._query._clone(db=self._db, use=use)
+        return checked
 
     def resolve(self, flag: bool) -> "AsyncSQLerQuerySet[T]":
         """Toggle relation hydration on result materialization (default True)."""
@@ -97,7 +94,7 @@ class AsyncSQLerQuerySet(Generic[T]):
     # execution
     async def all(self) -> list[T]:
         """Execute and return a list of model instances."""
-        return await self._load(await (await self._checked("rows")).all_dicts())
+        return await self._load(await self._checked("rows").all_dicts())
 
     async def as_dicts(self) -> list[dict[str, Any]]:
         """Execute and return raw dicts without Pydantic hydration.
@@ -106,10 +103,10 @@ class AsyncSQLerQuerySet(Generic[T]):
         limits, and ``.select()`` field projection — but skips model
         validation, type coercion, computed fields, and relation resolution.
         """
-        return await (await self._checked("rows")).all_dicts()
+        return await self._checked("rows").all_dicts()
 
     async def first(self) -> Optional[T]:
-        row = await (await self._checked("rows")).first_dict()
+        row = await self._checked("rows").first_dict()
         if row is None:
             return None
         return (await self._load([row]))[0]
@@ -121,35 +118,35 @@ class AsyncSQLerQuerySet(Generic[T]):
         return [_refs.from_row(self._model_cls, doc, doc, home) for doc in docs]
 
     async def count(self) -> int:
-        return await (await self._checked()).count()
+        return await self._checked().count()
 
     async def sum(self, field: str) -> Optional[float]:
         """Return the sum of values for the specified field."""
-        return await (await self._checked()).sum(field)
+        return await self._checked().sum(field)
 
     async def avg(self, field: str) -> Optional[float]:
         """Return the average of values for the specified field."""
-        return await (await self._checked()).avg(field)
+        return await self._checked().avg(field)
 
     async def min(self, field: str) -> Optional[Any]:
         """Return the minimum value for the specified field."""
-        return await (await self._checked()).min(field)
+        return await self._checked().min(field)
 
     async def max(self, field: str) -> Optional[Any]:
         """Return the maximum value for the specified field."""
-        return await (await self._checked()).max(field)
+        return await self._checked().max(field)
 
     async def exists(self) -> bool:
         """Check if any rows match the query."""
-        return await (await self._checked()).exists()
+        return await self._checked().exists()
 
     async def paginate(self, page: int, per_page: int = 20):
         """Return a paginated result set."""
-        return await (await self._checked("rows")).paginate(page, per_page)
+        return await self._checked("rows").paginate(page, per_page)
 
     async def distinct_values(self, field: str) -> list[Any]:
         """Return distinct values for a JSON field."""
-        return await (await self._checked()).distinct_values(field)
+        return await self._checked().distinct_values(field)
 
     async def update(self, **fields) -> int:
         """Update matching rows with the given field values; the class's rules apply as in
@@ -163,7 +160,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         """
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
-            return await (await self._checked("update")).update(**fields)
+            return await self._checked("update").update(**fields)
         return len(await self._written("update", lambda q: q._changed(fields)))
 
     async def update_one(self, **fields) -> Optional[T]:
@@ -207,7 +204,7 @@ class AsyncSQLerQuerySet(Generic[T]):
             int: Number of rows deleted.
         """
         if not _write_rules.set_delete(self._model_cls, self._query._table, on_delete):
-            return await (await self._checked()).delete()
+            return await self._checked().delete()
         return len(await self._written("rows", self._deleted_rows, on_delete))
 
     @staticmethod
@@ -219,12 +216,12 @@ class AsyncSQLerQuerySet(Generic[T]):
         written."""
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
-            return await (await self._checked("update"))._update_picked(fields, n, op)
+            return await self._checked("update")._update_picked(fields, n, op)
         return [after for _, after in await self._written("update", lambda q: q._changed(fields, n))]
 
     async def _written(self, use: str, write, on_delete: Optional[str] = None) -> list:
         """Async twin of :meth:`SQLerQuerySet._written`."""
-        query = await self._checked(use)
+        query = self._checked(use)
         return await _write_rules.aset_write(
             self._model_cls, self._db, query._table, lambda: write(query), on_delete
         )

@@ -23,11 +23,10 @@ A class with no such mixin pays one ``isinstance`` test per write and no stateme
 
 from __future__ import annotations
 
-import json
 from typing import Any, Callable, ClassVar, Optional
 
 from sqler import registry
-from sqler._stored import column_arg, stored
+from sqler._stored import stored
 from sqler.exceptions import ReferentialIntegrityError
 from sqler.models import _dirty, _refs, async_integrity, integrity
 from sqler.models._table_names import _Home, _home_of, _set_home
@@ -423,37 +422,27 @@ def _versioned(table: str) -> bool:
     return bool(getattr(registry.resolve(table), "_versioned_rows", False))
 
 
-def _nulled_update(cls, table: str, row_id, doc: dict, versioned: bool) -> tuple[str, list]:
-    """The UPDATE that writes ``doc``, a referring row with its reference nulled, with the
-    stamps of its class (a promoted one in its column). A ``versioned`` row's version moves,
-    as with every other write of it, in its column and in the document's copy that a save
-    checks too: a holder who loaded the row before cannot save the reference back, one who
-    loads it after can save it."""
+def _nulled(cls, doc: dict) -> dict:
+    """``doc``, a referring row's document with its reference nulled, with the update stamps
+    of its class; the database's by-id writer puts each key that names a column of the table
+    into its column."""
     stamps = cls._update_stamps() if cls is not None else {}
-    promoted = getattr(cls, "__promoted__", None) or {}
-    columns, params = [", _version = _version + 1"] if versioned else [], []
-    for name, value in stamps.items():
-        if name in promoted:
-            columns.append(f", {name} = ?")
-            params.append(column_arg(value))
-        else:
-            doc[name] = stored(value)
-    data = "json_set(json(?), '$._version', _version + 1)" if versioned else "json(?)"
-    return (
-        f"UPDATE {table} SET data = {data}{''.join(columns)} WHERE _id = ?;",
-        [json.dumps(doc), *params, row_id],
-    )
+    return {**doc, **{name: stored(value) for name, value in stamps.items()}}
 
 
 def null_referrer(db, table: str, row_id, doc: dict) -> None:
-    """``set_null``: write ``doc`` into the referring row ``row_id``."""
+    """``set_null``: write ``doc`` into the referring row ``row_id`` with the by-id writer a
+    save uses. A ``versioned`` row is written at the version it is at, which moves by one in
+    its column and in the document's copy, as with every other write of it: a holder who
+    loaded the row before cannot save the reference back, one who loads it after can save it."""
     cls = _class_of(table)
     before = db.find_document(table, row_id) if cls is not None and cls._row_rules else None
-    versioned = _versioned(table)
-    if versioned and not db._is_versioned(table):
-        db._ensure_versioned_table(table)
-    db.adapter.execute(*_nulled_update(cls, table, row_id, doc, versioned))
-    db.adapter.auto_commit()
+    doc = _nulled(cls, doc)
+    if _versioned(table):
+        version = db.find_document_with_version(table, row_id)["_version"]
+        db._upsert_versioned(table, row_id, {**doc, "_version": version + 1}, version)
+    else:
+        db._upsert(table, row_id, doc)
     if before is not None:
         after = _dirty.snapshot(db.find_document(table, row_id))
         cls._rows_written(db, table, [("update", row_id, before, after)])
@@ -463,12 +452,12 @@ async def anull_referrer(db, table: str, row_id, doc: dict) -> None:
     """Async twin of :func:`null_referrer`."""
     cls = _class_of(table)
     before = await db.find_document(table, row_id) if cls is not None and cls._row_rules else None
-    versioned = _versioned(table)
-    if versioned and not db._is_versioned(table):
-        await db._ensure_versioned_table(table)
-    cursor = await db.adapter.execute(*_nulled_update(cls, table, row_id, doc, versioned))
-    await cursor.close()
-    await db.adapter.auto_commit()
+    doc = _nulled(cls, doc)
+    if _versioned(table):
+        version = (await db.find_document_with_version(table, row_id))["_version"]
+        await db._upsert_versioned(table, row_id, {**doc, "_version": version + 1}, version)
+    else:
+        await db._upsert(table, row_id, doc)
     if before is not None:
         after = _dirty.snapshot(await db.find_document(table, row_id))
         await cls._arows_written(db, table, [("update", row_id, before, after)])

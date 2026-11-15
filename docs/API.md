@@ -659,8 +659,8 @@ reference, `query()`, `using(db)`): each row at version 0, and no read changes t
 so it works on a database that cannot be written. The first versioned write adds the
 column: a `save()` (a holder who read at version 0 then saves) or a set-based update. Only
 the sync safe bases' `set_db()` adds it when the class is bound. A database object asks
-once whether a table has the column and remembers it when it does; a table without it costs
-one `PRAGMA table_info` per versioned read until a write adds the column.
+once whether a table has the column, with the table's other columns (see "Promoted columns"
+in `docs/STORAGE.md`), and learns again when SQLite refuses a statement built for them.
 
 ### [C13] Safe model collision handling
 
@@ -1268,8 +1268,7 @@ as `None` writes NULL. A model class without `__promoted__` saves through these 
 its saves leave a column it has no field for as it is. `upsert_document` with an `_id`
 updates that row only: when the table has no row with that `_id` it writes no row and
 raises `NotFoundError`. In one call, rows that hold different
-keys each get their own (consecutive rows with the same keys share one statement;
-`AsyncSQLerDB.bulk_upsert` sends one statement per row). A value
+keys each get their own (consecutive rows with the same keys share one statement). A value
 a column refuses (`NOT NULL`, `CHECK`) raises SQLite's `IntegrityError` and writes nothing of
 the call; `bulk_upsert` of an existing row whose document lacks the key of a `NOT NULL`
 column without a `DEFAULT` raises it too, because SQLite checks the column before it finds

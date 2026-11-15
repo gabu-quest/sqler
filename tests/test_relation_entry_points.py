@@ -1891,19 +1891,19 @@ def test_a_batch_read_keeps_a_raw_statement_left_uncommitted(make_db, way):
 
 
 def _pragmas(sent: list, table: str) -> int:
-    return len([q for q in sent if q.sql == f'PRAGMA table_info("{table}");'])
+    return len([q for q in sent if q.sql == f'PRAGMA table_xinfo("{table}");'])
 
 
 def test_a_second_read_of_a_version_less_table_asks_the_table_once(make_db):
-    """The second batch read by the same object sends one ``PRAGMA`` and one ``SELECT`` on
-    the child table: nothing remembered, no statement that fails."""
+    """The second batch read by the same object sends one ``SELECT`` on the child table: the
+    table is remembered without the column, no statement that fails."""
     db = make_db()
     _plain_child_table(db)
     NcP.from_ids([1], db=db)
     with query_logger.capture() as sent:
         got = NcP.from_ids([1], db=db)[0]
     assert got.one._version == 0
-    assert (_pragmas(sent, NcC.__tablename__), sent_to(sent, NcC.__tablename__)) == (1, 1)
+    assert (_pragmas(sent, NcC.__tablename__), sent_to(sent, NcC.__tablename__)) == (0, 1)
 
 
 def test_a_second_read_of_a_versioned_table_sends_no_pragma(make_db):
