@@ -2,7 +2,6 @@ import functools
 import json
 import sqlite3
 import threading
-from types import SimpleNamespace
 from typing import Any, NamedTuple, Optional
 
 from sqler._stored import dumps, stored
@@ -167,9 +166,9 @@ class SQLerDB:
         # what is remembered about committed tables: versioned tables, promoted columns per table
         self._versioned_tables: set[str] = set()
         self._promoted_columns: dict[str, list[str]] = {}
-        # what each open level of this object's own transactions learned, innermost last; counted
-        # like the adapter's depth: per thread, or once for the single ":memory:" connection
-        self._open = SimpleNamespace(levels=[]) if adapter._memory_singleton else _OpenLevels()
+        # what each open level of this object's own transactions learned, innermost last; per
+        # thread, like the adapter's depth
+        self._open = _OpenLevels()
 
     def ensure_table(
         self,

@@ -785,7 +785,9 @@ class SQLerQuery:
         """Yield parsed dicts one at a time (memory-efficient streaming).
 
         Unlike ``all_dicts()`` which loads all rows into memory, this method
-        iterates over the cursor row by row.
+        iterates over the cursor row by row. On a plain ``":memory:"`` database, whose one
+        connection every thread shares, the statement's rows are all read before the first
+        is yielded, so the whole result is held while it yields.
 
         Raises:
             NoAdapterError: If the query has no adapter.

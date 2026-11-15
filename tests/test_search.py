@@ -565,11 +565,8 @@ def test_insert_or_replace_through_the_database_keeps_one_index_row(synced):
     assert _index_rows(db, index) == _table_rows(db, index)
 
 
-def test_bulk_upsert_of_a_thousand_rows_is_indexed(tmp_path):
-    # on disk: bulk_upsert on the single in-memory connection leaves its write uncommitted
-    # (the adapter's context manager commits a per-thread connection only), and the
-    # create() of the comparison below could then not open its transaction
-    db, index = _articles_index(db=SQLerDB.on_disk(str(tmp_path / "bulk.db")))
+def test_bulk_upsert_of_a_thousand_rows_is_indexed():
+    db, index = _articles_index()
     ids = db.bulk_upsert("articles", [{"title": f"bulk {i}", "body": "x"} for i in range(1000)])
     assert index.count("bulk") == 1000
     db.bulk_upsert("articles", [{"_id": i, "title": "renamed", "body": "x"} for i in ids])

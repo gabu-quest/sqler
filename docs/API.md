@@ -1333,6 +1333,10 @@ for record_json in stream_jsonl(User):
     process(record_json)
 ```
 
+On a plain `":memory:"` database (`SQLerDB.in_memory(shared=False)`), whose one connection
+every thread shares, a statement's rows are read whole before another thread may use the
+connection, so `stream_jsonl()`, `iter_dicts()` and `iter()` hold the whole result there.
+
 ```python
 from sqler import async_export_jsonl, async_import_jsonl
 
