@@ -107,6 +107,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`query_logger.capture()` gives the statements of its block when the log is full.** The log keeps its newest 1000 entries, and a block opened on a full log got nothing (with 995 entries, a block of ten statements got five). A block now gets every statement logged while it is open, and its list fills as they are logged. Of two blocks that overlap, the one that ends first no longer switches logging off under the other; `enable()` and `disable()` called inside a block keep what they set once it ends; and `metrics.enable()` called inside a block keeps counting after it.
 - **Sync adapter: a thread that ends gives back its connection.** Each thread's connection stayed open until `close()`, so a program that starts threads over its life grew one open connection per thread, and a thread that ended inside a transaction kept the write lock. The connection now closes when its thread ends, and its open transaction is rolled back. A shared in-memory database (`SQLerDB.in_memory()`) still lives from `connect()` until `close()`, whichever threads end in between.
 - **Sync adapter: a thread that was running across `close()` and `connect()` works again.** It kept its closed connection and failed with "Cannot operate on a closed database."
+- **`save_partial()` writes what `save()` would write for the changed fields.** It was a second write path beside `save()`. It raised `TypeError` on a `datetime`, a `Decimal`, a `timedelta` or a reference. A change to a promoted field went into the document and left the column, so every read gave the old value. On a safe model it skipped the version check and wrote over a newer row. On a row that was gone it wrote nothing and raised nothing. It ignored `db=` and `using()`, and timestamps, the audit log, cache invalidation and the search index did not run. It now goes through the model's own `save()`, which sends one `UPDATE` with the changed fields: a row that is gone raises `NotFoundError`; a stale one raises `StaleVersionError`, or is rebased where the model allows it; a model never saved is saved in full; with nothing changed no statement is sent. A key of the row that the model has no field for is left as it is, where a full `save()` drops it.
+- **`TrackedModel` tracks changes on the lite bases.** `is_dirty` was always False there, so `save_partial()` did nothing, without an error.
 
 ### Changed
 
@@ -164,12 +166,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`SQLerSafeModel.from_id()` and `refresh()` raise `ValidationError` for a typed list that names a deleted row**, as `SQLerModel.from_id()` does. They gave an empty child in its place.
 - **A `mode="before"` validator on a typed reference field receives the child model** through `from_ids()`, `query().all()` and `first()`, as it does through `from_id()`. It received the stored dict.
 - **Async `query().all()` cuts a cycle of typed references where the other ways do**, one level earlier than before, with fewer statements.
+- **`save_partial()` refuses a field name that holds a double quote or a backslash** with `InvalidFieldNameError`, before any statement: no JSON path names such a key on every supported SQLite. `save()` stores such a field as before.
+- **`save()` on every model base and mixin takes a private `_partial` keyword.** A class that overrides `save()` and is used with `save_partial()` must accept `**kwargs` and pass them on.
 
 ### Removed
 
 - **`PooledSQLerDB`, `PooledSQLiteAdapter`, `ConnectionPool` and the `sqler.pool` module**, with no alias. Use `SQLerDB`: it gives each thread its own connection and takes it back when the thread ends, so threads share one `SQLerDB` (`SQLerDB.on_disk(path)` in place of `PooledSQLerDB.on_disk(path, max_connections=n)`). There is no `max_connections`: the number of open connections is the number of live threads that used the database. `ConnectionPoolExhaustedError` stays; the async pool raises it.
 - **`PoolStats` moved from `sqler.pool` to `sqler.adapter.asynchronous`** and is exported from `sqler`. Its fields are unchanged. A `PoolStats` pickled by an older version does not load.
 - **`Transaction(adapter)` without a database.** `Transaction(adapter, db)` requires both; `db.transaction()` is the way to open one.
+- **`TrackedModel.asave()`, `TrackedModel.afrom_id()` and `PartialUpdateMixin.asave_partial()`**, which called methods no model has. On an async model use `AsyncTrackedModel` and `AsyncPartialUpdateMixin`; `TrackedModel` on an async model raises `TypeError` when the class is defined.
+- **`TrackedModel.from_id()`.** The model base's `from_id()` already returns a tracked, clean model.
 
 ### Added
 
@@ -184,6 +190,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`FTSIndex(Model, fields, db=db)`** takes the database, for classes that were never bound.
 - **`from_ids(ids, db=db)`** reads from a given database, on all model bases.
 - **`search(text, plain=True)`**, and the same on every search method of `FTSIndex` and `SearchableMixin`, finds the words of the text, so `C++`, `it's` and `foo-bar` can be searched. Without it the string is an FTS5 query, as before. `SearchQueryError` can be imported from `sqler`; it is a `QueryError`.
+- **`AsyncTrackedModel` and `AsyncPartialUpdateMixin`**, exported from `sqler`: change tracking and `await model.save_partial(db=db)` for the async bases. `save_partial()` takes `db=` on the sync bases too.
 
 ## [1.2026.4.2] - 2026-04-18
 
