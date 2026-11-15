@@ -1172,24 +1172,18 @@ class Transaction:
     the context exits successfully, or rolls back on exception.
     """
 
-    def __init__(self, adapter, db: Optional[SQLerDB] = None):
+    def __init__(self, adapter, db: SQLerDB):
         self.adapter = adapter
-        self._db = db  # None: a bare adapter transaction (PooledSQLerDB)
+        self._db = db
         self._active = False
 
     def _end(self, commit: bool, quiet: bool = False) -> None:
         self._active = False
-        if self._db is None:
-            _end_transaction(self.adapter, commit, quiet)
-        else:
-            self._db._end_level(commit, quiet=quiet)
+        self._db._end_level(commit, quiet=quiet)
 
     def __enter__(self):
         """Begin the transaction."""
-        if self._db is None:
-            self.adapter.begin_transaction()
-        else:
-            self._db._begin_level()
+        self._db._begin_level()
         self._active = True
         return self
 

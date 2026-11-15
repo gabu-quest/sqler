@@ -494,8 +494,8 @@ def read_rows(adapter: Any, table: str, ids: list, db: Any = None) -> Optional[t
     Read through ``db``'s by-id reader, as ``db.find_documents`` reads them; for the table of
     a versioned class bound to ``db`` the same statement reads the ``_version`` column, given
     as ``{id: version}`` and left out of the documents (0 where the table has no such column:
-    the read changes no schema). Without a database that has a reader
-    (a queryset built by hand, ``PooledSQLerDB``) ``adapter`` reads ``_id`` and ``data`` only.
+    the read changes no schema). Without a database (a queryset built by hand) ``adapter``
+    reads ``_id`` and ``data`` only.
     """
     reader = getattr(db, "_read_rows", None)
     if reader is None:

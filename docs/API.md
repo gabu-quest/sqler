@@ -1498,28 +1498,8 @@ results = Post.search("C++", plain=True)
 
 ### [C42] Connection pooling
 
-```python
-from sqler import PooledSQLerDB, PoolStats
-
-# Create pooled database with 10 connections
-db = PooledSQLerDB.on_disk("mydb.db", pool_size=10)
-
-class User(SQLerModel):
-    name: str
-
-User.set_db(db)
-
-# Use normally - connections are managed automatically
-User(name="Alice").save()
-users = User.query().all()
-
-# Check pool stats
-stats: PoolStats = db.pool_stats()
-print(f"Active: {stats.active_connections}/{stats.pool_size}")
-print(f"Waiting: {stats.waiting_requests}")
-
-db.close()
-```
+`SQLerDB` gives each thread its own connection and returns it when the thread ends, so threads share one `SQLerDB`.
+`AsyncSQLerDB` pools its connections; `db.pool_stats()` returns a `PoolStats` with the pool's size, free and in-use connections, checkouts, timeouts and wait times.
 
 ### [C43] Schema migrations
 

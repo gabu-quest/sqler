@@ -1147,26 +1147,6 @@ def test_C41_full_text_search():
     assert count == 1
 
 
-def test_C42_connection_pooling(tmp_path):
-    """C42: Connection pooling basics."""
-    from sqler import PooledSQLerDB
-
-    db = PooledSQLerDB.on_disk(str(tmp_path / "pool_test.db"), max_connections=5)
-
-    class PoolUser(SQLerModel):
-        name: str
-
-    PoolUser.set_db(db)
-    PoolUser(name="Alice").save()
-    assert PoolUser.query().count() == 1
-
-    stats = db.pool_stats()
-    assert stats.max_connections == 5
-    assert stats.total_connections >= 1
-
-    db.close()
-
-
 def test_C43_schema_migrations():
     """C43: Schema migrations with versioning."""
     from sqler import Migration, MigrationRunner, SQLerDB

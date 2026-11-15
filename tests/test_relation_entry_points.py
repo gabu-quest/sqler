@@ -31,7 +31,6 @@ from sqler.logging import query_logger
 from sqler.models import SQLerQuerySet, SQLerSafeModel, _refs
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
-from sqler.pool import PooledSQLerDB
 from sqler.query import SQLerQuery
 
 # ---- the classes, one pair per base -------------------------------------------------
@@ -1609,7 +1608,7 @@ def test_a_child_document_its_class_refuses_fails_the_load_as_on_the_base(make_d
     assert outcome == REFUSED_EXPECTED[(base, way)]
 
 
-# ---- a queryset without a database, and PooledSQLerDB -------------------------------
+# ---- a queryset without a database --------------------------------------------------
 
 
 def test_a_queryset_built_by_hand_without_a_database_builds_no_child(typed):
@@ -1619,25 +1618,6 @@ def test_a_queryset_built_by_hand_without_a_database_builds_no_child(typed):
     qs = SQLerQuerySet(p_cls, SQLerQuery(table=p_cls.__tablename__, adapter=db.adapter))
     got = qs.first()
     assert (type(got.one).__name__, got.one._id, got.one.name) == ("TyC", None, "c1b")
-
-
-def test_a_class_bound_to_a_pooled_database_gets_children_with_their_rows(tmp_path):
-    """On the base the child had ``_id`` None; now it is its row, read through the pool's
-    adapter (``_id`` and ``data`` only)."""
-    pdb = PooledSQLerDB.on_disk(str(tmp_path / "pool.db"), max_connections=2)
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            for cls in (TyG, TyC, TyP):
-                cls.set_db(pdb)
-        cid = pdb.insert_document(TyC.__tablename__, {"name": "c", "g": None})
-        pdb.insert_document(TyP.__tablename__, {"title": "p", "one": {"_table": TyC.__tablename__, "_id": cid}})
-        got = TyP.query().first()
-        assert (got.one._id, got.one.name) == (cid, "c")
-        got.save()
-        assert rows_of(pdb, TyP.__tablename__)[0][1]["one"] == {"_table": TyC.__tablename__, "_id": cid}
-    finally:
-        pdb.close()
 
 
 # ---- classes never bound, read through using(db) ------------------------------------
