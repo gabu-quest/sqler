@@ -73,39 +73,21 @@ class AsyncSQLerQuerySet(Generic[T]):
 
     # execution
     async def all(self) -> list[T]:
+        """Execute and return a list of model instances."""
         rows = docs = await self._query.all_dicts()
-        per_row = self._resolve
         if self._resolve:
             try:
-                docs, per_row = await self._abatch(rows)
+                docs = await self._abatch_resolve(rows)
             except RecursionError:
+                # As in the sync queryset: only this is tolerated, and any other error
+                # while the references are read reaches the caller.
                 logger.warning(
                     f"Circular reference detected during async batch resolution for "
                     f"{self._model_cls.__name__}. Returning partially resolved documents."
                 )
-            except Exception as e:
-                logger.warning(
-                    f"Error during async batch resolution for {self._model_cls.__name__}: "
-                    f"{type(e).__name__}: {e}. Continuing with unresolved references."
-                )
         results: list[T] = []
         other_table = self._reads_other_table()
         for row, d in zip(rows, docs, strict=True):
-            if per_row:
-                try:
-                    aresolver = getattr(self._model_cls, "_aresolve_relations", None)
-                    if aresolver is not None:
-                        d = await aresolver(d)  # type: ignore[assignment]
-                except RecursionError:
-                    logger.debug(
-                        f"Circular reference during individual resolution for "
-                        f"{self._model_cls.__name__}"
-                    )
-                except Exception as e:
-                    logger.debug(
-                        f"Individual resolution error for {self._model_cls.__name__}: "
-                        f"{type(e).__name__}: {e}"
-                    )
             inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
             self._attach_metadata(inst, d, row, other_table)
             results.append(inst)
@@ -131,11 +113,6 @@ class AsyncSQLerQuerySet(Generic[T]):
                 logger.warning(
                     f"Circular reference detected during async resolution for "
                     f"{self._model_cls.__name__}. Returning partially resolved document."
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Error during async resolution for {self._model_cls.__name__}: "
-                    f"{type(e).__name__}: {e}. Continuing with unresolved references."
                 )
         inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
         self._attach_metadata(inst, d, row, self._reads_other_table())
@@ -292,13 +269,9 @@ class AsyncSQLerQuerySet(Generic[T]):
 
     async def _abatch_resolve(self, docs: list[dict], max_depth: int = 5) -> list[dict]:
         """Resolve the references of ``docs`` into stored documents (see ``_refs.batch``)."""
-        return (await self._abatch(docs, max_depth))[0]
-
-    async def _abatch(self, docs: list[dict], max_depth: int = 5) -> tuple[list[dict], bool]:
-        """``(documents, found)`` of ``_refs.batch``: ``found`` is False when no document
-        holds a reference."""
         adapter = self._query._adapter  # type: ignore[attr-defined]
-        assert adapter is not None, "Query has no adapter bound"
+        if adapter is None:
+            raise RuntimeError("QuerySet has no adapter bound")
         walk = _refs.batch(docs, max_depth, self._model_cls, self._db)
         try:
             want = next(walk)

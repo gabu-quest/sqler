@@ -14,6 +14,7 @@ import asyncio
 import dataclasses
 import inspect
 import re
+import sqlite3
 import warnings
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Optional, Union
@@ -894,3 +895,69 @@ def test_a_msgspec_query_reads_a_typed_reference_to_no_row_by_the_same_rule():
         db.close()
 
     assert out == [(None, [("RpMsUser", 1, "u1")], ["a"])] * 2
+
+
+# ---- an error of the database while a reference is read ------------------------------
+
+
+def break_reads_of(w: World, table: str) -> None:
+    """From now on a SELECT from ``table`` raises what a locked database raises."""
+    adapter = w.db.adapter
+    real = adapter.execute
+
+    def refused(sql: str) -> bool:
+        return sql.lstrip().upper().startswith("SELECT") and f"FROM {table}" in sql
+
+    if inspect.iscoroutinefunction(real):
+
+        async def execute(sql, *args, **kwargs):
+            if refused(sql):
+                raise sqlite3.OperationalError("database is locked")
+            return await real(sql, *args, **kwargs)
+
+    else:
+
+        def execute(sql, *args, **kwargs):
+            if refused(sql):
+                raise sqlite3.OperationalError("database is locked")
+            return real(sql, *args, **kwargs)
+
+    adapter.execute = execute
+
+
+@pytest.mark.parametrize("broken", ["user", "team"])
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("key", list(BASES))
+def test_a_database_error_while_a_reference_is_read_reaches_the_caller(key, way, broken):
+    """The read of the child's table (``user``) fails, or the read of the child's own child's
+    (``team``). The load raises that error; it gives back no model with the reference unread."""
+
+    async def scenario(w):
+        tid = await w.put("team", {"name": "t1"})
+        uid = await w.put("user", {"name": "u1", "team": w.ref("team", tid)})
+        hid = await w.put("holder", {"one": w.ref("user", uid), "many": [w.ref("user", uid)]})
+        before = await w.load("holder", hid, way)
+        break_reads_of(w, w.t[broken])
+        with pytest.raises(sqlite3.OperationalError) as err:
+            await w.load("holder", hid, way)
+        return before.one.name, before.one.team.name, before.many[0].team.name, str(err.value)
+
+    assert run(key, scenario) == ("u1", "t1", "t1", "database is locked")
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("key", list(BASES))
+def test_a_typed_reference_into_a_table_that_holds_no_documents_raises(key, way):
+    """The table is there and is not a table of documents. That is SQLite's own error, where a
+    table that is not there reads as no row."""
+
+    async def scenario(w):
+        uid = await w.put("user", {"name": "u1"})
+        hid = await w.put("holder", {"one": w.ref("user", uid)})
+        await aw(w.db.adapter.execute(f"DROP TABLE {w.t['user']}"))
+        await aw(w.db.adapter.execute(f"CREATE TABLE {w.t['user']} (x TEXT)"))
+        with pytest.raises(sqlite3.OperationalError, match="no such column"):
+            await w.load("holder", hid, way)
+        return True
+
+    assert run(key, scenario) is True

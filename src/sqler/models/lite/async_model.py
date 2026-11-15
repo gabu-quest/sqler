@@ -459,7 +459,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             try:
                 doc = await cls._aresolve_relations(raw, db=db, _seen=seen | {(table, rid)})
                 inst = _refs.from_row(cls, doc, raw)
-            except Exception:
+            except _refs.UNLOADABLE:
                 out[rid] = _refs.KEEP
                 continue
             out[rid] = inst

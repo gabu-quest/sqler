@@ -858,11 +858,11 @@ EXPECTED: dict = {('lite', 'all'): ({'name': 'p',
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("with_ref,calls", [(False, 0), (True, 3)])
+@pytest.mark.parametrize("with_ref", [False, True])
 @pytest.mark.parametrize("base", sorted(COUNTING))
-async def test_all_runs_the_per_row_pass_only_when_a_row_holds_a_reference(
-    make_db, base, with_ref, calls
-):
+async def test_all_follows_references_in_the_batch_and_never_row_by_row(make_db, base, with_ref):
+    """``all()`` reads what its rows refer to with the batch alone, as the sync one does: the
+    per-row resolver, which ``from_id`` goes through once, is called for no row."""
     child, parent = COUNTING[base]
     db = await make_db()
     await bind(db, child, parent)
@@ -873,7 +873,10 @@ async def test_all_runs_the_per_row_pass_only_when_a_row_holds_a_reference(
     parent.per_row_calls = 0
     got = await parent.query().all()
     assert [g.name for g in got] == ["p0", "p1", "p2"]
-    assert parent.per_row_calls == calls
+    assert (got[1].held.name if with_ref else got[1].held) == ("c1" if with_ref else 1)
+    assert parent.per_row_calls == 0
+    await parent.from_id(got[1]._id)
+    assert parent.per_row_calls == 1
 
 
 # ---- typed references keep their row ------------------------------------------------
@@ -1762,9 +1765,9 @@ CYCLE_CHAINS: dict = {('lite', 'all'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref'
                        [(3, 'n3'), (3, 'n3'), (None, '')])}
 REFUSED_EXPECTED: dict = {('lite', 'all'): 'TypeError',
  ('lite', 'first'): 'TypeError',
- ('lite', 'from_id'): ('loaded', ('ref', 'arep_lrq_c', 1)),
+ ('lite', 'from_id'): 'TypeError',
  ('lite', 'from_ids'): 'TypeError',
- ('lite', 'refresh'): ('loaded', ('ref', 'arep_lrq_c', 1)),
+ ('lite', 'refresh'): 'TypeError',
  ('pydantic', 'all'): 'ValidationError',
  ('pydantic', 'first'): 'ValidationError',
  ('pydantic', 'from_id'): 'ValidationError',
