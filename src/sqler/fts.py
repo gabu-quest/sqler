@@ -987,13 +987,6 @@ class SearchableMixin:
             index._follow(*_instance_binding(self), self._id, deleted=False)
         return result
 
-    async def asave(self, *args, **kwargs):
-        """Async save and update search index."""
-        result = await super().asave(*args, **kwargs)
-        if self._fts_index is not None:
-            self._fts_index.index(self)  # Note: sync indexing
-        return result
-
     def delete(self, *args, **kwargs):
         """Delete and remove from search index (with ``content_sync`` its triggers do)."""
         _id = self._id
@@ -1004,12 +997,4 @@ class SearchableMixin:
         result = super().delete(*args, **kwargs)
         if manual:
             index._follow(db, table, _id, deleted=True)
-        return result
-
-    async def adelete(self, *args, **kwargs):
-        """Async delete and remove from search index."""
-        _id = self._id
-        result = await super().adelete(*args, **kwargs)
-        if self._fts_index is not None and _id is not None:
-            self._fts_index.remove(_id)
         return result

@@ -33,12 +33,33 @@ import hashlib
 import json
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Generic, Optional, TypeVar
+from typing import Any, Callable, Generic, Optional, TypeVar, Union
+
+from sqler.models._table_names import _unchecked_table_name
+from sqler.models._write_rules import WriteRules
 
 T = TypeVar("T")
+
+# Every QueryCache, so a write is told to each (``_tables_written``): replaced, never changed
+# in place, so a write reads it without a lock.
+_caches: tuple["weakref.ref[QueryCache]", ...] = ()
+# How many open transaction levels of this process wrote each table: while one has, no
+# cache serves or stores an entry of the table.
+_held: dict[str, int] = {}
+# taken to change ``_caches`` or ``_held``
+_held_lock = threading.Lock()
+
+
+def _table_name(table: Union[str, type, None]) -> Optional[str]:
+    """The name an entry of ``table`` is kept under: a model class stands for its table, and
+    SQLite does not tell table names apart by case."""
+    if table is None:
+        return None
+    return (table if isinstance(table, str) else _unchecked_table_name(table)).lower()
 
 
 @dataclass
@@ -153,6 +174,12 @@ class QueryCache:
         self._lock = threading.RLock()
         self._stats = CacheStats(max_size=max_size)
         self._table_keys: dict[str, set[str]] = {}  # table -> set of keys
+        # table -> how many times it was written; a result is stored only for the number
+        # its function started at
+        self._generations: dict[str, int] = {}
+        global _caches
+        with _held_lock:
+            _caches = (*(ref for ref in _caches if ref() is not None), weakref.ref(self))
 
         # Start background cleanup
         self._cleanup_thread: Optional[threading.Thread] = None
@@ -209,20 +236,33 @@ class QueryCache:
         value: T,
         *,
         ttl_seconds: Optional[float] = None,
-        table: Optional[str] = None,
+        table: Union[str, type, None] = None,
     ) -> None:
         """Set a cache entry.
+
+        While a transaction of this process that wrote ``table`` is open, nothing is stored.
 
         Args:
             key: Cache key
             value: Value to cache
             ttl_seconds: TTL in seconds (None uses default)
-            table: Associated table name (for invalidation)
+            table: Associated table name or model class (for invalidation)
         """
+        self._store(key, value, ttl_seconds, _table_name(table), None)
+
+    def _store(
+        self, key: str, value: Any, ttl_seconds: Optional[float], table: Optional[str], generation: Optional[int]
+    ) -> None:
+        """Store ``value``, unless ``table`` is held or was written since ``generation``
+        (``None``: not checked)."""
         ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_seconds
         expires_at = time.time() + ttl if ttl else None
 
         with self._lock:
+            if table is not None and (
+                table in _held or (generation is not None and self._generations.get(table, 0) != generation)
+            ):
+                return
             # Evict if at capacity and this is a new key
             if key not in self._cache and len(self._cache) >= self.max_size:
                 self._evict_lru()
@@ -258,11 +298,10 @@ class QueryCache:
             Cached value or default
         """
         with self._lock:
-            if key not in self._cache:
+            entry = self._cache.get(key)
+            if entry is None or entry.table in _held:
                 self._stats.misses += 1
                 return default
-
-            entry = self._cache[key]
 
             if entry.is_expired:
                 self._remove_key(key)
@@ -280,14 +319,32 @@ class QueryCache:
     def has(self, key: str) -> bool:
         """Check if a key exists and is not expired."""
         with self._lock:
-            if key not in self._cache:
+            entry = self._cache.get(key)
+            if entry is None or entry.table in _held:
                 return False
-            entry = self._cache[key]
             if entry.is_expired:
                 self._remove_key(key)
                 self._stats.expirations += 1
                 return False
             return True
+
+    def _lookup(self, key: str, table: Optional[str]) -> tuple[bool, Any]:
+        """``(True, value)`` for an entry to serve; else ``(False, generation)``: the number
+        of writes of ``table`` a result computed now is stored for, ``None`` while ``table``
+        is held (the result is not stored)."""
+        with self._lock:
+            if table in _held:
+                return False, None
+            entry = self._cache.get(key)
+            if entry is not None:
+                if not entry.is_expired:
+                    self._cache.move_to_end(key)
+                    entry.hits += 1
+                    self._stats.hits += 1
+                    return True, entry.value
+                self._remove_key(key)
+                self._stats.expirations += 1
+            return False, self._generations.get(table, 0)
 
     def invalidate(self, key: str) -> bool:
         """Invalidate a specific key.
@@ -302,25 +359,35 @@ class QueryCache:
                 return True
             return False
 
-    def invalidate_table(self, table: str) -> int:
+    def invalidate_table(self, table: Union[str, type]) -> int:
         """Invalidate all entries for a table.
 
         Args:
-            table: Table name
+            table: Table name or model class
 
         Returns:
             Number of entries invalidated
         """
+        name = _table_name(table)
         with self._lock:
-            if table not in self._table_keys:
-                return 0
+            return self._drop_table(name)
 
-            keys = list(self._table_keys[table])
-            for key in keys:
-                self._remove_key(key)
-                self._stats.invalidations += 1
+    def _drop_table(self, table: str) -> int:
+        """Drop the entries of ``table`` (must hold lock)."""
+        keys = self._table_keys.pop(table, ())
+        for key in keys:
+            del self._cache[key]
+            self._stats.size -= 1
+            self._stats.invalidations += 1
+        return len(keys)
 
-            return len(keys)
+    def _written(self, tables) -> None:
+        """``tables`` were written: their entries are dropped, and a result its function
+        started computing before is not stored."""
+        with self._lock:
+            for table in tables:
+                self._generations[table] = self._generations.get(table, 0) + 1
+                self._drop_table(table)
 
     def invalidate_pattern(self, pattern: str) -> int:
         """Invalidate keys matching a pattern.
@@ -441,7 +508,7 @@ def _make_cache_key(func: Callable, args: tuple, kwargs: dict) -> str:
 def cached_query(
     ttl_seconds: Optional[float] = None,
     key: Optional[str] = None,
-    table: Optional[str] = None,
+    table: Union[str, type, None] = None,
     cache: Optional[QueryCache] = None,
 ) -> Callable:
     """Decorator to cache query results.
@@ -449,12 +516,14 @@ def cached_query(
     Args:
         ttl_seconds: Cache TTL (None uses cache default)
         key: Explicit cache key (auto-generated if None)
-        table: Table name for invalidation
+        table: The table the function reads, or its model class: a write of a class with
+            :class:`CacheAwareModel` drops the entries of its table. Without a table an
+            entry ends only with its lifetime.
         cache: Specific cache instance (uses global if None)
 
     Usage::
 
-        @cached_query(ttl_seconds=60, table="user")
+        @cached_query(ttl_seconds=60, table=User)
         def get_active_users():
             return User.query().filter(F.active == True).all()
 
@@ -469,14 +538,13 @@ def cached_query(
         def wrapper(*args, **kwargs):
             c = cache or get_cache()
             cache_key = key or _make_cache_key(func, args, kwargs)
-
-            # Check cache
-            if c.has(cache_key):
-                return c.get(cache_key)
-
-            # Execute and cache
+            name = _table_name(table)
+            found, value = c._lookup(cache_key, name)
+            if found:
+                return value
             result = func(*args, **kwargs)
-            c.set(cache_key, result, ttl_seconds=ttl_seconds, table=table)
+            if value is not None:
+                c._store(cache_key, result, ttl_seconds, name, value)
             return result
 
         # Add cache control methods
@@ -493,7 +561,7 @@ def cached_query(
 def async_cached_query(
     ttl_seconds: Optional[float] = None,
     key: Optional[str] = None,
-    table: Optional[str] = None,
+    table: Union[str, type, None] = None,
     cache: Optional[QueryCache] = None,
 ) -> Callable:
     """Async version of cached_query decorator."""
@@ -503,14 +571,13 @@ def async_cached_query(
         async def wrapper(*args, **kwargs):
             c = cache or get_cache()
             cache_key = key or _make_cache_key(func, args, kwargs)
-
-            # Check cache
-            if c.has(cache_key):
-                return c.get(cache_key)
-
-            # Execute and cache
+            name = _table_name(table)
+            found, value = c._lookup(cache_key, name)
+            if found:
+                return value
             result = await func(*args, **kwargs)
-            c.set(cache_key, result, ttl_seconds=ttl_seconds, table=table)
+            if value is not None:
+                c._store(cache_key, result, ttl_seconds, name, value)
             return result
 
         wrapper.invalidate = lambda: (cache or get_cache()).invalidate(
@@ -523,58 +590,74 @@ def async_cached_query(
     return decorator
 
 
-class CacheAwareModel:
-    """Mixin to automatically invalidate cache on model changes.
+# ----- what a write and the end of a transaction tell the caches --------------------------
+
+
+def _tables_written(db, tables: set) -> None:
+    """``tables`` (names as ``_table_name`` gives them) were just written through ``db``. Inside
+    a transaction of ``db``'s own each is held until that transaction ends
+    (``level_ended``); every cache drops their entries. ``db`` is ``None`` for a queryset built
+    by hand without a database: no transaction of a database object is open around it."""
+    written = db._written_level() if db is not None else None
+    if written is not None:
+        with _held_lock:
+            for name in tables - written:
+                written.add(name)
+                _held[name] = _held.get(name, 0) + 1
+    _tell_caches(tables)
+
+
+def level_ended(written: set, above: Optional[set]) -> None:
+    """A transaction level that wrote the tables ``written`` ended (any way it ends): each is
+    held one level less, or from now on by ``above`` (the level a commit hands them to,
+    ``None`` at the outermost or on a rollback). Nothing is dropped here: no entry of a held
+    table can have been stored since the write dropped them."""
+    with _held_lock:
+        for name in written:
+            if above is not None and name not in above:
+                above.add(name)
+            elif _held.get(name, 0) > 1:
+                _held[name] -= 1
+            else:
+                _held.pop(name, None)
+
+
+def _tell_caches(tables) -> None:
+    for ref in _caches:
+        c = ref()
+        if c is not None:
+            c._written(tables)
+
+
+class CacheAwareModel(WriteRules):
+    """Mixin to keep cached results of the model's table fresh.
+
+    Every way of writing the model's rows (``save()``, ``save_partial()``, ``save_many()``,
+    ``delete()``, ``delete_with_policy()``, a queryset's ``update()``, ``update_one()``,
+    ``update_n()`` and ``delete_all()``, sync and async, and the rows a delete's policy
+    changes) drops the cached entries of its table (and of ``Meta.cache_table``, where the
+    class sets one); inside a transaction no entry of the table is served or stored until
+    it ends.
 
     Usage::
 
         class User(CacheAwareModel, SQLerModel):
             name: str
 
-            class Meta:
-                cache_table = "user"
+        @cached_query(table=User)
+        def users():
+            return User.query().all()
 
-        # Now saves/deletes automatically invalidate the cache
-        user.save()  # Invalidates "user" table cache
+        user.save()  # the next users() reads the table
     """
 
     @classmethod
-    def _get_cache_table(cls) -> Optional[str]:
-        """Get the cache table name for this model."""
-        if hasattr(cls, "Meta") and hasattr(cls.Meta, "cache_table"):
-            return cls.Meta.cache_table
-        if hasattr(cls, "__sqler_table__"):
-            return cls.__sqler_table__
-        return cls.__name__.lower()
+    def _get_cache_table(cls) -> str:
+        """The name of this class's cached results besides its table: ``Meta.cache_table``
+        where the class sets one, else its table."""
+        return getattr(getattr(cls, "Meta", None), "cache_table", None) or _unchecked_table_name(cls)
 
-    def save(self, *args, **kwargs):
-        """Save and invalidate cache."""
-        result = super().save(*args, **kwargs)
-        table = self._get_cache_table()
-        if table:
-            get_cache().invalidate_table(table)
-        return result
-
-    async def asave(self, *args, **kwargs):
-        """Async save and invalidate cache."""
-        result = await super().asave(*args, **kwargs)
-        table = self._get_cache_table()
-        if table:
-            get_cache().invalidate_table(table)
-        return result
-
-    def delete(self, *args, **kwargs):
-        """Delete and invalidate cache."""
-        result = super().delete(*args, **kwargs)
-        table = self._get_cache_table()
-        if table:
-            get_cache().invalidate_table(table)
-        return result
-
-    async def adelete(self, *args, **kwargs):
-        """Async delete and invalidate cache."""
-        result = await super().adelete(*args, **kwargs)
-        table = self._get_cache_table()
-        if table:
-            get_cache().invalidate_table(table)
-        return result
+    @classmethod
+    def _table_written(cls, db, table: str) -> None:
+        _tables_written(db, {table.lower(), cls._get_cache_table().lower()})
+        super()._table_written(db, table)

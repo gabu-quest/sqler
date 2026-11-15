@@ -200,7 +200,7 @@ class SQLerQuerySet(Generic[T]):
         """
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
-            return self._checked("update").update(**fields)
+            return self._told(self._checked("update").update(**fields))
         return len(self._written("update", lambda q: q._changed(fields)))
 
     def update_one(self, **fields) -> Optional[T]:
@@ -253,7 +253,7 @@ class SQLerQuerySet(Generic[T]):
             int: Number of rows deleted.
         """
         if not _write_rules.set_delete(self._model_cls, self._query._table, on_delete):
-            return self._checked().delete()
+            return self._told(self._checked().delete())
         return len(self._written("rows", lambda q: [(doc, None) for doc in q._deleted()], on_delete))
 
     def _updated(self, fields: dict, n: int, op: str) -> list[dict]:
@@ -261,8 +261,12 @@ class SQLerQuerySet(Generic[T]):
         written."""
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
-            return self._checked("update")._update_picked(fields, n, op)
+            return self._told(self._checked("update")._update_picked(fields, n, op))
         return [after for _, after in self._written("update", lambda q: q._changed(fields, n))]
+
+    def _told(self, result):
+        """``result`` of a write that went past the row rules; the class is told of it."""
+        return _write_rules.told(self._model_cls, self._db, self._query._table, result)
 
     def _written(self, use: str, write, on_delete: Optional[str] = None) -> list:
         """``write(query)``, what ``on_delete`` does about the rows that refer to the rows it

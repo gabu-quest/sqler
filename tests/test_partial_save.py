@@ -548,6 +548,18 @@ def test_after_a_partial_save_the_model_is_clean_by_both_answers(db, cls):
     assert [(q.sql, q.params[:1]) for q in after_partial] == [(q.sql, q.params[:1]) for q in after_full]
 
 
+@pytest.mark.parametrize("cls", BASES, ids=lambda c: c.__name__)
+def test_save_many_leaves_the_tracker_as_a_loop_of_save_does(db, cls):
+    batch, looped = cls(key="batch"), cls(key="looped")
+    batch.value = looped.value = "changed"
+    cls.save_many([batch], db=db)
+    looped.save(db=db)
+    assert [(m.is_dirty, m.changed_fields, m.get_change_history()) for m in (batch, looped)] == [
+        (False, set(), []),
+        (False, set(), []),
+    ]
+
+
 def test_is_dirty_stays_a_property_on_a_tracked_model(db):
     m = PsDoc(key="k").save(db=db)
     assert m.is_dirty is False

@@ -1,4 +1,4 @@
-"""Tests for new features: export/import, caching, tracking."""
+"""Tests for new features: export/import, tracking (the cache tests are in test_query_cache.py)."""
 
 import csv
 import json
@@ -15,7 +15,6 @@ from sqler import (
     SQLerDB,
     SQLerModel,
     TrackedModel,
-    cached_query,
     export_csv,
     export_csv_string,
     export_json,
@@ -322,147 +321,6 @@ class TestImportJSONL:
 
             logs = self.Log.query().all()
             assert len(logs) == 2
-
-
-# =============================================================================
-# Cache Tests
-# =============================================================================
-
-
-class TestQueryCache:
-    """Tests for QueryCache functionality."""
-
-    def test_cache_set_and_get(self):
-        """Basic set and get works."""
-        cache = QueryCache(max_size=100)
-
-        cache.set("key1", {"data": "value"})
-        result = cache.get("key1")
-
-        assert result == {"data": "value"}
-
-    def test_cache_ttl_expiration(self):
-        """TTL expiration works."""
-        cache = QueryCache(max_size=100, default_ttl_seconds=0.1)
-
-        cache.set("key1", "value")
-        assert cache.has("key1")
-
-        import time
-
-        time.sleep(0.15)
-
-        assert not cache.has("key1")
-        assert cache.get("key1") is None
-
-    def test_cache_lru_eviction(self):
-        """LRU eviction works when max size reached."""
-        cache = QueryCache(max_size=3)
-
-        cache.set("a", 1)
-        cache.set("b", 2)
-        cache.set("c", 3)
-
-        # Access 'a' to make it recently used
-        cache.get("a")
-
-        # Add new item, should evict 'b' (least recently used)
-        cache.set("d", 4)
-
-        assert cache.has("a")
-        assert not cache.has("b")
-        assert cache.has("c")
-        assert cache.has("d")
-
-    def test_cache_invalidate_key(self):
-        """Invalidate specific key works."""
-        cache = QueryCache(max_size=100)
-
-        cache.set("key1", "value1")
-        cache.set("key2", "value2")
-
-        cache.invalidate("key1")
-
-        assert not cache.has("key1")
-        assert cache.has("key2")
-
-    def test_cache_invalidate_pattern(self):
-        """Pattern invalidation works."""
-        cache = QueryCache(max_size=100)
-
-        cache.set("users:1", "user1")
-        cache.set("users:2", "user2")
-        cache.set("products:1", "product1")
-
-        count = cache.invalidate_pattern("users:*")
-
-        assert count == 2
-        assert not cache.has("users:1")
-        assert not cache.has("users:2")
-        assert cache.has("products:1")
-
-    def test_cache_invalidate_table(self):
-        """Table invalidation works."""
-        cache = QueryCache(max_size=100)
-
-        cache.set("key1", "value1", table="users")
-        cache.set("key2", "value2", table="users")
-        cache.set("key3", "value3", table="products")
-
-        count = cache.invalidate_table("users")
-
-        assert count == 2
-        assert not cache.has("key1")
-        assert cache.has("key3")
-
-    def test_cache_stats(self):
-        """Cache statistics are tracked."""
-        cache = QueryCache(max_size=100)
-
-        cache.set("key1", "value1")
-        cache.get("key1")  # Hit
-        cache.get("key2")  # Miss
-
-        stats = cache.stats
-
-        assert stats.hits == 1
-        assert stats.misses == 1
-        assert stats.hit_rate == 0.5
-
-    def test_cache_clear(self):
-        """Clear all entries works."""
-        cache = QueryCache(max_size=100)
-
-        cache.set("a", 1)
-        cache.set("b", 2)
-
-        count = cache.clear()
-
-        assert count == 2
-        assert len(cache) == 0
-
-
-class TestCachedQueryDecorator:
-    """Tests for cached_query decorator."""
-
-    def test_cached_query_decorator(self):
-        """Decorator caches function results."""
-        call_count = 0
-
-        @cached_query(ttl_seconds=60)
-        def expensive_function():
-            nonlocal call_count
-            call_count += 1
-            return {"result": "data"}
-
-        # First call executes function
-        result1 = expensive_function()
-        assert call_count == 1
-
-        # Second call returns cached result
-        result2 = expensive_function()
-        assert call_count == 1  # Not incremented
-        assert result1 == result2
 
 
 # =============================================================================

@@ -233,6 +233,18 @@ async def test_an_async_model_never_saved_is_saved_in_full(db):
     assert m.is_dirty is False
 
 
+@pytest.mark.parametrize("cls", BASES, ids=lambda c: c.__name__)
+async def test_save_many_leaves_the_tracker_as_a_loop_of_save_does(db, cls):
+    batch, looped = cls(key="batch"), cls(key="looped")
+    batch.value = looped.value = "changed"
+    await cls.save_many([batch], db=db)
+    await looped.save(db=db)
+    assert [(m.is_dirty, m.changed_fields, m.get_change_history()) for m in (batch, looped)] == [
+        (False, set(), []),
+        (False, set(), []),
+    ]
+
+
 class APsBound(AsyncPartialUpdateMixin, AsyncTrackedModel, AsyncSQLerModel):
     __tablename__ = "aps_bound"
     name: str = ""

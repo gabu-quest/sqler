@@ -1711,10 +1711,36 @@ cache.invalidate_pattern("users:*")
 cache.invalidate_table("users")
 
 # Use the decorator for automatic caching
-@cached_query(ttl_seconds=60)
+@cached_query(ttl_seconds=60, table=User)
 def get_active_users():
     return User.query().filter(F("active") == True).all()
 ```
+
+`table=` names what a cached function reads: a table name, or a model class, which stands
+for its table (the name its rows are written to; a name that differs only by case is the
+same table, as in SQLite). With `CacheAwareModel` on the class, a cached result of its table
+is never kept from rows older than the last write of the table:
+
+1. Every way of writing the class's rows drops the entries of its table in every
+   `QueryCache` (and those tagged with `Meta.cache_table`, where the class sets one):
+   `save()`, `save_partial()`, `save_many()`, `delete()`, `delete_with_policy()` and the rows
+   a delete's policy nulls or deletes (their own class's table), and a queryset's `update()`,
+   `update_one()`, `update_n()` and `delete_all()`, sync and async. An async write tells the
+   cache when it has run, not when its coroutine is made. It sends no statement.
+2. While a transaction of this process that wrote the table is open (`db.transaction()`,
+   `with db:`), no entry of the table
+   is served or stored (`get`, `has` and `set` too): the writer reads its own uncommitted
+   rows through, and other threads and tasks read the committed rows through. Caching of
+   the table resumes when the transaction ends, committed or rolled back.
+3. A result is stored only if the table was not written while its function ran.
+
+An entry with no table is never dropped by a write, only by its lifetime. A write made with
+`db.*` directly (`insert_many`, `bulk_upsert`, the document methods, raw SQL) is below the
+model and drops nothing: call `invalidate_table()` after one. A transaction opened on the
+adapter directly (`adapter.begin_transaction()`) is not seen either: a write inside it drops
+the entries at the write, not again at its end. The cache lives in this
+process: a write by another process is not seen, and an entry's lifetime is the bound on how
+long it can serve rows that write replaced.
 
 ### [C39] Data export (CSV, JSON)
 
