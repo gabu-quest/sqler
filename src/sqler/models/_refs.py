@@ -36,6 +36,10 @@ from sqler.utils import validate_table_name
 # the reference it was.
 KEEP = object()
 
+# What a row its class cannot hydrate raises, for every loader, sync and async. An error of
+# the database is none of these: it reaches the caller, and the reference is not kept.
+UNLOADABLE = (LookupError, RuntimeError, ValueError)
+
 _SQLITE_INT_MIN = -(2**63)
 _SQLITE_INT_MAX = 2**63 - 1
 
@@ -179,7 +183,7 @@ def _replace(value: Any, at: Position, get: Callable[[tuple[str, int], Any], Any
 
 def batch(
     docs: list[dict], max_depth: int, cls: Any = None, db: Any = None
-) -> Generator[tuple[str, list], Any, tuple[list[dict], bool]]:
+) -> Generator[tuple[str, list], Any, list[dict]]:
     """Resolve the references of ``docs`` into stored documents, to ``max_depth`` levels.
 
     Only a reference at a typed position is followed (:func:`collect`): in a field of
@@ -188,11 +192,10 @@ def batch(
     read and is sent what :func:`read_rows` gives: ``(documents, versions)``, or ``None``
     when the table does not exist; one read per table per level. A table whose name is
     not an identifier is never read.
-    Returns ``(documents, found)``: ``found`` is False when no document holds a
-    reference to follow, and then the documents are ``docs`` itself; else they are new
-    ones in which a reference that is being replaced further up stays a reference, and
-    one to a row that is not there (gone, or its table missing) leads to no row
-    (:func:`replace`). A followed row is replaced by its class's model of the row
+    Returns the documents: ``docs`` itself when no document holds a reference to
+    follow; else new ones in which a reference that is being replaced further up stays a
+    reference, and one to a row that is not there (gone, or its table missing) leads to
+    no row (:func:`replace`). A followed row is replaced by its class's model of the row
     (:func:`from_row`) when the class reads ``db``: bound to it, or never bound; else by
     the stored document.
     """
@@ -203,7 +206,7 @@ def batch(
         for d in docs:
             held |= collect(d, top, found)
     if not held:
-        return docs, False
+        return docs
     # the rows asked for: a document, or None while it is not read (or is not there)
     resolved: dict[tuple[str, int], Optional[dict]] = {}
     versions: dict[tuple[str, int], Any] = {}
@@ -258,7 +261,7 @@ def batch(
         except (TypeError, ValueError):
             return out  # refused by its class: the parent's validation says so, as it did
 
-    return [replace(d, top, expand) for d in docs], True
+    return [replace(d, top, expand) for d in docs]
 
 
 def _reads(mdl: Any, db: Any) -> bool:
@@ -586,13 +589,13 @@ def resolve(data: dict, db: Any, seen: frozenset, cls: Any) -> dict:
         if loader is not None:
             try:
                 found = loader(ids, seen)
-            except (LookupError, RuntimeError, ValueError):
+            except UNLOADABLE:
                 found = dict.fromkeys(ids, KEEP)
         else:
             for rid in ids:
                 try:
                     found[rid] = mdl.from_id(rid)
-                except (LookupError, RuntimeError, ValueError):
+                except UNLOADABLE:
                     found[rid] = KEEP
         for rid in ids:
             loaded[(table, rid)] = found.get(rid)
@@ -615,14 +618,14 @@ async def aresolve(data: dict, db: Any, seen: frozenset, cls: Any) -> dict:
         if loader is not None:
             try:
                 found = await loader(ids, seen)
-            except Exception:
+            except UNLOADABLE:
                 found = dict.fromkeys(ids, KEEP)
         else:
             for rid in ids:
                 try:
                     fn = mdl.from_id
                     found[rid] = await fn(rid) if inspect.iscoroutinefunction(fn) else fn(rid)
-                except Exception:
+                except UNLOADABLE:
                     found[rid] = KEEP
         for rid in ids:
             loaded[(table, rid)] = found.get(rid)

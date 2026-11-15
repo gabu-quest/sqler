@@ -78,7 +78,7 @@ class SQLerSafeModel(SQLerModel):
             try:
                 typed = _refs.resolve(doc, db, seen | {(table, rid)}, cls)
                 inst = _refs.from_row(cls, typed, doc)
-            except (LookupError, RuntimeError, ValueError):
+            except _refs.UNLOADABLE:
                 out[rid] = _refs.KEEP
                 continue
             out[rid] = inst

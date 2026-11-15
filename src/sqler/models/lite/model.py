@@ -487,7 +487,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
             try:
                 doc = cls._resolve_relations(raw, db=db, _seen=seen | {(table, rid)})
                 inst = _refs.from_row(cls, doc, raw)
-            except (LookupError, RuntimeError, ValueError):
+            except _refs.UNLOADABLE:
                 out[rid] = _refs.KEEP
                 continue
             out[rid] = inst

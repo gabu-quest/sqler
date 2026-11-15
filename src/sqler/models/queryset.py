@@ -307,4 +307,4 @@ class SQLerQuerySet(Generic[T]):
             while True:
                 want = walk.send(_refs.read_rows(adapter, *want, self._db))
         except StopIteration as done:
-            return done.value[0]
+            return done.value

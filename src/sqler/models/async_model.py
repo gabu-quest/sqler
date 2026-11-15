@@ -453,7 +453,7 @@ class AsyncSQLerModel(BaseModel):
             try:
                 resolved = await cls._aresolve_relations(doc, db=db, _seen=seen | {(table, rid)})
                 inst = _refs.from_row(cls, resolved, doc)
-            except Exception:
+            except _refs.UNLOADABLE:
                 out[rid] = _refs.KEEP
                 continue
             out[rid] = inst

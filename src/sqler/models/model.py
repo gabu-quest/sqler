@@ -555,7 +555,7 @@ class SQLerModel(BaseModel):
                 inst = _refs.from_row(
                     cls, cls._resolve_relations(doc, db=db, _seen=seen | {(table, rid)}), doc
                 )
-            except (LookupError, RuntimeError, ValueError):
+            except _refs.UNLOADABLE:
                 out[rid] = _refs.KEEP
                 continue
             out[rid] = inst
