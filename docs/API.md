@@ -1760,7 +1760,9 @@ index on every insert, update and delete of the table, whoever writes: `save()`,
 change commits or rolls back with the write. `index()` and `remove()` change nothing then:
 an entry leaves only with its row. **`content_sync=False`** adds no trigger: the index
 changes only through `index()`, `remove()`, `rebuild()` and the mixin's `save()` and
-`delete()`.
+`delete()`. The mixin keeps the entry in the database the row is written to or deleted from
+(inside that database's transaction), and only for a row of the index's table: a database
+that has no table of this index is left alone.
 
 **What a trigger costs:** each insert and delete of a row writes its index row as well;
 an update writes it only when the row id or the stored value of an indexed field changed,

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
 
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import SchemaError, SearchQueryError
+from sqler.models._table_names import _instance_binding
 from sqler.utils import validate_field_name, validate_identifier
 
 if TYPE_CHECKING:
@@ -500,9 +501,10 @@ class FTSIndex:
         db.adapter.execute(f"DELETE FROM {self.index_table};")
         db.adapter.execute(f"{self._fill_sql(db, 't')} FROM {self.table} AS t;")
 
-    def _refill(self, _id: int) -> None:
-        """Make the index row of ``_id`` what its stored row says: none when it has no row."""
-        db = self._get_db()
+    def _refill(self, _id: int, db: Optional["SQLerDB"] = None) -> None:
+        """Make the index row of ``_id`` what its stored row says: none when it has no row.
+        ``db`` is the database to do it in, else the index's."""
+        db = db if db is not None else self._get_db()
         db.adapter.execute(f"DELETE FROM {self.index_table} WHERE rowid = ?;", [_id])
         db.adapter.execute(f"{self._fill_sql(db, 't')} FROM {self.table} AS t WHERE t._id = ?;", [_id])
         db.adapter.auto_commit()
@@ -560,13 +562,27 @@ class FTSIndex:
             self._refill(_id)
             return
 
-        db = self._get_db()
-        db.adapter.execute(
-            f"DELETE FROM {self.index_table} WHERE rowid = ?;",
-            [_id],
-        )
+        self._delete_entry(self._get_db(), _id)
 
+    def _delete_entry(self, db: "SQLerDB", _id: int) -> None:
+        db.adapter.execute(f"DELETE FROM {self.index_table} WHERE rowid = ?;", [_id])
         db.adapter.auto_commit()
+
+    def _follow(self, db: "SQLerDB", table: str, _id: int, *, deleted: bool) -> None:
+        """Keep the entry of ``_id`` after its row was written to, or deleted from, ``table``
+        of ``db``, in that database (so in the caller's transaction on it). A row of another
+        table, or a database that has no table of this index, has no entry to keep."""
+        if table != self.table:
+            return
+        if db is not self._get_db() and db.adapter.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?);",
+            [self.index_table],
+        ).fetchone() is None:
+            return
+        if deleted:
+            self._delete_entry(db, _id)
+        else:
+            self._refill(_id, db)
 
     def search(
         self,
@@ -940,8 +956,10 @@ class SearchableMixin:
     def save(self, *args, **kwargs):
         """Save and update search index (with ``content_sync`` its triggers do)."""
         result = super().save(*args, **kwargs)
-        if self._fts_index is not None and not self._fts_index.content_sync:
-            self._fts_index.index(self)
+        index = self._fts_index
+        if index is not None and not index.content_sync:
+            # a saved instance belongs to the database and table it was written to
+            index._follow(*_instance_binding(self), self._id, deleted=False)
         return result
 
     async def asave(self, *args, **kwargs):
@@ -954,9 +972,13 @@ class SearchableMixin:
     def delete(self, *args, **kwargs):
         """Delete and remove from search index (with ``content_sync`` its triggers do)."""
         _id = self._id
+        index = self._fts_index
+        manual = index is not None and _id is not None and not index.content_sync
+        if manual:
+            db, table = _instance_binding(self, kwargs.get("db"))
         result = super().delete(*args, **kwargs)
-        if self._fts_index is not None and _id is not None and not self._fts_index.content_sync:
-            self._fts_index.remove(_id)
+        if manual:
+            index._follow(db, table, _id, deleted=True)
         return result
 
     async def adelete(self, *args, **kwargs):

@@ -1252,3 +1252,205 @@ def test_an_index_on_an_async_database_raises_type_error_before_anything_is_sent
             await adb.close()
 
     asyncio.run(run())
+
+
+# --- the entry of a row is kept in the database the row is written to ---
+
+
+def _manual_post_class(db, table="mposts", fields=("title",), promoted=None):
+    class MPost(SearchableMixin, SQLerModel):
+        title: str = ""
+
+    if promoted:
+        MPost.__promoted__ = promoted
+    MPost.set_db(db, table)
+    MPost._fts_index = FTSIndex(MPost, list(fields), db=db, content_sync=False)
+    MPost._fts_index.create()
+    return MPost
+
+
+def _entries(index, db):
+    """The index rows of ``index`` as ``db`` holds them, or None when it has no index table."""
+    try:
+        return sorted(
+            tuple(r) for r in db.adapter.execute(f"SELECT rowid, title FROM {index.index_table};")
+        )
+    except sqlite3.OperationalError:
+        return None
+
+
+@pytest.fixture
+def two_dbs():
+    a, b = SQLerDB.in_memory(shared=False), SQLerDB.in_memory(shared=False)
+    yield a, b
+    a.close()
+    b.close()
+
+
+def test_manual_index_follows_a_row_written_and_deleted_in_another_database(two_dbs):
+    a, b = two_dbs
+    Post = _manual_post_class(a)
+    Post(title="apple").save()
+    other = Post(title="zebra")
+    other.save(db=b)
+    assert (other._id, _entries(Post._fts_index, a)) == (1, [(1, "apple")])
+    row = Post.using(b).all()[0]
+    row.title = "zebra crossing"
+    row.save()
+    assert _entries(Post._fts_index, a) == [(1, "apple")]
+    row.delete()
+    assert Post.using(b).count() == 0
+    assert _entries(Post._fts_index, a) == [(1, "apple")]
+    assert [m.title for m in Post.search("apple")] == ["apple"]
+
+
+def test_manual_index_delete_in_another_database_that_rolls_back_changes_neither(two_dbs):
+    a, b = two_dbs
+    Post = _manual_post_class(a)
+    Post(title="apple").save()
+    Post(title="zebra").save(db=b)
+    row = Post.using(b).all()[0]
+    with pytest.raises(RuntimeError, match="undo"):
+        with b.transaction():
+            row.delete()
+            raise RuntimeError("undo")
+    assert [r.title for r in Post.using(b).all()] == ["zebra"]
+    assert _entries(Post._fts_index, a) == [(1, "apple")]
+
+
+def test_manual_index_of_a_second_object_on_the_same_file_stays_right(tmp_path):
+    path = str(tmp_path / "one.db")
+    a, same = SQLerDB.on_disk(path), SQLerDB.on_disk(path)
+    try:
+        Post = _manual_post_class(a)
+        first = Post(title="apple")
+        first.save(db=same)
+        assert _entries(Post._fts_index, a) == [(1, "apple")]
+        row = Post.using(same).all()[0]
+        row.title = "pear"
+        row.save()
+        assert _entries(Post._fts_index, a) == [(1, "pear")]
+        with same.transaction():
+            row.title = "plum"
+            row.save()
+            assert _entries(Post._fts_index, same) == [(1, "plum")]
+        assert _entries(Post._fts_index, a) == [(1, "plum")]
+        with pytest.raises(RuntimeError, match="undo"):
+            with same.transaction():
+                row.delete()
+                raise RuntimeError("undo")
+        assert _entries(Post._fts_index, a) == [(1, "plum")]
+        Post.using(same).all()[0].delete()
+        assert _entries(Post._fts_index, a) == []
+    finally:
+        same.close()
+        a.close()
+
+
+def test_manual_index_another_database_with_its_own_index_table_is_kept_by_its_own_rows(two_dbs):
+    a, b = two_dbs
+    Post = _manual_post_class(a)
+    Post(title="apple").save()
+    FTSIndex(Post, ["title"], db=b, content_sync=False).create()
+    row = Post(title="zebra")
+    row.save(db=b)
+    assert _entries(Post._fts_index, b) == [(1, "zebra")]
+    row.title = "zebra crossing"
+    row.save()
+    assert _entries(Post._fts_index, b) == [(1, "zebra crossing")]
+    row.delete()
+    assert _entries(Post._fts_index, b) == []
+    assert _entries(Post._fts_index, a) == [(1, "apple")]
+
+
+def test_manual_index_another_database_without_the_index_table_gets_nothing_written(two_dbs):
+    a, b = two_dbs
+    Post = _manual_post_class(a)
+    row = Post(title="zebra")
+    with query_logger.capture() as sent:
+        row.save(db=b)
+    assert _entries(Post._fts_index, b) is None
+    # the one statement more: does that database have the index table
+    assert [q.sql for q in sent if "lower(name)" in q.sql] == [
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?);"
+    ]
+    with query_logger.capture() as sent:
+        row.delete()
+    assert [q.sql for q in sent if "lower(name)" in q.sql] == [
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?);"
+    ]
+    assert _entries(Post._fts_index, b) is None
+    assert _entries(Post._fts_index, a) == []
+
+
+def test_manual_index_a_row_of_another_table_touches_no_index(two_dbs):
+    a, _ = two_dbs
+    Post = _manual_post_class(a)
+    Post(title="apple").save()
+    a.ensure_table("elsewhere")
+    a.insert_document("elsewhere", {"title": "other row"})
+    read = Post.using(a, table="elsewhere").all()[0]
+    assert (read._id, read.title) == (1, "other row")
+    read.title = "edited"
+    with query_logger.capture() as sent:
+        read.save()
+        read.delete()
+    assert [q.sql for q in sent if "mposts_fts" in q.sql] == []
+    assert _entries(Post._fts_index, a) == [(1, "apple")]
+
+
+def test_manual_index_delete_of_a_row_never_saved_raises_what_it_raised(two_dbs):
+    a, _ = two_dbs
+    Post = _manual_post_class(a)
+    with pytest.raises(ValueError) as err:
+        Post(title="nobody").delete()
+    assert str(err.value) == "Cannot delete unsaved model (missing _id)"
+
+
+def test_manual_index_with_a_promoted_field_follows_the_row_in_another_database(two_dbs):
+    a, b = two_dbs
+    Post = _manual_post_class(a, table="pposts", promoted={"title": "TEXT"})
+    Post(title="apple").save()
+    FTSIndex(Post, ["title"], db=b, content_sync=False).create()
+    row = Post(title="zebra")
+    row.save(db=b)
+    assert _entries(Post._fts_index, b) == [(1, "zebra")]
+    row.delete()
+    assert _entries(Post._fts_index, b) == []
+    assert _entries(Post._fts_index, a) == [(1, "apple")]
+
+
+def test_manual_index_in_the_same_database_sends_the_statements_it_sent(two_dbs):
+    a, _ = two_dbs
+    Post = _manual_post_class(a)
+    with query_logger.capture() as sent:
+        row = Post(title="apple").save()
+    saved = [q.sql for q in sent if "mposts_fts" in q.sql]
+    with query_logger.capture() as sent:
+        row.delete()
+    deleted = [q.sql for q in sent if "mposts_fts" in q.sql]
+    assert saved == [
+        "DELETE FROM mposts_fts WHERE rowid = ?;",
+        "INSERT INTO mposts_fts(rowid, title) SELECT t._id, json_extract(t.data, '$.title') FROM mposts AS t WHERE t._id = ?;",
+    ]
+    assert deleted == ["DELETE FROM mposts_fts WHERE rowid = ?;"]
+
+
+def test_synced_index_in_another_database_is_left_to_its_triggers(two_dbs):
+    a, b = two_dbs
+
+    class SyncPost(SearchableMixin, SQLerModel):
+        title: str = ""
+
+        class FTS:
+            fields = ["title"]
+
+    SyncPost.set_db(a, "sposts")
+    SyncPost.create_search_index()
+    SyncPost(title="apple").save()
+    row = SyncPost(title="zebra")
+    with query_logger.capture() as sent:
+        row.save(db=b)
+        row.delete()
+    assert [q.sql for q in sent if "sposts_fts" in q.sql] == []
+    assert _entries(SyncPost._fts_index, a) == [(1, "apple")]
