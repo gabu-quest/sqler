@@ -142,16 +142,69 @@ _AT_VERSION = "_id = ? AND _version = ? AND COALESCE(json_extract(data, '$._vers
 def _split_promoted(doc: dict[str, Any], promoted_fields: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """``doc`` as a row holds it: the JSON document, and each of the ``promoted_fields`` in
     stored form in its column. Every promoted name is checked, so it can go into SQL."""
+    if not promoted_fields:
+        return doc, {}
     for field in promoted_fields:
         validate_column_name(field)
+    return _split(doc, promoted_fields)
+
+
+def _split(doc: dict[str, Any], columns: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """:func:`_split_promoted` with ``columns`` already checked: each key of ``doc`` that names
+    one of them in stored form, the other keys as the JSON document. A column whose key ``doc``
+    does not hold is not in the result, so a write leaves it as it is."""
     json_doc: dict[str, Any] = {}
-    columns: dict[str, Any] = {}
+    values: dict[str, Any] = {}
     for k, v in doc.items():
-        if k in promoted_fields:
-            columns[k] = stored(v, field=k)
+        if k in columns:
+            values[k] = stored(v, field=k)
         else:
             json_doc[k] = v
-    return json_doc, columns
+    return json_doc, values
+
+
+def _row(doc: dict[str, Any], columns: Any) -> tuple[tuple[str, ...], str, list[Any]]:
+    """``doc`` as one row of a table with the checked ``columns`` beside ``data``: the columns
+    whose key it holds, in the table's order; its JSON text; their values in stored form."""
+    if not columns:
+        return (), dumps(doc), []
+    json_doc, values = _split(doc, columns)
+    held = tuple(c for c in columns if c in values)
+    return held, dumps(json_doc), [values[c] for c in held]
+
+
+def _runs(docs: list[dict[str, Any]], columns: Any, fixed: int) -> Any:
+    """The rows of ``docs`` (:func:`_row`) for multi-row statements: each run of consecutive
+    documents that hold the same column keys, as ``(those columns, [(index in docs, JSON text,
+    values)])``, cut so that one statement binds at most ``_MAX_VARIABLES`` with ``fixed``
+    variables a row besides the JSON text and the values, and holds one row at the least."""
+    keys: Optional[tuple[str, ...]] = None
+    run: list[tuple[int, str, list[Any]]] = []
+    size = 0
+    for i, doc in enumerate(docs):
+        held, text, values = _row(doc, columns)
+        if held != keys or len(run) == size:
+            if run:
+                yield keys, run
+            keys, run, size = held, [], max(1, _MAX_VARIABLES // (fixed + 1 + len(held)))
+        run.append((i, text, values))
+    if run:
+        yield keys, run
+
+
+def _insert_sql(table: str, held: Any, n: int, *, versioned: bool = False, upsert: bool = False) -> str:
+    """The ``INSERT`` of ``n`` rows into the validated ``table`` that names ``data`` and the
+    columns ``held``, nothing else (a column it does not name gets its DEFAULT, or keeps its
+    value on an update). ``versioned``: ``_version`` 0; ``upsert``: each row leads with its
+    ``_id`` and an existing row takes ``data`` and ``held``."""
+    names = ["_id", "data", *held] if upsert else ["data", "_version", *held] if versioned else ["data", *held]
+    lead = ["?", "json(?)"] if upsert else ["json(?)", "0"] if versioned else ["json(?)"]
+    mark = f"({', '.join([*lead, *['?'] * len(held)])})"
+    sql = f"INSERT INTO {table} ({', '.join(names)}) VALUES {', '.join([mark] * n)}"
+    if upsert:
+        sets = ", ".join(f"{c} = excluded.{c}" for c in ("data", *held))
+        sql += f" ON CONFLICT(_id) DO UPDATE SET {sets}"
+    return sql + ";"
 
 
 def _json_path(key: str) -> str:
@@ -850,7 +903,8 @@ class SQLerDB:
         return _id, expected_version + 1
 
     def insert_document(self, table: str, doc: dict[str, Any]) -> int:
-        """Insert a document.
+        """Insert a document: a key that names a column beside ``data`` goes into the column, the
+        rest into ``data``; a column whose key it does not hold is left out, so it gets its DEFAULT.
 
         Args:
             table: Table name.
@@ -859,14 +913,13 @@ class SQLerDB:
         Returns:
             int: Newly assigned ``_id``.
         """
+        table = validate_table_name(table)
         self._ensure_table(table)
-        payload = dumps(doc)
-        cursor = self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
-        self.adapter.auto_commit()
-        return cursor.lastrowid
+        return self.upsert_document_promoted(table, None, doc, self._columns_of(table))
 
     def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
-        """Insert or update a document.
+        """Insert or update a document, as :meth:`insert_document` writes it; an update leaves a
+        column whose key the document does not hold as it is.
 
         Args:
             table: Table name.
@@ -876,13 +929,11 @@ class SQLerDB:
         Returns:
             int: The existing or newly assigned ``_id``.
         """
+        table = validate_table_name(table)
         self._ensure_table(table)
-        payload = dumps(doc)
         if _id is None:
             return self.insert_document(table, doc)
-        self.adapter.execute(f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id])
-        self.adapter.auto_commit()
-        return _id
+        return self.upsert_document_promoted(table, _id, doc, self._columns_of(table))
 
     def _update_fields(
         self,
@@ -894,9 +945,10 @@ class SQLerDB:
         expected_version: Optional[int] = None,
     ) -> Optional[int]:
         """Write the ``fields`` of ``doc`` into row ``_id`` and leave its other fields as they
-        are, in one statement: the JSON ones in ``data``, the ``promoted`` ones in their columns.
-        With ``expected_version`` the row is written only at that version, as
-        ``upsert_with_version`` writes it, and the new version is returned.
+        are, in one statement: a field that names a column beside ``data`` in its column, the
+        rest in ``data``. The columns are the table's (:meth:`_columns_of`), whatever
+        ``promoted`` the caller passes. With ``expected_version`` the row is written only at
+        that version, as ``upsert_with_version`` writes it, and the new version is returned.
 
         Raises:
             NotFoundError: The row is gone: a write of some fields cannot recreate it.
@@ -907,7 +959,7 @@ class SQLerDB:
             self._ensure_table(table)
         elif not self._is_versioned(table):
             self._ensure_versioned_table(table)
-        update = _fields_update(table, _id, doc, fields, promoted, expected_version)
+        update = _fields_update(table, _id, doc, fields, self._columns_of(table), expected_version)
         if update is None:
             return None
         if expected_version is None:
@@ -939,8 +991,9 @@ class SQLerDB:
         """
         if not docs:
             return []
+        table = validate_table_name(table)
         self._ensure_table(table)
-        return self._insert_many_chunked(table, docs, cols=["data"], versioned=False)
+        return self._insert_many_chunked(table, docs, versioned=False, promoted_fields=self._columns_of(table))
 
     def insert_many_promoted(
         self, table: str, docs: list[dict[str, Any]], promoted_fields: list[str]
@@ -960,8 +1013,7 @@ class SQLerDB:
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
-        cols = ["data"] + promoted_fields
-        return self._insert_many_chunked(table, docs, cols=cols, versioned=False, promoted_fields=promoted_fields)
+        return self._insert_many_chunked(table, docs, versioned=False, promoted_fields=promoted_fields)
 
     def insert_many_with_version(
         self, table: str, docs: list[dict[str, Any]]
@@ -977,8 +1029,10 @@ class SQLerDB:
         """
         if not docs:
             return []
+        table = validate_table_name(table)
+        columns = self._columns_of(table)
         self._ensure_versioned_table(table)
-        ids = self._insert_many_chunked(table, docs, cols=["data"], versioned=True)
+        ids = self._insert_many_chunked(table, docs, versioned=True, promoted_fields=columns)
         return [(id_, 0) for id_ in ids]
 
     def insert_many_with_version_promoted(
@@ -999,8 +1053,7 @@ class SQLerDB:
         for field in promoted_fields:
             validate_identifier(field)
         self._ensure_versioned_table(table)
-        cols = ["data"] + promoted_fields
-        ids = self._insert_many_chunked(table, docs, cols=cols, versioned=True, promoted_fields=promoted_fields)
+        ids = self._insert_many_chunked(table, docs, versioned=True, promoted_fields=promoted_fields)
         return [(id_, 0) for id_ in ids]
 
     def _insert_many_chunked(
@@ -1008,68 +1061,27 @@ class SQLerDB:
         table: str,
         docs: list[dict[str, Any]],
         *,
-        cols: list[str],
         versioned: bool,
         promoted_fields: list[str] | None = None,
     ) -> list[int]:
-        """Internal: chunked multi-row INSERT with transaction wrapping.
-
-        Builds ``INSERT INTO t (col1, ...) VALUES (...), (...), ...`` statements,
-        chunking to stay within SQLite's 999-parameter limit.
+        """Internal: the multi-row INSERTs of ``docs`` into the validated ``table``, in one
+        transaction. Each run of consecutive documents that hold the same keys of the checked
+        ``promoted_fields`` is one statement (:func:`_runs`), within SQLite's variable limit;
+        a column a document does not hold is not named, so it gets its DEFAULT.
         """
-        promoted_fields = promoted_fields or []
-        params_per_row = 1 + len(promoted_fields)
-        max_rows_per_chunk = max(1, _MAX_VARIABLES // params_per_row)
-
         all_ids: list[int] = []
-        all_col_names = list(cols)
-        if versioned:
-            all_col_names = ["data", "_version"] + promoted_fields
-
         with self.transaction():
-            for offset in range(0, len(docs), max_rows_per_chunk):
-                chunk = docs[offset : offset + max_rows_per_chunk]
-                params: list[Any] = []
-                value_groups: list[str] = []
-
-                for doc in chunk:
-                    if promoted_fields:
-                        promoted_vals = {k: stored(doc[k], field=k) for k in promoted_fields if k in doc}
-                        json_doc = {k: v for k, v in doc.items() if k not in promoted_fields}
-                    else:
-                        json_doc = doc
-                        promoted_vals = {}
-
-                    payload = dumps(json_doc)
-                    row_placeholders = ["json(?)"]
-                    params.append(payload)
-
-                    if versioned:
-                        row_placeholders.append("0")
-
-                    for pf in promoted_fields:
-                        row_placeholders.append("?")
-                        params.append(promoted_vals.get(pf))
-
-                    value_groups.append(f"({', '.join(row_placeholders)})")
-
-                col_list = ", ".join(all_col_names)
-                values_sql = ", ".join(value_groups)
-                sql = f"INSERT INTO {table} ({col_list}) VALUES {values_sql};"
-
-                cursor = self.adapter.execute(sql, params)
+            for held, rows in _runs(docs, promoted_fields or (), 0):
+                params = [p for _, text, values in rows for p in (text, *values)]
+                cursor = self.adapter.execute(_insert_sql(table, held, len(rows), versioned=versioned), params)
                 try:
                     last_id = cursor.lastrowid
                 finally:
                     cursor.close()
-
                 # ID range is contiguous because BEGIN IMMEDIATE (from
                 # self.transaction()) holds an exclusive write lock, preventing
                 # concurrent inserts from interleaving AUTOINCREMENT IDs.
-                chunk_size = len(chunk)
-                first_id = last_id - chunk_size + 1
-                all_ids.extend(range(first_id, last_id + 1))
-
+                all_ids.extend(range(last_id - len(rows) + 1, last_id + 1))
         return all_ids
 
     def bulk_upsert(self, table: str, docs: list[dict[str, Any]]) -> list[int]:
@@ -1079,7 +1091,9 @@ class SQLerDB:
         (with ``_id``) are updated.
 
         Uses chunked multi-row INSERT statements (same pattern as
-        ``_insert_many_chunked``) to minimize per-row Python overhead.
+        ``_insert_many_chunked``) to minimize per-row Python overhead. A column
+        whose key a document does not hold is not written: a new row gets its
+        DEFAULT, an existing row keeps its value.
 
         Args:
             table: Table name.
@@ -1089,63 +1103,31 @@ class SQLerDB:
         Returns:
             list[int]: The ``_id`` for each input document, preserving order.
         """
+        table = validate_table_name(table)
         self._ensure_table(table)
         if not docs:
             return []
-
-        # Split into inserts (no _id) and updates (has _id), tracking
-        # original indices so we can return IDs in input order.
-        inserts: list[tuple[int, dict]] = []
-        updates: list[tuple[int, dict]] = []
-        for i, doc in enumerate(docs):
-            if doc.get("_id") is None:
-                inserts.append((i, doc))
-            else:
-                updates.append((i, doc))
-
+        columns = self._columns_of(table)
+        # inserts (no _id) and updates (an _id), by their index in ``docs``, so the ids come back
+        # in input order; each without its ``_id`` key, which is the row's column
+        inserts = [i for i, doc in enumerate(docs) if doc.get("_id") is None]
+        updates = [i for i, doc in enumerate(docs) if doc.get("_id") is not None]
+        bodies = [{k: v for k, v in doc.items() if k != "_id"} for doc in docs]
         assigned = [0] * len(docs)
-
         with self.adapter as adapter:
-            # Batch inserts: chunked multi-row INSERT, 1 param per row.
-            if inserts:
-                for offset in range(0, len(inserts), 999):
-                    chunk = inserts[offset : offset + 999]
-                    params = [
-                        dumps({k: v for k, v in doc.items() if k != "_id"})
-                        for _, doc in chunk
-                    ]
-                    values_sql = ", ".join("(json(?))" for _ in chunk)
-                    sql = f"INSERT INTO {table} (data) VALUES {values_sql};"
-                    cursor = adapter.execute(sql, params)
-                    last_id = cursor.lastrowid
-                    # ID range is contiguous because BEGIN IMMEDIATE (from
-                    # self.adapter context) holds an exclusive write lock.
-                    first_id = last_id - len(chunk) + 1
-                    for j, (orig_idx, doc) in enumerate(chunk):
-                        new_id = first_id + j
-                        assigned[orig_idx] = new_id
-                        doc["_id"] = new_id
-
-            # Batch updates: chunked multi-row INSERT ON CONFLICT, 2 params
-            # per row.  Chunk size 499 keeps params under sqlite's 999 limit.
-            if updates:
-                for offset in range(0, len(updates), 499):
-                    chunk = updates[offset : offset + 499]
-                    params = []
-                    for _, doc in chunk:
-                        params.extend([
-                            int(doc["_id"]),
-                            dumps({k: v for k, v in doc.items() if k != "_id"}),
-                        ])
-                    values_sql = ", ".join("(?, json(?))" for _ in chunk)
-                    sql = (
-                        f"INSERT INTO {table} (_id, data) VALUES {values_sql} "
-                        "ON CONFLICT(_id) DO UPDATE SET data = excluded.data;"
-                    )
-                    adapter.execute(sql, params)
-                    for orig_idx, doc in chunk:
-                        assigned[orig_idx] = int(doc["_id"])
-
+            for held, rows in _runs([bodies[i] for i in inserts], columns, 0):
+                params = [p for _, text, values in rows for p in (text, *values)]
+                last_id = adapter.execute(_insert_sql(table, held, len(rows)), params).lastrowid
+                # ID range is contiguous because BEGIN IMMEDIATE (from
+                # self.adapter context) holds an exclusive write lock.
+                for j, (k, _, _) in enumerate(rows):
+                    i = inserts[k]
+                    assigned[i] = docs[i]["_id"] = last_id - len(rows) + 1 + j
+            for held, rows in _runs([bodies[i] for i in updates], columns, 1):
+                params = [p for k, text, values in rows for p in (int(docs[updates[k]]["_id"]), text, *values)]
+                adapter.execute(_insert_sql(table, held, len(rows), upsert=True), params)
+                for k, _, _ in rows:
+                    assigned[updates[k]] = int(docs[updates[k]]["_id"])
         return assigned
 
     def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
@@ -1530,32 +1512,7 @@ class SQLerDB:
             RuntimeError: On stale version conflicts (no rows updated).
         """
         table = validate_table_name(table)
-        if not self._is_versioned(table):
-            self._ensure_versioned_table(table)
-        payload = dumps(doc)
-        if _id is None:
-            cur = self.adapter.execute(
-                f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",
-                [payload],
-            )
-            self.adapter.auto_commit()
-            return cur.lastrowid, 0
-        if expected_version is None:
-            raise ValueError("expected_version required for update")
-        cur = self._versioned_update(
-            f"UPDATE {table} SET data = json(?), _version = _version + 1 "
-            f"WHERE {_AT_VERSION};",
-            [payload, _id, expected_version, expected_version, expected_version],
-        )
-        rc = getattr(cur, "rowcount", -1)
-        if rc <= 0:
-            # treat non-positive as conflict
-            # double-check via select
-            _ = self.adapter.execute(
-                f"SELECT _version FROM {table} WHERE _id = ?;", [_id]
-            ).fetchone()
-            raise StaleVersionError("Stale version: update rejected")
-        return _id, expected_version + 1
+        return self.upsert_with_version_promoted(table, _id, doc, expected_version, self._columns_of(table))
 
     def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         """Fetch a document by id including ``_version`` in the result dict.

@@ -209,3 +209,64 @@ def test_record_of_settled_promoted_columns(written):
     assert written.execute(
         "SELECT COUNT(*) FROM jobs WHERE json_type(data, '$.status') IS NOT NULL OR json_type(data, '$.priority') IS NOT NULL"
     ).fetchone() == (0,)
+
+
+def test_a_write_names_only_the_columns_its_document_holds(tmp_path):
+    """Section "Promoted columns": a key that names a column goes into it, a column whose key
+    the document does not hold is not written (an insert gives its DEFAULT, an update leaves
+    it), a key held as ``None`` writes NULL, a key in another case is a key of ``data``."""
+    for text in (
+        "`PRAGMA table_info` lists it, so a generated column is\nnot one",
+        "an update leaves its value, and an insert leaves it out, so SQLite\ngives it its `DEFAULT`",
+        "A key held with the value `None` writes NULL.",
+        "SQLite checks `NOT NULL` first",
+        "(`Status` beside the column `status`) is a key of\n`data`",
+    ):
+        assert text in DOC
+    path = str(tmp_path / "w.db")
+    db = SQLerDB.on_disk(path)
+    db.ensure_table("w", promoted={"status": "TEXT NOT NULL DEFAULT 'pending'", "note": "TEXT"})
+    db.insert_document("w", {"name": "a", "status": "open", "note": "n"})
+    db.insert_document("w", {"name": "b"})
+    db.insert_document("w", {"name": "c", "Status": "x"})
+    db.upsert_document("w", 1, {"name": "a2"})
+    db.upsert_document("w", 2, {"name": "b2", "note": None, "status": "done"})
+    db.close()
+    conn = sqlite3.connect(path)
+    try:
+        rows = conn.execute("SELECT _id, data, status, note FROM w ORDER BY _id").fetchall()
+    finally:
+        conn.close()
+    assert rows == [
+        (1, '{"name":"a2"}', "open", "n"),
+        (2, '{"name":"b2"}', "done", None),
+        (3, '{"name":"c","Status":"x"}', "pending", None),
+    ]
+
+
+def test_a_database_object_learns_a_tables_columns_once(tmp_path):
+    """Section "Promoted columns": an object learns a table's columns at its first write of
+    it; a column another object adds after that is seen by a new object, while this one
+    writes the key into ``data``."""
+    assert "a column added after that by another database object or by\nplain SQL is seen by a new database object" in DOC
+    path = str(tmp_path / "m.db")
+    first = SQLerDB.on_disk(path)
+    first.insert_document("m", {"name": "a"})
+    other = SQLerDB.on_disk(path)
+    other.ensure_table("m", promoted={"status": "TEXT"})
+    other.close()
+    first.insert_document("m", {"name": "b", "status": "kept in data"})
+    first.close()
+    fresh = SQLerDB.on_disk(path)
+    fresh.insert_document("m", {"name": "c", "status": "in its column"})
+    fresh.close()
+    conn = sqlite3.connect(path)
+    try:
+        rows = conn.execute("SELECT _id, data, status FROM m ORDER BY _id").fetchall()
+    finally:
+        conn.close()
+    assert rows == [
+        (1, '{"name":"a"}', None),
+        (2, '{"name":"b","status":"kept in data"}', None),
+        (3, '{"name":"c"}', "in its column"),
+    ]

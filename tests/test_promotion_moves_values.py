@@ -1329,3 +1329,688 @@ def test_a_table_sqler_makes_replaces_what_is_recorded_under_its_name(run):
     finally:
         other.close()
     assert _records(run.path) == [("fresh", "status")]
+
+
+# ---------------------------------------------------------------- the database's document writers on a table with columns
+#
+# A plain document writer (``insert_document``, ``upsert_document``, ``insert_many``,
+# ``insert_many_with_version``, ``bulk_upsert``, ``upsert_with_version``) puts each key of the
+# document where a read takes it: a key that names a column beside ``data`` into that column, in
+# stored form, the rest into ``data``. A column whose key the document does not hold is not
+# written: an update leaves its value, an insert gives it its DEFAULT (or NULL, or SQLite's error).
+
+
+def _call(run, is_async):
+    """``call(method, *args)``: the database method on ``tickets``, sync or async."""
+
+    def call(name, *args):
+        db = run.adb if is_async else run.db
+        out = getattr(db, name)(TABLE, *args)
+        return run.go(out) if is_async else out
+
+    return call
+
+
+INSERTS = {
+    "insert_document": lambda c, doc: c("insert_document", doc),
+    "upsert_document": lambda c, doc: c("upsert_document", None, doc),
+    "insert_many": lambda c, doc: c("insert_many", [doc])[0],
+    "insert_many_with_version": lambda c, doc: c("insert_many_with_version", [doc])[0][0],
+    "bulk_upsert": lambda c, doc: c("bulk_upsert", [dict(doc)])[0],
+    "upsert_with_version": lambda c, doc: c("upsert_with_version", None, doc, None)[0],
+}
+
+# each writes row ``_id``, saved through a model that does not version it (version 0)
+UPDATES = {
+    "upsert_document": lambda c, _id, doc: c("upsert_document", _id, doc),
+    "bulk_upsert": lambda c, _id, doc: c("bulk_upsert", [{**doc, "_id": _id}])[0],
+    "upsert_with_version": lambda c, _id, doc: c("upsert_with_version", _id, doc, 0)[0],
+}
+
+WRITES = [("insert", name) for name in INSERTS] + [("update", name) for name in UPDATES]
+IS_ASYNC = pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+
+
+def _write(run, is_async, kind, name, doc, _id=1):
+    """Write ``doc`` with the writer ``name``: a new row, or row ``_id``; returns the row's id."""
+    c = _call(run, is_async)
+    return INSERTS[name](c, doc) if kind == "insert" else UPDATES[name](c, _id, doc)
+
+
+def _stored_row(path, _id, columns):
+    """``(data, *columns, typeof of each column)`` of row ``_id``, read with ``sqlite3`` alone."""
+    conn = sqlite3.connect(path)
+    try:
+        cols = ", ".join([*columns, *(f"typeof({c})" for c in columns)])
+        return conn.execute(f"SELECT data, {cols} FROM {TABLE} WHERE _id = ?", [_id]).fetchone()
+    finally:
+        conn.close()
+
+
+def _three(promoted):
+    class Ticket(SQLerModel):
+        __tablename__ = TABLE
+        __promoted__ = promoted
+        name: str = ""
+        status: Optional[str] = None
+        n: Optional[int] = None
+
+    return Ticket
+
+
+def _as_the_model_writes(tmp_path, cls, doc):
+    """What a row of ``doc`` saved through ``cls`` holds and reads, in a database of its own."""
+    db = SQLerDB.on_disk(str(tmp_path / "model.db"))
+    try:
+        row = cls(**doc).save(db=db)
+        return _stored_row(str(tmp_path / "model.db"), row._id, list(cls.__promoted__)), db.find_document(TABLE, row._id)
+    finally:
+        db.close()
+
+
+ONE_AND_TWO = pytest.mark.parametrize(
+    "promoted", [{"status": "TEXT"}, {"status": "TEXT", "n": "INTEGER"}], ids=["one column", "two columns"]
+)
+
+
+@IS_ASYNC
+@ONE_AND_TWO
+@pytest.mark.parametrize(("kind", "name"), WRITES, ids=[f"{k} {n}" for k, n in WRITES])
+def test_a_plain_writer_writes_the_row_the_model_writes(run, tmp_path, is_async, promoted, kind, name):
+    cls = _three(promoted)
+    cls(name="a", status="open", n=1).save(db=run.db)
+    doc = {"name": "m", "status": "closed", "n": 8}
+    stored, read = _as_the_model_writes(tmp_path, cls, doc)
+    _id = _write(run, is_async, kind, name, doc)
+    assert _stored_row(run.path, _id, list(promoted)) == stored
+    assert stored[0] == ('{"name":"m"}' if len(promoted) == 2 else '{"name":"m","n":8}')
+    found = run.go(run.adb.find_document(TABLE, _id)) if is_async else run.db.find_document(TABLE, _id)
+    assert found == {**read, "_id": _id}
+    (row,) = cls.from_ids([_id], db=run.db)
+    assert row.model_dump() == {"name": "m", "status": "closed", "n": 8}
+
+
+# (id, value, column definition, what the column holds, its typeof)
+VALUE_FORMS = [
+    ("datetime", datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc), "TEXT", "2026-01-02T03:04:05+00:00", "text"),
+    ("decimal", Decimal("1.25"), "REAL", 1.25, "real"),
+    ("enum", Color.RED, "TEXT", "red", "text"),
+]
+
+
+@IS_ASYNC
+@pytest.mark.parametrize(("value", "definition", "held", "kind"), [v[1:] for v in VALUE_FORMS], ids=[v[0] for v in VALUE_FORMS])
+@pytest.mark.parametrize("name", list(INSERTS), ids=str)
+def test_a_plain_writer_stores_a_value_as_the_model_does(run, tmp_path, is_async, value, definition, held, kind, name):
+    class Valued(SQLerModel):
+        __tablename__ = TABLE
+        __promoted__ = {"v": definition}
+        k: int = 0
+        v: Optional[type(value)] = None
+
+    stored, _ = _as_the_model_writes(tmp_path, Valued, {"k": 1, "v": value})
+    Valued.set_db(run.db)
+    _id = INSERTS[name](_call(run, is_async), {"k": 1, "v": value})
+    assert _stored_row(run.path, _id, ["v"]) == stored
+    assert stored == ('{"k":1}', held, kind)
+
+
+def _found(run, is_async, _id):
+    return run.go(run.adb.find_document(TABLE, _id)) if is_async else run.db.find_document(TABLE, _id)
+
+
+@IS_ASYNC
+@pytest.mark.parametrize("definition", ["TEXT DEFAULT 'pending'", "TEXT NOT NULL DEFAULT 'pending'"], ids=["default", "not null default"])
+@pytest.mark.parametrize("name", list(UPDATES), ids=str)
+def test_an_update_without_the_key_leaves_the_column(run, is_async, definition, name):
+    run.db.ensure_table(TABLE, promoted={"status": definition})
+    run.db.upsert_document_promoted(TABLE, None, {"name": "a", "status": "open"}, ["status"])
+    _write(run, is_async, "update", name, {"name": "a2"})
+    assert _stored_row(run.path, 1, ["status"]) == ('{"name":"a2"}', "open", "text")
+    assert _found(run, is_async, 1) == {"name": "a2", "_id": 1, "status": "open"}
+
+
+@IS_ASYNC
+@pytest.mark.parametrize("definition", ["TEXT DEFAULT 'pending'", "TEXT NOT NULL DEFAULT 'pending'"], ids=["default", "not null default"])
+@pytest.mark.parametrize("name", list(INSERTS), ids=str)
+def test_an_insert_without_the_key_gives_the_column_its_default(run, is_async, definition, name):
+    run.db.ensure_table(TABLE, promoted={"status": definition})
+    _id = _write(run, is_async, "insert", name, {"name": "b"})
+    assert _stored_row(run.path, _id, ["status"]) == ('{"name":"b"}', "pending", "text")
+    assert _found(run, is_async, _id) == {"name": "b", "_id": _id, "status": "pending"}
+
+
+@IS_ASYNC
+@pytest.mark.parametrize("name", list(INSERTS), ids=str)
+def test_a_key_held_as_none_writes_null(run, is_async, name):
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT DEFAULT 'pending'"})
+    _id = _write(run, is_async, "insert", name, {"name": "b", "status": None})
+    assert _stored_row(run.path, _id, ["status"]) == ('{"name":"b"}', None, "null")
+
+
+def _not_null_without_default(path):
+    """``tickets`` made by hand: ``status TEXT NOT NULL`` with no DEFAULT, and ``_version``
+    (so a versioned writer adds no column); row 1 ``{"name": "a"}``, ``status`` ``'open'``."""
+    conn = sqlite3.connect(path)
+    conn.execute(
+        f"CREATE TABLE {TABLE} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL, "
+        "status TEXT NOT NULL, _version INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.execute(f"INSERT INTO {TABLE} (data, status) VALUES (json(?), 'open')", ['{"name":"a"}'])
+    conn.commit()
+    conn.close()
+
+
+@IS_ASYNC
+@pytest.mark.parametrize("name", list(INSERTS), ids=str)
+def test_a_not_null_column_without_a_default_refuses_an_insert_without_its_key(run, is_async, name):
+    _not_null_without_default(run.path)
+    before = _raw(run.path)
+    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL constraint failed: tickets.status"):
+        _write(run, is_async, "insert", name, {"name": "b"})
+    assert _raw(run.path) == before
+
+
+@IS_ASYNC
+@pytest.mark.parametrize("name", ["upsert_document", "upsert_with_version"], ids=str)
+def test_a_not_null_column_without_a_default_keeps_its_value_on_an_update_without_its_key(run, is_async, name):
+    _not_null_without_default(run.path)
+    _write(run, is_async, "update", name, {"name": "a2"})
+    assert _stored_row(run.path, 1, ["status"]) == ('{"name":"a2"}', "open", "text")
+
+
+@IS_ASYNC
+def test_a_bulk_upsert_of_an_existing_row_without_a_not_null_columns_key_raises(run, is_async):
+    """``bulk_upsert`` writes an existing row as an insert that becomes an update on its
+    ``_id``; SQLite checks ``NOT NULL`` before it finds the row, so a column without a DEFAULT
+    refuses a document without its key, as it did before columns were written."""
+    _not_null_without_default(run.path)
+    before = _raw(run.path)
+    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL constraint failed: tickets.status"):
+        _write(run, is_async, "update", "bulk_upsert", {"name": "a2"})
+    assert _raw(run.path) == before
+
+
+@IS_ASYNC
+@pytest.mark.parametrize(("kind", "name"), WRITES, ids=[f"{k} {n}" for k, n in WRITES])
+def test_a_value_the_check_refuses_writes_nothing(run, is_async, kind, name):
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT"}, checks={"known": "status IN ('open', 'closed')"})
+    run.db.upsert_document_promoted(TABLE, None, {"name": "a", "status": "open"}, ["status"])
+    if "version" in name:
+        run.db.upsert_with_version(TABLE, None, {"name": "z", "status": "open"}, None)
+    before = _raw(run.path)
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        _write(run, is_async, kind, name, {"name": "a", "status": "lost"})
+    assert _raw(run.path) == before
+
+
+@IS_ASYNC
+def test_a_bulk_upsert_with_one_refused_row_writes_none_of_the_batch(run, is_async):
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT"}, checks={"known": "status IN ('open', 'closed')"})
+    run.db.upsert_document_promoted(TABLE, None, {"name": "a", "status": "open"}, ["status"])
+    before = _raw(run.path)
+    batch = [{"_id": 1, "name": "a", "status": "closed"}, {"name": "b", "status": "open"}, {"name": "c", "status": "lost"}]
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        _call(run, is_async)("bulk_upsert", batch)
+    assert _raw(run.path) == before
+
+
+@IS_ASYNC
+def test_a_bulk_upsert_of_2500_new_rows_and_updates(run, is_async):
+    """1250 updates and 1250 new rows, three variables a new row and four an update: more than
+    one statement's worth of variables either way."""
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT", "n": "INTEGER"})
+    run.db.insert_many_promoted(TABLE, [{"name": f"old{i}", "status": "open", "n": i} for i in range(1250)], ["status", "n"])
+    docs = []
+    for i in range(2500):
+        doc = {"name": f"r{i}", "status": "closed", "n": -i}
+        if i % 2 == 0:
+            doc["_id"] = i // 2 + 1
+        docs.append(doc)
+    ids = _call(run, is_async)("bulk_upsert", docs)
+    assert ids[:4] == [1, 1251, 2, 1252]
+    assert sorted(ids) == list(range(1, 2501))
+    cols, rows = _raw(run.path)
+    assert cols == ["_id", "data", "status", "n"]
+    assert len(rows) == 2500
+    by_id = {r[0]: r[1:] for r in rows}
+    for i, _id in enumerate(ids):
+        assert by_id[_id] == (json.dumps({"name": f"r{i}"}, separators=(",", ":")), "closed", -i)
+    found = run.go(run.adb.find_documents(TABLE, ids)) if is_async else run.db.find_documents(TABLE, ids)
+    assert found == [{"name": f"r{i}", "status": "closed", "n": -i, "_id": _id} for i, _id in enumerate(ids)]
+
+
+@IS_ASYNC
+@pytest.mark.parametrize("name", ["insert_many", "insert_many_with_version"], ids=str)
+def test_an_insert_many_of_2500(run, is_async, name):
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT", "n": "INTEGER"})
+    docs = [{"name": f"r{i}", "status": "new", "n": i} for i in range(2500)]
+    out = _call(run, is_async)(name, docs)
+    assert out == (list(range(1, 2501)) if name == "insert_many" else [(i, 0) for i in range(1, 2501)])
+    rows = _raw(run.path)[1]
+    assert len(rows) == 2500
+    assert [r[1:4] for r in rows] == [(f'{{"name":"r{i}"}}', "new", i) for i in range(2500)]
+
+
+@IS_ASYNC
+def test_a_key_in_another_case_than_its_column_stays_in_the_document(run, is_async):
+    """``Status`` is not the key of the column ``status``: a read gives both, each as written."""
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT"})
+    _id = _call(run, is_async)("insert_document", {"name": "a", "Status": "open"})
+    assert _stored_row(run.path, _id, ["status"]) == ('{"name":"a","Status":"open"}', None, "null")
+    found = run.go(run.adb.find_document(TABLE, _id)) if is_async else run.db.find_document(TABLE, _id)
+    assert found == {"name": "a", "Status": "open", "_id": _id, "status": None}
+
+
+@IS_ASYNC
+@pytest.mark.parametrize(("kind", "name"), WRITES, ids=[f"{k} {n}" for k, n in WRITES])
+def test_a_column_added_by_hand_takes_its_key(run, is_async, kind, name):
+    _legacy(run.path, [{"name": "a"}], columns={"note": "TEXT"})
+    _id = _write(run, is_async, kind, name, {"name": "b", "note": "kept"})
+    assert _stored_row(run.path, _id, ["note"]) == ('{"name":"b"}', "kept", "text")
+    found = run.go(run.adb.find_document(TABLE, _id)) if is_async else run.db.find_document(TABLE, _id)
+    assert found == {"name": "b", "_id": _id, "note": "kept"}
+
+
+@IS_ASYNC
+@pytest.mark.parametrize(("kind", "name"), WRITES, ids=[f"{k} {n}" for k, n in WRITES])
+def test_a_plain_writer_refuses_an_unsettled_table_as_a_read_does(run, is_async, kind, name):
+    _unsettled(run.path)
+    before = _raw(run.path)
+    with pytest.raises(SchemaError) as refused:
+        _write(run, is_async, kind, name, {"name": "x", "status": "x"})
+    assert refused.value.details == UNSETTLED
+    assert _raw(run.path) == before
+    assert _records(run.path) == []
+
+
+@IS_ASYNC
+def test_a_delete_of_a_row_of_an_unsettled_table_hides_nothing_and_is_not_refused(run, is_async):
+    _unsettled(run.path)
+    _call(run, is_async)("delete_document", 2)
+    assert _raw(run.path)[1] == [(1, '{"name":"a","status":"open"}', None)]
+
+
+def test_a_table_made_in_a_rolled_back_transaction_is_not_remembered(run):
+    with pytest.raises(RuntimeError):
+        with run.db:
+            run.db.insert_document("fresh", {"n": 1})
+            raise RuntimeError("roll back")
+    assert run.db._promoted_of("fresh") is None
+    conn = sqlite3.connect(run.path)
+    conn.execute("CREATE TABLE fresh (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL, status TEXT)")
+    conn.commit()
+    conn.close()
+    _id = run.db.insert_document("fresh", {"n": 2, "status": "new"})
+    assert run.db.find_document("fresh", _id) == {"n": 2, "_id": _id, "status": "new"}
+    assert _raw(run.path, "fresh")[1] == [(1, '{"n":2}', "new")]
+
+
+# what each writer sends on a table with no column beside ``data``: the first call learns the
+# columns (one statement), every later call sends what it sent before columns were written
+PLAIN_COSTS = {
+    "insert_document": lambda c: c("insert_document", {"n": 1}),
+    "upsert_document insert": lambda c: c("upsert_document", None, {"n": 1}),
+    "upsert_document update": lambda c: c("upsert_document", 1, {"n": 1}),
+    "insert_many": lambda c: c("insert_many", [{"n": 1}, {"n": 2}]),
+    "bulk_upsert": lambda c: c("bulk_upsert", [{"_id": 1, "n": 1}, {"n": 2}]),
+    "_update_fields": lambda c: c("_update_fields", 1, {"n": 5}, ["n"]),
+}
+
+
+def _cost(sent):
+    return ["columns" if q.sql.lstrip().upper().startswith("PRAGMA TABLE_INFO") else q.sql.split()[0].upper() for q in sent]
+
+
+@IS_ASYNC
+@pytest.mark.parametrize("name", list(PLAIN_COSTS), ids=str)
+def test_a_table_without_columns_costs_one_statement_once(run, is_async, name):
+    _legacy(run.path, [{"n": 0}])
+    write = PLAIN_COSTS[name]
+    c = _call(run, is_async)
+    with query_logger.capture() as first:
+        write(c)
+    with query_logger.capture() as second:
+        write(c)
+    first, second = _cost(first), _cost(second)
+    assert first.count("columns") == 1
+    assert [s for s in first if s != "columns"] == second
+    assert second == PLAIN_STATEMENTS[name]
+
+
+# what each sent on the base, before columns were written: on a table remembered, the same
+PLAIN_STATEMENTS = {
+    "insert_document": ["CREATE", "INSERT"],
+    "upsert_document insert": ["CREATE", "CREATE", "INSERT"],
+    "upsert_document update": ["CREATE", "UPDATE"],
+    "insert_many": ["CREATE", "INSERT"],
+    "bulk_upsert": ["CREATE", "INSERT", "INSERT"],
+    "_update_fields": ["CREATE", "UPDATE"],
+}
+
+
+@IS_ASYNC
+def test_a_versioned_writer_on_a_table_without_columns_learns_its_columns_once(run, is_async):
+    """``upsert_with_version`` and ``insert_many_with_version`` on a missing table: the first
+    call learns the columns before it makes the table (one statement more than before); every
+    later call sends what it sent before."""
+    c = _call(run, is_async)
+    sent = []
+    for write in (
+        lambda: c("upsert_with_version", None, {"n": 1}, None),
+        lambda: c("upsert_with_version", 1, {"n": 2}, 0),
+        lambda: c("insert_many_with_version", [{"n": 3}]),
+        lambda: c("insert_many_with_version", [{"n": 4}]),
+    ):
+        with query_logger.capture() as one:
+            write()
+        sent.append(_cost(one))
+    if is_async:
+        assert sent == [["columns", "CREATE", "columns", "ALTER", "INSERT"], ["UPDATE"], ["INSERT"], ["INSERT"]]
+    else:
+        # the sync check for ``_version`` asks for the columns on every call, as it did before
+        assert sent == [
+            ["columns", "CREATE", "columns", "columns", "ALTER", "INSERT"],
+            ["BEGIN", "UPDATE"],
+            ["CREATE", "columns", "INSERT"],
+            ["CREATE", "columns", "INSERT"],
+        ]
+
+
+def test_inside_the_adapters_own_transaction_each_write_learns_the_columns(run):
+    """The adapter's transaction is not the database object's: nothing learned there is kept
+    (a rollback the object does not see would leave it wrong), so each write asks again."""
+    _legacy(run.path, [{"n": 0}])
+    run.db.adapter.begin_transaction()
+    try:
+        with query_logger.capture() as sent:
+            run.db.insert_document(TABLE, {"n": 1})
+            run.db.insert_document(TABLE, {"n": 2})
+    finally:
+        run.db.adapter.end_transaction(commit=True)
+    assert _cost(sent) == ["CREATE", "columns", "INSERT", "CREATE", "columns", "INSERT"]
+
+
+# ---------------------------------------------------------------- a write touches no column it does not name
+#
+# A model class without ``__promoted__`` saves through the plain writers. On a table with a
+# column beside ``data`` the class has no field for (added by hand, or promoted by another
+# class), its saves leave that column as it is, and new rows get the column's DEFAULT.
+
+
+def _named(base, status=False):
+    """A class of ``base`` on ``tickets`` with the field ``name`` and, with ``status``, the
+    field ``status: Optional[str] = None``; no ``__promoted__``."""
+    annotations = {"name": str, **({"status": Optional[str]} if status else {})}
+    ns = {"__tablename__": TABLE, "__annotations__": annotations, "name": "", **({"status": None} if status else {})}
+    cls = type("Ticket", (base,), ns)
+    return dataclass(cls) if "Lite" in base.__name__ else cls
+
+
+FAMILIES = [
+    ("pydantic", SQLerModel, False),
+    ("safe", SQLerSafeModel, False),
+    ("lite", SQLerLiteModel, False),
+    ("lite_safe", SQLerLiteSafeModel, False),
+    ("msgspec", SQLerMsgspecModel, False),
+    ("async", AsyncSQLerModel, True),
+    ("async_safe", AsyncSQLerSafeModel, True),
+    ("async_lite", AsyncSQLerLiteModel, True),
+    ("async_lite_safe", AsyncSQLerLiteSafeModel, True),
+]
+EVERY_FAMILY = pytest.mark.parametrize(("base", "is_async"), [f[1:] for f in FAMILIES], ids=[f[0] for f in FAMILIES])
+
+
+def _by_hand(path, definition):
+    """``tickets`` made with ``sqlite3`` alone and a column ``status <definition>`` added to it;
+    row 1 ``{"name": "a", "extra": 1}`` with ``status`` ``'open'``."""
+    _legacy(path, [], columns={"status": definition})
+    conn = sqlite3.connect(path)
+    conn.execute(f"INSERT INTO {TABLE} (data, status) VALUES (json(?), 'open')", ['{"name":"a","extra":1}'])
+    conn.commit()
+    conn.close()
+
+
+def _status_by_row(path):
+    """``[(_id, name, status)]`` ordered by ``_id``, read with ``sqlite3`` alone."""
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute(f"SELECT _id, json_extract(data, '$.name'), status FROM {TABLE} ORDER BY _id").fetchall()
+    finally:
+        conn.close()
+
+
+@EVERY_FAMILY
+@pytest.mark.parametrize(
+    ("definition", "new"), [("TEXT", None), ("TEXT NOT NULL DEFAULT 'pending'", "pending")], ids=["by hand", "not null default"]
+)
+def test_a_class_without_the_columns_field_keeps_the_column(run, base, is_async, definition, new):
+    _by_hand(run.path, definition)
+    cls = _named(base)
+    db = run.adb if is_async else run.db
+    go = run.go if is_async else (lambda x: x)
+    (row,) = go(cls.from_ids([1], db=db))
+    row.name = "a2"
+    go(row.save(db=db))
+    go(cls(name="b").save(db=db))
+    go((cls.asave_many if is_async else cls.save_many)([cls(name="c"), cls(name="d")], db=db))
+    assert _status_by_row(run.path) == [(1, "a2", "open"), (2, "b", new), (3, "c", new), (4, "d", new)]
+
+
+@EVERY_FAMILY
+def test_a_field_named_like_the_column_saved_as_none_writes_null(run, base, is_async):
+    _by_hand(run.path, "TEXT DEFAULT 'pending'")
+    cls = _named(base, status=True)
+    db = run.adb if is_async else run.db
+    go = run.go if is_async else (lambda x: x)
+    (row,) = go(cls.from_ids([1], db=db))
+    assert row.status == "open"
+    row.status = None
+    go(row.save(db=db))
+    go(cls(name="b").save(db=db))
+    go((cls.asave_many if is_async else cls.save_many)([cls(name="c")], db=db))
+    go(cls(name="d", status="set").save(db=db))
+    assert _status_by_row(run.path) == [(1, "a", None), (2, "b", None), (3, "c", None), (4, "d", "set")]
+
+
+@IS_ASYNC
+@pytest.mark.parametrize("name", ["insert_many", "insert_many_with_version", "bulk_upsert"], ids=str)
+def test_a_batch_of_rows_of_different_shapes_gives_each_row_its_own_keys(run, is_async, name):
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT DEFAULT 'pending'"})
+    batch = [{"name": "a", "status": "x"}, {"name": "b"}, {"name": "c", "status": None}]
+    out = _call(run, is_async)(name, batch)
+    assert out == ([(1, 0), (2, 0), (3, 0)] if name == "insert_many_with_version" else [1, 2, 3])
+    assert _status_by_row(run.path) == [(1, "a", "x"), (2, "b", "pending"), (3, "c", None)]
+
+
+@IS_ASYNC
+@pytest.mark.parametrize("name", ["insert_many", "insert_many_with_version", "bulk_upsert"], ids=str)
+def test_a_row_the_not_null_column_refuses_writes_none_of_the_batch(run, is_async, name):
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT NOT NULL DEFAULT 'pending'"}, versioned=True)
+    before = _raw(run.path)
+    batch = [{"name": "a", "status": "x"}, {"name": "b"}, {"name": "c", "status": None}]
+    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL constraint failed: tickets.status"):
+        _call(run, is_async)(name, batch)
+    assert _raw(run.path) == before
+
+
+@IS_ASYNC
+def test_a_bulk_upsert_of_new_and_existing_rows_with_different_keys(run, is_async):
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT DEFAULT 'pending'"})
+    run.db.insert_many_promoted(TABLE, [{"name": "a", "status": "open"}, {"name": "b", "status": "open"}], ["status"])
+    batch = [
+        {"_id": 1, "name": "a2", "status": "closed"},
+        {"_id": 2, "name": "b2"},
+        {"name": "c", "status": "new"},
+        {"name": "d"},
+        {"_id": 9, "name": "e"},
+    ]
+    assert _call(run, is_async)("bulk_upsert", batch) == [1, 2, 3, 4, 9]
+    assert _status_by_row(run.path) == [
+        (1, "a2", "closed"),
+        (2, "b2", "open"),
+        (3, "c", "new"),
+        (4, "d", "pending"),
+        (9, "e", "pending"),
+    ]
+
+
+def _shapes(n):
+    """``n`` documents alternating between ``{name, status, n}`` and ``{name}``."""
+    return [{"name": f"r{i}", "status": "s", "n": i} if i % 2 == 0 else {"name": f"r{i}"} for i in range(n)]
+
+
+@IS_ASYNC
+@pytest.mark.parametrize(
+    ("name", "alternating", "statements"),
+    [
+        ("insert_many", False, 8),
+        ("insert_many", True, 2500),
+        ("insert_many_with_version", False, 8),
+        ("insert_many_with_version", True, 2500),
+        ("bulk_upsert", False, 8),
+        ("bulk_upsert", True, 2500),
+    ],
+    ids=["insert_many one shape", "insert_many two shapes", "with_version one shape", "with_version two shapes",
+         "bulk_upsert one shape", "bulk_upsert two shapes"],
+)
+def test_2500_rows_of_one_shape_and_of_two_alternating(run, is_async, name, alternating, statements):
+    """One shape: the statements each writer sent before (three variables a row, 333 rows a
+    statement). Two shapes alternating: each row is a run of its own, one statement a row. The
+    async ``bulk_upsert`` sends one statement a row whatever the shapes, as before."""
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT DEFAULT 'pending'", "n": "INTEGER"})
+    docs = _shapes(2500) if alternating else [{"name": f"r{i}", "status": "s", "n": i} for i in range(2500)]
+    with query_logger.capture() as sent:
+        out = _call(run, is_async)(name, docs)
+    assert out == ([(i, 0) for i in range(1, 2501)] if name == "insert_many_with_version" else list(range(1, 2501)))
+    inserts = [q for q in sent if q.sql.lstrip().upper().startswith("INSERT")]
+    assert len(inserts) == (2500 if is_async and name == "bulk_upsert" else statements)
+    conn = sqlite3.connect(run.path)
+    try:
+        rows = conn.execute(f"SELECT _id, data, status, n FROM {TABLE} ORDER BY _id").fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 2500
+    assert rows == [
+        (i + 1, f'{{"name":"r{i}"}}', *(("s", i) if i % 2 == 0 or not alternating else ("pending", None)))
+        for i in range(2500)
+    ]
+
+
+@IS_ASYNC
+@pytest.mark.parametrize(("kind", "name"), WRITES, ids=[f"{k} {n}" for k, n in WRITES])
+def test_a_generated_column_is_never_named_and_its_key_stays_in_the_document(run, is_async, kind, name):
+    """``PRAGMA table_info`` (what ``_columns_of`` reads) lists no generated column, so a key of
+    its name is a key of ``data``, as on the releases before."""
+    conn = sqlite3.connect(run.path)
+    conn.execute(
+        f"CREATE TABLE {TABLE} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL, "
+        "_version INTEGER NOT NULL DEFAULT 0, "
+        "g TEXT GENERATED ALWAYS AS (json_extract(data, '$.name')) VIRTUAL, "
+        "s TEXT GENERATED ALWAYS AS (upper(json_extract(data, '$.name'))) STORED)"
+    )
+    conn.execute(f"INSERT INTO {TABLE} (data) VALUES (json(?))", ['{"name":"a"}'])
+    conn.commit()
+    conn.close()
+    _id = _write(run, is_async, kind, name, {"name": "m", "g": "x", "s": "y"})
+    conn = sqlite3.connect(run.path)
+    try:
+        row = conn.execute(f"SELECT data, g, s FROM {TABLE} WHERE _id = ?", [_id]).fetchone()
+    finally:
+        conn.close()
+    assert row == ('{"name":"m","g":"x","s":"y"}', "m", "M")
+    assert _found(run, is_async, _id) == {"name": "m", "g": "x", "s": "y", "_id": _id}
+
+
+# each writer as one call on a database object, sync (its result) or async (its coroutine)
+ONE_CALL = {
+    ("insert", "insert_document"): lambda db, doc: db.insert_document(TABLE, doc),
+    ("insert", "upsert_document"): lambda db, doc: db.upsert_document(TABLE, None, doc),
+    ("insert", "insert_many"): lambda db, doc: db.insert_many(TABLE, [doc]),
+    ("insert", "insert_many_with_version"): lambda db, doc: db.insert_many_with_version(TABLE, [doc]),
+    ("insert", "bulk_upsert"): lambda db, doc: db.bulk_upsert(TABLE, [dict(doc)]),
+    ("insert", "upsert_with_version"): lambda db, doc: db.upsert_with_version(TABLE, None, doc, None),
+    ("update", "upsert_document"): lambda db, doc: db.upsert_document(TABLE, 1, doc),
+    ("update", "bulk_upsert"): lambda db, doc: db.bulk_upsert(TABLE, [{**doc, "_id": 1}]),
+    ("update", "upsert_with_version"): lambda db, doc: db.upsert_with_version(TABLE, 1, doc, 0),
+}
+
+
+class _Undo(Exception):
+    pass
+
+
+@IS_ASYNC
+@pytest.mark.parametrize(("kind", "name"), WRITES, ids=[f"{k} {n}" for k, n in WRITES])
+def test_a_write_in_a_transaction_that_rolls_back_leaves_nothing(run, is_async, kind, name):
+    run.db.ensure_table(TABLE, promoted={"status": "TEXT DEFAULT 'pending'"}, versioned=True)
+    run.db.upsert_document_promoted(TABLE, None, {"name": "a", "status": "open"}, ["status"])
+    before = _raw(run.path)
+    write = ONE_CALL[(kind, name)]
+    doc = {"name": "b", "status": "x"}
+
+    async def inside():
+        async with run.adb.transaction():
+            await write(run.adb, doc)
+            raise _Undo
+
+    adb = run.adb if is_async else None  # connected before the loop runs ``inside``
+    with pytest.raises(_Undo):
+        if adb is not None:
+            run.go(inside())
+        else:
+            with run.db.transaction():
+                write(run.db, doc)
+                raise _Undo
+    assert _raw(run.path) == before
+
+
+@IS_ASYNC
+def test_a_write_of_some_fields_lands_in_the_column_whatever_list_the_caller_passed(run, is_async):
+    _by_hand(run.path, "TEXT")
+    c = _call(run, is_async)
+    c("_update_fields", 1, {"name": "a2", "status": "closed"}, ["name", "status"])
+    assert _stored_row(run.path, 1, ["status"]) == ('{"name":"a2","extra":1}', "closed", "text")
+    assert _found(run, is_async, 1) == {"name": "a2", "extra": 1, "_id": 1, "status": "closed"}
+
+
+def test_a_partial_save_of_a_field_named_like_a_column_lands_in_the_column(run):
+    from sqler.tracking import PartialUpdateMixin, TrackedModel
+
+    class Ticket(PartialUpdateMixin, TrackedModel, SQLerModel):
+        __tablename__ = TABLE
+        name: str = ""
+        status: Optional[str] = None
+
+    _by_hand(run.path, "TEXT")
+    (row,) = Ticket.from_ids([1], db=run.db)
+    row.status = "closed"
+    row.save_partial(db=run.db)
+    assert _stored_row(run.path, 1, ["status"]) == ('{"name":"a","extra":1}', "closed", "text")
+    assert Ticket.from_ids([1], db=run.db)[0].status == "closed"
+
+
+@IS_ASYNC
+def test_a_bulk_upsert_on_a_table_wider_than_a_statement_sends_one_row_a_statement(run, is_async):
+    """998 columns beside ``data``: a new row binds 999 variables, an update 1000, more than one
+    statement of ``_MAX_VARIABLES`` holds; each row then goes in a statement of its own."""
+    names = [f"c{i}" for i in range(998)]
+    conn = sqlite3.connect(run.path)
+    conn.execute(
+        f"CREATE TABLE {TABLE} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL, "
+        + ", ".join(f"{n} INTEGER" for n in names)
+        + ")"
+    )
+    conn.execute(f"INSERT INTO {TABLE} (data) VALUES ('{{}}'), ('{{}}')")
+    conn.commit()
+    conn.close()
+    docs = [{"_id": 1, **{n: 1 for n in names}}, {"_id": 2, **{n: 2 for n in names}}, {**{n: 3 for n in names}}]
+    with query_logger.capture() as sent:
+        assert _call(run, is_async)("bulk_upsert", docs) == [1, 2, 3]
+    assert len([q for q in sent if q.sql.lstrip().upper().startswith("INSERT")]) == 3
+    conn = sqlite3.connect(run.path)
+    try:
+        rows = conn.execute(f"SELECT _id, data, c0, c997 FROM {TABLE} ORDER BY _id").fetchall()
+    finally:
+        conn.close()
+    assert rows == [(1, "{}", 1, 1), (2, "{}", 2, 2), (3, "{}", 3, 3)]
