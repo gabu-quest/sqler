@@ -423,32 +423,13 @@ class AsyncSQLerModel(BaseModel):
         Args:
             db: Optional database to delete from (overrides class-level binding).
             on_delete: One of "restrict", "set_null", or "cascade".
-                - "restrict": Deletes the row without checking for references.
+                - "restrict": Raises ``ReferentialIntegrityError`` while any row refers to
+                  this one, and deletes nothing.
                 - "set_null": Nullifies all references to this row before deleting.
                 - "cascade": Recursively deletes all rows that reference this row.
         """
         db, table = _instance_binding(self, db)
-        await _write_rules.adelete(
-            self, db, table, on_delete, lambda: self._delete_row(db, table, on_delete)
-        )
-
-    async def _delete_row(self, db, table: str, on_delete: str) -> None:
-        """Delete this instance's row under ``on_delete`` (``delete_with_policy()`` without
-        the rules of its class)."""
-        from .async_integrity import (
-            async_cascade_delete,
-            async_find_referrers,
-            async_set_null_referrers,
-        )
-
-        if on_delete == "set_null":
-            referrers = await async_find_referrers(db, table, self._id)
-            await async_set_null_referrers(db, table, self._id, referrers)
-        elif on_delete == "cascade":
-            referrers = await async_find_referrers(db, table, self._id)
-            await async_cascade_delete(db, referrers, set())
-
-        await db.delete_document(table, self._id)
+        await _write_rules.adelete(self, db, table, on_delete)
         self._id = None
 
     async def refresh(self: TAModel) -> TAModel:

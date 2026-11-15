@@ -28,11 +28,10 @@ from typing import Any, Callable, ClassVar, Optional
 
 from sqler import registry
 from sqler._stored import column_arg, stored
-from sqler.models import _dirty
+from sqler.exceptions import ReferentialIntegrityError
+from sqler.models import _dirty, async_integrity, integrity
 
 Row = tuple[str, Any, Optional[dict], Optional[dict]]
-
-_DELETE_POLICIES = ("restrict", "set_null", "cascade")
 
 
 class WriteRules:
@@ -74,7 +73,8 @@ def deletable(inst, on_delete: str) -> None:
     if inst._id is None:
         raise ValueError("Cannot delete unsaved model (missing _id)")
     if on_delete not in _DELETE_POLICIES:
-        raise ValueError("on_delete must be 'restrict', 'set_null', or 'cascade'")
+        *others, last = _DELETE_POLICIES
+        raise ValueError(f"on_delete must be {', '.join(map(repr, others))}, or {last!r}")
 
 
 # ----- one unit: all of a write or none of it; what a failed write puts back ------------
@@ -223,45 +223,71 @@ async def asave_many(cls, instances: list, db, insert) -> list:
     return instances
 
 
-def delete(inst, db, table: str, on_delete: str, remove: Callable[[], None]) -> None:
-    """``delete_with_policy()``: ``remove()`` deletes the row and does what the policy does to
-    the rows that refer to it. Whatever writes more than one statement (a policy that
-    touches referrers, row rules) is one unit, and a failure leaves the rows and the
-    instance's identity as they were."""
+def delete(inst, db, table: str, on_delete: str) -> None:
+    """``delete_with_policy()``: delete the row and do what the policy does about the rows
+    that refer to it, with the class's row rules. The check for referrers and the delete are
+    one unit (``db.transaction()``: no other connection writes a referrer in between), and a
+    failure leaves every row as it was."""
     deletable(inst, on_delete)
+    row_id = int(inst._id)
     rules = isinstance(inst, WriteRules) and inst._row_rules
-    if on_delete == "restrict" and not rules:
-        return remove()
-    row_id = inst._id
-    kept = _remember_identity(inst)
-    try:
-        with db.transaction():
-            before = db.find_document(table, row_id) if rules else None
-            remove()
-            if before is not None:
-                inst._rows_written(db, table, [("delete", row_id, before, None)])
-    except BaseException:
-        _restore_identity(inst, kept)
-        raise
+    with db.transaction():
+        before = db.find_document(table, row_id) if rules else None
+        referrers = integrity.find_referrers(db, table, row_id)
+        change = _referrer_change(on_delete, table, row_id, referrers)
+        if change is not None:
+            change[0](db, table, row_id, referrers)
+        db.delete_document(table, row_id)
+        if before is not None:
+            inst._rows_written(db, table, [("delete", row_id, before, None)])
 
 
-async def adelete(inst, db, table: str, on_delete: str, remove) -> None:
-    """Async twin of :func:`delete`; ``remove()`` returns an awaitable."""
+async def adelete(inst, db, table: str, on_delete: str) -> None:
+    """Async twin of :func:`delete`."""
     deletable(inst, on_delete)
+    row_id = int(inst._id)
     rules = isinstance(inst, WriteRules) and inst._row_rules
-    if on_delete == "restrict" and not rules:
-        return await remove()
-    row_id = inst._id
-    kept = _remember_identity(inst)
-    try:
-        async with db.transaction():
-            before = await db.find_document(table, row_id) if rules else None
-            await remove()
-            if before is not None:
-                await inst._arows_written(db, table, [("delete", row_id, before, None)])
-    except BaseException:
-        _restore_identity(inst, kept)
-        raise
+    async with db.transaction():
+        before = await db.find_document(table, row_id) if rules else None
+        referrers = await async_integrity.async_find_referrers(db, table, row_id)
+        change = _referrer_change(on_delete, table, row_id, referrers)
+        if change is not None:
+            await change[1](db, table, row_id, referrers)
+        await db.delete_document(table, row_id)
+        if before is not None:
+            await inst._arows_written(db, table, [("delete", row_id, before, None)])
+
+
+# ----- what a delete's policy does about the rows that refer to its row ------------------
+
+
+def _cascade(db, table: str, row_id, referrers) -> None:
+    integrity.cascade_delete(db, referrers, {(table, row_id)})
+
+
+async def _acascade(db, table: str, row_id, referrers) -> None:
+    await async_integrity.async_cascade_delete(db, referrers, {(table, row_id)})
+
+
+# The policies that change the referring rows, each as its sync and its async way.
+_CHANGES = {
+    "set_null": (integrity.set_null_referrers, async_integrity.async_set_null_referrers),
+    "cascade": (_cascade, _acascade),
+}
+_DELETE_POLICIES = ("restrict", *_CHANGES)
+
+
+def _referrer_change(on_delete: str, table: str, row_id, referrers: list):
+    """What ``on_delete`` does about ``referrers``, the rows that refer to ``table``:``row_id``:
+    ``restrict`` refuses the delete; the others are their ``(sync, async)`` change of the
+    rows. ``None`` where no row refers to it."""
+    if not referrers:
+        return None
+    if on_delete == "restrict":
+        raise ReferentialIntegrityError(
+            f"Cannot delete {table}:{row_id}; referenced by {len(referrers)} row(s)"
+        )
+    return _CHANGES[on_delete]
 
 
 # ----- the set-based ways: a queryset's update, update_one, update_n and delete_all ------

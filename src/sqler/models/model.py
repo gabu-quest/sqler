@@ -439,29 +439,7 @@ class SQLerModel(BaseModel):
             on_delete: One of "restrict", "set_null", or "cascade".
         """
         db, table = _instance_binding(self, db)
-        _write_rules.delete(
-            self, db, table, on_delete, lambda: self._delete_row(db, table, on_delete)
-        )
-
-    def _delete_row(self, db, table: str, on_delete: str) -> None:
-        """Delete this instance's row under ``on_delete`` (``delete_with_policy()`` without
-        the rules of its class)."""
-        target = (table, int(self._id))
-        # find referrers
-        referrers = self._find_referrers(db, table, int(self._id))
-        if on_delete == "restrict" and referrers:
-            from . import ReferentialIntegrityError as _RefErr
-
-            raise _RefErr(
-                f"Cannot delete {table}:{self._id}; referenced by {len(referrers)} row(s)"
-            )
-        if on_delete == "set_null":
-            self._set_null_referrers(db, table, int(self._id), referrers)
-        elif on_delete == "cascade":
-            visited: set[tuple[str, int]] = {target}
-            self._cascade_delete(db, referrers, visited)
-
-        db.delete_document(table, self._id)
+        _write_rules.delete(self, db, table, on_delete)
         self._id = None
 
     def refresh(self: TModel) -> TModel:
@@ -513,24 +491,6 @@ class SQLerModel(BaseModel):
         from .integrity import find_ref_paths
 
         return find_ref_paths(data, allowed_tables, target_id)
-
-    @classmethod
-    def _set_null_referrers(
-        cls, db: SQLerDB, target_table: str, target_id: int, referrers: list[tuple[str, int, dict]]
-    ) -> None:
-        """Nullify all references to the target row in referring documents."""
-        from .integrity import set_null_referrers
-
-        set_null_referrers(db, target_table, target_id, referrers)
-
-    @classmethod
-    def _cascade_delete(
-        cls, db: SQLerDB, referrers: list[tuple[str, int, dict]], visited: set[tuple[str, int]]
-    ) -> None:
-        """Recursively delete referring rows and their dependents."""
-        from .integrity import cascade_delete
-
-        cascade_delete(db, referrers, visited)
 
     # ----- reference validation -----
     @classmethod
