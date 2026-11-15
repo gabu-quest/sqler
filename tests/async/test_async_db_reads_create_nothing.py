@@ -149,10 +149,15 @@ async def _apage(awaitable):
     return _page(await awaitable)
 
 
+async def _streamed(iterator):
+    return [row async for row in iterator]
+
+
 QUERY_CALLS = {
     "all": (lambda q: q.all(), []),
     "first": (lambda q: q.first(), None),
     "all_dicts": (lambda q: q.all_dicts(), []),
+    "iter_dicts": (lambda q: _streamed(q.iter_dicts()), []),
     "first_dict": (lambda q: q.first_dict(), None),
     "count": (lambda q: q.count(), 0),
     "sum": (lambda q: q.sum("n"), None),
@@ -203,6 +208,7 @@ QS_CALLS = {
     "all": (lambda q: q.all(), []),
     "first": (lambda q: q.first(), None),
     "as_dicts": (lambda q: q.as_dicts(), []),
+    "iter": (lambda q: _streamed(q.iter()), []),
     "count": (lambda q: q.count(), 0),
     "sum": (lambda q: q.sum("n"), None),
     "avg": (lambda q: q.avg("n"), None),

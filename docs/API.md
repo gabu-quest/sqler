@@ -984,16 +984,16 @@ nested block that ends in it raises it too.
 
 ### Async cursors
 
-The cursor `await adapter.execute(...)` returns reads only what its statement saw while the
-connection was its task's. SQLite reads a statement's rows as they are fetched; so before
-another task sends a statement on that connection (a task that took it from the pool, a
-child task that shares the pin, a sibling in a shared transaction) or a rollback ends its
-transaction, the rows the cursor has not returned yet are read, in the connection's thread
-ahead of that statement, and the cursor serves them from memory. Rows its own transaction
-wrote and then rolled back are served: they are what the statement saw. While only its own
-task uses the connection it reads lazily, as SQLite does (a row the task inserts before the
-first fetch is in the result), and a cursor nobody holds any more, or one that is closed or
-has returned its last row, is never read ahead. A statement whose rows raise part-way (a
+The cursor `await adapter.execute(...)` returns reads only what its statement saw. SQLite
+reads a statement's rows as they are fetched; so before any statement is sent on that
+connection (by the cursor's own task, a task that took it from the pool, a child task that
+shares the pin, a sibling in a shared transaction) or a rollback ends its transaction, the
+rows the cursor has not returned yet are read, in the connection's thread ahead of that
+statement, and the cursor serves them from memory. Rows its own transaction wrote and then
+rolled back are served: they are what the statement saw, and a row its own task inserts
+before the first fetch is not. While nothing else is sent on the connection it reads
+lazily, as SQLite does, and a cursor nobody holds any more, or one that is closed or has
+returned its last row, is never read ahead. A statement whose rows raise part-way (a
 `json()` of a malformed value, say) raises at the same read either way. A cursor serving
 rows from memory answers `fetchone`, `fetchmany` (`arraysize` honoured), `fetchall`,
 `async for`, `async with`, `close`, `description`, `rowcount` and `lastrowid` as before;
@@ -1801,6 +1801,31 @@ for record_json in stream_jsonl(User):
 On a plain `":memory:"` database (`SQLerDB.in_memory(shared=False)`), whose one connection
 every thread shares, a statement's rows are read whole before another thread may use the
 connection, so `stream_jsonl()`, `iter_dicts()` and `iter()` hold the whole result there.
+
+The async query and query set stream with `async for`:
+
+```python
+async for doc in (await db.query("users")).iter_dicts():
+    process(doc)
+
+async for user in User.query().filter(F("age") > 30).iter():
+    process(user)
+```
+
+They give what `all_dicts()` and `all()` give, a chunk of rows read at a time; `iter()`
+follows no reference (as `.resolve(False)`). Outside a transaction a suspended iteration
+holds one pooled connection, from its first step until it ends: its rows run out, it is
+closed (`await it.aclose()`, or `contextlib.aclosing`), or the event loop closes it once it
+was dropped or left by an exception or a cancellation. Then the connection goes back to the
+pool, whichever task ends it. It stays with its task when that task sent another statement
+on it after the iteration's and has not committed it: the task's `auto_commit()` (or its
+end) gives it back. Stopping early reads none of the rows left. Inside
+`async with db.transaction()` the iteration sees the transaction's writes and the
+transaction's end gives the connection back; an iterator left unfinished when it ends goes
+on giving what its statement saw. Writing inside the loop (a `save()` of each model, say) is
+safe: the first statement sent on the iteration's connection reads the rows not given yet
+first, so each row comes once with the values its statement saw, and the rest of the result
+is held in memory from then on.
 
 ```python
 from sqler import async_export_jsonl, async_import_jsonl
