@@ -834,6 +834,27 @@ block that ends it raises the error too. An interrupt (`KeyboardInterrupt`) duri
 end leaves as it is, and the transaction ends rolled back the same way. The same holds for
 `adapter.begin_transaction()` and `adapter.end_transaction()` called directly.
 
+### A rollback that fails
+
+When the `ROLLBACK` that ends a transaction fails in SQLite (a progress handler or
+`interrupt()` stops it, say), at the end of a block, after a failed commit or after a failed
+statement, the sync adapter tries it once more at once. If that fails too, no later
+statement is ever sent into that transaction. A thread's own connection (a file, a named
+shared-cache memory database) is closed, which rolls back and frees the write lock, and a
+warning is logged; the thread opens a new connection at its next statement, and the block's
+own exception leaves as it is. (A cursor of the closed connection that still has rows to
+read keeps SQLite from letting go of it: until that cursor is closed or dropped, writers
+get `database is locked`; the block's rows are not committed either way.) An interrupt
+(`KeyboardInterrupt`) that arrives between the two tries is raised on after the same has
+been done. The one connection of a plain `":memory:"` database cannot be
+closed without losing the database: it keeps the transaction, and its thread stays the
+holder. The end raises `TransactionStateError` with SQLite's error as `__cause__` (a block
+that is already raising keeps its own exception, with the sentence as a note); every later
+statement of any thread tries the rollback again first: until one succeeds, the holder's
+statements raise the same error and the other threads wait as for any open transaction. A
+thread that ends as the holder is treated the same way. The async adapter closes such a
+connection and puts a fresh one in its place in the pool.
+
 ### How long a statement waits for a lock
 
 `timeout_ms` (default 5000) is how long a statement waits for another connection's lock
