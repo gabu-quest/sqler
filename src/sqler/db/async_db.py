@@ -6,15 +6,19 @@ from typing import Any, Optional
 from sqler._stored import dumps, stored
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter
 from sqler.db.sqler_db import (
+    _AT_VERSION,
     _MAX_VARIABLES,
     _columns_sql,
+    _fields_update,
     _id_params,
     _in_order,
     _Level,
     _promoted_in,
+    _refuse_unwritten,
     _row_columns,
     _row_documents,
     _rows_sql,
+    _split_promoted,
 )
 from sqler.exceptions import StaleVersionError, TransactionStateError
 from sqler.pool import PoolStats
@@ -240,15 +244,7 @@ class AsyncSQLerDB:
     ) -> int:
         """Insert or update, splitting promoted fields into real columns (async)."""
         table = validate_table_name(table)
-        for field in promoted_fields:
-            validate_column_name(field)
-        promoted_vals = {}
-        json_doc = {}
-        for k, v in doc.items():
-            if k in promoted_fields:
-                promoted_vals[k] = stored(v, field=k)
-            else:
-                json_doc[k] = v
+        json_doc, promoted_vals = _split_promoted(doc, promoted_fields)
 
         payload = dumps(json_doc)
 
@@ -289,17 +285,8 @@ class AsyncSQLerDB:
     ) -> tuple[int, int]:
         """Insert or update with optimistic locking, splitting promoted columns (async)."""
         table = validate_table_name(table)
-        for field in promoted_fields:
-            validate_column_name(field)
+        json_doc, promoted_vals = _split_promoted(doc, promoted_fields)
         await self._ensure_versioned_table(table)
-
-        promoted_vals = {}
-        json_doc = {}
-        for k, v in doc.items():
-            if k in promoted_fields:
-                promoted_vals[k] = stored(v, field=k)
-            else:
-                json_doc[k] = v
 
         payload = dumps(json_doc)
 
@@ -328,7 +315,7 @@ class AsyncSQLerDB:
 
         sql = (
             f"UPDATE {table} SET {', '.join(set_parts)} "
-            f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;"
+            f"WHERE {_AT_VERSION};"
         )
         cur = await self.adapter.execute(sql, params_list)
         try:
@@ -364,6 +351,37 @@ class AsyncSQLerDB:
         finally:
             await cur.close()
         return _id
+
+    async def _update_fields(
+        self,
+        table: str,
+        _id: int,
+        doc: dict[str, Any],
+        fields: Any,
+        promoted: Any = (),
+        expected_version: Optional[int] = None,
+    ) -> Optional[int]:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._update_fields`."""
+        table = validate_table_name(table)
+        if expected_version is None:
+            await self._ensure_table(table)
+        else:
+            await self._ensure_versioned_table(table)
+        update = _fields_update(table, _id, doc, fields, promoted, expected_version)
+        if update is None:
+            return None
+        cur = await self.adapter.execute(*update)
+        try:
+            rowcount = cur.rowcount
+        finally:
+            await cur.close()
+        await self.adapter.auto_commit()
+        if rowcount > 0:
+            return None if expected_version is None else expected_version + 1
+        gone = expected_version is None or not await _afetch_all(
+            self.adapter, f"SELECT 1 FROM {table} WHERE _id = ?;", [_id]
+        )
+        _refuse_unwritten(gone, table, _id)
 
     async def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         rows, columns = await self._read_rows(table, [_id])
@@ -855,7 +873,7 @@ class AsyncSQLerDB:
             raise ValueError("expected_version required for update")
         cur = await self.adapter.execute(
             f"UPDATE {table} SET data = json(?), _version = _version + 1 "
-            f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
+            f"WHERE {_AT_VERSION};",
             [payload, _id, expected_version, expected_version, expected_version],
         )
         try:

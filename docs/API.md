@@ -1715,6 +1715,62 @@ user.revert_changes()
 print(user.name)  # 'Alice'
 ```
 
+On a tracked model `is_dirty` is a property (the tracker's answer), where the model bases
+have an `is_dirty()` method: write `user.is_dirty`, and `SQLerModel.is_dirty(user)` for the
+base's answer.
+
+`TrackedModel` works with the sync pydantic and lite bases (`SQLerModel`, `SQLerSafeModel`,
+`SQLerLiteModel`, `SQLerLiteSafeModel`). An async model uses `AsyncTrackedModel` (with
+`AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite twins); `TrackedModel` on an async
+model raises `TypeError` when the class is defined. A msgspec model cannot take either:
+msgspec refuses the mixin when the class is defined.
+
+```python
+from sqler import PartialUpdateMixin, TrackedModel
+
+class Config(PartialUpdateMixin, TrackedModel, SQLerModel):
+    key: str
+    value: str
+    description: str = ""
+
+config = Config(key="theme", value="dark").save(db=db)
+config.value = "light"
+config.save_partial(db=db)  # writes only `value`; `key` and `description` stay as the row has them
+```
+
+`save_partial(db=None)` writes the fields that differ from the row as the model last loaded
+or saved it, and leaves the row's other fields as they are, so two instances of one row that
+change different fields both land. It goes through `save()`:
+
+- the row is the one `save()` writes: the database given or bound, and the table the row was
+  read from (`using(db, table)`);
+- each changed value is stored as `save()` stores it (a `datetime`, `Decimal`, `timedelta`, a
+  reference, a nested model, a promoted column, ...); a value with no stored form raises
+  `UnstorableValueError` naming its field. The changed fields go in one `UPDATE`;
+- on a safe model the version is checked and bumped as `save()` does: a stale partial save
+  raises `StaleVersionError` (or is rebased where `_rebase_config` allows it);
+- the mixins around `save()` run as for `save()`: `TimestampMixin` moves `updated_at`, the
+  audit log records the changed fields in the same transaction, `CacheAwareModel`
+  invalidates its table, `SearchableMixin` re-indexes, hooks run;
+- a row that is gone raises `NotFoundError` (a write of some fields cannot recreate it);
+  a model never saved is saved in full; with no changed field nothing is sent;
+- a key in the row that the model has no field for (a row written by another version of
+  the program) is left as it is; a full `save()` writes the model's own document and drops
+  it. A field the row did not hold yet is added at the end of the document, so the stored
+  text can order its keys differently from a full save's; the values are the same;
+- a field whose name holds a double quote or a backslash (possible only through
+  `pydantic.create_model`) raises `InvalidFieldNameError` before anything is sent: save
+  such a row with `save()`.
+
+Your own `save()` override on such a model must take and pass on keyword arguments
+(`def save(self, **kwargs): ... return super().save(**kwargs)`): the partial save reaches
+the base through it, and an override that takes none raises `TypeError` on
+`save_partial()`.
+
+After it the model is clean (`is_dirty` is False); a partial save that raised leaves it dirty.
+The async twin is `AsyncPartialUpdateMixin` with `AsyncTrackedModel`:
+`await config.save_partial(db=db)`.
+
 ```python
 from sqler import DiffMixin
 

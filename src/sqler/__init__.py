@@ -167,6 +167,8 @@ from .query import F, SQLerExpression, SQLerField, SQLerQuery
 from .query.query import PaginatedResult
 from .registry import register, resolve, tables
 from .tracking import (
+    AsyncPartialUpdateMixin,
+    AsyncTrackedModel,
     ChangeTracker,
     DiffMixin,
     FieldChange,
@@ -338,8 +340,10 @@ __all__ = [
     "SearchableMixin",
     # Change Tracking
     "TrackedModel",
+    "AsyncTrackedModel",
     "ChangeTracker",
     "FieldChange",
     "PartialUpdateMixin",
+    "AsyncPartialUpdateMixin",
     "DiffMixin",
 ]

@@ -147,7 +147,7 @@ class SQLerSafeModel(SQLerModel):
             inst._snapshot = _dirty.snapshot(payload)
         return instances
 
-    def save(self: TSafe, *, db=None) -> TSafe:  # type: ignore[override]
+    def save(self: TSafe, *, db=None, _partial: bool = False) -> TSafe:  # type: ignore[override]
         """Insert or update with optimistic locking and intent rebasing.
 
         If the save fails due to a stale version (another process updated
@@ -157,6 +157,9 @@ class SQLerSafeModel(SQLerModel):
 
         Args:
             db: Optional database to write to (overrides class-level binding).
+            _partial: Write only the fields that differ from the row as this model last
+                loaded or saved it, and leave the row's other fields as they are
+                (``save_partial()``). The row must exist.
 
         Returns:
             Self: The saved instance with updated ``_id`` and ``_version``.
@@ -187,6 +190,12 @@ class SQLerSafeModel(SQLerModel):
                 promoted = getattr(cls, "__promoted__", None)
                 if promoted:
                     db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
+                if _partial:
+                    changed = _dirty.changed_fields(self._snapshot or {}, attempt_payload)
+                    new_id, new_version = self._id, db._update_fields(
+                        table, self._id, attempt_payload, changed, promoted or (), self._version
+                    )
+                elif promoted:
                     new_id, new_version = db.upsert_with_version_promoted(
                         table, self._id, attempt_payload, self._version,
                         list(promoted.keys()),

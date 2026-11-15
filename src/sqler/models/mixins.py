@@ -66,10 +66,10 @@ class TimestampMixin:
         """Set timestamp fields before save."""
         self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
 
-    def save(self, *, db=None) -> Self:
+    def save(self, *, db=None, _partial: bool = False) -> Self:
         """Save with automatic timestamp updates."""
         self._set_timestamps()
-        return super().save(db=db)  # type: ignore[misc, return-value]
+        return super().save(db=db, _partial=_partial)  # type: ignore[misc, return-value]
 
 
 class SoftDeleteMixin:
@@ -363,7 +363,7 @@ class HooksMixin:
         """
         pass
 
-    def save(self, *, db=None) -> Self:
+    def save(self, *, db=None, _partial: bool = False) -> Self:
         """Save with before/after hooks.
 
         Calls before_save() first. If it returns False, the save is aborted.
@@ -379,7 +379,7 @@ class HooksMixin:
             raise RuntimeError(
                 f"before_save() returned False, save aborted for {self.__class__.__name__}"
             )
-        result = super().save(db=db)  # type: ignore[misc]
+        result = super().save(db=db, _partial=_partial)  # type: ignore[misc]
         if self._hooks_enabled:
             self.after_save()
         return result  # type: ignore[return-value]
@@ -448,7 +448,7 @@ class AsyncHooksMixin:
         """Called after the model is deleted (async)."""
         pass
 
-    async def save(self, *, db=None) -> Self:
+    async def save(self, *, db=None, _partial: bool = False) -> Self:
         """Save with before/after hooks (async).
 
         Calls before_save() first. If it returns False, the save is aborted.
@@ -464,7 +464,7 @@ class AsyncHooksMixin:
             raise RuntimeError(
                 f"before_save() returned False, save aborted for {self.__class__.__name__}"
             )
-        result = await super().save(db=db)  # type: ignore[misc]
+        result = await super().save(db=db, _partial=_partial)  # type: ignore[misc]
         if self._hooks_enabled:
             await self.after_save()
         return result  # type: ignore[return-value]
@@ -600,10 +600,10 @@ class AuditMixin:
         self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
         self.updated_by = user  # type: ignore[attr-defined]
 
-    def save(self, *, db=None) -> Self:
+    def save(self, *, db=None, _partial: bool = False) -> Self:
         """Save with automatic audit field updates."""
         self._set_audit_fields()
-        return super().save(db=db)  # type: ignore[misc, return-value]
+        return super().save(db=db, _partial=_partial)  # type: ignore[misc, return-value]
 
 
 class AsyncAuditMixin:
@@ -655,10 +655,10 @@ class AsyncAuditMixin:
         self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
         self.updated_by = user  # type: ignore[attr-defined]
 
-    async def save(self, *, db=None) -> Self:
+    async def save(self, *, db=None, _partial: bool = False) -> Self:
         """Save with automatic audit field updates."""
         self._set_audit_fields()
-        return await super().save(db=db)  # type: ignore[misc, return-value]
+        return await super().save(db=db, _partial=_partial)  # type: ignore[misc, return-value]
 
 
 _NO_VALUE = object()
@@ -821,7 +821,7 @@ class AuditLogMixin:
 
         return _audit_entries(rows)
 
-    def save(self, *, db=None) -> Self:
+    def save(self, *, db=None, _partial: bool = False) -> Self:
         """Save with automatic audit logging.
 
         Outside a transaction the save and its audit row share one transaction: both
@@ -832,18 +832,22 @@ class AuditLogMixin:
         kept = _remember_identity(self)
         try:
             with _atomic(db):
-                return self._save_and_log(db)
+                return self._save_and_log(db, _partial)
         except BaseException:
             # the save was rolled back (or the caller's transaction will be): the
             # instance goes back to what it was, so a second save() starts from there
             _restore_identity(self, kept)
             raise
 
-    def _save_and_log(self, db) -> Self:
+    def _save_and_log(self, db, _partial: bool) -> Self:
         is_new = getattr(self, "_id", None) is None
         old_row = None if is_new else db.find_document(_instance_binding(self, db)[1], self._id)
-        result = super().save(db=db)  # type: ignore[misc]
-        written = self._snapshot  # type: ignore[attr-defined]
+        result = super().save(db=db, _partial=_partial)  # type: ignore[misc]
+        # a partial save leaves the row's other fields as they were: the row is what it wrote
+        if _partial:
+            written = _dirty.snapshot(db.find_document(_instance_binding(self, db)[1], self._id))
+        else:
+            written = self._snapshot  # type: ignore[attr-defined]
         if is_new:
             self._log_audit("create", None, written, db=db)
         elif changes := _audit_changes(old_row, written):
@@ -913,7 +917,7 @@ class AsyncAuditLogMixin:
 
         return _audit_entries(rows)
 
-    async def save(self, *, db=None) -> Self:
+    async def save(self, *, db=None, _partial: bool = False) -> Self:
         """Save with automatic audit logging (async).
 
         Outside a transaction the save and its audit row share one transaction: both
@@ -924,18 +928,22 @@ class AsyncAuditLogMixin:
         kept = _remember_identity(self)
         try:
             async with _aatomic(db):
-                return await self._save_and_log(db)
+                return await self._save_and_log(db, _partial)
         except BaseException:
             _restore_identity(self, kept)
             raise
 
-    async def _save_and_log(self, db) -> Self:
+    async def _save_and_log(self, db, _partial: bool) -> Self:
         is_new = getattr(self, "_id", None) is None
         old_row = (
             None if is_new else await db.find_document(_instance_binding(self, db)[1], self._id)
         )
-        result = await super().save(db=db)  # type: ignore[misc]
-        written = self._snapshot  # type: ignore[attr-defined]
+        result = await super().save(db=db, _partial=_partial)  # type: ignore[misc]
+        # a partial save leaves the row's other fields as they were: the row is what it wrote
+        if _partial:
+            written = _dirty.snapshot(await db.find_document(_instance_binding(self, db)[1], self._id))
+        else:
+            written = self._snapshot  # type: ignore[attr-defined]
         if is_new:
             await self._log_audit("create", None, written, db=db)
         elif changes := _audit_changes(old_row, written):

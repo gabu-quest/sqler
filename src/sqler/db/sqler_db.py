@@ -6,7 +6,13 @@ from typing import Any, NamedTuple, Optional
 
 from sqler._stored import dumps, stored
 from sqler.adapter import SQLiteAdapter
-from sqler.exceptions import InvalidIdentifierError, StaleVersionError
+from sqler.exceptions import (
+    InvalidFieldNameError,
+    InvalidIdentifierError,
+    NotFoundError,
+    StaleVersionError,
+    UnstorableValueError,
+)
 from sqler.query import SQLerQuery
 from sqler.query.query import is_missing_table
 from sqler.utils import (
@@ -118,6 +124,88 @@ def _select_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) 
         if is_missing_table(exc, table):
             return None
         raise
+
+
+# ---- the write of one row: promoted columns, the version check, a write of some fields ----
+
+
+# a versioned row is written only while it is at the version its writer read
+_AT_VERSION = "_id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?"
+
+
+def _split_promoted(doc: dict[str, Any], promoted_fields: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``doc`` as a row holds it: the JSON document, and each of the ``promoted_fields`` in
+    stored form in its column. Every promoted name is checked, so it can go into SQL."""
+    for field in promoted_fields:
+        validate_column_name(field)
+    json_doc: dict[str, Any] = {}
+    columns: dict[str, Any] = {}
+    for k, v in doc.items():
+        if k in promoted_fields:
+            columns[k] = stored(v, field=k)
+        else:
+            json_doc[k] = v
+    return json_doc, columns
+
+
+def _json_path(key: str) -> str:
+    """The JSON path of the top-level ``key`` of a document, to bind as a parameter.
+
+    The key is quoted, so a dot, a space or a bracket in it is part of the name. A key with
+    a double quote or a backslash is refused: SQLite reads an escape in a path only since
+    3.45, so no path names such a key on every SQLite this library runs on."""
+    if '"' in key or "\\" in key:
+        raise InvalidFieldNameError(
+            f"Field {key!r} cannot be written by itself: its name holds a double quote or a "
+            "backslash, which a JSON path cannot name. Save the whole row with save().",
+            field=key,
+        )
+    return f'$."{key}"'
+
+
+def _fields_update(
+    table: str, _id: Any, doc: dict[str, Any], fields: Any, promoted: Any, expected_version: Optional[int]
+) -> Optional[tuple[str, list[Any]]]:
+    """The ``UPDATE`` of row ``_id`` of the validated ``table`` that writes the ``fields`` of
+    ``doc`` and leaves the row's other fields as they are, with its parameters; ``None`` when
+    an unversioned write has nothing to write.
+
+    A JSON field is set in ``data`` from its JSON text, a promoted one in its column, all in
+    one statement; with ``expected_version`` the row is written only at that version and its
+    ``_version`` goes up by one. A name in ``fields`` that ``doc`` does not hold (a key of
+    the row the model has no field for) is not written and not removed. A JSON field's name
+    is bound, never put into the SQL text."""
+    json_doc, columns = _split_promoted({k: v for k, v in doc.items() if k in fields}, promoted)
+    sets: list[str] = []
+    params: list[Any] = []
+    if json_doc:
+        paths = [_json_path(k) for k in json_doc]
+        try:
+            texts = [dumps(v) for v in json_doc.values()]
+        except UnstorableValueError:
+            dumps(json_doc)  # the same refusal, named by the field it is in
+            raise
+        for path, text in zip(paths, texts):
+            params += (path, text)
+        sets.append(f"data = json_set(data{', ?, json(?)' * len(paths)})")
+    for col, val in columns.items():
+        sets.append(f"{col} = ?")
+        params.append(val)
+    if expected_version is None:
+        return (f"UPDATE {table} SET {', '.join(sets)} WHERE _id = ?;", [*params, _id]) if sets else None
+    sets.append("_version = _version + 1")
+    v = expected_version
+    return f"UPDATE {table} SET {', '.join(sets)} WHERE {_AT_VERSION};", [*params, _id, v, v, v]
+
+
+def _refuse_unwritten(gone: bool, table: str, _id: Any) -> None:
+    """The error of a write of some fields that wrote no row: the row is gone, or at another version."""
+    if gone:
+        raise NotFoundError(
+            f"Row {_id} of {table} is gone: a write of some of its fields cannot recreate it",
+            id_=_id,
+        )
+    raise StaleVersionError("Stale version: update rejected")
 
 
 class SQLerDB:
@@ -359,16 +447,8 @@ class SQLerDB:
             int: The existing or newly assigned ``_id``.
         """
         table = validate_table_name(table)
-        for field in promoted_fields:
-            validate_column_name(field)
         # Split promoted from JSON
-        promoted_vals = {}
-        json_doc = {}
-        for k, v in doc.items():
-            if k in promoted_fields:
-                promoted_vals[k] = stored(v, field=k)
-            else:
-                json_doc[k] = v
+        json_doc, promoted_vals = _split_promoted(doc, promoted_fields)
 
         payload = dumps(json_doc)
 
@@ -415,18 +495,9 @@ class SQLerDB:
             tuple[int, int]: The row id and new version.
         """
         table = validate_table_name(table)
-        for field in promoted_fields:
-            validate_column_name(field)
+        json_doc, promoted_vals = _split_promoted(doc, promoted_fields)
         if not self._is_versioned(table):
             self._ensure_versioned_table(table)
-
-        promoted_vals = {}
-        json_doc = {}
-        for k, v in doc.items():
-            if k in promoted_fields:
-                promoted_vals[k] = stored(v, field=k)
-            else:
-                json_doc[k] = v
 
         payload = dumps(json_doc)
 
@@ -451,7 +522,7 @@ class SQLerDB:
 
         sql = (
             f"UPDATE {table} SET {', '.join(set_parts)} "
-            f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;"
+            f"WHERE {_AT_VERSION};"
         )
         cur = self._versioned_update(sql, params_list)
         rc = getattr(cur, "rowcount", -1)
@@ -496,6 +567,44 @@ class SQLerDB:
         self.adapter.execute(f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id])
         self.adapter.auto_commit()
         return _id
+
+    def _update_fields(
+        self,
+        table: str,
+        _id: int,
+        doc: dict[str, Any],
+        fields: Any,
+        promoted: Any = (),
+        expected_version: Optional[int] = None,
+    ) -> Optional[int]:
+        """Write the ``fields`` of ``doc`` into row ``_id`` and leave its other fields as they
+        are, in one statement: the JSON ones in ``data``, the ``promoted`` ones in their columns.
+        With ``expected_version`` the row is written only at that version, as
+        ``upsert_with_version`` writes it, and the new version is returned.
+
+        Raises:
+            NotFoundError: The row is gone: a write of some fields cannot recreate it.
+            StaleVersionError: The row is at another version.
+        """
+        table = validate_table_name(table)
+        if expected_version is None:
+            self._ensure_table(table)
+        elif not self._is_versioned(table):
+            self._ensure_versioned_table(table)
+        update = _fields_update(table, _id, doc, fields, promoted, expected_version)
+        if update is None:
+            return None
+        if expected_version is None:
+            cur = self.adapter.execute(*update)
+            self.adapter.auto_commit()
+            if cur.rowcount > 0:
+                return None
+            _refuse_unwritten(True, table, _id)
+        cur = self._versioned_update(*update)
+        if cur.rowcount > 0:
+            return expected_version + 1
+        row = self.adapter.execute(f"SELECT 1 FROM {table} WHERE _id = ?;", [_id]).fetchone()
+        _refuse_unwritten(row is None, table, _id)
 
     # ---- batch insert helpers ----
 
@@ -1120,7 +1229,7 @@ class SQLerDB:
             raise ValueError("expected_version required for update")
         cur = self._versioned_update(
             f"UPDATE {table} SET data = json(?), _version = _version + 1 "
-            f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
+            f"WHERE {_AT_VERSION};",
             [payload, _id, expected_version, expected_version, expected_version],
         )
         rc = getattr(cur, "rowcount", -1)
