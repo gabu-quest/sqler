@@ -5,6 +5,7 @@ import sqlite3
 from contextvars import ContextVar
 from typing import Any, Optional
 
+from sqler import cache
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter, PoolStats
 from sqler.db.sqler_db import (
     _and_fields,
@@ -902,7 +903,7 @@ class AsyncSQLerDB(_TableMemory):
 
     async def _begin_level(self) -> None:
         await self.adapter.begin_transaction()
-        self._open.set((*self._open.get(), _Level(set(), {}, {}, self.adapter._depth())))
+        self._open.set((*self._open.get(), _Level(set(), {}, {}, self.adapter._depth(), set())))
 
     async def _end_level(self, commit: bool, *, leaving: Optional[BaseException] = None) -> None:
         """End this task's innermost level; the async twin of ``SQLerDB._end_level``.
@@ -912,12 +913,16 @@ class AsyncSQLerDB(_TableMemory):
         levels = self._open.get()
         level = levels[-1] if levels else None  # none: begun in another task; nothing to merge
         self._open.set(levels[:-1])
+        committed = False
         try:
             await self.adapter.end_transaction(commit=commit)
+            committed = commit
         except Exception as ended:
             _ended_while_leaving(ended, leaving)
-            return
-        if commit and level is not None:
+        finally:
+            if level is not None and level.written:
+                cache.level_ended(level.written, self._written_level() if committed else None)
+        if committed and level is not None:
             self._merge(level)
 
 

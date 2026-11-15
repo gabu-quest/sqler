@@ -160,7 +160,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         """
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
-            return await self._checked("update").update(**fields)
+            return self._told(await self._checked("update").update(**fields))
         return len(await self._written("update", lambda q: q._changed(fields)))
 
     async def update_one(self, **fields) -> Optional[T]:
@@ -204,7 +204,7 @@ class AsyncSQLerQuerySet(Generic[T]):
             int: Number of rows deleted.
         """
         if not _write_rules.set_delete(self._model_cls, self._query._table, on_delete):
-            return await self._checked().delete()
+            return self._told(await self._checked().delete())
         return len(await self._written("rows", self._deleted_rows, on_delete))
 
     @staticmethod
@@ -216,8 +216,12 @@ class AsyncSQLerQuerySet(Generic[T]):
         written."""
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
-            return await self._checked("update")._update_picked(fields, n, op)
+            return self._told(await self._checked("update")._update_picked(fields, n, op))
         return [after for _, after in await self._written("update", lambda q: q._changed(fields, n))]
+
+    def _told(self, result):
+        """``result`` of a write that went past the row rules; the class is told of it."""
+        return _write_rules.told(self._model_cls, self._db, self._query._table, result)
 
     async def _written(self, use: str, write, on_delete: Optional[str] = None) -> list:
         """Async twin of :meth:`SQLerQuerySet._written`."""

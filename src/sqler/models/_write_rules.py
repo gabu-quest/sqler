@@ -8,6 +8,8 @@ a rule derives from :class:`WriteRules` and adds its part cooperatively:
 * ``_stamp()``: what to set on an instance just before it is written (the timestamp and
   audit-field mixins); ``_update_stamps()``: what a set-based update of the class's rows
   sets on each, in the same statement.
+* ``_table_written()``: told, right after a write, that a table of the class was written
+  (the cache mixin); it needs no row and runs no statement.
 * ``_rows_written()`` / ``_arows_written()``, for a class whose ``_row_rules`` is true:
   told, inside the write's transaction, of each row written as
   ``(action, _id, before, after)``: ``action`` is ``"create"``, ``"update"`` or
@@ -47,6 +49,12 @@ class WriteRules:
     def _update_stamps(cls) -> dict[str, Any]:
         """The fields a set-based update of this class's rows sets on each, with their values."""
         return {}
+
+    @classmethod
+    def _table_written(cls, db, table: str) -> None:
+        """Called right after a write of ``table`` through ``db`` (inside the write's
+        transaction where it has one); also after a write that raised, which may have
+        written some of its rows."""
 
     @classmethod
     def _rows_written(cls, db, table: str, rows: list[Row]) -> None:
@@ -139,10 +147,15 @@ async def _awritten(db, table: str, inst, partial: bool) -> dict:
 def save(inst, db, table: str, partial: bool, write: Callable[[], Any]):
     """``save()``: stamp, then ``write()`` the row; with row rules, in one transaction with
     them, and a failure puts the instance's identity back."""
-    if isinstance(inst, WriteRules):
+    rules = isinstance(inst, WriteRules)
+    if rules:
         inst._stamp()
-    if not (isinstance(inst, WriteRules) and inst._row_rules):
-        result = write()
+    if not (rules and inst._row_rules):
+        try:
+            result = write()
+        finally:
+            if rules:
+                inst._table_written(db, table)
         _written_to([inst], db, table)
         return result
     kept = _remember_identity(inst)
@@ -151,6 +164,7 @@ def save(inst, db, table: str, partial: bool, write: Callable[[], Any]):
             row_id = inst._id
             before = None if row_id is None else db.find_document(table, row_id)
             result = write()
+            inst._table_written(db, table)
             _written_to([inst], db, table)
             action = "create" if row_id is None else "update"
             after = _written(db, table, inst, partial)
@@ -163,10 +177,15 @@ def save(inst, db, table: str, partial: bool, write: Callable[[], Any]):
 
 async def asave(inst, db, table: str, partial: bool, write):
     """Async twin of :func:`save`; ``write()`` returns an awaitable."""
-    if isinstance(inst, WriteRules):
+    rules = isinstance(inst, WriteRules)
+    if rules:
         inst._stamp()
-    if not (isinstance(inst, WriteRules) and inst._row_rules):
-        result = await write()
+    if not (rules and inst._row_rules):
+        try:
+            result = await write()
+        finally:
+            if rules:
+                inst._table_written(db, table)
         _written_to([inst], db, table)
         return result
     kept = _remember_identity(inst)
@@ -175,6 +194,7 @@ async def asave(inst, db, table: str, partial: bool, write):
             row_id = inst._id
             before = None if row_id is None else await db.find_document(table, row_id)
             result = await write()
+            inst._table_written(db, table)
             _written_to([inst], db, table)
             action = "create" if row_id is None else "update"
             after = await _awritten(db, table, inst, partial)
@@ -193,17 +213,23 @@ def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]
         return instances
     new_only(instances)
     db, table = cls._resolve_binding(db)
-    if issubclass(cls, WriteRules):
+    rules = issubclass(cls, WriteRules)
+    if rules:
         for inst in instances:
             inst._stamp()
-    if not row_rules(cls):
-        insert(db, table, instances)
+    if not (rules and cls._row_rules):
+        try:
+            insert(db, table, instances)
+        finally:
+            if rules:
+                cls._table_written(db, table)
         _written_to(instances, db, table)
         return instances
     kept = [_remember_identity(inst) for inst in instances]
     try:
         with db.transaction():
             insert(db, table, instances)
+            cls._table_written(db, table)
             _written_to(instances, db, table)
             cls._rows_written(
                 db, table, [("create", inst._id, None, inst._snapshot) for inst in instances]
@@ -221,17 +247,23 @@ async def asave_many(cls, instances: list, db, insert) -> list:
         return instances
     new_only(instances)
     db, table = cls._resolve_binding(db)
-    if issubclass(cls, WriteRules):
+    rules = issubclass(cls, WriteRules)
+    if rules:
         for inst in instances:
             inst._stamp()
-    if not row_rules(cls):
-        await insert(db, table, instances)
+    if not (rules and cls._row_rules):
+        try:
+            await insert(db, table, instances)
+        finally:
+            if rules:
+                cls._table_written(db, table)
         _written_to(instances, db, table)
         return instances
     kept = [_remember_identity(inst) for inst in instances]
     try:
         async with db.transaction():
             await insert(db, table, instances)
+            cls._table_written(db, table)
             _written_to(instances, db, table)
             await cls._arows_written(
                 db, table, [("create", inst._id, None, inst._snapshot) for inst in instances]
@@ -250,10 +282,13 @@ def delete(inst, db, table: str, on_delete: str) -> None:
     unsaved (see :func:`_deleted`)."""
     deletable(inst, on_delete)
     row_id = int(inst._id)
-    rules = isinstance(inst, WriteRules) and inst._row_rules
+    told = isinstance(inst, WriteRules)
+    rules = told and inst._row_rules
     with db.transaction():
         before = db.find_document(table, row_id) if rules else None
         db.delete_document(table, row_id)
+        if told:
+            inst._table_written(db, table)
         deleted(db, table, [row_id], on_delete)
         if before is not None:
             inst._rows_written(db, table, [("delete", row_id, before, None)])
@@ -264,10 +299,13 @@ async def adelete(inst, db, table: str, on_delete: str) -> None:
     """Async twin of :func:`delete`."""
     deletable(inst, on_delete)
     row_id = int(inst._id)
-    rules = isinstance(inst, WriteRules) and inst._row_rules
+    told = isinstance(inst, WriteRules)
+    rules = told and inst._row_rules
     async with db.transaction():
         before = await db.find_document(table, row_id) if rules else None
         await db.delete_document(table, row_id)
+        if told:
+            inst._table_written(db, table)
         await adeleted(db, table, [row_id], on_delete)
         if before is not None:
             await inst._arows_written(db, table, [("delete", row_id, before, None)])
@@ -384,6 +422,14 @@ def _ids(pairs) -> list:
     return [before["_id"] for before, _ in pairs]
 
 
+def told(cls, db, table: str, result):
+    """``result`` of a set-based write of ``table`` that needed no row of it (a class without
+    row rules), once the class has been told that its table was written."""
+    if issubclass(cls, WriteRules):
+        cls._table_written(db, table)
+    return result
+
+
 def set_write(cls, db, table: str, write: Callable[[], list], on_delete: Optional[str] = None) -> list:
     """A set-based write: ``write()`` writes the rows and returns each as
     ``(before, after)`` (``after`` ``None`` for a delete); it, what ``on_delete`` does about
@@ -391,6 +437,8 @@ def set_write(cls, db, table: str, write: Callable[[], list], on_delete: Optiona
     one unit."""
     with _unit_db(cls, db).transaction():
         pairs = write()
+        if issubclass(cls, WriteRules):
+            cls._table_written(db, table)
         if on_delete is not None:
             deleted(db, table, _ids(pairs), on_delete)
         if row_rules(cls):
@@ -402,6 +450,8 @@ async def aset_write(cls, db, table: str, write, on_delete: Optional[str] = None
     """Async twin of :func:`set_write`; ``write()`` returns an awaitable."""
     async with _unit_db(cls, db).transaction():
         pairs = await write()
+        if issubclass(cls, WriteRules):
+            cls._table_written(db, table)
         if on_delete is not None:
             await adeleted(db, table, _ids(pairs), on_delete)
         if row_rules(cls):
@@ -443,6 +493,8 @@ def null_referrer(db, table: str, row_id, doc: dict) -> None:
         db._upsert_versioned(table, row_id, {**doc, "_version": version + 1}, version)
     else:
         db._upsert(table, row_id, doc)
+    if cls is not None:
+        cls._table_written(db, table)
     if before is not None:
         after = _dirty.snapshot(db.find_document(table, row_id))
         cls._rows_written(db, table, [("update", row_id, before, after)])
@@ -458,6 +510,8 @@ async def anull_referrer(db, table: str, row_id, doc: dict) -> None:
         await db._upsert_versioned(table, row_id, {**doc, "_version": version + 1}, version)
     else:
         await db._upsert(table, row_id, doc)
+    if cls is not None:
+        cls._table_written(db, table)
     if before is not None:
         after = _dirty.snapshot(await db.find_document(table, row_id))
         await cls._arows_written(db, table, [("update", row_id, before, after)])
@@ -468,6 +522,8 @@ def delete_referrer(db, table: str, row_id) -> None:
     cls = _class_of(table)
     before = db.find_document(table, row_id) if cls is not None and cls._row_rules else None
     db.delete_document(table, row_id)
+    if cls is not None:
+        cls._table_written(db, table)
     if before is not None:
         cls._rows_written(db, table, [("delete", row_id, before, None)])
 
@@ -477,5 +533,7 @@ async def adelete_referrer(db, table: str, row_id) -> None:
     cls = _class_of(table)
     before = await db.find_document(table, row_id) if cls is not None and cls._row_rules else None
     await db.delete_document(table, row_id)
+    if cls is not None:
+        cls._table_written(db, table)
     if before is not None:
         await cls._arows_written(db, table, [("delete", row_id, before, None)])

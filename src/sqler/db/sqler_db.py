@@ -7,6 +7,7 @@ import sys
 import threading
 from typing import Any, NamedTuple, Optional
 
+from sqler import cache
 from sqler._stored import dumps, stored
 from sqler.adapter import SQLiteAdapter
 from sqler.exceptions import (
@@ -32,14 +33,16 @@ from sqler.utils import (
 
 
 class _Level(NamedTuple):
-    """One open transaction of a database object's own: what it learned about tables, and the
+    """One open transaction of a database object's own: what it learned about tables, the
     adapter's depth right after its ``begin_transaction`` (the level is the innermost one of the
-    adapter's only while the adapter's depth is still this number)."""
+    adapter's only while the adapter's depth is still this number), and the tables of cached
+    results written in it (``sqler.cache``), whose results are not cached until it ends."""
 
     versioned: set[str]
     promoted: dict[str, list[str]]
     layouts: dict[str, tuple[str, ...]]
     depth: int
+    written: set[str]
 
 
 class _TableMemory:
@@ -100,6 +103,16 @@ class _TableMemory:
         if above is not None:
             for table, names in level.layouts.items():
                 _put(above, table, names, level.promoted.get(table))
+
+    def _written_level(self) -> Optional[set[str]]:
+        """The tables of cached results written in this object's innermost open transaction
+        (``_Level.written``); ``None`` with none open. A level whose depth is above the
+        adapter's has ended: a task started inside a transaction keeps that transaction's
+        levels after it."""
+        levels = self._levels()
+        if levels and levels[-1].depth <= self._adapter_depth():
+            return levels[-1].written
+        return None
 
     def _known(self, table: str) -> Optional[tuple[tuple[str, ...], Optional[list[str]], bool]]:
         """The names, promoted columns (``None``: not checked yet) and version remembered for
@@ -1818,20 +1831,27 @@ class SQLerDB(_TableMemory):
 
     def _begin_level(self) -> None:
         self.adapter.begin_transaction()
-        self._open.levels.append(_Level(set(), {}, {}, self.adapter._txn_depth))
+        self._open.levels.append(_Level(set(), {}, {}, self.adapter._txn_depth, set()))
 
     def _end_level(self, commit: bool, *, leaving: Optional[BaseException] = None) -> None:
         """End this thread's innermost level; what it learned about tables goes with it.
 
         A commit moves it to the level above, or at the outermost level to the shared memory
         (``_merge``); a rollback, or a commit that fails, drops it. That runs no statement and
-        raises nothing. ``leaving``: the caller's exception on its way out (see
-        ``_end_transaction``).
+        raises nothing. The tables of cached results written in it are cached again however
+        the level ends, or go on being held by the level above (``cache.level_ended``).
+        ``leaving``: the caller's exception on its way out (see ``_end_transaction``).
         """
         levels = self._open.levels
         level = levels.pop() if levels else None  # none: begun on another thread; nothing to merge
-        _end_transaction(self.adapter, commit, leaving)
-        if commit and level is not None:
+        committed = False
+        try:
+            _end_transaction(self.adapter, commit, leaving)
+            committed = commit
+        finally:
+            if level is not None and level.written:
+                cache.level_ended(level.written, self._written_level() if committed else None)
+        if committed and level is not None:
             self._merge(level)
 
     # ---- versioned (optimistic locking) helpers ----

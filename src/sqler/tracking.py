@@ -240,6 +240,14 @@ class TrackedModel(_ChangeTracking):
         self.mark_clean()
         return result
 
+    @classmethod
+    def save_many(cls, instances, *args, **kwargs):
+        """Save new instances in one batch and reset the tracking of each, as ``save()`` does."""
+        result = super().save_many(instances, *args, **kwargs)
+        for inst in instances:
+            inst.mark_clean()
+        return result
+
 
 class AsyncTrackedModel(_ChangeTracking):
     """Async twin of :class:`TrackedModel`, for ``AsyncSQLerModel``, ``AsyncSQLerSafeModel``
@@ -249,6 +257,14 @@ class AsyncTrackedModel(_ChangeTracking):
         """Save and reset tracking (async)."""
         result = await super().save(*args, **kwargs)
         self.mark_clean()
+        return result
+
+    @classmethod
+    async def save_many(cls, instances, *args, **kwargs):
+        """Save new instances in one batch and reset the tracking of each (async)."""
+        result = await super().save_many(instances, *args, **kwargs)
+        for inst in instances:
+            inst.mark_clean()
         return result
 
 
