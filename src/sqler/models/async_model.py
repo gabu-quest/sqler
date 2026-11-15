@@ -1,19 +1,33 @@
 from __future__ import annotations
 
-import inspect
+import os
 import warnings
-from typing import Any, ClassVar, Optional, Type, TypeVar
+from typing import ClassVar, Optional, Type, TypeVar
 
 from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
+from sqler._stored import stored
 from sqler.db.async_db import AsyncSQLerDB
-from sqler.exceptions import NotBoundError
+from sqler.exceptions import NotBoundError, UniqueConstraintError
+from sqler.models import _dirty, _refs
+from sqler.models._table_names import (
+    _aread_document,
+    _aread_documents,
+    _default_table_name,
+    _instance_binding,
+    _model_table_name,
+    _register_defined_class,
+)
 from sqler.models.async_queryset import AsyncSQLerQuerySet
-from sqler.models.model import _default_table_name
+from sqler.models.model import SQLerModel
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
 from sqler.utils import validate_field_name, validate_table_name
+
+# The deprecation warning is attributed to the first caller outside the sqler package, so a
+# subclass's ``super().set_db()`` does not hide it behind sqler's own file.
+_SQLER_PREFIXES = (os.path.dirname(os.path.abspath(registry.__file__)) + os.sep,)
 
 TAModel = TypeVar("TAModel", bound="AsyncSQLerModel")
 
@@ -42,10 +56,14 @@ class AsyncSQLerModel(BaseModel):
     _id: Optional[int] = PrivateAttr(default=None)
     # snapshot of last-loaded document (for merge strategies in perf mode)
     _snapshot: Optional[dict] = PrivateAttr(default=None)
+    # table this row was read from, when ``using(db, table)`` named one other than the class's
+    _source_table: Optional[str] = PrivateAttr(default=None)
 
     # class-bound db + table metadata
     _db: ClassVar[Optional[AsyncSQLerDB]] = None
     _table: ClassVar[Optional[str]] = None
+    # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
+    _versioned_rows: ClassVar[bool] = False
 
     # ----- class config -----
     model_config = {
@@ -54,13 +72,18 @@ class AsyncSQLerModel(BaseModel):
     }
 
     @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        _register_defined_class(cls)
+
+    @classmethod
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
         warnings.warn(
             f"{cls.__name__}.set_db() is deprecated. "
             "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
             "set_db() will be removed in a future version.",
             DeprecationWarning,
-            stacklevel=2,
+            skip_file_prefixes=_SQLER_PREFIXES,
         )
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
@@ -87,8 +110,7 @@ class AsyncSQLerModel(BaseModel):
     def _resolve_binding(cls, db=None) -> tuple[AsyncSQLerDB, str]:
         """Return (db, table) using the provided db or the class-level binding."""
         if db is not None:
-            table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-            return db, validate_table_name(table)
+            return db, _model_table_name(cls)
         return cls._require_binding()
 
     @classmethod
@@ -100,16 +122,13 @@ class AsyncSQLerModel(BaseModel):
     @classmethod
     async def from_id(cls: Type[TAModel], id_: int) -> Optional[TAModel]:
         db, table = cls._require_binding()
-        doc = await db.find_document(table, id_)
+        doc = await _aread_document(db, table, id_)
         if doc is None:
             return None
-        doc = await cls._aresolve_relations(doc)
-        inst = cls.model_validate(doc)
-        inst._id = doc.get("_id")
-        return inst  # type: ignore[return-value]
+        return _refs.from_row(cls, await cls._aresolve_relations(doc, db=db), doc)
 
     @classmethod
-    async def from_ids(cls: Type[TAModel], ids: list[int]) -> list[TAModel]:
+    async def from_ids(cls: Type[TAModel], ids: list[int], *, db=None) -> list[TAModel]:
         """Hydrate multiple instances by id list (batch operation).
 
         Fetches all documents in a single query and resolves all relations
@@ -118,6 +137,7 @@ class AsyncSQLerModel(BaseModel):
 
         Args:
             ids: List of row ids to load.
+            db: Optional database (overrides class-level binding).
 
         Returns:
             List of model instances (in same order as input ids).
@@ -125,19 +145,18 @@ class AsyncSQLerModel(BaseModel):
         """
         if not ids:
             return []
-        db, table = cls._require_binding()
-        docs = await db.find_documents(table, ids)
+        given = db
+        db, table = cls._resolve_binding(db)
+        read = _refs.aread_versioned if cls._versioned_rows else _aread_documents
+        docs = await read(db, table, ids)
         if not docs:
             return []
         # Use queryset's batch resolution for efficient nested ref loading
-        qs = cls.query()
-        docs = await qs._abatch_resolve(docs)
-        instances = []
-        for doc in docs:
-            inst = cls.model_validate(doc)
-            inst._id = doc.get("_id")
-            instances.append(inst)
-        return instances
+        qs = cls.using(given) if given is not None else cls.query()
+        return [
+            _refs.from_row(cls, doc, row)
+            for row, doc in zip(docs, await qs._abatch_resolve(docs), strict=True)
+        ]
 
     @classmethod
     async def count(cls: Type[TAModel]) -> int:
@@ -145,30 +164,39 @@ class AsyncSQLerModel(BaseModel):
 
         Shorthand for ``await cls.query().count()``.
         """
-        db, table = cls._require_binding()
-        await db._ensure_table(table)
         return await cls.query().count()
 
     @classmethod
     def query(cls: Type[TAModel]) -> AsyncSQLerQuerySet[TAModel]:
+        """Return a queryset on the bound table."""
         db, table = cls._require_binding()
-        q = AsyncSQLerQuery(table=table, adapter=db.adapter)
-        promoted = getattr(cls, "__promoted__", None)
-        if promoted:
-            q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TAModel](cls, q)
+        return cls._queryset(db, table)
 
     @classmethod
-    def using(cls: Type[TAModel], db: AsyncSQLerDB) -> AsyncSQLerQuerySet[TAModel]:
-        """Return a queryset bound to a specific DB (no class-level mutation)."""
-        table = validate_table_name(
-            getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-        )
+    def using(
+        cls: Type[TAModel], db: AsyncSQLerDB, table: Optional[str] = None
+    ) -> AsyncSQLerQuerySet[TAModel]:
+        """Return a queryset bound to a specific DB (no class-level mutation).
+
+        Args:
+            db: Database to read.
+            table: Optional table to read instead of the class's own. The class
+                binding is not changed. A row read from it remembers the table:
+                ``save()``, ``delete()`` and ``refresh()`` use that table.
+
+        A read creates no table: on a table nobody created, ``all()`` is empty,
+        ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
+        """
+        table = validate_table_name(table) if table is not None else _model_table_name(cls)
+        return cls._queryset(db, table)
+
+    @classmethod
+    def _queryset(cls: Type[TAModel], db: AsyncSQLerDB, table: str) -> AsyncSQLerQuerySet[TAModel]:
         q = AsyncSQLerQuery(table=table, adapter=db.adapter)
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TAModel](cls, q)
+        return AsyncSQLerQuerySet[TAModel](cls, q, db)
 
     @classmethod
     def filter(cls: Type[TAModel], expression: SQLerExpression) -> AsyncSQLerQuerySet[TAModel]:
@@ -207,7 +235,14 @@ class AsyncSQLerModel(BaseModel):
             return existing, False
         merged = {**lookup, **(defaults or {})}
         inst = cls(**merged)
-        await inst.save(db=db)
+        try:
+            await inst.save(db=db)
+        except UniqueConstraintError:
+            # another caller inserted the same lookup between the read and the insert
+            existing = await qs.first()
+            if existing is None:
+                raise  # refused by a unique index on a field outside the lookup
+            return existing, False
         return inst, True  # type: ignore[return-value]
 
     # ergonomic relation field builder
@@ -305,9 +340,9 @@ class AsyncSQLerModel(BaseModel):
         db, table = cls._resolve_binding(db)
         promoted = getattr(cls, "__promoted__", None)
 
-        if promoted and table not in db._promoted_columns:
+        if promoted:
             checks = getattr(cls, "__checks__", None)
-            await db._ensure_table_with_promoted(table, promoted, checks)
+            await db._ensure_promoted(table, promoted, checks)
 
         payloads = [await inst._adump_with_relations() for inst in instances]
 
@@ -317,18 +352,19 @@ class AsyncSQLerModel(BaseModel):
         else:
             ids = await db.insert_many(table, payloads)
 
-        for inst, id_ in zip(instances, ids):
+        for inst, id_, payload in zip(instances, ids, payloads):
             inst._id = id_
+            inst._snapshot = _dirty.snapshot(payload)
         return instances
 
     async def save(self: TAModel, *, db=None) -> TAModel:
         cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
         promoted = getattr(cls, "__promoted__", None)
-        if promoted and table not in db._promoted_columns:
+        if promoted:
             checks = getattr(cls, "__checks__", None)
-            await db._ensure_table_with_promoted(table, promoted, checks)
-        elif not promoted:
+            await db._ensure_promoted(table, promoted, checks)
+        else:
             await db._ensure_table(table)
         payload = await self._adump_with_relations()
         if promoted:
@@ -337,6 +373,7 @@ class AsyncSQLerModel(BaseModel):
         else:
             new_id = await db.upsert_document(table, self._id, payload)
         self._id = new_id
+        self._snapshot = _dirty.snapshot(payload)
         return self
 
     async def delete(self, *, db=None) -> None:
@@ -363,8 +400,7 @@ class AsyncSQLerModel(BaseModel):
             async_set_null_referrers,
         )
 
-        cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot delete unsaved model (missing _id)")
         if on_delete not in {"restrict", "set_null", "cascade"}:
@@ -382,13 +418,13 @@ class AsyncSQLerModel(BaseModel):
 
     async def refresh(self: TAModel) -> TAModel:
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = _instance_binding(self)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = await db.find_document(table, self._id)
+        doc = await _aread_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        doc = await cls._aresolve_relations(doc)
+        doc = await cls._aresolve_relations(doc, db=db)
         fresh = cls.model_validate(doc)
         for fname in self.__class__.model_fields:
             if fname == "_id":
@@ -399,71 +435,35 @@ class AsyncSQLerModel(BaseModel):
 
     # ----- relationship helpers (async) -----
     @classmethod
-    async def _aresolve_relations(cls, data: dict) -> dict:
-        async def adecode(value: Any):
-            if isinstance(value, dict):
-                if isinstance(value.get("_table"), str) and "_id" in value:
-                    table = value["_table"]
-                    rid = value["_id"]
-                    mdl = registry.resolve(table)
-                    if mdl is not None and hasattr(mdl, "from_id"):
-                        fn = getattr(mdl, "from_id")
-                        if inspect.iscoroutinefunction(fn):
-                            try:
-                                return await fn(rid)
-                            except Exception:
-                                return value
-                        else:
-                            try:
-                                return fn(rid)
-                            except Exception:
-                                return value
-                out = {}
-                for k, v in value.items():
-                    out[k] = await adecode(v)
-                return out
-            if isinstance(value, list):
-                return [await adecode(v) for v in value]
-            return value
+    async def _aresolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
+        """Replace the references in ``data`` by the rows they point to (see ``_refs.aresolve``)."""
+        return await _refs.aresolve(data, db, _seen)
 
-        out = {}
-        for k, v in data.items():
-            out[k] = await adecode(v)
+    @classmethod
+    async def _aload_refs(cls, ids: list, seen: frozenset) -> dict:
+        """Load the rows ``ids`` of this class's table with one statement.
+
+        Returns ``{id: instance}``; a row that is gone is missing, one that cannot be
+        hydrated maps to ``_refs.KEEP``.
+        """
+        db, table = cls._require_binding()
+        out: dict = {}
+        for doc in await _aread_documents(db, table, ids):
+            rid = doc["_id"]
+            try:
+                resolved = await cls._aresolve_relations(doc, db=db, _seen=seen | {(table, rid)})
+                inst = _refs.from_row(cls, resolved, doc)
+            except Exception:
+                out[rid] = _refs.KEEP
+                continue
+            out[rid] = inst
         return out
 
     async def _adump_with_relations(self) -> dict:
-        async def aencode(value: Any):
-            from datetime import datetime
-
-            from sqler.models.async_model import AsyncSQLerModel
-            from sqler.models.model import SQLerModel
-
-            if isinstance(value, AsyncSQLerModel):
-                if value._id is None:
-                    raise ValueError("Related async model must be saved before saving parent")
-                table = value.__class__._table
-                return {"_table": table, "_id": value._id}
-            if isinstance(value, SQLerModel):
-                if value._id is None:
-                    raise ValueError("Related model must be saved before saving parent")
-                table = value.__class__._table
-                return {"_table": table, "_id": value._id}
-            if isinstance(value, datetime):
-                return value.isoformat()
-            if isinstance(value, list):
-                return [await aencode(v) for v in value]
-            if isinstance(value, dict):
-                out = {}
-                for k, v in value.items():
-                    out[k] = await aencode(v)
-                return out
-            if isinstance(value, BaseModel):
-                return value.model_dump()
-            return value
-
-        payload: dict = {}
-        for name in self.__class__.model_fields:
-            if name == "_id":
-                continue
-            payload[name] = await aencode(getattr(self, name))
-        return payload
+        """The document ``save()`` writes: each field in stored form, a related model (async
+        or sync) as the reference to its row."""
+        return {
+            name: stored(getattr(self, name), (AsyncSQLerModel, SQLerModel))
+            for name in type(self).model_fields
+            if name != "_id"
+        }

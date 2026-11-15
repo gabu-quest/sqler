@@ -13,6 +13,8 @@ from dataclasses import fields
 from datetime import date, datetime
 from typing import Any, ClassVar, Optional, Type, TypeVar
 
+from sqler.models import _dirty, _refs
+
 T = TypeVar("T", bound="SQLerLiteModelBase")
 
 
@@ -34,6 +36,8 @@ class SQLerLiteModelBase:
     # These are NOT dataclass fields
     _id: Optional[int] = None
     _snapshot: Optional[dict] = None
+    # table this row was read from, when ``using(db, table)`` named one other than the class's
+    _source_table: Optional[str] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Inject annotations from non-dataclass mixin bases.
@@ -64,6 +68,10 @@ class SQLerLiteModelBase:
                 if name in base.__dict__:
                     setattr(cls, name, base.__dict__[name])
 
+        from sqler.models._table_names import _register_defined_class
+
+        _register_defined_class(cls)
+
     def __post_init__(self) -> None:
         """Initialize private attributes after dataclass __init__."""
         # Use object.__setattr__ to set private attrs without triggering
@@ -84,22 +92,24 @@ class SQLerLiteModelBase:
         # Get dataclass field names
         field_names = {f.name for f in fields(cls)}  # type: ignore[arg-type]
 
-        # Get annotations for relationship resolution
-        annotations = getattr(cls, "__annotations__", {})
-
         # Filter to only known fields (ignore extra like Pydantic's extra="ignore")
         init_data = {}
         for k, v in data.items():
             if k not in field_names or k.startswith("_"):
                 continue
             # Check if this is a dict that might be a related model
-            if isinstance(v, dict) and "_id" in v and k in annotations:
+            if isinstance(v, dict) and "_id" in v:
                 # Try to resolve using registry
                 from sqler import registry
 
                 # Check if this dict has _table (from _resolve_relations path)
                 # or try to infer the model from the field annotation
                 if "_table" in v:
+                    if v.keys() == {"_table", "_id"}:
+                        # a bare stored reference: its row could not be read (a missing
+                        # table or row); it stays the reference it was, never an empty model
+                        init_data[k] = v
+                        continue
                     # Already has table info, use registry
                     table = v.get("_table")
                     model_cls = registry.resolve(table) if isinstance(table, str) else None
@@ -108,10 +118,9 @@ class SQLerLiteModelBase:
                         continue
                 else:
                     # No _table - this is from batch_resolve, try to get model from annotation
-                    ann = annotations.get(k)
-                    model_cls = cls._resolve_annotation_to_model(ann)
-                    if model_cls is not None:
-                        init_data[k] = model_cls.model_validate(v)
+                    admits = _refs.typed_fields(cls).get(k)
+                    if admits:
+                        init_data[k] = admits[0].model_validate(v)
                         continue
             init_data[k] = v
 
@@ -123,52 +132,6 @@ class SQLerLiteModelBase:
             object.__setattr__(inst, "_id", data["_id"])
 
         return inst
-
-    @classmethod
-    def _resolve_annotation_to_model(cls, ann: Any) -> Optional[Type["SQLerLiteModelBase"]]:
-        """Try to resolve an annotation to a SQLerLiteModelBase subclass.
-
-        Args:
-            ann: The type annotation (could be a type, string, or Optional/Union).
-
-        Returns:
-            The model class if found, else None.
-        """
-        if ann is None:
-            return None
-
-        # If it's already a class, check if it's a model
-        if isinstance(ann, type):
-            if issubclass(ann, SQLerLiteModelBase):
-                return ann
-            return None
-
-        # Handle Optional[T] / Union[T, None] - get __args__
-        args = getattr(ann, "__args__", None)
-        if args:
-            for arg in args:
-                if arg is type(None):
-                    continue
-                result = cls._resolve_annotation_to_model(arg)
-                if result is not None:
-                    return result
-
-        # Handle string annotation (forward reference)
-        if isinstance(ann, str):
-            # Try to find in registry by pluralized name
-            from sqler import registry
-
-            # Try common table name patterns
-            lower = ann.lower()
-            for table_name in [lower, lower + "s", lower + "es"]:
-                try:
-                    model_cls = registry.resolve(table_name)
-                    if model_cls is not None and issubclass(model_cls, SQLerLiteModelBase):
-                        return model_cls
-                except (LookupError, TypeError):
-                    pass
-
-        return None
 
     def model_dump(
         self,
@@ -234,6 +197,10 @@ class SQLerLiteModelBase:
     def get_field_names(cls) -> set[str]:
         """Return set of public field names."""
         return {f.name for f in fields(cls) if not f.name.startswith("_")}  # type: ignore[arg-type]
+
+    # ----- dirty tracking -----
+    is_dirty = _dirty.is_dirty
+    get_dirty_fields = _dirty.get_dirty_fields
 
     def __repr__(self) -> str:
         """Return string representation."""

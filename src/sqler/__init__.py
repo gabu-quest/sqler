@@ -17,6 +17,7 @@ from .exceptions import (
     ConcurrencyError,
     ConnectionPoolExhaustedError,
     IntegrityError,
+    LockTimeoutError,
     MaxDepthExceededError,
     MissingReferenceError,
     MissingReferenceWarning,
@@ -285,6 +286,7 @@ __all__ = [
     # Errors - Concurrency
     "ConcurrencyError",
     "StaleVersionError",
+    "LockTimeoutError",
     # Errors - Integrity
     "IntegrityError",
     "UniqueConstraintError",

@@ -4,6 +4,9 @@ This module provides a consistent set of exceptions for all SQLer operations,
 making error handling more predictable and informative.
 """
 
+import builtins
+import re
+import sqlite3
 from typing import Any, Optional
 
 
@@ -60,10 +63,20 @@ class QueryError(SQLerError):
         self.params = params
 
 
-class NoAdapterError(QueryError):
-    """Raised when attempting to execute a query without an adapter."""
+class NoAdapterError(QueryError, builtins.ConnectionError):
+    """Raised when attempting to execute a query without an adapter.
 
-    pass
+    The one error for a sync and an async query. It is a ``SQLerError`` and also
+    Python's built-in ``ConnectionError``, which the sync query's own class used to
+    be, so ``except ConnectionError`` around a sync query keeps working.
+    """
+
+    def __reduce__(self):
+        return (_rebuild_no_adapter_error, (self.message, self.sql, self.params, self.details))
+
+
+def _rebuild_no_adapter_error(message, sql, params, details):
+    return NoAdapterError(message, sql=sql, params=params, details=details)
 
 
 class QueryTimeoutError(QueryError):
@@ -189,8 +202,21 @@ class ReferentialIntegrityError(IntegrityError):
         self.referrer_count = referrer_count
 
 
-class UniqueConstraintError(IntegrityError):
-    """Raised when a unique constraint is violated."""
+class UniqueConstraintError(IntegrityError, sqlite3.IntegrityError):
+    """Raised when a unique constraint (a unique index or a primary key) refuses a row.
+
+    The sync and the async adapter raise it in place of the driver's
+    ``sqlite3.IntegrityError`` when SQLite reports ``UNIQUE constraint failed``.
+    It is also a ``sqlite3.IntegrityError``, so ``except sqlite3.IntegrityError``
+    still catches it, and the driver error is its ``__cause__``.
+
+    Attributes:
+        table: The table SQLite named, or ``None`` for an index on an expression.
+        columns: The columns SQLite named, in its order (empty for an index on an expression).
+        index: The index SQLite named when it names no column, else ``None``.
+        field: The column when SQLite named exactly one, else ``None``.
+        value: Not known to SQLite's message; ``None`` unless the caller sets it.
+    """
 
     def __init__(
         self,
@@ -199,10 +225,67 @@ class UniqueConstraintError(IntegrityError):
         field: Optional[str] = None,
         value: Any = None,
         details: Optional[dict[str, Any]] = None,
+        table: Optional[str] = None,
+        columns: Optional[list[str]] = None,
+        index: Optional[str] = None,
     ):
         super().__init__(message, details=details)
         self.field = field
         self.value = value
+        self.table = table
+        self.columns = list(columns or [])
+        self.index = index
+
+
+_UNIQUE_PREFIX = "UNIQUE constraint failed: "
+_UNIQUE_ERRORNAMES = frozenset({"SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_PRIMARYKEY"})
+_UNIQUE_INDEX_RE = re.compile(r"index '(?P<index>.*)'")
+
+
+def unique_violation_from(exc: BaseException) -> Optional[UniqueConstraintError]:
+    """Return the ``UniqueConstraintError`` for a driver error that reports a unique violation.
+
+    The one place where a SQLite error becomes a sqler error; the sync and the
+    async adapter call it on every failed statement. Returns ``None`` for
+    anything that is not a ``sqlite3.IntegrityError`` whose message starts with
+    ``UNIQUE constraint failed:`` and whose extended code is a unique index or a
+    primary key, not a trigger (NOT NULL, CHECK and FOREIGN KEY errors stay
+    as they are), and for an error that is already a ``UniqueConstraintError``.
+    The caller raises the result ``from exc``.
+    """
+    if not isinstance(exc, sqlite3.IntegrityError) or isinstance(exc, UniqueConstraintError):
+        return None
+    message = str(exc)
+    if not message.startswith(_UNIQUE_PREFIX):
+        return None
+    # The message alone can be forged by a trigger (RAISE(ABORT, 'UNIQUE constraint
+    # failed: ...')). SQLite's extended code tells a unique index or a primary key
+    # from a trigger. ``sqlite_errorname`` exists from Python 3.11 and the project
+    # requires 3.12; an error without it is left as the driver raised it.
+    if getattr(exc, "sqlite_errorname", None) not in _UNIQUE_ERRORNAMES:
+        return None
+    named = message[len(_UNIQUE_PREFIX):]
+    table: Optional[str] = None
+    columns: list[str] = []
+    index: Optional[str] = None
+    match = _UNIQUE_INDEX_RE.fullmatch(named)
+    if match:
+        index = match.group("index")
+    else:
+        for part in named.split(", "):
+            tbl, _, col = part.partition(".")
+            table = tbl
+            columns.append(col)
+    err = UniqueConstraintError(
+        message,
+        field=columns[0] if len(columns) == 1 else None,
+        table=table,
+        columns=columns,
+        index=index,
+    )
+    err.sqlite_errorcode = getattr(exc, "sqlite_errorcode", None)
+    err.sqlite_errorname = getattr(exc, "sqlite_errorname", None)
+    return err
 
 
 # Schema Errors

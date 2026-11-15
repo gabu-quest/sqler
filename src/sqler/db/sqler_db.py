@@ -1,10 +1,15 @@
+import functools
 import json
+import sqlite3
 import threading
-from typing import Any, Optional
+from types import SimpleNamespace
+from typing import Any, NamedTuple, Optional
 
+from sqler._stored import dumps, stored
 from sqler.adapter import SQLiteAdapter
-from sqler.exceptions import StaleVersionError
+from sqler.exceptions import InvalidIdentifierError, StaleVersionError
 from sqler.query import SQLerQuery
+from sqler.query.query import is_missing_table
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -13,6 +18,107 @@ from sqler.utils import (
     validate_identifier,
     validate_table_name,
 )
+
+
+class _Level(NamedTuple):
+    """One open transaction of a database object's own: what it learned about tables, and the
+    adapter's depth right after its ``begin_transaction`` (the level is the innermost one of the
+    adapter's only while the adapter's depth is still this number)."""
+
+    versioned: set[str]
+    promoted: dict[str, list[str]]
+    depth: int
+
+
+# ---- a stored row read by its id: the one column list and the one row-to-document rule ----
+
+
+_NOT_PROMOTED = frozenset({"_id", "data", "_version"})
+
+
+def _promoted_in(names: Any) -> list[str]:
+    """The promoted columns among a table's column ``names``: every column but ``_id``,
+    ``data`` and ``_version`` whose name sqler accepts for a promoted column. A column
+    added by hand under another name is never read."""
+    out = []
+    for name in names:
+        if name.lower() in _NOT_PROMOTED:
+            continue
+        try:
+            validate_column_name(name)
+        except InvalidIdentifierError:
+            continue
+        out.append(name)
+    return out
+
+
+def _columns_sql(table: str) -> str:
+    """The statement that lists the columns of the validated ``table``: no rows when it is missing."""
+    return f'PRAGMA table_info("{table}");'
+
+
+def _row_columns(promoted: Any = (), versioned: bool = False) -> tuple[str, ...]:
+    """The columns a stored row is read with: ``_id``, ``data``, ``_version`` for a versioned
+    read, then the promoted columns."""
+    return ("_id", "data", "_version", *promoted) if versioned else ("_id", "data", *promoted)
+
+
+# The most variables one statement binds: the bound the bulk inserts chunk by
+# (``_insert_many_chunked``), SQLite's historic default limit of host variables.
+_MAX_VARIABLES = 999
+
+
+@functools.lru_cache(maxsize=512)
+def _rows_sql(table: str, columns: tuple[str, ...], n: int) -> str:
+    """The statement that reads ``n`` ids of the validated ``table`` with ``columns``, one
+    variable per id; for ``n == 0`` the ids come as one JSON array in one variable. Built once
+    per shape, so a one-id read builds no text."""
+    ids = "SELECT value FROM json_each(?)" if n == 0 else ",".join("?" * n)
+    return f"SELECT {', '.join(columns)} FROM {table} WHERE _id IN ({ids});"
+
+
+def _row_documents(rows: Any, columns: list[str]) -> list[dict[str, Any]]:
+    """Each row read with ``columns`` as a document: its JSON, then every column but ``data``
+    set on it by name (a column wins over a JSON key of its name)."""
+    loads = json.loads
+    docs = []
+    for row in rows:
+        doc = loads(row[1])
+        doc["_id"] = row[0]
+        docs.append(doc)
+    extra = columns[2:]
+    if extra:
+        for doc, row in zip(docs, rows):
+            doc.update(zip(extra, row[2:]))
+    return docs
+
+
+def _in_order(rows: Any, ids: list) -> list:
+    """The rows of ``ids`` in the order of ``ids``: an id asked twice gives its row twice, an
+    id with no row gives nothing."""
+    by_id = {row[0]: row for row in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def _id_params(ids: list) -> tuple[int, list]:
+    """The ``n`` of :func:`_rows_sql` and the variables for ``ids``: one per id up to
+    ``_MAX_VARIABLES``, past it the whole list as one JSON array, so a read is one statement
+    whatever the number of ids."""
+    if len(ids) <= _MAX_VARIABLES:
+        return len(ids), ids
+    return 0, [json.dumps(ids)]
+
+
+def _select_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) -> Optional[list]:
+    """The rows of ``ids`` read with ``columns``, in stored order; ``None`` when ``table`` is
+    missing (a read creates no table)."""
+    n, params = _id_params(ids)
+    try:
+        return adapter.execute(_rows_sql(table, columns, n), params).fetchall()
+    except sqlite3.OperationalError as exc:
+        if is_missing_table(exc, table):
+            return None
+        raise
 
 
 class SQLerDB:
@@ -58,10 +164,46 @@ class SQLerDB:
         self.adapter.connect()
         # serialize DDL operations (e.g., adding _version) across threads
         self._ddl_lock = threading.RLock()
-        # cache of tables already ensured to be versioned
+        # what is remembered about committed tables: versioned tables, promoted columns per table
         self._versioned_tables: set[str] = set()
-        # promoted columns per table: table -> list of column names
         self._promoted_columns: dict[str, list[str]] = {}
+        # what each open level of this object's own transactions learned, innermost last; counted
+        # like the adapter's depth: per thread, or once for the single ":memory:" connection
+        self._open = SimpleNamespace(levels=[]) if adapter._memory_singleton else _OpenLevels()
+
+    def ensure_table(
+        self,
+        table: str,
+        *,
+        promoted: Optional[dict[str, str]] = None,
+        checks: Optional[dict[str, str]] = None,
+        versioned: bool = False,
+    ) -> None:
+        """Create a table if it is missing, with promoted columns, CHECK constraints and a version.
+
+        Safe to call again: on an existing table it adds the promoted columns
+        and the ``_version`` column that are missing, and changes nothing else
+        (CHECK constraints are only written when the table is created).
+
+        Args:
+            table: Table name (``[a-zA-Z_][a-zA-Z0-9_]*``).
+            promoted: ``{column: definition}`` for real columns beside ``data``,
+                e.g. ``{"status": "TEXT NOT NULL DEFAULT 'pending'"}``.
+            checks: ``{name: expression}`` CHECK constraints for a new table.
+            versioned: Add the ``_version INTEGER NOT NULL DEFAULT 0`` column
+                used by the versioned writes.
+
+        Raises:
+            InvalidTableNameError: The table name is not accepted.
+            InvalidIdentifierError: A promoted column name is not accepted.
+            InvalidColumnDefError: A column definition or CHECK expression is not accepted.
+        """
+        if promoted or checks:
+            self._ensure_table_with_promoted(table, promoted or {}, checks)
+        else:
+            self._ensure_table(table)
+        if versioned:
+            self._ensure_versioned_table(table)
 
     def _ensure_table(self, table: str) -> None:
         """Create the target table if it doesn't exist.
@@ -78,6 +220,18 @@ class SQLerDB:
         """
         self.adapter.execute(ddl)
         self.adapter.auto_commit()
+
+    def _ensure_promoted(
+        self,
+        table: str,
+        promoted: dict[str, str],
+        checks: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here
+        with every column of ``promoted``."""
+        known = self._promoted_of(table)
+        if known is None or any(col not in known for col in promoted):
+            self._ensure_table_with_promoted(table, promoted, checks)
 
     def _ensure_table_with_promoted(
         self,
@@ -97,8 +251,6 @@ class SQLerDB:
                 ``{"status": "TEXT NOT NULL DEFAULT 'pending'"}``.
             checks: Optional ``{name: expression}`` CHECK constraints.
         """
-        import sqlite3 as _sqlite3
-
         table = validate_table_name(table)
         checks = checks or {}
         for col_name, col_def in promoted.items():
@@ -125,29 +277,69 @@ class SQLerDB:
                 ddl = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
                 self.adapter.execute(ddl)
                 self.adapter.auto_commit()
+                columns = list(promoted)
             else:
-                # Get existing columns
-                cur = self.adapter.execute(f'PRAGMA table_info("{table}");')
-                rows = cur.fetchall()
-                existing_cols: set[str] = set()
-                for row in rows:
-                    try:
-                        if isinstance(row, _sqlite3.Row):
-                            existing_cols.add(row["name"])
-                        else:
-                            existing_cols.add(row[1])
-                    except (KeyError, IndexError, TypeError):
-                        continue
-
-                # Add missing promoted columns
-                for col_name, col_def in promoted.items():
-                    if col_name not in existing_cols:
-                        self.adapter.execute(
-                            f'ALTER TABLE "{table}" ADD COLUMN {col_name} {col_def};'
-                        )
+                existing = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+                added = [col for col in promoted if col not in existing]
+                for col_name in added:
+                    self.adapter.execute(
+                        f'ALTER TABLE "{table}" ADD COLUMN {col_name} {promoted[col_name]};'
+                    )
                 self.adapter.auto_commit()
+                columns = _promoted_in(existing) + added
 
-            self._promoted_columns[table] = list(promoted.keys())
+            self._remember(table, promoted=columns)
+
+    def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]]]]:
+        """Where an ensure call keeps what it learned about a table.
+
+        The innermost open level of this object's own transactions, if the adapter's depth is
+        still that level's; with no level open, the shared memory, at depth 0. Anywhere else
+        the transaction is not this object's (the adapter used directly, another thread's on
+        the single ``":memory:"`` connection): nowhere. Forgetting costs a repeated
+        ``CREATE TABLE IF NOT EXISTS``, remembering wrongly loses a write.
+        """
+        depth = self.adapter._txn_depth
+        levels = self._open.levels
+        if levels:
+            level = levels[-1]
+            return (level.versioned, level.promoted) if level.depth == depth else None
+        return (self._versioned_tables, self._promoted_columns) if depth == 0 else None
+
+    def _remember(self, table: str, *, promoted: Optional[list[str]] = None) -> None:
+        """Remember ``table``'s ``promoted`` columns, or without them that it has ``_version``."""
+        learned = self._learned()
+        if learned is None:
+            return
+        if promoted is None:
+            learned[0].add(table)
+        else:
+            learned[1][table] = promoted
+
+    def _is_versioned(self, table: str) -> bool:
+        """Whether ``table`` is remembered to have its ``_version`` column, here and now."""
+        return table in self._versioned_tables or any(table in level.versioned for level in self._open.levels)
+
+    def _promoted_of(self, table: str) -> Optional[list[str]]:
+        """The promoted columns remembered for ``table`` here and now; ``None`` if it is not remembered."""
+        for level in reversed(self._open.levels):
+            if table in level.promoted:
+                return level.promoted[table]
+        return self._promoted_columns.get(table)
+
+    def _columns_of(self, table: str) -> list[str]:
+        """The promoted columns of the validated ``table``: remembered, or else read from the
+        table once and remembered as an ensure call remembers them (a table without any as
+        having none). A missing table has none and is not remembered."""
+        promoted = self._promoted_of(table)
+        if promoted is None:
+            names = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+            promoted = _promoted_in(names)
+            learned = self._learned() if names else None
+            if learned is not None:
+                # an entry made since the statement above (another thread's ensure) is newer
+                promoted = learned[1].setdefault(table, promoted)
+        return promoted
 
     def upsert_document_promoted(
         self,
@@ -167,16 +359,19 @@ class SQLerDB:
         Returns:
             int: The existing or newly assigned ``_id``.
         """
+        table = validate_table_name(table)
+        for field in promoted_fields:
+            validate_column_name(field)
         # Split promoted from JSON
         promoted_vals = {}
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = v
+                promoted_vals[k] = stored(v)
             else:
                 json_doc[k] = v
 
-        payload = json.dumps(json_doc)
+        payload = dumps(json_doc)
 
         if _id is None:
             # INSERT
@@ -220,18 +415,21 @@ class SQLerDB:
         Returns:
             tuple[int, int]: The row id and new version.
         """
-        if table not in self._versioned_tables:
+        table = validate_table_name(table)
+        for field in promoted_fields:
+            validate_column_name(field)
+        if not self._is_versioned(table):
             self._ensure_versioned_table(table)
 
         promoted_vals = {}
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = v
+                promoted_vals[k] = stored(v)
             else:
                 json_doc[k] = v
 
-        payload = json.dumps(json_doc)
+        payload = dumps(json_doc)
 
         if _id is None:
             cols = ["data", "_version"] + list(promoted_vals.keys())
@@ -245,13 +443,6 @@ class SQLerDB:
         if expected_version is None:
             raise ValueError("expected_version required for update")
 
-        # Acquire write lock early
-        if not self.adapter.in_transaction:
-            try:
-                self.adapter.execute("BEGIN IMMEDIATE;")
-            except (RuntimeError, ValueError):
-                pass
-
         set_parts = ["data = json(?)", "_version = _version + 1"]
         params_list: list[Any] = [payload]
         for col, val in promoted_vals.items():
@@ -263,8 +454,7 @@ class SQLerDB:
             f"UPDATE {table} SET {', '.join(set_parts)} "
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;"
         )
-        cur = self.adapter.execute(sql, params_list)
-        self.adapter.auto_commit()
+        cur = self._versioned_update(sql, params_list)
         rc = getattr(cur, "rowcount", -1)
         if rc <= 0:
             self.adapter.execute(
@@ -284,7 +474,7 @@ class SQLerDB:
             int: Newly assigned ``_id``.
         """
         self._ensure_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         cursor = self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
         self.adapter.auto_commit()
         return cursor.lastrowid
@@ -301,7 +491,7 @@ class SQLerDB:
             int: The existing or newly assigned ``_id``.
         """
         self._ensure_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         if _id is None:
             return self.insert_document(table, doc)
         self.adapter.execute(f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, _id])
@@ -343,6 +533,7 @@ class SQLerDB:
         """
         if not docs:
             return []
+        table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
         cols = ["data"] + promoted_fields
@@ -404,7 +595,7 @@ class SQLerDB:
         """
         promoted_fields = promoted_fields or []
         params_per_row = 1 + len(promoted_fields)
-        max_rows_per_chunk = max(1, 999 // params_per_row)
+        max_rows_per_chunk = max(1, _MAX_VARIABLES // params_per_row)
 
         all_ids: list[int] = []
         all_col_names = list(cols)
@@ -419,13 +610,13 @@ class SQLerDB:
 
                 for doc in chunk:
                     if promoted_fields:
-                        promoted_vals = {k: doc[k] for k in promoted_fields if k in doc}
+                        promoted_vals = {k: stored(doc[k]) for k in promoted_fields if k in doc}
                         json_doc = {k: v for k, v in doc.items() if k not in promoted_fields}
                     else:
                         json_doc = doc
                         promoted_vals = {}
 
-                    payload = json.dumps(json_doc)
+                    payload = dumps(json_doc)
                     row_placeholders = ["json(?)"]
                     params.append(payload)
 
@@ -496,7 +687,7 @@ class SQLerDB:
                 for offset in range(0, len(inserts), 999):
                     chunk = inserts[offset : offset + 999]
                     params = [
-                        json.dumps({k: v for k, v in doc.items() if k != "_id"})
+                        dumps({k: v for k, v in doc.items() if k != "_id"})
                         for _, doc in chunk
                     ]
                     values_sql = ", ".join("(json(?))" for _ in chunk)
@@ -520,9 +711,7 @@ class SQLerDB:
                     for _, doc in chunk:
                         params.extend([
                             int(doc["_id"]),
-                            json.dumps(
-                                {k: v for k, v in doc.items() if k != "_id"}
-                            ),
+                            dumps({k: v for k, v in doc.items() if k != "_id"}),
                         ])
                     values_sql = ", ".join("(?, json(?))" for _ in chunk)
                     sql = (
@@ -546,24 +735,8 @@ class SQLerDB:
             dict | None: Decoded document with ``_id`` merged in, or ``None``
             if not found.
         """
-        self._ensure_table(table)
-        promoted = self._promoted_columns.get(table, [])
-        if promoted:
-            extra_cols = ", ".join(promoted)
-            cur = self.adapter.execute(
-                f"SELECT _id, data, {extra_cols} FROM {table} WHERE _id = ?;", [_id]
-            )
-        else:
-            cur = self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
-        row = cur.fetchone()
-        if not row:
-            return None
-        obj = json.loads(row[1])
-        obj["_id"] = row[0]
-        if promoted:
-            for i, col_name in enumerate(promoted):
-                obj[col_name] = row[2 + i]
-        return obj
+        rows, columns = self._read_rows(table, [_id])
+        return _row_documents(rows, columns)[0] if rows else None
 
     def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
         """Fetch multiple documents by id list (batch operation).
@@ -576,25 +749,46 @@ class SQLerDB:
             ids: List of row ids to fetch.
 
         Returns:
-            list[dict]: Decoded documents with ``_id`` merged in.
+            list[dict]: Decoded documents with ``_id`` and the promoted columns merged
+            in, as :meth:`find_document` gives each.
         """
         if not ids:
             return []
-        self._ensure_table(table)
-        placeholders = ",".join("?" for _ in ids)
-        cur = self.adapter.execute(
-            f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
-            list(ids),
-        )
-        rows = cur.fetchall()
-        # Build lookup dict for ordering
-        by_id: dict[int, dict[str, Any]] = {}
-        for row in rows:
-            obj = json.loads(row[1])
-            obj["_id"] = row[0]
-            by_id[row[0]] = obj
-        # Return in input order, skipping missing
-        return [by_id[i] for i in ids if i in by_id]
+        rows, columns = self._read_rows(table, ids)
+        return _row_documents(_in_order(rows or [], ids), columns)
+
+    def _read_rows(
+        self, table: str, ids: list, *, versioned: bool = False, alter: bool = True
+    ) -> tuple[Optional[list], list[str]]:
+        """The by-id read every reader of this database goes through.
+
+        Returns the stored rows of ``ids`` (stored order) and the columns they were read
+        with: the promoted columns of ``table`` (:meth:`_columns_of`), and ``_version`` when
+        ``versioned``. A missing table gives ``None`` rows and is not created; a table made
+        before versioning gets its ``_version`` column on a versioned read, as it always did.
+        With ``alter=False`` it gets none, and nothing is sent that fails for want of it: a
+        table not remembered as versioned is asked for its columns; with ``_version`` that is
+        remembered, without it the rows are read at version 0 and nothing is remembered.
+        """
+        table = validate_table_name(table)
+        promoted = self._columns_of(table)
+        columns = _row_columns(promoted, versioned)
+        if versioned and not alter and not self._is_versioned(table):
+            names = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+            if "_version" not in names:
+                plain = _select_rows(self.adapter, table, _row_columns(promoted), ids)
+                if plain is None:  # a missing table stays a missing table
+                    return None, columns
+                return [(r[0], r[1], 0, *r[2:]) for r in plain], columns
+            self._remember(table)
+        try:
+            rows = _select_rows(self.adapter, table, columns, ids)
+        except sqlite3.OperationalError as exc:
+            if not versioned or "no such column: _version" not in str(exc):
+                raise
+            self._ensure_versioned_table(table)
+            rows = _select_rows(self.adapter, table, columns, ids)
+        return rows, columns
 
     def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
@@ -680,8 +874,7 @@ class SQLerDB:
         Returns:
             SQLerQuery: Query object you can chain and execute.
         """
-        self._ensure_table(table)
-        return SQLerQuery(table=table, adapter=self.adapter)
+        return SQLerQuery(table=validate_table_name(table), adapter=self.adapter)
 
     def close(self):
         """Close the underlying adapter connection."""
@@ -704,7 +897,7 @@ class SQLerDB:
         Returns:
             Transaction: Context manager for transaction scope.
         """
-        return Transaction(self.adapter)
+        return Transaction(self.adapter, self)
 
     def create_index(
         self,
@@ -809,13 +1002,32 @@ class SQLerDB:
 
     def __enter__(self):
         """Enter context manager; begin transaction."""
-        self.adapter.begin_transaction()
+        self._begin_level()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Exit context manager; commit or rollback."""
-        self.adapter.end_transaction(commit=(exc_type is None))
+        """Exit context manager; commit, or roll back while the caller's exception leaves."""
+        self._end_level(exc_type is None, quiet=exc_type is not None)
         return False
+
+    def _begin_level(self) -> None:
+        self.adapter.begin_transaction()
+        self._open.levels.append(_Level(set(), {}, self.adapter._txn_depth))
+
+    def _end_level(self, commit: bool, *, quiet: bool = False) -> None:
+        """End this thread's innermost level; what it learned about tables goes with it.
+
+        A commit moves it to the level above, or at the outermost level to the shared memory;
+        a rollback, or a commit that fails, drops it. That runs no statement and raises
+        nothing. ``quiet``: an error of the adapter's own is not raised (the caller's
+        exception is on its way out).
+        """
+        levels = self._open.levels
+        level = levels.pop() if levels else None  # none: begun on another thread; nothing to merge
+        _end_transaction(self.adapter, commit, quiet)
+        if commit and level is not None and (above := self._learned()) is not None:
+            above[0].update(level.versioned)
+            above[1].update(level.promoted)
 
     # ---- versioned (optimistic locking) helpers ----
 
@@ -829,47 +1041,48 @@ class SQLerDB:
         """
         self._ensure_table(table)
         # fast path: check without lock
-        import sqlite3 as _sqlite3
-
-        cur = self.adapter.execute(f'PRAGMA table_info("{table}");')
-        rows = cur.fetchall()
-        cols = set()
-        for row in rows:
-            try:
-                if isinstance(row, _sqlite3.Row):
-                    name = row["name"]
-                else:
-                    name = row[1]
-            except (KeyError, IndexError, TypeError):
-                # Skip malformed rows
-                continue
-            cols.add(name)
+        cols = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+        if self._promoted_of(table) is None:
+            self._remember(table, promoted=_promoted_in(cols))
         if "_version" in cols:
-            # mark cache and return
-            self._versioned_tables.add(table)
+            self._remember(table)
             return
         # serialize DDL; re-check inside lock
         with self._ddl_lock:
-            cur = self.adapter.execute(f'PRAGMA table_info("{table}");')
-            rows = cur.fetchall()
-            cols = set()
-            for row in rows:
-                try:
-                    if isinstance(row, _sqlite3.Row):
-                        name = row["name"]
-                    else:
-                        name = row[1]
-                except (KeyError, IndexError, TypeError):
-                    # Skip malformed rows
-                    continue
-                cols.add(name)
+            cols = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
             if "_version" not in cols:
                 self.adapter.execute(
                     f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
                 )
                 self.adapter.auto_commit()
-            # update cache regardless
-            self._versioned_tables.add(table)
+            self._remember(table)
+
+    def _versioned_update(self, sql: str, params: list[Any]) -> Any:
+        """Run a versioned ``UPDATE`` and commit it unless an explicit transaction is open.
+
+        Outside an explicit transaction the write lock is taken first with
+        ``BEGIN IMMEDIATE`` (less live-lock under contention), and that
+        transaction is ended on every path: committed on success, rolled back
+        when anything raises before the commit.
+        """
+        if self.adapter.in_transaction:
+            cur = self.adapter.execute(sql, params)
+            self.adapter.auto_commit()
+            return cur
+        try:
+            self.adapter.execute("BEGIN IMMEDIATE;")
+        except (RuntimeError, ValueError):
+            pass  # an adapter that cannot run BEGIN here: the UPDATE runs in its own transaction
+        try:
+            cur = self.adapter.execute(sql, params)
+            self.adapter.auto_commit()
+        except BaseException:
+            try:
+                self.adapter.execute("ROLLBACK;")
+            except sqlite3.Error:
+                pass  # already rolled back by the adapter, or nothing open
+            raise
+        return cur
 
     def upsert_with_version(
         self, table: str, _id: Optional[int], doc: dict[str, Any], expected_version: Optional[int]
@@ -893,9 +1106,10 @@ class SQLerDB:
             ValueError: If updating with ``_id`` but ``expected_version`` is None.
             RuntimeError: On stale version conflicts (no rows updated).
         """
-        if table not in self._versioned_tables:
+        table = validate_table_name(table)
+        if not self._is_versioned(table):
             self._ensure_versioned_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         if _id is None:
             cur = self.adapter.execute(
                 f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",
@@ -905,19 +1119,11 @@ class SQLerDB:
             return cur.lastrowid, 0
         if expected_version is None:
             raise ValueError("expected_version required for update")
-        # Acquire write lock early to reduce live-lock under contention (only if not in transaction)
-        if not self.adapter.in_transaction:
-            try:
-                self.adapter.execute("BEGIN IMMEDIATE;")
-            except (RuntimeError, ValueError):
-                # tolerate if already in a transaction
-                pass
-        cur = self.adapter.execute(
+        cur = self._versioned_update(
             f"UPDATE {table} SET data = json(?), _version = _version + 1 "
             f"WHERE _id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?;",
             [payload, _id, expected_version, expected_version, expected_version],
         )
-        self.adapter.auto_commit()
         rc = getattr(cur, "rowcount", -1)
         if rc <= 0:
             # treat non-positive as conflict
@@ -938,33 +1144,25 @@ class SQLerDB:
         Returns:
             dict | None: Decoded document with ``_id`` and ``_version`` keys, or None.
         """
-        self._ensure_versioned_table(table)
-        promoted = self._promoted_columns.get(table, [])
-        if promoted:
-            extra_cols = ", " + ", ".join(promoted)
-        else:
-            extra_cols = ""
-        cur = self.adapter.execute(
-            f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;", [_id]
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-        try:
-            obj = json.loads(row["data"])  # type: ignore[index]
-            obj["_id"] = row["_id"]  # type: ignore[index]
-            obj["_version"] = row["_version"]  # type: ignore[index]
-            if promoted:
-                for col_name in promoted:
-                    obj[col_name] = row[col_name]  # type: ignore[index]
-        except (KeyError, TypeError):
-            obj = json.loads(row[1])
-            obj["_id"] = row[0]
-            obj["_version"] = row[2]
-            if promoted:
-                for i, col_name in enumerate(promoted):
-                    obj[col_name] = row[3 + i]
-        return obj
+        rows, columns = self._read_rows(table, [_id], versioned=True)
+        return _row_documents(rows, columns)[0] if rows else None
+
+
+class _OpenLevels(threading.local):
+    """The open levels of a database object's own transactions on this thread."""
+
+    def __init__(self):
+        self.levels: list[_Level] = []
+
+
+def _end_transaction(adapter, commit: bool, quiet: bool) -> None:
+    """End the adapter's innermost transaction; ``quiet``: an error of its own is not raised
+    (the adapter closed inside the block, say), so the caller's exception is the one that leaves."""
+    try:
+        adapter.end_transaction(commit=commit)
+    except Exception:
+        if not quiet:
+            raise
 
 
 class Transaction:
@@ -975,32 +1173,39 @@ class Transaction:
     the context exits successfully, or rolls back on exception.
     """
 
-    def __init__(self, adapter):
+    def __init__(self, adapter, db: Optional[SQLerDB] = None):
         self.adapter = adapter
+        self._db = db  # None: a bare adapter transaction (PooledSQLerDB)
         self._active = False
+
+    def _end(self, commit: bool, quiet: bool = False) -> None:
+        self._active = False
+        if self._db is None:
+            _end_transaction(self.adapter, commit, quiet)
+        else:
+            self._db._end_level(commit, quiet=quiet)
 
     def __enter__(self):
         """Begin the transaction."""
-        self.adapter.begin_transaction()
+        if self._db is None:
+            self.adapter.begin_transaction()
+        else:
+            self._db._begin_level()
         self._active = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Commit on success, rollback on exception."""
-        if not self._active:
-            return False
-        self._active = False
-        self.adapter.end_transaction(commit=(exc_type is None))
+        if self._active:
+            self._end(exc_type is None, quiet=exc_type is not None)
         return False
 
     def commit(self):
         """Explicitly commit the transaction."""
         if self._active:
-            self.adapter.end_transaction(commit=True)
-            self._active = False
+            self._end(True)
 
     def rollback(self):
         """Explicitly rollback the transaction."""
         if self._active:
-            self.adapter.end_transaction(commit=False)
-            self._active = False
+            self._end(False)

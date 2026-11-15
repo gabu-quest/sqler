@@ -1,6 +1,67 @@
+import re
 from typing import Any, Optional, Union
 
+from sqler._stored import stored
 from sqler.query import SQLerExpression
+
+_PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Keys that would not reach SQLite as the same key: a backslash (read back differently), NUL
+# (ends the SQL text), and any whitespace but a single space (SQLerQuery collapses runs of
+# whitespace in the whole statement, which would turn the name into a different key).
+_UNCARRIABLE_KEY = re.compile(r"[\\\x00]|[^\S ]|  ")
+
+
+def _check_not_empty(segment: str) -> None:
+    """An empty key is refused. A string is one key, so ``a..b``, ``a.`` and ``.a`` are keys."""
+    from sqler.exceptions import InvalidFieldNameError
+
+    if segment == "":
+        raise InvalidFieldNameError(
+            f"Invalid field name: {segment!r}. A field name cannot be empty.",
+            field=segment,
+        )
+
+
+def _json_path_text(path: "list[Union[str, int]]") -> str:
+    """Render keys/indexes as a SQLite JSON path, e.g. ['a', 1, 'b c'] -> $.a[1]."b c".
+
+    A key is data. A key SQLite's path syntax cannot carry literally (a backslash,
+    which SQLite would not read back as the same key, or a NUL, which ends the SQL
+    text) raises InvalidFieldNameError before any SQL is built.
+    """
+    from sqler.exceptions import InvalidFieldNameError
+
+    parts = ["$"]
+    for segment in path:
+        if isinstance(segment, bool):
+            raise InvalidFieldNameError(
+                f"Invalid JSON path segment: {segment!r}", field=repr(segment)
+            )
+        if isinstance(segment, int):
+            parts.append(f"[{segment}]")
+        elif isinstance(segment, str):
+            _check_not_empty(segment)
+            if _UNCARRIABLE_KEY.search(segment):
+                raise InvalidFieldNameError(
+                    f"Invalid field name: {segment!r}. A name with a backslash, NUL, tab, "
+                    "newline, other whitespace or two spaces in a row cannot be used as a "
+                    "JSON key in a query path.",
+                    field=segment,
+                )
+            if _PLAIN_KEY.fullmatch(segment):
+                parts.append(f".{segment}")
+            else:
+                parts.append('."' + segment.replace('"', '\\"') + '"')
+        else:
+            raise InvalidFieldNameError(
+                f"Invalid JSON path segment: {segment!r}", field=repr(segment)
+            )
+    return "".join(parts)
+
+
+def _json_path_literal(path: "list[Union[str, int]]") -> str:
+    """The one place a JSON path becomes a SQL string literal: path text, ' doubled."""
+    return "'" + _json_path_text(path).replace("'", "''") + "'"
 
 
 def _normalize_alias_stack(
@@ -77,6 +138,9 @@ class SQLerField:
             self.path: list[Union[str, int]] = [path]
         else:
             self.path = list(path)
+        for segment in self.path:
+            if isinstance(segment, str):
+                _check_not_empty(segment)
         self.alias_stack: list[
             Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]
         ] = alias_stack or []
@@ -86,29 +150,14 @@ class SQLerField:
 
     def _json_path(self) -> str:
         """
-        build a sqlite json path string
+        build a sqlite json path string (not yet a SQL literal)
           ex: ['a', 'b', 1, 'c'] -> '$.a.b[1].c'
         """
-        import re
+        return _json_path_text(self.path)
 
-        if not self.path:
-            return "$"
-
-        def needs_quoting(s: str) -> bool:
-            # quotes if not valid json key
-            return not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", s)
-
-        parts = ["$"]
-        for segment in self.path:
-            if isinstance(segment, int):
-                parts.append(f"[{segment}]")
-            else:
-                if needs_quoting(segment):
-                    escaped = segment.replace('"', '\\"')
-                    parts.append(f'."{escaped}"')
-                else:
-                    parts.append(f".{segment}")
-        return "".join(parts)
+    def _json_path_sql(self) -> str:
+        """the path as a SQL string literal, quotes included: '$.a.b[1].c'"""
+        return _json_path_literal(self.path)
 
     def any(self) -> "SQLerAnyContext":
         """
@@ -153,9 +202,10 @@ class SQLerField:
         do a comparison on this field (==, >, etc)
         uses SQLerAnyExpression for any() chains, else direct json_extract
         """
+        val = stored(val)
         if self.alias_stack:
             return SQLerAnyExpression(self.path, self.alias_stack, op, val)
-        expr = f"JSON_EXTRACT(data, '{self._json_path()}') {op} ?"
+        expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) {op} ?"
         return SQLerExpression(expr, [val])
 
     def __eq__(self, other: Any) -> SQLerExpression:  # type: ignore[override]
@@ -167,7 +217,7 @@ class SQLerField:
             # Use IS NULL for proper SQL NULL comparison
             if self.alias_stack:
                 return SQLerAnyExpression(self.path, self.alias_stack, "IS", None)
-            expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NULL"
+            expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) IS NULL"
             return SQLerExpression(expr, [])
         return self.__compare("=", other)
 
@@ -180,7 +230,7 @@ class SQLerField:
             # Use IS NOT NULL for proper SQL NULL comparison
             if self.alias_stack:
                 return SQLerAnyExpression(self.path, self.alias_stack, "IS NOT", None)
-            expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NOT NULL"
+            expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) IS NOT NULL"
             return SQLerExpression(expr, [])
         return self.__compare("!=", other)
 
@@ -206,9 +256,9 @@ class SQLerField:
           SQLerField('tags').contains('red')
           # -> EXISTS (SELECT 1 FROM json_each(data, '$.tags') WHERE json_each.value = ?)
         """
-        json_path = self._json_path()
-        expr = f"EXISTS (SELECT 1 FROM json_each(data, '{json_path}') WHERE json_each.value = ?)"
-        return SQLerExpression(expr, [value])
+        json_path = self._json_path_sql()
+        expr = f"EXISTS (SELECT 1 FROM json_each(data, {json_path}) WHERE json_each.value = ?)"
+        return SQLerExpression(expr, [stored(value)])
 
     def isin(self, values: list[Any]) -> SQLerExpression:
         """
@@ -218,13 +268,13 @@ class SQLerField:
         """
         if not values:
             return SQLerExpression("0", [])
-        json_path = self._json_path()
+        json_path = self._json_path_sql()
         placeholders = ", ".join("?" for _ in values)
         expr = (
-            f"EXISTS (SELECT 1 FROM json_each(data, '{json_path}') "
+            f"EXISTS (SELECT 1 FROM json_each(data, {json_path}) "
             f"WHERE json_each.value IN ({placeholders}))"
         )
-        return SQLerExpression(expr, values)
+        return SQLerExpression(expr, [stored(v) for v in values])
 
     def like(self, pattern: str) -> SQLerExpression:
         """
@@ -232,7 +282,7 @@ class SQLerField:
           SQLerField('field1').like('a%')
           # -> JSON_EXTRACT(data, '$.field1') LIKE ?
         """
-        expr = f"JSON_EXTRACT(data, '{self._json_path()}') LIKE ?"
+        expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) LIKE ?"
         return SQLerExpression(expr, [pattern])
 
     def between(self, low: Any, high: Any) -> SQLerExpression:
@@ -241,8 +291,8 @@ class SQLerField:
           SQLerField('age').between(18, 65)
           # -> JSON_EXTRACT(data, '$.age') BETWEEN ? AND ?
         """
-        expr = f"JSON_EXTRACT(data, '{self._json_path()}') BETWEEN ? AND ?"
-        return SQLerExpression(expr, [low, high])
+        expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) BETWEEN ? AND ?"
+        return SQLerExpression(expr, [stored(low), stored(high)])
 
     def is_null(self) -> SQLerExpression:
         """
@@ -250,7 +300,7 @@ class SQLerField:
           SQLerField('email').is_null()
           # -> JSON_EXTRACT(data, '$.email') IS NULL
         """
-        expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NULL"
+        expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) IS NULL"
         return SQLerExpression(expr, [])
 
     def is_not_null(self) -> SQLerExpression:
@@ -259,7 +309,7 @@ class SQLerField:
           SQLerField('email').is_not_null()
           # -> JSON_EXTRACT(data, '$.email') IS NOT NULL
         """
-        expr = f"JSON_EXTRACT(data, '{self._json_path()}') IS NOT NULL"
+        expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) IS NOT NULL"
         return SQLerExpression(expr, [])
 
     def startswith(self, prefix: str) -> SQLerExpression:
@@ -270,7 +320,7 @@ class SQLerField:
         """
         # Escape special LIKE characters in the prefix
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        expr = f"JSON_EXTRACT(data, '{self._json_path()}') LIKE ? ESCAPE '\\'"
+        expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) LIKE ? ESCAPE '\\'"
         return SQLerExpression(expr, [escaped + "%"])
 
     def endswith(self, suffix: str) -> SQLerExpression:
@@ -280,7 +330,7 @@ class SQLerField:
           # -> JSON_EXTRACT(data, '$.email') LIKE '%@example.com' ESCAPE '\\'
         """
         escaped = suffix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        expr = f"JSON_EXTRACT(data, '{self._json_path()}') LIKE ? ESCAPE '\\'"
+        expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) LIKE ? ESCAPE '\\'"
         return SQLerExpression(expr, ["%" + escaped])
 
     def glob(self, pattern: str) -> SQLerExpression:
@@ -289,7 +339,7 @@ class SQLerField:
           SQLerField('path').glob('/home/*')
           # -> JSON_EXTRACT(data, '$.path') GLOB ?
         """
-        expr = f"JSON_EXTRACT(data, '{self._json_path()}') GLOB ?"
+        expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) GLOB ?"
         return SQLerExpression(expr, [pattern])
 
     def in_list(self, values: list[Any]) -> SQLerExpression:
@@ -301,8 +351,8 @@ class SQLerField:
         if not values:
             return SQLerExpression("0", [])
         placeholders = ", ".join("?" for _ in values)
-        expr = f"JSON_EXTRACT(data, '{self._json_path()}') IN ({placeholders})"
-        return SQLerExpression(expr, list(values))
+        expr = f"JSON_EXTRACT(data, {self._json_path_sql()}) IN ({placeholders})"
+        return SQLerExpression(expr, [stored(v) for v in values])
 
     # --- Arithmetic operators for F-expressions in update() ---
 
@@ -311,27 +361,27 @@ class SQLerField:
         return str(self.path[0]) if self.path else ""
 
     def __add__(self, other: Any) -> "SQLerUpdateExpression":
-        base = f"json_extract(data, '{self._json_path()}')"
+        base = f"json_extract(data, {self._json_path_sql()})"
         return SQLerUpdateExpression(f"{base} + ?", [other], self._field_name())
 
     def __radd__(self, other: Any) -> "SQLerUpdateExpression":
-        base = f"json_extract(data, '{self._json_path()}')"
+        base = f"json_extract(data, {self._json_path_sql()})"
         return SQLerUpdateExpression(f"? + {base}", [other], self._field_name())
 
     def __sub__(self, other: Any) -> "SQLerUpdateExpression":
-        base = f"json_extract(data, '{self._json_path()}')"
+        base = f"json_extract(data, {self._json_path_sql()})"
         return SQLerUpdateExpression(f"{base} - ?", [other], self._field_name())
 
     def __rsub__(self, other: Any) -> "SQLerUpdateExpression":
-        base = f"json_extract(data, '{self._json_path()}')"
+        base = f"json_extract(data, {self._json_path_sql()})"
         return SQLerUpdateExpression(f"? - {base}", [other], self._field_name())
 
     def __mul__(self, other: Any) -> "SQLerUpdateExpression":
-        base = f"json_extract(data, '{self._json_path()}')"
+        base = f"json_extract(data, {self._json_path_sql()})"
         return SQLerUpdateExpression(f"{base} * ?", [other], self._field_name())
 
     def __rmul__(self, other: Any) -> "SQLerUpdateExpression":
-        base = f"json_extract(data, '{self._json_path()}')"
+        base = f"json_extract(data, {self._json_path_sql()})"
         return SQLerUpdateExpression(f"? * {base}", [other], self._field_name())
 
 
@@ -385,11 +435,11 @@ class SQLerAnyExpression(SQLerExpression):
         first_array_key = array_keys[0]
         idx0 = path.index(first_array_key)
         base = path[:idx0]  # all path before arrays (could be [])
-        base_json = "$" + "".join(f".{p}" for p in base + [first_array_key])
+        base_json = _json_path_literal(base + [first_array_key])
 
         first_alias = aliases[0]
         # first FROM: make a table out of the first array
-        joins.append(f"json_each(data, '{base_json}') AS {first_alias}")
+        joins.append(f"json_each(data, {base_json}) AS {first_alias}")
         first_where = norm[0][2]
         if first_where is not None:
             wsql, wparams = _scope_expr(first_where, first_alias)
@@ -400,7 +450,9 @@ class SQLerAnyExpression(SQLerExpression):
         # handle more .any()s: join each nested array
         for alias, array_key, wexpr in norm[1:]:
             # e.g. JOIN json_each(a.value, '$.arr2') AS b
-            joins.append(f"json_each({prev_alias}.value, '$.{array_key}') AS {alias}")
+            joins.append(
+                f"json_each({prev_alias}.value, {_json_path_literal([array_key])}) AS {alias}"
+            )
             if wexpr is not None:
                 wsql, wparams = _scope_expr(wexpr, alias)
                 where_clauses.append(wsql)
@@ -409,7 +461,7 @@ class SQLerAnyExpression(SQLerExpression):
 
         from_join = " JOIN ".join(joins)
         # always compare the last_field in the innermost joined alias
-        where = f"json_extract({prev_alias}.value, '$.{last_field}') {op} ?"
+        where = f"json_extract({prev_alias}.value, {_json_path_literal([last_field])}) {op} ?"
         if where_clauses:
             where = " AND ".join(where_clauses + [where])
 
@@ -477,14 +529,14 @@ class SQLerAnyContext:
         except ValueError:
             idx0 = len(path) - 1
         base_path = path[: idx0 + 1]
-        base_json = SQLerField(base_path)._json_path()
+        base_json = _json_path_literal(base_path)
 
         joins: list[str] = []
         where_clauses: list[str] = []
         params: list[Any] = []
 
         first_alias, _, first_where = norm[0]
-        joins.append(f"json_each(data, '{base_json}') AS {first_alias}")
+        joins.append(f"json_each(data, {base_json}) AS {first_alias}")
         if first_where is not None:
             wsql, wparams = _scope_expr(first_where, first_alias)
             where_clauses.append(wsql)
@@ -492,7 +544,9 @@ class SQLerAnyContext:
         prev_alias = first_alias
 
         for alias, array_key, wexpr in norm[1:]:
-            joins.append(f"json_each({prev_alias}.value, '$.{array_key}') AS {alias}")
+            joins.append(
+                f"json_each({prev_alias}.value, {_json_path_literal([array_key])}) AS {alias}"
+            )
             if wexpr is not None:
                 wsql, wparams = _scope_expr(wexpr, alias)
                 where_clauses.append(wsql)

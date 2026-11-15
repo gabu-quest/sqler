@@ -32,6 +32,7 @@ For Prometheus integration::
         )
 """
 
+import re
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -39,6 +40,42 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from sqler.logging import QueryLog, query_logger
+
+
+def _escape_label_value(value: Any) -> str:
+    """Escape a label value as the Prometheus text format requires (``\\``, ``"``, newline)."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _label_name(name: Any) -> str:
+    """A label name made valid: characters outside ``[a-zA-Z0-9_]`` become ``_``."""
+    cleaned = re.sub(r"[^a-zA-Z0-9_]", "_", str(name))
+    if not cleaned or cleaned[0].isdigit():
+        cleaned = "_" + cleaned
+    return cleaned
+
+
+# Label names the exporter writes itself on some samples
+_RESERVED_LABELS = frozenset({"le", "table", "operation"})
+
+
+def _validate_labels(labels: dict[str, str]) -> None:
+    """Refuse labels that would put one label name twice on a sample.
+
+    Raises:
+        ValueError: A name that is reserved by the exporter (``le``, ``table``,
+            ``operation``), or two names that are the same after cleaning.
+    """
+    seen: dict[str, Any] = {}
+    for original in labels:
+        cleaned = _label_name(original)
+        if cleaned in _RESERVED_LABELS:
+            raise ValueError(f"metric label {original!r} is reserved ({cleaned!r})")
+        if cleaned in seen:
+            raise ValueError(
+                f"metric labels {seen[cleaned]!r} and {original!r} are both {cleaned!r}"
+            )
+        seen[cleaned] = original
 
 
 @dataclass
@@ -175,6 +212,9 @@ class MetricsCollector:
         # Custom labels
         self._labels: dict[str, str] = {}
 
+        # The query logger as it was before enable(), when enable() had to turn it on
+        self._logger_before: Optional[tuple[bool, int]] = None
+
         # Callbacks for real-time monitoring
         self._callbacks: list[Callable[[QueryLog], None]] = []
 
@@ -188,10 +228,17 @@ class MetricsCollector:
         Args:
             slow_threshold_ms: Threshold for slow query tracking.
             labels: Custom labels to add to all metrics.
+
+        Raises:
+            ValueError: A label name is ``le``, ``table`` or ``operation`` (the
+                exporter writes those itself), or two names are the same once
+                cleaned for Prometheus.
         """
         with self._lock:
             if self._enabled:
                 return
+            if labels:
+                _validate_labels({**self._labels, **labels})
 
             self._enabled = True
             self._start_time = datetime.now()
@@ -202,16 +249,29 @@ class MetricsCollector:
 
             # Hook into query logger
             query_logger.add_callback(self._on_query)
-            query_logger.enable(log_to_logger=False)
+            if query_logger.enabled:
+                self._logger_before = None  # the caller's own logging stays as it is
+            else:
+                self._logger_before = (query_logger._log_to_logger, query_logger._log_level)
+                query_logger.enable(log_to_logger=False)
 
     def disable(self) -> None:
-        """Disable metrics collection."""
+        """Disable metrics collection.
+
+        The query logger goes back to the state it was in before :meth:`enable`:
+        off if ``enable`` turned it on, still on if the caller had turned it on.
+        """
         with self._lock:
             if not self._enabled:
                 return
 
             self._enabled = False
             query_logger.remove_callback(self._on_query)
+            if self._logger_before is not None:
+                log_to_logger, level = self._logger_before
+                self._logger_before = None
+                query_logger.enable(log_to_logger=log_to_logger, level=level)
+                query_logger.disable()
 
     def reset(self) -> None:
         """Reset all metrics to zero."""
@@ -332,9 +392,13 @@ class MetricsCollector:
             String in Prometheus exposition format.
         """
         with self._lock:
-            lines = []
-            labels_str = ",".join(f'{k}="{v}"' for k, v in self._labels.items())
+            lines: list[str] = []
+            pairs = [
+                f'{_label_name(k)}="{_escape_label_value(v)}"' for k, v in self._labels.items()
+            ]
+            labels_str = ",".join(pairs)
             label_suffix = f"{{{labels_str}}}" if labels_str else ""
+            extra = f",{labels_str}" if labels_str else ""
 
             # Query counter
             lines.append("# HELP sqler_queries_total Total number of SQL queries executed")
@@ -346,9 +410,10 @@ class MetricsCollector:
             lines.append("# TYPE sqler_query_errors_total counter")
             lines.append(f"sqler_query_errors_total{label_suffix} {self._queries.total_errors}")
 
-            # Duration histogram
-            lines.append("# HELP sqler_query_duration_ms_bucket Query duration histogram")
-            lines.append("# TYPE sqler_query_duration_ms_bucket histogram")
+            # Duration histogram: declared once under its base name; the samples carry
+            # the _bucket, _sum and _count suffixes
+            lines.append("# HELP sqler_query_duration_ms Query duration histogram")
+            lines.append("# TYPE sqler_query_duration_ms histogram")
 
             bucket_bounds = [
                 ("1", "le_1"),
@@ -364,12 +429,7 @@ class MetricsCollector:
             ]
             for bound, key in bucket_bounds:
                 count = self._queries.histogram[key]
-                if labels_str:
-                    lines.append(
-                        f'sqler_query_duration_ms_bucket{{le="{bound}",{labels_str}}} {count}'
-                    )
-                else:
-                    lines.append(f'sqler_query_duration_ms_bucket{{le="{bound}"}} {count}')
+                lines.append(f'sqler_query_duration_ms_bucket{{le="{bound}"{extra}}} {count}')
 
             lines.append(
                 f"sqler_query_duration_ms_sum{label_suffix} {self._queries.total_duration_ms}"
@@ -382,16 +442,13 @@ class MetricsCollector:
             lines.append("# HELP sqler_table_operations_total Operations per table")
             lines.append("# TYPE sqler_table_operations_total counter")
             for table, table_metrics in self._tables.items():
+                table_label = _escape_label_value(table)
                 for op in ["inserts", "updates", "deletes", "selects"]:
                     count = getattr(table_metrics, op)
-                    if labels_str:
-                        lines.append(
-                            f'sqler_table_operations_total{{table="{table}",operation="{op}",{labels_str}}} {count}'
-                        )
-                    else:
-                        lines.append(
-                            f'sqler_table_operations_total{{table="{table}",operation="{op}"}} {count}'
-                        )
+                    lines.append(
+                        f'sqler_table_operations_total{{table="{table_label}",'
+                        f'operation="{op}"{extra}}} {count}'
+                    )
 
             # Slow query count
             lines.append("# HELP sqler_slow_queries_total Number of slow queries")

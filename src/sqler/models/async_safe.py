@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-import asyncio
-import random
 import sqlite3
 from typing import ClassVar, Optional, Type, TypeVar
 
 from pydantic import PrivateAttr
 
 from sqler.exceptions import StaleVersionError
+from sqler.models import _dirty, _refs
+from sqler.models._table_names import _instance_binding
 from sqler.query.async_query import AsyncSQLerQuery
 
+from . import save_retry as _retry
 from .async_model import AsyncSQLerModel
 from .async_queryset import AsyncSQLerQuerySet
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     RebaseConfig,
-    apply_numeric_scalar_deltas,
     can_rebase_deltas,
     compute_numeric_scalar_deltas,
 )
@@ -57,6 +57,8 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
 
     # Configurable intent rebasing (can be overridden in subclasses)
     _rebase_config: ClassVar[RebaseConfig] = DEFAULT_REBASE_CONFIG
+    # from_ids reads each row with its version, as from_id does
+    _versioned_rows: ClassVar[bool] = True
 
     @classmethod
     def query(cls: Type[TASafe]) -> AsyncSQLerQuerySet[TASafe]:  # type: ignore[override]
@@ -65,7 +67,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return AsyncSQLerQuerySet[TASafe](cls, q)
+        return AsyncSQLerQuerySet[TASafe](cls, q, db)
 
     @classmethod
     def set_db(cls, db, table: Optional[str] = None) -> None:  # type: ignore[override]
@@ -77,19 +79,29 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         # For explicitness, no-op here; version checks happen on use.
 
     @classmethod
+    async def _aload_refs(cls: Type[TASafe], ids: list, seen: frozenset) -> dict:  # type: ignore[override]
+        """Load the rows ``ids`` with their versions and snapshots, one statement."""
+        db, table = cls._require_binding()
+        out: dict = {}
+        for doc in await _refs.aread_versioned(db, table, ids):
+            rid = doc["_id"]
+            try:
+                typed = await _refs.aresolve(doc, db, seen | {(table, rid)}, _refs.typed_fields(cls))
+                inst = _refs.from_row(cls, typed, doc)
+            except (LookupError, RuntimeError, ValueError):
+                out[rid] = _refs.KEEP
+                continue
+            out[rid] = inst
+        return out
+
+    @classmethod
     async def from_id(cls: Type[TASafe], id_: int) -> Optional[TASafe]:  # type: ignore[override]
         db, table = cls._require_binding()
         doc = await db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        inst = cls.model_validate(doc)  # type: ignore[call-arg]
-        inst._id = doc.get("_id")
-        inst._version = doc.get("_version", 0)
-        try:
-            inst._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        return inst  # type: ignore[return-value]
+        typed = await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls))
+        return _refs.from_row(cls, typed, doc)  # type: ignore[return-value]
 
     @classmethod
     async def asave_many(cls: Type[TASafe], instances: list[TASafe], *, db=None) -> list[TASafe]:  # type: ignore[override]
@@ -117,9 +129,9 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         db, table = cls._resolve_binding(db)
         promoted = getattr(cls, "__promoted__", None)
 
-        if promoted and table not in db._promoted_columns:
+        if promoted:
             checks = getattr(cls, "__checks__", None)
-            await db._ensure_table_with_promoted(table, promoted, checks)
+            await db._ensure_promoted(table, promoted, checks)
         await db._ensure_versioned_table(table)
 
         payloads = [await inst._adump_with_relations() for inst in instances]
@@ -133,7 +145,7 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             inst._id = id_
             inst._version = version
-            inst._snapshot = {k: v for k, v in payload.items() if k not in {"_id", "_version"}}
+            inst._snapshot = _dirty.snapshot(payload)
         return instances
 
     async def save(self: TASafe, *, db=None) -> TASafe:  # type: ignore[override]
@@ -154,32 +166,28 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
             StaleVersionError: If the version is stale and cannot be rebased.
         """
         cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
 
         # Get the rebase configuration for this model class
         rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
 
-        # Capture initial intent as numeric scalar deltas from snapshot → target
+        # The caller's intent: the counter deltas from its snapshot to its payload
         snap = getattr(self, "_snapshot", None)
-        has_snapshot = isinstance(snap, dict) and len(snap) > 0
-        orig = {k: v for k, v in snap.items() if k != "_version"} if has_snapshot else None
-        target_payload = await self._adump_with_relations()
-        delta = compute_numeric_scalar_deltas(orig or {}, target_payload) if has_snapshot else None
+        held = await self._adump_with_relations()
+        delta = compute_numeric_scalar_deltas(snap, held) if snap else None
+        can_rebase = bool(delta) and can_rebase_deltas(delta, rebase_config)
 
-        # Use the configurable rebase checker
-        can_rebase = has_snapshot and can_rebase_deltas(delta, rebase_config) if delta else False
+        retry = _retry.SaveRetry(rebase_config)
 
-        max_retries = rebase_config.max_retries if rebase_config else 128
-        base = 0.002  # seconds
-
-        for attempt in range(max_retries):
+        payload, written = held, None
+        while True:
+            retry.begin_try()
             try:
-                attempt_payload = dict(target_payload)
+                attempt_payload = dict(payload)
                 attempt_payload["_version"] = 0 if self._id is None else self._version + 1
                 promoted = getattr(cls, "__promoted__", None)
                 if promoted:
-                    if table not in db._promoted_columns:
-                        await cls._ensure_schema()
+                    await db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
                     new_id, new_version = await db.upsert_with_version_promoted(
                         table, self._id, attempt_payload, self._version,
                         list(promoted.keys()),
@@ -190,52 +198,41 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
                     )
                 self._id = new_id
                 self._version = new_version
-                target_payload = attempt_payload
-                try:
-                    snap_payload = {
-                        k: v for k, v in target_payload.items() if k not in {"_id", "_version"}
-                    }
-                    self._snapshot = snap_payload  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+                self._snapshot = _dirty.snapshot(attempt_payload)
+                if written is not None:  # rebased: the row holds the other writer's work too
+                    _retry.settle(self, held, written)
                 return self
-            except StaleVersionError:
+            except StaleVersionError as stale:
                 if not can_rebase:
                     raise
                 if self._id is None:
                     raise
-                latest_doc = await db.find_document_with_version(table, self._id)
+                delay = retry.after_conflict()
+                latest_doc = await retry.areread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
-                latest_payload = {k: v for k, v in latest_doc.items() if k not in ("_id", "_version")}
-                rebased = {**latest_payload}
-                for k, v in target_payload.items():
-                    if delta is None or k not in delta:
-                        rebased[k] = v
-                if delta is not None:
-                    rebased = apply_numeric_scalar_deltas(rebased, delta)
-                target_payload = rebased
-                self._version = latest_doc.get("_version", 0)
-                try:
-                    self._snapshot = latest_payload.copy()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-            except sqlite3.OperationalError as e:
-                if "locked" not in str(e).lower():
-                    raise
-            # backoff
-            await asyncio.sleep((base * (2 ** min(attempt, 10))) + (random.random() * 0.0005))
+                payload = _retry.rebase(latest_doc, held, snap, delta)
+                async def build():
+                    return cls.model_validate(await _refs.aresolve(payload, db, frozenset(), _refs.typed_fields(cls)))
 
-        raise StaleVersionError("save retries exhausted")
+                written = await retry.abuild(stale, build)
+                self._version = latest_doc.get("_version", 0)
+                self._snapshot = _dirty.snapshot(latest_doc)
+            except sqlite3.OperationalError as e:
+                if not _retry.is_lock_error(e):
+                    raise
+                delay = retry.after_lock(e)
+            await _retry.asleep(delay)
 
     async def refresh(self: TASafe) -> TASafe:  # type: ignore[override]
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = _instance_binding(self)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
         doc = await db.find_document_with_version(table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
+        row, doc = doc, await _refs.aresolve(doc, db, frozenset(), _refs.typed_fields(cls))
         fresh = cls.model_validate(doc)  # type: ignore[call-arg]
         for fname in self.__class__.model_fields:
             if fname == "_id":
@@ -243,8 +240,5 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
             setattr(self, fname, getattr(fresh, fname))
         self._id = doc.get("_id")
         self._version = doc.get("_version", 0)
-        try:
-            self._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        self._snapshot = _dirty.snapshot(row)
         return self

@@ -1,8 +1,24 @@
 import json
+import sqlite3
+from contextvars import ContextVar
 from typing import Any, Optional
 
-from sqler.adapter.asynchronous import AsyncSQLiteAdapter
+from sqler._stored import dumps, stored
+from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter
+from sqler.db.sqler_db import (
+    _MAX_VARIABLES,
+    _columns_sql,
+    _id_params,
+    _in_order,
+    _Level,
+    _promoted_in,
+    _row_columns,
+    _row_documents,
+    _rows_sql,
+)
 from sqler.exceptions import StaleVersionError
+from sqler.pool import PoolStats
+from sqler.query.query import is_missing_table
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -13,31 +29,87 @@ from sqler.utils import (
 )
 
 
+async def _afetch_all(adapter: Any, sql: str, params: list) -> list:
+    cur = await adapter.execute(sql, params)
+    try:
+        return await cur.fetchall()
+    finally:
+        await cur.close()
+
+
+async def _aselect_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) -> Optional[list]:
+    """Async twin of :func:`sqler.db.sqler_db._select_rows`."""
+    n, params = _id_params(ids)
+    try:
+        return await _afetch_all(adapter, _rows_sql(table, columns, n), params)
+    except sqlite3.OperationalError as exc:
+        if is_missing_table(exc, table):
+            return None
+        raise
+
+
 class AsyncSQLerDB:
     """Async document store for JSON blobs on SQLite."""
 
     @classmethod
-    def in_memory(cls, shared: bool = True, *, name: Optional[str] = None) -> "AsyncSQLerDB":
-        adapter = AsyncSQLiteAdapter.in_memory(shared=shared, name=name)
+    def in_memory(
+        cls,
+        shared: bool = True,
+        *,
+        name: Optional[str] = None,
+        acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S,
+    ) -> "AsyncSQLerDB":
+        """In-memory database; ``acquire_timeout`` bounds the wait for a pooled connection (seconds, ``None`` = forever)."""
+        adapter = AsyncSQLiteAdapter.in_memory(shared=shared, name=name, acquire_timeout=acquire_timeout)
         return cls(adapter)
 
     @classmethod
-    def on_disk(cls, path: str = "sqler.db") -> "AsyncSQLerDB":
-        adapter = AsyncSQLiteAdapter.on_disk(path)
+    def on_disk(
+        cls, path: str = "sqler.db", *, acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S
+    ) -> "AsyncSQLerDB":
+        """Database file at ``path``; ``acquire_timeout`` bounds the wait for a pooled connection (seconds, ``None`` = forever)."""
+        adapter = AsyncSQLiteAdapter.on_disk(path, acquire_timeout=acquire_timeout)
         return cls(adapter)
 
     def __init__(self, adapter: AsyncSQLiteAdapter):
         self.adapter = adapter
-        # Cache of tables already ensured to be versioned
+        # what is remembered about committed tables: versioned tables, promoted columns per table
         self._versioned_tables: set[str] = set()
-        # promoted columns per table: table -> list of column names
         self._promoted_columns: dict[str, list[str]] = {}
+        # what each open level of this object's own transactions learned, innermost last;
+        # per task, like the adapter's depth (a task started inside a level shares it)
+        self._open: ContextVar[tuple[_Level, ...]] = ContextVar(
+            "sqler_open_levels", default=()
+        )
 
     async def connect(self) -> None:
         await self.adapter.connect()
 
     async def close(self) -> None:
         await self.adapter.close()
+
+    def pool_stats(self) -> PoolStats:
+        """Return the adapter's connection pool statistics (synchronous, cheap)."""
+        return self.adapter.pool_stats()
+
+    async def ensure_table(
+        self,
+        table: str,
+        *,
+        promoted: Optional[dict[str, str]] = None,
+        checks: Optional[dict[str, str]] = None,
+        versioned: bool = False,
+    ) -> None:
+        """Create a table if it is missing, with promoted columns, CHECK constraints and a version.
+
+        The async twin of ``SQLerDB.ensure_table``; same arguments, same schema.
+        """
+        if promoted or checks:
+            await self._ensure_table_with_promoted(table, promoted or {}, checks)
+        else:
+            await self._ensure_table(table)
+        if versioned:
+            await self._ensure_versioned_table(table)
 
     async def _ensure_table(self, table: str) -> None:
         table = validate_table_name(table)
@@ -49,6 +121,18 @@ class AsyncSQLerDB:
         """
         await self.adapter.execute(ddl)
         await self.adapter.auto_commit()
+
+    async def _ensure_promoted(
+        self,
+        table: str,
+        promoted: dict[str, str],
+        checks: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here
+        with every column of ``promoted``."""
+        known = self._promoted_of(table)
+        if known is None or any(col not in known for col in promoted):
+            await self._ensure_table_with_promoted(table, promoted, checks)
 
     async def _ensure_table_with_promoted(
         self,
@@ -85,21 +169,67 @@ class AsyncSQLerDB:
             ddl = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
             await self.adapter.execute(ddl)
             await self.adapter.auto_commit()
+            columns = list(promoted)
         else:
-            cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
-            try:
-                rows = await cur.fetchall()
-            finally:
-                await cur.close()
-            existing_cols = {r[1] for r in rows}
-            for col_name, col_def in promoted.items():
-                if col_name not in existing_cols:
-                    await self.adapter.execute(
-                        f'ALTER TABLE "{table}" ADD COLUMN {col_name} {col_def};'
-                    )
+            existing = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
+            added = [col for col in promoted if col not in existing]
+            for col_name in added:
+                await self.adapter.execute(
+                    f'ALTER TABLE "{table}" ADD COLUMN {col_name} {promoted[col_name]};'
+                )
             await self.adapter.auto_commit()
+            columns = _promoted_in(existing) + added
 
-        self._promoted_columns[table] = list(promoted.keys())
+        self._remember(table, promoted=columns)
+
+    def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]]]]:
+        """Where an ensure call keeps what it learned about a table.
+
+        The innermost open level of this object's own transactions, if the adapter's depth is
+        still that level's; with no level open, the shared memory, at depth 0. Anywhere else
+        the transaction is not this object's (the adapter used directly, another thread's on
+        the single ``":memory:"`` connection): nowhere. Forgetting costs a repeated
+        ``CREATE TABLE IF NOT EXISTS``, remembering wrongly loses a write.
+        """
+        depth = self.adapter._txn_depth.get(0)
+        levels = self._open.get()
+        if levels:
+            level = levels[-1]
+            return (level.versioned, level.promoted) if level.depth == depth else None
+        return (self._versioned_tables, self._promoted_columns) if depth == 0 else None
+
+    def _remember(self, table: str, *, promoted: Optional[list[str]] = None) -> None:
+        """Remember ``table``'s ``promoted`` columns, or without them that it has ``_version``."""
+        learned = self._learned()
+        if learned is None:
+            return
+        if promoted is None:
+            learned[0].add(table)
+        else:
+            learned[1][table] = promoted
+
+    def _is_versioned(self, table: str) -> bool:
+        """Whether ``table`` is remembered to have its ``_version`` column, in this task now."""
+        return table in self._versioned_tables or any(table in level.versioned for level in self._open.get())
+
+    def _promoted_of(self, table: str) -> Optional[list[str]]:
+        """The promoted columns remembered for ``table`` in this task now; ``None`` if it is not remembered."""
+        for level in reversed(self._open.get()):
+            if table in level.promoted:
+                return level.promoted[table]
+        return self._promoted_columns.get(table)
+
+    async def _columns_of(self, table: str) -> list[str]:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._columns_of`."""
+        promoted = self._promoted_of(table)
+        if promoted is None:
+            names = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
+            promoted = _promoted_in(names)
+            learned = self._learned() if names else None
+            if learned is not None:
+                # an entry made since the statement above (another task's ensure) is newer
+                promoted = learned[1].setdefault(table, promoted)
+        return promoted
 
     async def upsert_document_promoted(
         self,
@@ -109,15 +239,18 @@ class AsyncSQLerDB:
         promoted_fields: list[str],
     ) -> int:
         """Insert or update, splitting promoted fields into real columns (async)."""
+        table = validate_table_name(table)
+        for field in promoted_fields:
+            validate_column_name(field)
         promoted_vals = {}
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = v
+                promoted_vals[k] = stored(v)
             else:
                 json_doc[k] = v
 
-        payload = json.dumps(json_doc)
+        payload = dumps(json_doc)
 
         if _id is None:
             cols = ["data"] + list(promoted_vals.keys())
@@ -155,17 +288,20 @@ class AsyncSQLerDB:
         promoted_fields: list[str],
     ) -> tuple[int, int]:
         """Insert or update with optimistic locking, splitting promoted columns (async)."""
+        table = validate_table_name(table)
+        for field in promoted_fields:
+            validate_column_name(field)
         await self._ensure_versioned_table(table)
 
         promoted_vals = {}
         json_doc = {}
         for k, v in doc.items():
             if k in promoted_fields:
-                promoted_vals[k] = v
+                promoted_vals[k] = stored(v)
             else:
                 json_doc[k] = v
 
-        payload = json.dumps(json_doc)
+        payload = dumps(json_doc)
 
         if _id is None:
             cols = ["data", "_version"] + list(promoted_vals.keys())
@@ -206,7 +342,7 @@ class AsyncSQLerDB:
 
     async def insert_document(self, table: str, doc: dict[str, Any]) -> int:
         await self._ensure_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         cur = await self.adapter.execute(f"INSERT INTO {table} (data) VALUES (json(?));", [payload])
         try:
             await self.adapter.auto_commit()
@@ -217,7 +353,7 @@ class AsyncSQLerDB:
 
     async def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
         await self._ensure_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         if _id is None:
             return await self.insert_document(table, doc)
         cur = await self.adapter.execute(
@@ -230,28 +366,8 @@ class AsyncSQLerDB:
         return _id
 
     async def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
-        await self._ensure_table(table)
-        promoted = self._promoted_columns.get(table, [])
-        if promoted:
-            extra_cols = ", ".join(promoted)
-            cur = await self.adapter.execute(
-                f"SELECT _id, data, {extra_cols} FROM {table} WHERE _id = ?;", [_id]
-            )
-        else:
-            cur = await self.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [_id])
-        try:
-            row = await cur.fetchone()
-        finally:
-            await cur.close()
-        await self.adapter.auto_commit()
-        if not row:
-            return None
-        obj = json.loads(row[1])
-        obj["_id"] = row[0]
-        if promoted:
-            for i, col_name in enumerate(promoted):
-                obj[col_name] = row[2 + i]
-        return obj
+        rows, columns = await self._read_rows(table, [_id])
+        return _row_documents(rows, columns)[0] if rows else None
 
     async def find_documents(self, table: str, ids: list[int]) -> list[dict[str, Any]]:
         """Fetch multiple documents by id list (batch operation).
@@ -268,25 +384,38 @@ class AsyncSQLerDB:
         """
         if not ids:
             return []
-        await self._ensure_table(table)
-        placeholders = ",".join("?" for _ in ids)
-        cur = await self.adapter.execute(
-            f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders});",
-            list(ids),
-        )
+        rows, columns = await self._read_rows(table, ids)
+        return _row_documents(_in_order(rows or [], ids), columns)
+
+    async def _read_rows(
+        self, table: str, ids: list, *, versioned: bool = False, alter: bool = True
+    ) -> tuple[Optional[list], list[str]]:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._read_rows`."""
+        table = validate_table_name(table)
+        promoted = await self._columns_of(table)
+        columns = _row_columns(promoted, versioned)
+        if versioned and not alter and not self._is_versioned(table):
+            names = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
+            if "_version" not in names:
+                plain = await _aselect_rows(self.adapter, table, _row_columns(promoted), ids)
+                if plain is None:  # a missing table stays a missing table
+                    return None, columns
+                await self.adapter.auto_commit()
+                return [(r[0], r[1], 0, *r[2:]) for r in plain], columns
+            self._remember(table)
         try:
-            rows = await cur.fetchall()
-        finally:
-            await cur.close()
+            rows = await _aselect_rows(self.adapter, table, columns, ids)
+        except sqlite3.OperationalError as exc:
+            if not versioned or "no such column: _version" not in str(exc):
+                raise
+            # a table made before versioning: it gets the column, as it always did
+            self._versioned_tables.discard(table)
+            await self._ensure_versioned_table(table)
+            rows = await _aselect_rows(self.adapter, table, columns, ids)
+        if rows is None:
+            return None, columns  # a read creates no table
         await self.adapter.auto_commit()
-        # Build lookup dict for ordering
-        by_id: dict[int, dict[str, Any]] = {}
-        for row in rows:
-            obj = json.loads(row[1])
-            obj["_id"] = row[0]
-            by_id[row[0]] = obj
-        # Return in input order, skipping missing
-        return [by_id[i] for i in ids if i in by_id]
+        return rows, columns
 
     async def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
@@ -337,6 +466,7 @@ class AsyncSQLerDB:
         """
         if not docs:
             return []
+        table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
         cols = ["data"] + promoted_fields
@@ -409,7 +539,7 @@ class AsyncSQLerDB:
         promoted_fields = promoted_fields or []
         # params_per_row: 1 for json(?) + 1 per promoted field
         params_per_row = 1 + len(promoted_fields)
-        max_rows_per_chunk = max(1, 999 // params_per_row)
+        max_rows_per_chunk = max(1, _MAX_VARIABLES // params_per_row)
 
         all_ids: list[int] = []
         all_col_names = list(cols)
@@ -424,13 +554,13 @@ class AsyncSQLerDB:
 
                 for doc in chunk:
                     if promoted_fields:
-                        promoted_vals = {k: doc[k] for k in promoted_fields if k in doc}
+                        promoted_vals = {k: stored(doc[k]) for k in promoted_fields if k in doc}
                         json_doc = {k: v for k, v in doc.items() if k not in promoted_fields}
                     else:
                         json_doc = doc
                         promoted_vals = {}
 
-                    payload = json.dumps(json_doc)
+                    payload = dumps(json_doc)
                     row_placeholders = ["json(?)"]
                     params.append(payload)
 
@@ -481,7 +611,7 @@ class AsyncSQLerDB:
         for doc in docs:
             doc_id = doc.get("_id")
             payload_dict = {k: v for k, v in doc.items() if k != "_id"}
-            payload = json.dumps(payload_dict)
+            payload = dumps(payload_dict)
             if doc_id is None:
                 cur = await self.adapter.execute(
                     f"INSERT INTO {table} (data) VALUES (json(?));",
@@ -688,16 +818,13 @@ class AsyncSQLerDB:
             table: Table name.
         """
         table = validate_table_name(table)
-        # Fast path: check cache first
-        if table in self._versioned_tables:
+        if self._is_versioned(table):
             return
         await self._ensure_table(table)
-        cur = await self.adapter.execute(f'PRAGMA table_info("{table}");')
-        try:
-            cols = [row[1] for row in await cur.fetchall()]
-        finally:
-            await cur.close()
+        cols = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
         await self.adapter.auto_commit()
+        if self._promoted_of(table) is None:
+            self._remember(table, promoted=_promoted_in(cols))
         if "_version" not in cols:
             cur2 = await self.adapter.execute(
                 f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
@@ -706,14 +833,13 @@ class AsyncSQLerDB:
                 await self.adapter.auto_commit()
             finally:
                 await cur2.close()
-        # Update cache
-        self._versioned_tables.add(table)
+        self._remember(table)
 
     async def upsert_with_version(
         self, table: str, _id: Optional[int], doc: dict[str, Any], expected_version: Optional[int]
     ) -> tuple[int, int]:
         await self._ensure_versioned_table(table)
-        payload = json.dumps(doc)
+        payload = dumps(doc)
         if _id is None:
             cur = await self.adapter.execute(
                 f"INSERT INTO {table} (data, _version) VALUES (json(?), 0);",
@@ -742,37 +868,14 @@ class AsyncSQLerDB:
         return _id, expected_version + 1
 
     async def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
-        await self._ensure_versioned_table(table)
-        promoted = self._promoted_columns.get(table, [])
-        if promoted:
-            extra_cols = ", " + ", ".join(promoted)
-        else:
-            extra_cols = ""
-        cur = await self.adapter.execute(
-            f"SELECT _id, data, _version{extra_cols} FROM {table} WHERE _id = ?;",
-            [_id],
-        )
-        try:
-            row = await cur.fetchone()
-        finally:
-            await cur.close()
-        await self.adapter.auto_commit()
-        if not row:
-            return None
-        obj = json.loads(row[1])
-        obj["_id"] = row[0]
-        obj["_version"] = row[2]
-        if promoted:
-            for i, col_name in enumerate(promoted):
-                obj[col_name] = row[3 + i]
-        return obj
+        rows, columns = await self._read_rows(table, [_id], versioned=True)
+        return _row_documents(rows, columns)[0] if rows else None
 
     async def query(self, table: str):
         """Convenience: return an AsyncSQLerQuery bound to this adapter."""
         from sqler.query.async_query import AsyncSQLerQuery
 
-        await self._ensure_table(table)
-        return AsyncSQLerQuery(table=table, adapter=self.adapter)
+        return AsyncSQLerQuery(table=validate_table_name(table), adapter=self.adapter)
 
     def transaction(self) -> "AsyncTransaction":
         """Return a context manager for explicit transactions.
@@ -787,17 +890,36 @@ class AsyncSQLerDB:
         Returns:
             AsyncTransaction: Async context manager for transaction scope.
         """
-        return AsyncTransaction(self.adapter)
+        return AsyncTransaction(self.adapter, self)
 
     async def __aenter__(self):
         """Enter async context manager; begin transaction."""
-        await self.adapter.begin_transaction()
+        await self._begin_level()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Exit async context manager; commit or rollback."""
-        await self.adapter.end_transaction(commit=(exc_type is None))
+        """Exit async context manager; commit, or roll back while the caller's exception leaves."""
+        await self._end_level(exc_type is None, quiet=exc_type is not None)
         return False
+
+    async def _begin_level(self) -> None:
+        await self.adapter.begin_transaction()
+        self._open.set((*self._open.get(), _Level(set(), {}, self.adapter._txn_depth.get(0))))
+
+    async def _end_level(self, commit: bool, *, quiet: bool = False) -> None:
+        """End this task's innermost level; the async twin of ``SQLerDB._end_level``."""
+        levels = self._open.get()
+        level = levels[-1] if levels else None  # none: begun in another task; nothing to merge
+        self._open.set(levels[:-1])
+        try:
+            await self.adapter.end_transaction(commit=commit)
+        except Exception:
+            if not quiet:
+                raise
+            return
+        if commit and level is not None and (above := self._learned()) is not None:
+            above[0].update(level.versioned)
+            above[1].update(level.promoted)
 
 
 class AsyncTransaction:
@@ -807,32 +929,33 @@ class AsyncTransaction:
     (like model.save()) respect the transaction boundary and don't auto-commit.
     """
 
-    def __init__(self, adapter):
+    def __init__(self, adapter, db: AsyncSQLerDB):
         self.adapter = adapter
+        self._db = db
         self._active = False
+
+    async def _end(self, commit: bool, quiet: bool = False) -> None:
+        self._active = False
+        await self._db._end_level(commit, quiet=quiet)
 
     async def __aenter__(self):
         """Begin the transaction."""
-        await self.adapter.begin_transaction()
+        await self._db._begin_level()
         self._active = True
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Commit on success, rollback on exception."""
-        if not self._active:
-            return False
-        self._active = False
-        await self.adapter.end_transaction(commit=(exc_type is None))
+        if self._active:
+            await self._end(exc_type is None, quiet=exc_type is not None)
         return False
 
     async def commit(self):
         """Explicitly commit the transaction."""
         if self._active:
-            await self.adapter.end_transaction(commit=True)
-            self._active = False
+            await self._end(True)
 
     async def rollback(self):
         """Explicitly rollback the transaction."""
         if self._active:
-            await self.adapter.end_transaction(commit=False)
-            self._active = False
+            await self._end(False)

@@ -1,10 +1,17 @@
 import re
+import sqlite3
 from typing import Any, Optional, Self
 
+from sqler._stored import column_arg, json_arg
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
 from sqler.query.expression import SQLerExpression
-from sqler.query.query import _META_COLUMNS, PaginatedResult, _rewrite_promoted_refs
+from sqler.query.query import (
+    _META_COLUMNS,
+    PaginatedResult,
+    _rewrite_promoted_refs,
+    is_missing_table,
+)
 from sqler.utils import validate_field_name
 
 
@@ -61,6 +68,34 @@ class AsyncSQLerQuery:
             group_by_fields=kwargs.get("group_by_fields", self._group_by_fields),
             having=kwargs.get("having", self._having),
         )
+
+    async def _execute(self, sql: str, params: list[Any]):
+        """Run one statement on the query's own table; ``None`` when that table does not exist.
+
+        A missing table reads as an empty one and is not created: each caller returns what its
+        statement gives on a table with no rows, and runs nothing more (the adapter has already
+        ended the failed statement).
+        """
+        try:
+            return await self._adapter.execute(sql, params)
+        except sqlite3.OperationalError as exc:
+            if is_missing_table(exc, self._table):
+                return None
+            raise
+
+    async def _rows(self, *, include_id: bool = False) -> list[tuple]:
+        """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        sql, params = self._build_query(include_id=include_id)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return []
+        try:
+            return await cur.fetchall()
+        finally:
+            await cur.close()
+            await self._adapter.auto_commit()
 
     def filter(self, expression: SQLerExpression) -> Self:
         new_expression = expression if self._expression is None else (self._expression & expression)
@@ -220,7 +255,9 @@ class AsyncSQLerQuery:
     ) -> list[dict[str, Any]]:
         """Execute a grouped aggregate and return list[dict]."""
         sql, params = self._build_grouped_aggregate_query(func, field)
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return []
         rows = await cur.fetchall()
         await cur.close()
         await self._adapter.auto_commit()
@@ -347,7 +384,9 @@ class AsyncSQLerQuery:
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
         sql, params = self._build_query()
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return []
         rows = await cur.fetchall()
         await cur.close()
         await self._adapter.auto_commit()
@@ -367,7 +406,9 @@ class AsyncSQLerQuery:
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("COUNT")
         sql, params = self._build_aggregate_query("COUNT")
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return 0
         row = await cur.fetchone()
         await cur.close()
         await self._adapter.auto_commit()
@@ -380,7 +421,9 @@ class AsyncSQLerQuery:
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("SUM", field)
         sql, params = self._build_aggregate_query("SUM", field)
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return None
         row = await cur.fetchone()
         await cur.close()
         await self._adapter.auto_commit()
@@ -393,7 +436,9 @@ class AsyncSQLerQuery:
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("AVG", field)
         sql, params = self._build_aggregate_query("AVG", field)
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return None
         row = await cur.fetchone()
         await cur.close()
         await self._adapter.auto_commit()
@@ -406,7 +451,9 @@ class AsyncSQLerQuery:
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("MIN", field)
         sql, params = self._build_aggregate_query("MIN", field)
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return None
         row = await cur.fetchone()
         await cur.close()
         await self._adapter.auto_commit()
@@ -419,7 +466,9 @@ class AsyncSQLerQuery:
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("MAX", field)
         sql, params = self._build_aggregate_query("MAX", field)
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return None
         row = await cur.fetchone()
         await cur.close()
         await self._adapter.auto_commit()
@@ -443,7 +492,9 @@ class AsyncSQLerQuery:
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         params = self._expression.params if self._expression else []
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return []
         rows = await cur.fetchall()
         await cur.close()
         await self._adapter.auto_commit()
@@ -469,7 +520,7 @@ class AsyncSQLerQuery:
         total = await self.count()
         total_pages = (total + per_page - 1) // per_page if total > 0 else 0
         offset = (page - 1) * per_page
-        items = await self.offset(offset).limit(per_page).all_dicts()
+        items = await self.offset(offset).limit(per_page).all_dicts() if total else []
 
         return PaginatedResult(
             items=items,
@@ -485,7 +536,9 @@ class AsyncSQLerQuery:
         import json
 
         sql, params = self._build_query(include_id=True)
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return []
         rows = await cur.fetchall()
         await cur.close()
         await self._adapter.auto_commit()
@@ -547,8 +600,6 @@ class AsyncSQLerQuery:
         for key in fields:
             validate_field_name(key)
 
-        import json
-
         promoted_set: list[str] = []
         promoted_params: list[Any] = []
         json_set_parts: list[str] = []
@@ -568,13 +619,13 @@ class AsyncSQLerQuery:
                     json_set_parts.append(f"'$.{field}', {expr_sql}")
                     json_set_params.extend(value.params)
             else:
-                serialized = json.dumps(value) if isinstance(value, (dict, list)) else value
                 if is_promoted:
                     promoted_set.append(f"{field} = ?")
-                    promoted_params.append(serialized)
+                    promoted_params.append(column_arg(value))
                 else:
-                    json_set_parts.append(f"'$.{field}', ?")
-                    json_set_params.append(serialized)
+                    slot, param = json_arg(value)
+                    json_set_parts.append(f"'$.{field}', {slot}")
+                    json_set_params.append(param)
 
         set_clauses: list[str] = []
         all_set_params: list[Any] = []
@@ -596,7 +647,9 @@ class AsyncSQLerQuery:
         sql = f"UPDATE {self._table} SET {', '.join(set_clauses)} {where}".strip()
         sql = " ".join(sql.split())
 
-        cur = await self._adapter.execute(sql, all_set_params + where_params)
+        cur = await self._execute(sql, all_set_params + where_params)
+        if cur is None:
+            return 0
         rowcount = cur.rowcount
         await cur.close()
         await self._adapter.auto_commit()
@@ -644,13 +697,13 @@ class AsyncSQLerQuery:
                     json_set_parts.append(f"'$.{field}', {expr_sql}")
                     json_set_params.extend(value.params)
             else:
-                serialized = json.dumps(value) if isinstance(value, (dict, list)) else value
                 if is_promoted:
                     promoted_set.append(f"{field} = ?")
-                    promoted_params.append(serialized)
+                    promoted_params.append(column_arg(value))
                 else:
-                    json_set_parts.append(f"'$.{field}', ?")
-                    json_set_params.append(serialized)
+                    slot, param = json_arg(value)
+                    json_set_parts.append(f"'$.{field}', {slot}")
+                    json_set_params.append(param)
 
         set_clauses: list[str] = []
         all_set_params: list[Any] = []
@@ -710,7 +763,9 @@ class AsyncSQLerQuery:
         sql = " ".join(sql.split())
 
         all_params = all_set_params + inner_where_params
-        cur = await self._adapter.execute(sql, all_params)
+        cur = await self._execute(sql, all_params)
+        if cur is None:
+            return None
         row = await cur.fetchone()
         await cur.close()
         await self._adapter.auto_commit()
@@ -776,13 +831,13 @@ class AsyncSQLerQuery:
                     json_set_parts.append(f"'$.{field}', {expr_sql}")
                     json_set_params.extend(value.params)
             else:
-                serialized = json.dumps(value) if isinstance(value, (dict, list)) else value
                 if is_promoted:
                     promoted_set.append(f"{field} = ?")
-                    promoted_params.append(serialized)
+                    promoted_params.append(column_arg(value))
                 else:
-                    json_set_parts.append(f"'$.{field}', ?")
-                    json_set_params.append(serialized)
+                    slot, param = json_arg(value)
+                    json_set_parts.append(f"'$.{field}', {slot}")
+                    json_set_params.append(param)
 
         set_clauses: list[str] = []
         all_set_params: list[Any] = []
@@ -842,7 +897,9 @@ class AsyncSQLerQuery:
         sql = " ".join(sql.split())
 
         all_params = all_set_params + inner_where_params
-        cur = await self._adapter.execute(sql, all_params)
+        cur = await self._execute(sql, all_params)
+        if cur is None:
+            return []
         rows = await cur.fetchall()
         await cur.close()
         await self._adapter.auto_commit()
@@ -885,7 +942,9 @@ class AsyncSQLerQuery:
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
 
-        cur = await self._adapter.execute(sql, params)
+        cur = await self._execute(sql, params)
+        if cur is None:
+            return 0
         rowcount = cur.rowcount
         await cur.close()
         await self._adapter.auto_commit()

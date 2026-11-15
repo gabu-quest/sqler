@@ -7,11 +7,16 @@ This module provides production-ready operations for SQLer databases including:
 """
 
 import os
+import shutil
 import sqlite3
 import time
+import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
+
+from sqler.exceptions import QueryError
 
 if TYPE_CHECKING:
     from sqler.db.async_db import AsyncSQLerDB
@@ -262,6 +267,38 @@ def get_stats(db: "SQLerDB") -> DatabaseStats:
     )
 
 
+def _temp_destination(destination: str) -> str:
+    """A fresh temporary path beside ``destination`` (same folder, so the final rename is atomic)."""
+    return f"{destination}.{uuid.uuid4().hex[:8]}.tmp"
+
+
+def _check_replaceable(destination: str) -> None:
+    """Refuse up front a destination file this process may not overwrite."""
+    if os.path.exists(destination) and not os.access(destination, os.W_OK):
+        raise PermissionError(f"backup destination is read-only: {destination}")
+
+
+def _discard_temp(temp: str) -> None:
+    """Remove a temporary backup file and any SQLite side files it left."""
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        try:
+            os.unlink(temp + suffix)
+        except OSError:
+            pass
+
+
+def _publish_temp(temp: str, destination: str) -> None:
+    """Flush the finished temporary backup and move it over ``destination`` in one step."""
+    fd = os.open(temp, os.O_RDWR)  # Windows flushes only a descriptor opened for writing
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    if os.path.exists(destination):
+        shutil.copymode(destination, temp)  # an existing destination keeps its mode
+    os.replace(temp, destination)
+
+
 def backup(
     db: "SQLerDB",
     destination: str,
@@ -272,12 +309,16 @@ def backup(
     """Create a backup of the database using SQLite's online backup API.
 
     This performs a safe, online backup that doesn't block readers/writers
-    for extended periods. The backup is atomic - it either completes fully
-    or not at all.
+    for extended periods. The backup is atomic: it is written to a temporary
+    file beside ``destination`` and moved into place only when complete. When
+    it fails, ``destination`` is as it was before the call (absent if it was
+    absent, the old file if one was there) and no temporary file is left. On
+    success ``destination`` is a complete database.
 
     Args:
         db: SQLerDB instance to backup.
         destination: Path to the backup file (will be created/overwritten).
+            Its folder must exist and a file already there must be writable.
         pages_per_step: Pages to copy per step (-1 for all at once).
         sleep_ms: Milliseconds to sleep between steps (for throttling).
 
@@ -306,12 +347,19 @@ def backup(
     source_path = db.adapter.path
     timestamp = datetime.now()
 
+    # A destination that is a symbolic link is written through it, as SQLite does:
+    # the link stays a link and the file it points to receives the backup.
+    reported = destination
+    destination = os.path.realpath(destination)
+    temp = _temp_destination(destination)
     try:
+        _check_replaceable(destination)
+
         # Get the source connection
         source_conn = db.adapter._conn()
 
-        # Create destination connection
-        dest_conn = sqlite3.connect(destination)
+        # The copy is written to a temporary file beside the destination
+        dest_conn = sqlite3.connect(temp)
 
         try:
             # Perform the backup using SQLite's backup API
@@ -324,6 +372,8 @@ def backup(
         finally:
             dest_conn.close()
 
+        _publish_temp(temp, destination)
+
         # Get backup file size
         size_bytes = os.path.getsize(destination)
         duration_ms = (time.perf_counter() - start) * 1000
@@ -331,18 +381,19 @@ def backup(
         return BackupResult(
             success=True,
             source_path=source_path,
-            destination_path=destination,
+            destination_path=reported,
             duration_ms=duration_ms,
             size_bytes=size_bytes,
             timestamp=timestamp,
         )
 
     except Exception as e:
+        _discard_temp(temp)
         duration_ms = (time.perf_counter() - start) * 1000
         return BackupResult(
             success=False,
             source_path=source_path,
-            destination_path=destination,
+            destination_path=reported,
             duration_ms=duration_ms,
             size_bytes=0,
             timestamp=timestamp,
@@ -502,6 +553,19 @@ def checkpoint(db: "SQLerDB", mode: str = "PASSIVE") -> dict[str, int]:
 # ============================================================================
 
 
+@asynccontextmanager
+async def _connection_returned(db: "AsyncSQLerDB") -> AsyncIterator[None]:
+    """Whatever the body does, the calling task holds no pooled connection afterwards.
+
+    Ends with the adapter's ``auto_commit()``: it commits and returns the connection, and does
+    nothing inside the caller's own transaction, which keeps its connection.
+    """
+    try:
+        yield
+    finally:
+        await db.adapter.auto_commit()
+
+
 async def async_health_check(db: "AsyncSQLerDB", timeout_ms: int = 5000) -> HealthStatus:
     """Perform an async health check on the database.
 
@@ -513,6 +577,22 @@ async def async_health_check(db: "AsyncSQLerDB", timeout_ms: int = 5000) -> Heal
         HealthStatus with check results.
     """
     start = time.perf_counter()
+    status = await _probe(db, start)
+    try:
+        # a probe that read and returned, or failed, leaves no connection with this task
+        await db.adapter.auto_commit()
+    except Exception as e:
+        return HealthStatus(
+            healthy=False,
+            latency_ms=(time.perf_counter() - start) * 1000,
+            message=f"could not return the connection: {e}",
+            timestamp=datetime.now(),
+            details=status.details,
+        )
+    return status
+
+
+async def _probe(db: "AsyncSQLerDB", start: float) -> HealthStatus:
     details: dict[str, Any] = {}
 
     try:
@@ -592,6 +672,11 @@ async def async_get_stats(db: "AsyncSQLerDB") -> DatabaseStats:
     Returns:
         DatabaseStats with size, page info, table/index counts.
     """
+    async with _connection_returned(db):
+        return await _read_stats(db)
+
+
+async def _read_stats(db: "AsyncSQLerDB") -> DatabaseStats:
     path = db.adapter.path
 
     # Get file size
@@ -663,6 +748,11 @@ async def async_backup(
     Note: The actual backup operation uses SQLite's synchronous backup API
     but is wrapped for async compatibility.
 
+    As in :func:`backup`, the copy is written to a temporary file beside
+    ``destination`` and moved into place only when complete. When it fails,
+    ``destination`` is as it was before the call and no temporary file is
+    left; on success it is a complete database.
+
     Args:
         db: AsyncSQLerDB instance to backup.
         destination: Path to the backup file.
@@ -677,12 +767,19 @@ async def async_backup(
     source_path = db.adapter.path
     timestamp = datetime.now()
 
+    # A destination that is a symbolic link is written through it, as SQLite does:
+    # the link stays a link and the file it points to receives the backup.
+    reported = destination
+    destination = os.path.realpath(destination)
+    temp = _temp_destination(destination)
     try:
+        _check_replaceable(destination)
+
         # Acquire a connection from the pool-based async adapter
         aio_conn = await db.adapter._acquire()
         try:
-            # Create destination connection
-            dest_conn = sqlite3.connect(destination)
+            # The copy is written to a temporary file beside the destination
+            dest_conn = sqlite3.connect(temp)
 
             try:
                 # Use aiosqlite's backup() which runs on the correct thread
@@ -696,6 +793,8 @@ async def async_backup(
         finally:
             await db.adapter._release()
 
+        _publish_temp(temp, destination)
+
         # Get backup file size
         size_bytes = os.path.getsize(destination)
         duration_ms = (time.perf_counter() - start) * 1000
@@ -703,18 +802,19 @@ async def async_backup(
         return BackupResult(
             success=True,
             source_path=source_path,
-            destination_path=destination,
+            destination_path=reported,
             duration_ms=duration_ms,
             size_bytes=size_bytes,
             timestamp=timestamp,
         )
 
     except Exception as e:
+        _discard_temp(temp)
         duration_ms = (time.perf_counter() - start) * 1000
         return BackupResult(
             success=False,
             source_path=source_path,
-            destination_path=destination,
+            destination_path=reported,
             duration_ms=duration_ms,
             size_bytes=0,
             timestamp=timestamp,
@@ -723,11 +823,21 @@ async def async_backup(
 
 
 async def async_vacuum(db: "AsyncSQLerDB") -> float:
-    """Async vacuum to reclaim unused space."""
+    """Async vacuum to reclaim unused space.
+
+    Raises:
+        QueryError: Inside a transaction (SQLite refuses a VACUUM there); the transaction is
+            untouched and still usable.
+    """
+    if db.adapter.in_transaction:
+        raise QueryError(
+            "VACUUM cannot run inside a transaction: end the transaction first",
+            sql="VACUUM;",
+        )
     start = time.perf_counter()
-    cursor = await db.adapter.execute("VACUUM;")
-    await cursor.close()
-    await db.adapter.commit()
+    async with _connection_returned(db):
+        cursor = await db.adapter.execute("VACUUM;")
+        await cursor.close()
     return (time.perf_counter() - start) * 1000
 
 
@@ -743,9 +853,12 @@ async def async_checkpoint(db: "AsyncSQLerDB", mode: str = "PASSIVE") -> dict[st
             f"Invalid checkpoint mode: {mode!r}. "
             f"Must be one of: {', '.join(sorted(_VALID_CHECKPOINT_MODES))}"
         )
-    cursor = await db.adapter.execute(f"PRAGMA wal_checkpoint({mode_upper});")
-    row = await cursor.fetchone()
-    await cursor.close()
+    async with _connection_returned(db):
+        cursor = await db.adapter.execute(f"PRAGMA wal_checkpoint({mode_upper});")
+        try:
+            row = await cursor.fetchone()
+        finally:
+            await cursor.close()
     return {
         "busy": row[0],
         "log": row[1],

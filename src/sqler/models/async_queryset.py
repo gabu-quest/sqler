@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, Optional, Type, TypeVar
 
+from sqler.models import _dirty, _refs
+from sqler.models._table_names import _unchecked_table_name
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
 
@@ -14,56 +16,68 @@ logger = logging.getLogger("sqler.async_queryset")
 class AsyncSQLerQuerySet(Generic[T]):
     """Async queryset that materializes model instances."""
 
-    def __init__(self, model_cls: Type[T], query: AsyncSQLerQuery) -> None:
+    def __init__(self, model_cls: Type[T], query: AsyncSQLerQuery, db: Any = None) -> None:
+        """``db``: the database ``query`` reads, which reads the rows references point at
+        (optional: without it they are read as ``_id`` and ``data`` through the query's
+        adapter)."""
         self._model_cls = model_cls
         self._query = query
+        self._db = db
         self._resolve = True
 
+    def _copy(self, query: AsyncSQLerQuery) -> "AsyncSQLerQuerySet[T]":
+        """A queryset on ``query`` holding everything this one holds but its query."""
+        clone = self.__class__(self._model_cls, query, self._db)
+        clone._resolve = self._resolve
+        return clone
+
     def resolve(self, flag: bool) -> "AsyncSQLerQuerySet[T]":
-        clone = self.__class__(self._model_cls, self._query)
+        """Toggle relation hydration on result materialization (default True)."""
+        clone = self._copy(self._query)
         clone._resolve = flag
         return clone
 
     # chaining
     def filter(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
-        return self.__class__(self._model_cls, self._query.filter(expression))
+        return self._copy(self._query.filter(expression))
 
     def exclude(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
-        return self.__class__(self._model_cls, self._query.exclude(expression))
+        return self._copy(self._query.exclude(expression))
 
     def or_filter(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with the expression OR-ed in."""
-        return self.__class__(self._model_cls, self._query.or_filter(expression))
+        return self._copy(self._query.or_filter(expression))
 
     def distinct(self) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with DISTINCT results."""
-        return self.__class__(self._model_cls, self._query.distinct())
+        return self._copy(self._query.distinct())
 
     def select(self, *fields: str) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset that only retrieves specified fields."""
-        return self.__class__(self._model_cls, self._query.select(*fields))
+        return self._copy(self._query.select(*fields))
 
     def order_by(self, *fields: str, desc: bool = False) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset ordered by the given JSON field(s)."""
-        return self.__class__(self._model_cls, self._query.order_by(*fields, desc=desc))
+        return self._copy(self._query.order_by(*fields, desc=desc))
 
     def limit(self, n: int) -> "AsyncSQLerQuerySet[T]":
-        return self.__class__(self._model_cls, self._query.limit(n))
+        return self._copy(self._query.limit(n))
 
     def group_by(self, *fields: str) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset grouped by the given field(s)."""
-        return self.__class__(self._model_cls, self._query.group_by(*fields))
+        return self._copy(self._query.group_by(*fields))
 
     def having(self, expression: SQLerExpression) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with a HAVING clause (requires group_by)."""
-        return self.__class__(self._model_cls, self._query.having(expression))
+        return self._copy(self._query.having(expression))
 
     # execution
     async def all(self) -> list[T]:
-        docs = await self._query.all_dicts()
+        rows = docs = await self._query.all_dicts()
+        per_row = self._resolve
         if self._resolve:
             try:
-                docs = await self._abatch_resolve(docs)
+                docs, per_row = await self._abatch(rows)
             except RecursionError:
                 logger.warning(
                     f"Circular reference detected during async batch resolution for "
@@ -75,8 +89,9 @@ class AsyncSQLerQuerySet(Generic[T]):
                     f"{type(e).__name__}: {e}. Continuing with unresolved references."
                 )
         results: list[T] = []
-        for d in docs:
-            if self._resolve:
+        other_table = self._reads_other_table()
+        for row, d in zip(rows, docs, strict=True):
+            if per_row:
                 try:
                     aresolver = getattr(self._model_cls, "_aresolve_relations", None)
                     if aresolver is not None:
@@ -92,7 +107,7 @@ class AsyncSQLerQuerySet(Generic[T]):
                         f"{type(e).__name__}: {e}"
                     )
             inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
-            self._attach_metadata(inst, d)
+            self._attach_metadata(inst, d, row, other_table)
             results.append(inst)
         return results
 
@@ -106,12 +121,12 @@ class AsyncSQLerQuerySet(Generic[T]):
         return await self._query.all_dicts()
 
     async def first(self) -> Optional[T]:
-        d = await self._query.first_dict()
+        row = d = await self._query.first_dict()
         if d is None:
             return None
         if self._resolve:
             try:
-                d = (await self._abatch_resolve([d]))[0]
+                d = (await self._abatch_resolve([row]))[0]
             except RecursionError:
                 logger.warning(
                     f"Circular reference detected during async resolution for "
@@ -123,22 +138,36 @@ class AsyncSQLerQuerySet(Generic[T]):
                     f"{type(e).__name__}: {e}. Continuing with unresolved references."
                 )
         inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
-        self._attach_metadata(inst, d)
+        self._attach_metadata(inst, d, row, self._reads_other_table())
         return inst
 
-    def _attach_metadata(self, inst: T, doc: dict) -> None:
+    def _reads_other_table(self) -> bool:
+        """True when this queryset reads a table other than its class's own.
+
+        Each run that makes instances asks once and hands the answer to ``_attach_metadata``:
+        the class lookup behind it is slow on a pydantic class, and the class may have been
+        rebound since the queryset was built.
+        """
+        table = self._query._table
+        return table is not None and table != _unchecked_table_name(self._model_cls)
+
+    def _attach_metadata(self, inst: T, doc: dict, row: dict, other_table: bool) -> None:
         """Attach database metadata (_id, _version, _snapshot) to an instance.
 
         Args:
             inst: The model instance to attach metadata to.
-            doc: The document dictionary containing the metadata.
+            doc: The document the instance was built from (``_id``, ``_version``).
+            row: The row as it was read, before its references were resolved: the snapshot
+                is taken from it. The same dict as ``doc`` when nothing was resolved.
+            other_table: The run's ``_reads_other_table()`` answer.
         """
         try:
             inst._id = doc.get("_id")  # type: ignore[attr-defined]
             if "_version" in doc:
                 inst._version = doc.get("_version")  # type: ignore[attr-defined]
-            snap = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
-            inst._snapshot = snap  # type: ignore[attr-defined]
+            inst._snapshot = _dirty.snapshot(row)  # type: ignore[attr-defined]
+            if other_table:
+                inst._source_table = self._query._table  # type: ignore[attr-defined]
         except AttributeError as e:
             logger.debug(f"Could not attach metadata to {self._model_cls.__name__}: {e}")
 
@@ -197,7 +226,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         if doc is None:
             return None
         inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-        self._attach_metadata(inst, doc)
+        self._attach_metadata(inst, doc, doc, self._reads_other_table())
         return inst
 
     async def update_n(self, n: int, **fields) -> list[T]:
@@ -212,9 +241,10 @@ class AsyncSQLerQuerySet(Generic[T]):
         """
         docs = await self._query.update_n(n, **fields)
         results: list[T] = []
+        other_table = self._reads_other_table()
         for doc in docs:
             inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-            self._attach_metadata(inst, doc)
+            self._attach_metadata(inst, doc, doc, other_table)
             results.append(inst)
         return results
 
@@ -231,7 +261,7 @@ class AsyncSQLerQuerySet(Generic[T]):
 
     def offset(self, n: int) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""
-        return self.__class__(self._model_cls, self._query.offset(n))
+        return self._copy(self._query.offset(n))
 
     # inspection
     def sql(self) -> str:
@@ -261,107 +291,18 @@ class AsyncSQLerQuerySet(Generic[T]):
         return rows
 
     async def _abatch_resolve(self, docs: list[dict], max_depth: int = 5) -> list[dict]:
-        """Recursively resolve all relationship references in batch (async).
+        """Resolve the references of ``docs`` into stored documents (see ``_refs.batch``)."""
+        return (await self._abatch(docs, max_depth))[0]
 
-        This method:
-        1. Recursively collects ALL refs at all nesting depths
-        2. Fetches them in batch (one query per table per depth level)
-        3. Replaces refs with resolved data, recursively processing nested refs
-
-        Args:
-            docs: List of documents to resolve.
-            max_depth: Maximum recursion depth to prevent infinite loops.
-
-        Returns:
-            list[dict]: Documents with references replaced by actual data.
-        """
-        if max_depth <= 0 or not docs:
-            return docs
-
-        import json
-
+    async def _abatch(self, docs: list[dict], max_depth: int = 5) -> tuple[list[dict], bool]:
+        """``(documents, found)`` of ``_refs.batch``: ``found`` is False when no document
+        holds a reference."""
         adapter = self._query._adapter  # type: ignore[attr-defined]
         assert adapter is not None, "Query has no adapter bound"
-
-        # Master dict to hold ALL resolved refs across all depths
-        resolved: dict[tuple[str, int], dict] = {}
-
-        async def collect_and_fetch(values: list, depth: int) -> None:
-            """Recursively collect refs and fetch them, building up resolved dict."""
-            if depth <= 0:
-                return
-
-            # Collect refs grouped by table
-            refs_by_table: dict[str, set[int]] = {}
-
-            def collect(value):
-                if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    key = (value["_table"], int(value["_id"]))
-                    if key not in resolved:  # Don't re-fetch already resolved
-                        refs_by_table.setdefault(value["_table"], set()).add(int(value["_id"]))
-                elif isinstance(value, dict):
-                    for v in value.values():
-                        collect(v)
-                elif isinstance(value, list):
-                    for v in value:
-                        collect(v)
-
-            for v in values:
-                collect(v)
-
-            if not refs_by_table:
-                return
-
-            # Fetch all refs and recurse into fetched docs
-            nested_docs: list[dict] = []
-            for table, ids in refs_by_table.items():
-                if not ids:
-                    continue
-                placeholders = ",".join(["?"] * len(ids))
-                sql = f"SELECT _id, data FROM {table} WHERE _id IN ({placeholders})"
-                cur = await adapter.execute(sql, list(ids))
-                rows = await cur.fetchall()
-                await cur.close()
-                for _id, data_json in rows:
-                    obj = json.loads(data_json)
-                    obj["_id"] = _id
-                    resolved[(table, int(_id))] = obj
-                    nested_docs.append(obj)
-
-            # Recursively fetch nested refs
-            if nested_docs:
-                await collect_and_fetch(nested_docs, depth - 1)
-
-        # Collect and fetch all refs at all depths into single resolved dict
-        await collect_and_fetch(docs, max_depth)
-
-        if not resolved:
-            return docs
-
-        # Replace refs with resolved data, recursively processing nested refs
-        def make_replace():
-            # Track refs currently being processed (stack) to detect cycles
-            processing: set[tuple[str, int]] = set()
-
-            def replace(value):
-                if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    key = (value["_table"], int(value["_id"]))
-                    if key in processing:
-                        return value  # Circular ref - we're already processing this
-                    fetched = resolved.get(key)
-                    if fetched is None:
-                        return value  # Not found, keep original ref
-                    # Mark as processing, resolve, then unmark
-                    processing.add(key)
-                    result = {k: replace(v) for k, v in fetched.items()}
-                    processing.discard(key)
-                    return result
-                if isinstance(value, dict):
-                    return {k: replace(v) for k, v in value.items()}
-                if isinstance(value, list):
-                    return [replace(v) for v in value]
-                return value
-
-            return replace
-
-        return [make_replace()(d) for d in docs]
+        walk = _refs.batch(docs, max_depth, self._model_cls, self._db)
+        try:
+            want = next(walk)
+            while True:
+                want = walk.send(await _refs.aread_rows(adapter, *want, self._db))
+        except StopIteration as done:
+            return done.value

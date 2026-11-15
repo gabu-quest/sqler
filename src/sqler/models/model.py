@@ -1,17 +1,32 @@
 from __future__ import annotations
 
+import os
 import warnings
 from typing import ClassVar, Optional, Type, TypeVar
 
 from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
+from sqler._stored import stored
 from sqler.db.sqler_db import SQLerDB
-from sqler.exceptions import NotBoundError
-from sqler.models._table_names import _default_table_name, _pluralize  # noqa: F401
+from sqler.exceptions import NotBoundError, UniqueConstraintError
+from sqler.models import _dirty, _refs
+from sqler.models._table_names import (  # noqa: F401
+    _default_table_name,
+    _instance_binding,
+    _model_table_name,
+    _pluralize,
+    _read_document,
+    _read_documents,
+    _register_defined_class,
+)
 from sqler.models.queryset import SQLerQuerySet
 from sqler.query import SQLerExpression
 from sqler.utils import validate_field_name, validate_table_name
+
+# The deprecation warning is attributed to the first caller outside the sqler package, so a
+# subclass's ``super().set_db()`` does not hide it behind sqler's own file.
+_SQLER_PREFIXES = (os.path.dirname(os.path.abspath(registry.__file__)) + os.sep,)
 
 TModel = TypeVar("TModel", bound="SQLerModel")
 
@@ -38,16 +53,25 @@ class SQLerModel(BaseModel):
     _id: Optional[int] = PrivateAttr(default=None)
     # snapshot of last-loaded document (for merge strategies in perf mode)
     _snapshot: Optional[dict] = PrivateAttr(default=None)
+    # table this row was read from, when ``using(db, table)`` named one other than the class's
+    _source_table: Optional[str] = PrivateAttr(default=None)
 
     # class-bound db + table metadata
     _db: ClassVar[Optional[SQLerDB]] = None
     _table: ClassVar[Optional[str]] = None
+    # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
+    _versioned_rows: ClassVar[bool] = False
 
     # ----- class config -----
     model_config = {
         "extra": "ignore",
         "frozen": False,
     }
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        _register_defined_class(cls)
 
     # ----- class methods -----
     @classmethod
@@ -68,7 +92,7 @@ class SQLerModel(BaseModel):
             "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
             "set_db() will be removed in a future version.",
             DeprecationWarning,
-            stacklevel=2,
+            skip_file_prefixes=_SQLER_PREFIXES,
         )
         explicit = getattr(cls, "__tablename__", None)
         chosen = validate_table_name(
@@ -137,8 +161,7 @@ class SQLerModel(BaseModel):
     def _resolve_binding(cls, db=None) -> tuple[SQLerDB, str]:
         """Return (db, table) using the provided db or the class-level binding."""
         if db is not None:
-            table = cls._table or getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-            return db, validate_table_name(table)
+            return db, _model_table_name(cls)
         return cls._require_binding()
 
     @classmethod
@@ -152,17 +175,13 @@ class SQLerModel(BaseModel):
             Model instance when found, else ``None``.
         """
         db, table = cls._require_binding()
-        doc = db.find_document(table, id_)
+        doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        doc = cls._resolve_relations(doc)
-        inst = cls.model_validate(doc)  # type: ignore[call-arg]
-        # attach db id stored outside the json payload
-        inst._id = doc.get("_id")
-        return inst  # type: ignore[return-value]
+        return _refs.from_row(cls, cls._resolve_relations(doc, db=db), doc)
 
     @classmethod
-    def from_ids(cls: Type[TModel], ids: list[int]) -> list[TModel]:
+    def from_ids(cls: Type[TModel], ids: list[int], *, db=None) -> list[TModel]:
         """Hydrate multiple instances by id list (batch operation).
 
         Fetches all documents in a single query and resolves all relations
@@ -171,6 +190,7 @@ class SQLerModel(BaseModel):
 
         Args:
             ids: List of row ids to load.
+            db: Optional database (overrides class-level binding).
 
         Returns:
             List of model instances (in same order as input ids).
@@ -178,19 +198,18 @@ class SQLerModel(BaseModel):
         """
         if not ids:
             return []
-        db, table = cls._require_binding()
-        docs = db.find_documents(table, ids)
+        given = db
+        db, table = cls._resolve_binding(db)
+        read = _refs.read_versioned if cls._versioned_rows else _read_documents
+        docs = read(db, table, ids)
         if not docs:
             return []
         # Use queryset's batch resolution for efficient nested ref loading
-        qs = cls.query()
-        docs = qs._batch_resolve(docs)
-        instances = []
-        for doc in docs:
-            inst = cls.model_validate(doc)
-            inst._id = doc.get("_id")
-            instances.append(inst)
-        return instances
+        qs = cls.using(given) if given is not None else cls.query()
+        return [
+            _refs.from_row(cls, doc, row)
+            for row, doc in zip(docs, qs._batch_resolve(docs), strict=True)
+        ]
 
     @classmethod
     def count(cls: Type[TModel]) -> int:
@@ -208,7 +227,7 @@ class SQLerModel(BaseModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return SQLerQuerySet[TModel](cls, q)
+        return SQLerQuerySet[TModel](cls, q, db)
 
     @classmethod
     def all(cls: Type[TModel]) -> list[TModel]:
@@ -221,18 +240,28 @@ class SQLerModel(BaseModel):
         return cls.query().first()
 
     @classmethod
-    def using(cls: Type[TModel], db: SQLerDB) -> SQLerQuerySet[TModel]:
-        """Return a queryset bound to a specific DB (no class-level mutation)."""
-        table = validate_table_name(
-            getattr(cls, "__tablename__", None) or _default_table_name(cls.__name__)
-        )
+    def using(
+        cls: Type[TModel], db: SQLerDB, table: Optional[str] = None
+    ) -> SQLerQuerySet[TModel]:
+        """Return a queryset bound to a specific DB (no class-level mutation).
+
+        Args:
+            db: Database to read.
+            table: Optional table to read instead of the class's own. The class
+                binding is not changed. A row read from it remembers the table:
+                ``save()``, ``delete()`` and ``refresh()`` use that table.
+
+        A read creates no table: on a table nobody created, ``all()`` is empty,
+        ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
+        """
+        table = validate_table_name(table) if table is not None else _model_table_name(cls)
         from sqler.query import SQLerQuery
 
         q = SQLerQuery(table=table, adapter=db.adapter)
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
-        return SQLerQuerySet[TModel](cls, q)
+        return SQLerQuerySet[TModel](cls, q, db)
 
     @classmethod
     def filter(cls: Type[TModel], expression: SQLerExpression) -> SQLerQuerySet[TModel]:
@@ -272,7 +301,14 @@ class SQLerModel(BaseModel):
             return existing, False
         merged = {**lookup, **(defaults or {})}
         inst = cls(**merged)
-        inst.save(db=db)
+        try:
+            inst.save(db=db)
+        except UniqueConstraintError:
+            # another caller inserted the same lookup between the read and the insert
+            existing = qs.first()
+            if existing is None:
+                raise  # refused by a unique index on a field outside the lookup
+            return existing, False
         return inst, True  # type: ignore[return-value]
 
     @classmethod
@@ -336,7 +372,7 @@ class SQLerModel(BaseModel):
 
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            db._ensure_table_with_promoted(table, promoted, checks)
+            db._ensure_promoted(table, promoted, checks)
 
         payloads = [inst._dump_with_relations() for inst in instances]
 
@@ -346,8 +382,9 @@ class SQLerModel(BaseModel):
         else:
             ids = db.insert_many(table, payloads)
 
-        for inst, id_ in zip(instances, ids):
+        for inst, id_, payload in zip(instances, ids, payloads):
             inst._id = id_
+            inst._snapshot = _dirty.snapshot(payload)
         return instances
 
     def save(self: TModel, *, db=None) -> TModel:
@@ -360,15 +397,17 @@ class SQLerModel(BaseModel):
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
+            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
             promoted_fields = list(promoted.keys())
             new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
         else:
             new_id = db.upsert_document(table, self._id, payload)
         self._id = new_id
+        self._snapshot = _dirty.snapshot(payload)
         return self
 
     def delete(self, *, db=None) -> None:
@@ -386,8 +425,7 @@ class SQLerModel(BaseModel):
             db: Optional database to delete from (overrides class-level binding).
             on_delete: One of "restrict", "set_null", or "cascade".
         """
-        cls = self.__class__
-        db, table = cls._resolve_binding(db)
+        db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot delete unsaved model (missing _id)")
         target = (table, int(self._id))
@@ -422,13 +460,13 @@ class SQLerModel(BaseModel):
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = cls._require_binding()
+        db, table = _instance_binding(self)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = db.find_document(table, self._id)
+        doc = _read_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        doc = cls._resolve_relations(doc)
+        row, doc = doc, cls._resolve_relations(doc, db=db)
         fresh = cls.model_validate(doc)  # type: ignore[call-arg]
         # update fields in-place (excluding _id which is also present)
         for fname in self.__class__.model_fields:
@@ -437,32 +475,12 @@ class SQLerModel(BaseModel):
             setattr(self, fname, getattr(fresh, fname))
         # set db id explicitly
         self._id = doc.get("_id")
-        # refresh the dirty-tracking snapshot so is_dirty() reflects the new loaded state
-        self._snapshot = {k: v for k, v in doc.items() if k not in {"_id", "_version"}}
+        self._snapshot = _dirty.snapshot(row)
         return self
 
     # ----- dirty tracking -----
-    def is_dirty(self) -> bool:
-        """Return True if any field differs from the last loaded/refreshed state.
-
-        The snapshot is captured by the queryset hydration path and refreshed
-        by ``refresh()``. Instances created directly (not loaded from DB) have
-        no snapshot and are considered dirty until first save.
-        """
-        if self._snapshot is None:
-            return True
-        return self.model_dump() != self._snapshot
-
-    def get_dirty_fields(self) -> set[str]:
-        """Return names of fields that differ from the last loaded/refreshed state."""
-        if self._snapshot is None:
-            return set(self.__class__.model_fields.keys())
-        current = self.model_dump()
-        dirty: set[str] = set()
-        for key, value in current.items():
-            if key not in self._snapshot or self._snapshot[key] != value:
-                dirty.add(key)
-        return dirty
+    is_dirty = _dirty.is_dirty
+    get_dirty_fields = _dirty.get_dirty_fields
 
     # ----- ref integrity utils -----
     @classmethod
@@ -518,61 +536,36 @@ class SQLerModel(BaseModel):
         return isinstance(value, dict) and "_table" in value and "_id" in value
 
     @classmethod
-    def _resolve_relations(cls, data: dict) -> dict:
-        def decode(value: object):
-            if isinstance(value, dict):
-                if cls._is_ref_dict(value):
-                    table = value.get("_table")
-                    rid = value.get("_id")
-                    mdl = registry.resolve(table) if isinstance(table, str) else None
-                    if mdl is not None and hasattr(mdl, "from_id"):
-                        try:
-                            return mdl.from_id(rid)
-                        except (LookupError, RuntimeError, ValueError):
-                            # Return raw ref if hydration fails
-                            return value
-                return {k: decode(v) for k, v in value.items()}
-            if isinstance(value, list):
-                return [decode(v) for v in value]
-            return value
+    def _resolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
+        """Replace the references in ``data`` by the rows they point to (see ``_refs.resolve``)."""
+        return _refs.resolve(data, db, _seen)
 
-        return {k: decode(v) for k, v in data.items()}
+    @classmethod
+    def _load_refs(cls, ids: list, seen: frozenset) -> dict:
+        """Load the rows ``ids`` of this class's table with one statement.
+
+        Returns ``{id: instance}``; a row that is gone is missing, one that cannot be
+        hydrated maps to ``_refs.KEEP``.
+        """
+        db, table = cls._require_binding()
+        out: dict = {}
+        for doc in _read_documents(db, table, ids):
+            rid = doc["_id"]
+            try:
+                inst = _refs.from_row(
+                    cls, cls._resolve_relations(doc, db=db, _seen=seen | {(table, rid)}), doc
+                )
+            except (LookupError, RuntimeError, ValueError):
+                out[rid] = _refs.KEEP
+                continue
+            out[rid] = inst
+        return out
 
     def _dump_with_relations(self) -> dict:
-        from datetime import date, datetime
-
-        visited: set[tuple[str, int]] = set()
-
-        def encode(value: object):
-            from sqler.models.model import SQLerModel
-            from sqler.models.ref import as_ref
-
-            if isinstance(value, SQLerModel):
-                # avoid recursion: require saved child
-                if value._id is None:
-                    raise ValueError("Related model must be saved before saving parent")
-                if (value.__class__._table, int(value._id)) not in visited:  # type: ignore[attr-defined]
-                    visited.add((value.__class__._table, int(value._id)))  # type: ignore[attr-defined]
-                return as_ref(value)
-            # already a ref dict: validate minimally
-            if isinstance(value, dict) and "_table" in value and "_id" in value:
-                return {"_table": value["_table"], "_id": value["_id"]}
-            if isinstance(value, list):
-                return [encode(v) for v in value]
-            if isinstance(value, dict):
-                return {k: encode(v) for k, v in value.items()}
-            if isinstance(value, BaseModel):
-                return value.model_dump()
-            # Handle datetime/date serialization
-            if isinstance(value, datetime):
-                return value.isoformat()
-            if isinstance(value, date):
-                return value.isoformat()
-            return value
-
-        payload: dict = {}
-        for name in self.__class__.model_fields:
-            if name == "_id":
-                continue
-            payload[name] = encode(getattr(self, name))
-        return payload
+        """The document ``save()`` writes: each field in stored form, a related model as the
+        reference to its row."""
+        return {
+            name: stored(getattr(self, name), SQLerModel)
+            for name in type(self).model_fields
+            if name != "_id"
+        }

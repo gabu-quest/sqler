@@ -7,6 +7,7 @@ from sqler.exceptions import (
     InvalidColumnDefError,
     InvalidFieldNameError,
     InvalidIdentifierError,
+    InvalidTableNameError,
 )
 from sqler.fts import FTSIndex
 from sqler.ops import checkpoint
@@ -16,6 +17,7 @@ from sqler.utils import (
     validate_column_name,
     validate_field_name,
     validate_identifier,
+    validate_table_name,
 )
 
 # ---------------------------------------------------------------------------
@@ -651,3 +653,541 @@ class TestReservedWordProtection:
         ddl = row[0]
         assert "status" in ddl
         assert "priority" in ddl
+
+
+# ---------------------------------------------------------------------------
+# names stored in documents / used as JSON keys never change the statement
+# ---------------------------------------------------------------------------
+
+from pydantic import Field as _PydField  # noqa: E402
+from sqler import SQLerDB as _SQLerDB  # noqa: E402
+from sqler.models import SQLerModel  # noqa: E402
+from sqler.query import SQLerField as F  # noqa: E402
+
+HOSTILE_TABLES = [
+    "'; DROP TABLE users; --",
+    "users WHERE 1=1 UNION SELECT _id, data FROM secrets --",
+    "secrets WHERE 1 UNION SELECT _id, data FROM secrets",
+    "users where",
+    "",
+    "a b",
+    "a\nb",
+    "t\x00",
+    "名前",
+    "x" * 10000 + "'",
+]
+
+BAD_IDS = ["1 OR 1=1", None, 1.5, [1], True, {"a": 1}, "1", 2**63, -(2**63) - 1, 10**20]
+EDGE_IDS = [2**63 - 1, -(2**63)]
+TRAILING_NEWLINE_NAMES = ["users\n", "users\r\n", "\nusers", "a\n", "_\n"]
+
+
+class Holder(SQLerModel):
+    payload: dict = _PydField(default_factory=dict)
+
+
+@pytest.fixture
+def rdb():
+    d = _SQLerDB.in_memory(shared=False)
+    Holder.set_db(d)
+    d.insert_document("secrets", {"secret": "s3"})
+    d.insert_document("users", {"name": "u1"})
+    yield d
+    d.close()
+
+
+class TestBatchResolveRejectsHostileRefs:
+    @pytest.mark.parametrize("table", HOSTILE_TABLES)
+    def test_hostile_table_left_unchanged(self, rdb, table):
+        ref = {"_table": table, "_id": 1}
+        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.parametrize("bad", BAD_IDS, ids=repr)
+    def test_bad_id_left_unchanged(self, rdb, bad):
+        ref = {"_table": "users", "_id": bad}
+        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.parametrize("edge", EDGE_IDS, ids=repr)
+    def test_edge_id_without_row_left_unchanged(self, rdb, edge):
+        ref = {"_table": "users", "_id": edge}
+        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    @pytest.mark.parametrize("table", ["users\n", "users\r\n", "\nusers"], ids=repr)
+    def test_newline_table_left_unchanged(self, rdb, table):
+        ref = {"_table": table, "_id": 1}
+        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
+        assert out == [{"payload": {"k": ref}, "_id": 1}]
+
+    def test_bad_ref_does_not_stop_good_ref(self, rdb):
+        bad = {"_table": "users; x", "_id": 1}
+        good = {"_table": "users", "_id": 1}
+        out = Holder.query()._batch_resolve([{"payload": {"a": bad, "b": good}}])
+        assert out[0]["payload"]["a"] == bad
+        assert out[0]["payload"]["b"]["name"] == "u1"
+
+    def test_end_to_end_all(self, rdb):
+        ref = {"_table": "secrets WHERE 1 UNION SELECT _id, data FROM secrets", "_id": 1}
+        Holder(payload={"k": ref}).save()
+        got = Holder.query().all()
+        assert got[0].payload == {"k": ref}
+
+
+# --- JSON path literals -----------------------------------------------------
+
+LITERAL_NAMES = [
+    "x') OR 1=1 --",
+    "it's",
+    'a"b',
+    "'; DROP TABLE users; --",
+    "a..b",
+    "a.",
+    ".a",
+    "n" * 10000,
+    "名前",
+    "two words"
+]
+UNMATCHABLE_NAMES = ['a\\"b', "a\\'b", "a\\b", "a\x00b", "a\nb", "a\tb", "a\u00a0b", "a  b"]
+
+
+@pytest.fixture
+def jdb():
+    d = _SQLerDB.in_memory(shared=False)
+    yield d
+    d.close()
+
+
+def _ids(db, expr):
+    return sorted(r["_id"] for r in db.query("docs").filter(expr).all_dicts())
+
+
+class TestJsonPathLiteralEscaping:
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_field_matches_key_literally(self, jdb, name):
+        a = jdb.insert_document("docs", {name: 1})
+        jdb.insert_document("docs", {"plain": 1})
+        assert _ids(jdb, F(name) == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_nested_key_matches_literally(self, jdb, name):
+        a = jdb.insert_document("docs", {"o": {name: 1}})
+        jdb.insert_document("docs", {"o": {"plain": 1}})
+        assert _ids(jdb, F("o")[name] == 1) == [a]
+
+    @pytest.mark.parametrize("name", UNMATCHABLE_NAMES, ids=repr)
+    def test_unrepresentable_name_raises_sqler_error(self, jdb, name):
+        jdb.insert_document("docs", {"plain": 1})
+        with pytest.raises(InvalidFieldNameError):
+            _ids(jdb, F(name) == 1)
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_any_last_field(self, jdb, name):
+        a = jdb.insert_document("docs", {"arr": [{name: 1}]})
+        jdb.insert_document("docs", {"arr": [{"plain": 1}]})
+        assert _ids(jdb, F("arr").any()[name] == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_any_array_key(self, jdb, name):
+        a = jdb.insert_document("docs", {name: [{"v": 1}]})
+        jdb.insert_document("docs", {"plain": [{"v": 1}]})
+        assert _ids(jdb, F(name).any()["v"] == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_any_nested_array_key(self, jdb, name):
+        a = jdb.insert_document("docs", {"o": [{name: [{"v": 1}]}]})
+        jdb.insert_document("docs", {"o": [{"plain": [{"v": 1}]}]})
+        assert _ids(jdb, F("o").any()[name].any()["v"] == 1) == [a]
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_any_context_where_nested_key(self, jdb, name):
+        a = jdb.insert_document("docs", {"o": [{name: 1}]})
+        jdb.insert_document("docs", {"o": [{"plain": 1}]})
+        expr = F("o").any().where(F(name) == 1)
+        assert _ids(jdb, expr.to_expression()) == [a]
+
+    @pytest.mark.parametrize("name", UNMATCHABLE_NAMES, ids=repr)
+    def test_any_unrepresentable_raises(self, jdb, name):
+        with pytest.raises(InvalidFieldNameError):
+            _ids(jdb, F("arr").any()[name] == 1)
+        with pytest.raises(InvalidFieldNameError):
+            _ids(jdb, F(name).any()["v"] == 1)
+
+    @pytest.mark.parametrize("name", UNMATCHABLE_NAMES, ids=repr)
+    def test_statement_refused_for_unmatchable_name(self, name):
+        with pytest.raises(InvalidFieldNameError):
+            (F(name) == 1).sql  # noqa: B018
+
+    @pytest.mark.parametrize("name", LITERAL_NAMES, ids=lambda s: repr(s[:20]))
+    def test_statement_text_has_no_bare_quote(self, name):
+        sql = (F(name) == 1).sql
+        literal = sql.split("JSON_EXTRACT(data, ", 1)[1].rsplit(") = ?", 1)[0]
+        assert literal.startswith("'") and literal.endswith("'")
+        assert "'" not in literal[1:-1].replace("''", "")
+
+    def test_ordinary_names_keep_their_sql(self):
+        assert (F("a") == 1).sql == "JSON_EXTRACT(data, '$.a') = ?"
+        assert (F(["a", "b", 1, "c"]) == 1).sql == "JSON_EXTRACT(data, '$.a.b[1].c') = ?"
+        assert (F("a-b") == 1).sql == "JSON_EXTRACT(data, '$.\"a-b\"') = ?"
+        assert (F("a b") == 1).sql == "JSON_EXTRACT(data, '$.\"a b\"') = ?"
+        assert (F("a.b") == 1).sql == "JSON_EXTRACT(data, '$.\"a.b\"') = ?"
+        assert (F("arr").any()["val"] == 1).sql == (
+            "EXISTS (SELECT 1 FROM json_each(data, '$.arr') AS a "
+            "WHERE json_extract(a.value, '$.val') = ?)"
+        )
+        assert (F("l1").any()["arr2"].any()["f"] > 1).sql == (
+            "EXISTS (SELECT 1 FROM json_each(data, '$.l1') AS a "
+            "JOIN json_each(a.value, '$.arr2') AS b "
+            "WHERE json_extract(b.value, '$.f') > ?)"
+        )
+
+    def test_expression_index_still_used(self, jdb):
+        jdb.insert_document("docs", {"a-b": 1})
+        jdb.adapter.execute("CREATE INDEX ix ON docs (JSON_EXTRACT(data, '$.\"a-b\"'))")
+        plan = jdb.query("docs").filter(F("a-b") == 1).explain_query_plan(jdb.adapter)
+        assert any("ix" in str(tuple(r)) for r in plan)
+
+
+class TestValidatorsRefuseTrailingNewline:
+    @pytest.mark.parametrize("name", TRAILING_NEWLINE_NAMES, ids=repr)
+    def test_table_name(self, name):
+        with pytest.raises(InvalidTableNameError):
+            validate_table_name(name)
+
+    @pytest.mark.parametrize("name", TRAILING_NEWLINE_NAMES, ids=repr)
+    def test_identifier(self, name):
+        with pytest.raises(InvalidIdentifierError):
+            validate_identifier(name)
+
+    @pytest.mark.parametrize("name", TRAILING_NEWLINE_NAMES, ids=repr)
+    def test_column_name(self, name):
+        with pytest.raises(InvalidIdentifierError):
+            validate_column_name(name)
+
+    @pytest.mark.parametrize("name", TRAILING_NEWLINE_NAMES + ["a.b\n", "a\n.b"], ids=repr)
+    def test_field_name(self, name):
+        with pytest.raises(InvalidFieldNameError):
+            validate_field_name(name)
+
+    @pytest.mark.parametrize("name", ["users", "_a1", "A"])
+    def test_valid_names_stay_valid(self, name):
+        assert validate_table_name(name) == name
+        assert validate_identifier(name) == name
+        assert validate_field_name(name + ".b_2") == name + ".b_2"
+
+
+# ---------------------------------------------------------------------------
+# Model fields, search index names and integrity checks
+# ---------------------------------------------------------------------------
+
+from sqler.exceptions import InvalidTableNameError as _InvalidTableNameError  # noqa: E402
+from sqler.models import SQLerModel as _SQLerModel  # noqa: E402
+from sqler.models import SQLerModelField as _MF  # noqa: E402
+from sqler.models import integrity as _integrity  # noqa: E402
+
+_CARRIABLE_KEYS = ["a'b", 'a"b', "a.b", "a[0]", "x') OR 1=1 --"]
+_UNCARRIABLE_MF_KEYS = ["a\n", "a\x00b", "", "a\\b"]
+
+
+class _MFOwner(_SQLerModel):
+    name: str = ""
+
+
+@pytest.fixture
+def mfdb():
+    d = SQLerDB.in_memory(shared=False)
+    _MFOwner.set_db(d, table="mfowners")
+    yield d
+    d.close()
+
+
+def _mf_owners(db, expr):
+    cur = db.adapter.execute(
+        f"SELECT _id FROM mfowners WHERE {expr.sql} ORDER BY _id", list(expr.params)
+    )
+    return [r[0] for r in cur.fetchall()]
+
+
+class TestModelFieldSearchAndIntegrityNames:
+    @pytest.mark.parametrize("key", _CARRIABLE_KEYS, ids=repr)
+    @pytest.mark.parametrize("position", ["last", "middle"])
+    @pytest.mark.parametrize("any_", [False, True])
+    def test_model_field_matches_only_the_document_with_that_key(
+        self, mfdb, key, position, any_
+    ):
+        if position == "last":
+            hit, miss, rest = {key: 5}, {"zzz": 5}, [key]
+        else:
+            hit, miss, rest = {key: {"v": 5}}, {"zzz": {"v": 5}}, [key, "v"]
+        a_hit = mfdb.insert_document("addresses", hit)
+        a_miss = mfdb.insert_document("addresses", miss)
+        # a dotted or bracketed key must not match the nested / array document either
+        decoy = None
+        if "." in key:
+            head, tail = key.split(".", 1)
+            decoy = {head: {tail: 5}} if position == "last" else {head: {tail: {"v": 5}}}
+        elif key == "a[0]":
+            decoy = {"a": [5]} if position == "last" else {"a": [{"v": 5}]}
+        a_decoy = mfdb.insert_document("addresses", decoy) if decoy is not None else None
+        ref = lambda i: {"_table": "addresses", "_id": i}  # noqa: E731
+        wrap = (lambda i: [ref(i)]) if any_ else ref
+        u_hit = mfdb.insert_document("mfowners", {"addresses": wrap(a_hit)})
+        mfdb.insert_document("mfowners", {"addresses": wrap(a_miss)})
+        mfdb.insert_document("mfowners", {"addresses": wrap(a_miss + 1)})
+        if a_decoy is not None:
+            mfdb.insert_document("mfowners", {"addresses": wrap(a_decoy)})
+        field = _MF(_MFOwner, ["addresses"] + rest, array_any=any_)
+        assert _mf_owners(mfdb, field == 5) == [u_hit]
+
+    @pytest.mark.parametrize("key", _UNCARRIABLE_MF_KEYS, ids=repr)
+    @pytest.mark.parametrize("position", ["last", "middle"])
+    def test_model_field_refuses_uncarriable_key_before_sql(self, mfdb, key, position):
+        rest = [key] if position == "last" else [key, "v"]
+        with pytest.raises(InvalidFieldNameError):
+            (_MF(_MFOwner, ["addresses"] + rest) == 1).sql  # noqa: B018
+
+    @pytest.mark.parametrize("key", _CARRIABLE_KEYS + _UNCARRIABLE_MF_KEYS, ids=repr)
+    @pytest.mark.parametrize("any_", [False, True])
+    def test_model_field_first_segment_that_is_no_table_name_is_refused(self, mfdb, key, any_):
+        with pytest.raises((InvalidFieldNameError, _InvalidTableNameError)):
+            (_MF(_MFOwner, [key, "v"], array_any=any_) == 1).sql  # noqa: B018
+
+    @pytest.mark.parametrize("any_", [False, True])
+    def test_model_field_statement_has_no_bare_quote(self, mfdb, any_):
+        sql = (_MF(_MFOwner, ["addresses", "a'b", "c'd"], array_any=any_) == 1).sql
+        assert "a'b" not in sql and "c'd" not in sql
+
+    def test_model_field_plain_names_still_work(self, mfdb):
+        a = mfdb.insert_document("addresses", {"city": "Kyoto", "geo": {"lat": 3}})
+        u = mfdb.insert_document("mfowners", {"addresses": {"_table": "addresses", "_id": a}})
+        assert _mf_owners(mfdb, _MF(_MFOwner, ["addresses", "city"]) == "Kyoto") == [u]
+        assert _mf_owners(mfdb, _MF(_MFOwner, ["addresses", "geo", "lat"]) == 3) == [u]
+        assert _mf_owners(mfdb, _MF(_MFOwner, ["addresses", "_id"]) == a) == [u]
+
+    # -- search index ------------------------------------------------------
+
+    @pytest.mark.parametrize("name", ["x; DROP TABLE users; --", "docs_fts\n", "a b", ""], ids=repr)
+    def test_index_table_set_after_construction_is_checked(self, name):
+        class _Doc(_SQLerModel):
+            body: str = ""
+
+        idx = FTSIndex(_Doc, ["body"], index_name="ok_fts")
+        with pytest.raises(InvalidIdentifierError):
+            idx.index_table = name
+        assert idx.index_table == "ok_fts"
+
+    def test_index_table_can_still_be_reset_to_none_and_valid_names(self):
+        class _Doc2(_SQLerModel):
+            body: str = ""
+
+        idx = FTSIndex(_Doc2, ["body"], index_name="ok_fts")
+        idx.index_table = "other_fts"
+        assert idx.index_table == "other_fts"
+        idx.index_table = None
+        assert idx.index_table.endswith("_fts")
+
+    @pytest.mark.parametrize("name", ["x; DROP TABLE users; --", "docs_fts\n"], ids=repr)
+    def test_no_fts_method_runs_sql_for_a_bad_index_table(self, name):
+        class _Doc3(_SQLerModel):
+            body: str = ""
+
+        d = SQLerDB.in_memory(shared=False)
+        _Doc3.set_db(d, table="doc3s")
+        d.insert_document("users", {"name": "u"})
+        idx = FTSIndex(_Doc3, ["body"])
+        with pytest.raises(InvalidIdentifierError):
+            idx.index_table = name
+        idx.create(d)
+        assert d.adapter.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+        d.close()
+
+    @pytest.mark.parametrize("tok", ["porter\n", "porter; --", "porter\n\n", "x'y"], ids=repr)
+    def test_tokenizer_with_trailing_newline_or_junk_is_refused(self, tok):
+        class _Doc4(_SQLerModel):
+            body: str = ""
+
+        with pytest.raises(ValueError):
+            FTSIndex(_Doc4, ["body"], tokenizer=tok)
+
+    # -- integrity ---------------------------------------------------------
+
+    def test_integrity_has_no_pattern_of_its_own(self):
+        import inspect
+
+        assert "a-zA-Z" not in inspect.getsource(_integrity)
+
+    @pytest.mark.parametrize("bad", ["users\n", "users; --", "a b"], ids=repr)
+    def test_validate_references_reports_bad_table_name_as_broken(self, bad):
+        d = SQLerDB.in_memory(shared=False)
+        _MFOwner.set_db(d, table="mfowners")
+        d.insert_document("mfowners", {"r": {"_table": bad, "_id": 1}})
+        broken = _integrity.validate_references(d)
+        assert [(b.table, b.target_table) for b in broken] == [("mfowners", bad)]
+        d.close()
+
+    def test_validate_references_trailing_newline_name_is_not_sent_to_sql(self):
+        d = SQLerDB.in_memory(shared=False)
+        _MFOwner.set_db(d, table="mfowners")
+        d.insert_document("users", {"name": "u"})
+        d.insert_document("mfowners", {"r": {"_table": "users\n", "_id": 1}})
+        broken = _integrity.validate_references(d)
+        assert [b.target_table for b in broken] == ["users\n"]
+        d.close()
+
+
+class TestFtsFieldsSetAfterConstruction:
+    @pytest.mark.parametrize("name", ["x'); DROP TABLE users; --", "body\n", ""], ids=repr)
+    def test_fields_set_after_construction_are_checked(self, name):
+        class _Doc5(_SQLerModel):
+            body: str = ""
+
+        idx = FTSIndex(_Doc5, ["body"])
+        with pytest.raises(InvalidFieldNameError):
+            idx.fields = ["body", name]
+        assert idx.fields == ["body"]
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: values that still reach SQL in the search index and integrity
+# ---------------------------------------------------------------------------
+
+_EVIL_FIELD = "x'); DROP TABLE users; --"
+_EVIL_TOKENIZER = "x'); DROP TABLE users; --"
+
+
+def _fts_fixture(table="rv_docs"):
+    class _RvDoc(_SQLerModel):
+        body: str = ""
+
+    d = SQLerDB.in_memory(shared=False)
+    _RvDoc.set_db(d, table=table)
+    d.insert_document("users", {"name": "u"})
+    return _RvDoc, d
+
+
+def _users_intact(d):
+    return d.adapter.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+
+
+class TestFtsAndIntegrityReviewFixes:
+    def test_fields_returned_list_cannot_change_the_index(self):
+        doc, d = _fts_fixture()
+        idx = FTSIndex(doc, ["body"])
+        idx.fields.append(_EVIL_FIELD)
+        assert idx.fields == ["body"]
+        idx.create(d)
+        idx.rebuild()
+        assert _users_intact(d)
+        d.close()
+
+    def test_constructor_list_mutation_cannot_change_the_index(self):
+        doc, d = _fts_fixture()
+        given = ["body"]
+        idx = FTSIndex(doc, given)
+        given.append(_EVIL_FIELD)
+        assert idx.fields == ["body"]
+        idx.create(d)
+        idx.rebuild()
+        assert idx.stats().fields == ["body"]
+        assert _users_intact(d)
+        d.close()
+
+    @pytest.mark.parametrize("tok", [_EVIL_TOKENIZER, "porter\n", "porter; --"], ids=repr)
+    def test_tokenizer_set_after_construction_is_checked(self, tok):
+        doc, d = _fts_fixture()
+        idx = FTSIndex(doc, ["body"])
+        with pytest.raises(ValueError, match="Invalid tokenizer"):
+            idx.tokenizer = tok
+        assert idx.tokenizer == "porter unicode61"
+        d.close()
+
+    @pytest.mark.parametrize("bad", [True, 1.5, "3", "1) FROM users; --"], ids=repr)
+    def test_snippet_max_tokens_must_be_an_integer(self, bad):
+        doc, d = _fts_fixture()
+        idx = FTSIndex(doc, ["body"])
+        idx.create(d)
+        m = doc(body="hello world")
+        m.save()
+        idx.index(m)
+        with pytest.raises(TypeError, match="max_tokens"):
+            idx.snippet("hello", m, max_tokens=bad)
+        assert idx.snippet("hello", m, max_tokens=5) == "<b>hello</b> world"
+        assert _users_intact(d)
+        d.close()
+
+    @pytest.mark.parametrize("name", ["x; DROP TABLE users; --", "docs\n", "a b"], ids=repr)
+    def test_model_table_set_by_hand_is_checked(self, name):
+        class _Hand(_SQLerModel):
+            body: str = ""
+
+        _Hand._table = name
+        idx = FTSIndex(_Hand, ["body"])
+        with pytest.raises(InvalidTableNameError):
+            idx.table  # noqa: B018
+        with pytest.raises(InvalidTableNameError):
+            idx.index_table  # noqa: B018
+
+    @pytest.mark.parametrize("fn", ["set_null", "cascade"])
+    @pytest.mark.parametrize("bad", ["users\n", "users; --", "a b", ""], ids=repr)
+    def test_integrity_helpers_refuse_bad_referrer_table(self, fn, bad):
+        d = SQLerDB.in_memory(shared=False)
+        d.insert_document("users", {"name": "u"})
+        referrers = [("users", 1, {}), (bad, 1, {})]
+        with pytest.raises(_InvalidTableNameError):
+            if fn == "set_null":
+                _integrity.set_null_referrers(d, "users", 1, referrers)
+            else:
+                _integrity.cascade_delete(d, referrers, set())
+        # refused before any SQL ran: the valid first entry was not touched either
+        assert d.adapter.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+        d.close()
+
+
+# ---------------------------------------------------------------------------
+# Database write methods with promoted columns check table and field names
+# ---------------------------------------------------------------------------
+
+from sqler.exceptions import InvalidIdentifierError as _InvalidIdentifierError  # noqa: E402
+
+_PROMOTED_WRITES = {
+    "upsert_document_promoted": lambda d, t, f: d.upsert_document_promoted(t, None, {"s": "a"}, f),
+    "upsert_document_promoted_update": lambda d, t, f: d.upsert_document_promoted(t, 1, {"s": "a"}, f),
+    "insert_many_promoted": lambda d, t, f: d.insert_many_promoted(t, [{"s": "a"}], f),
+    "upsert_with_version_promoted": lambda d, t, f: d.upsert_with_version_promoted(t, None, {"s": "a"}, None, f),
+    "upsert_with_version_promoted_update": lambda d, t, f: d.upsert_with_version_promoted(t, 1, {"s": "a"}, 0, f),
+}
+
+
+class TestPromotedWriteNames:
+    @pytest.fixture
+    def pdb(self):
+        d = SQLerDB.in_memory(shared=False)
+        d.ensure_table("jobs", promoted={"s": "TEXT"}, versioned=True)
+        d.upsert_with_version_promoted("jobs", None, {"s": "first"}, None, ["s"])
+        yield d
+        d.close()
+
+    def _untouched(self, d):
+        rows = d.adapter.execute("SELECT _id, s, _version FROM jobs").fetchall()
+        tables = d.adapter.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+        return [tuple(r) for r in rows], [r[0] for r in tables]
+
+    @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
+    def test_table_ending_in_newline_is_refused(self, pdb, method):
+        before = self._untouched(pdb)
+        with pytest.raises(InvalidTableNameError):
+            _PROMOTED_WRITES[method](pdb, "jobs\n", ["s"])
+        assert self._untouched(pdb) == before == ([(1, "first", 0)], ["jobs", "sqlite_sequence"])
+
+    @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
+    def test_hostile_promoted_field_is_refused(self, pdb, method):
+        before = self._untouched(pdb)
+        with pytest.raises(_InvalidIdentifierError):
+            _PROMOTED_WRITES[method](pdb, "jobs", ["s", 'x"; DROP TABLE t; --'])
+        assert self._untouched(pdb) == before
+
+    @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
+    def test_valid_names_still_work(self, pdb, method):
+        _PROMOTED_WRITES[method](pdb, "jobs", ["s"])
+        assert pdb.adapter.execute("SELECT s FROM jobs WHERE s = 'a'").fetchone()[0] == "a"

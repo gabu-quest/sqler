@@ -7,17 +7,54 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  test:
+    name: Lint & Test (ubuntu, py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Tag must equal v + pyproject version
+        run: |
+          version="$(uv run --frozen python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match v${version} from pyproject.toml" >&2
+            exit 1
+          fi
+
+      - name: Sync dependencies (main + dev)
+        run: uv sync --dev --frozen
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Run unit tests (perf excluded)
+        env:
+          PYTHONUTF8: "1"
+        run: uv run pytest -q -m "not perf" --disable-warnings
+
   build-and-publish:
     name: Build & Publish
+    needs: test
     runs-on: ubuntu-latest
     environment: pypi # must match the Environment name on your PyPI Trusted Publisher entry
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout

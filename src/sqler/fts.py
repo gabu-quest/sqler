@@ -31,6 +31,7 @@ Usage::
 
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
 
@@ -43,7 +44,16 @@ if TYPE_CHECKING:
 # Tokenizer values: alphanumeric, spaces, underscores only.
 # Covers all standard FTS5 tokenizers (porter, unicode61, ascii, trigram)
 # and numeric options (e.g. "unicode61 remove_diacritics 2").
-_TOKENIZER_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_ ]*$")
+_TOKENIZER_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9_ ]*")
+
+
+def _check_tokenizer(tokenizer: object) -> str:
+    if not isinstance(tokenizer, str) or not _TOKENIZER_PATTERN.fullmatch(tokenizer):
+        raise ValueError(
+            f"Invalid tokenizer: {tokenizer!r}. "
+            f"Must contain only alphanumeric characters, spaces, and underscores."
+        )
+    return tokenizer
 
 
 @dataclass
@@ -70,6 +80,16 @@ class FTSStats:
     indexed_rows: int
     total_tokens: int
     fields: list[str]
+
+
+def _check_search_field(name: str) -> None:
+    """A search field is a column of the index table: a plain name, never a dotted path.
+
+    A malformed name raises InvalidFieldNameError; a well-formed dotted one
+    (``meta.title``) raises InvalidIdentifierError, as ``create()`` does.
+    """
+    validate_field_name(name)
+    validate_identifier(name)
 
 
 class FTSIndex:
@@ -109,6 +129,7 @@ class FTSIndex:
         index_name: Optional[str] = None,
         tokenizer: str = "porter unicode61",
         content_sync: bool = True,
+        db: Optional["SQLerDB"] = None,
     ):
         """Create an FTS index configuration.
 
@@ -118,38 +139,60 @@ class FTSIndex:
             index_name: Custom index table name (default: {table}_fts)
             tokenizer: FTS5 tokenizer (default: porter unicode61)
             content_sync: Keep index synced with content table
+            db: Database holding the model's rows. Needed when the class was never
+                bound with ``set_db()``; a ``db`` given to ``create()``,
+                ``drop()`` or ``rebuild()`` replaces it.
         """
         # Validate all inputs that will be interpolated into SQL
         for f in fields:
-            validate_field_name(f)
+            _check_search_field(f)
         if index_name is not None:
             validate_identifier(index_name)
-        if not _TOKENIZER_PATTERN.match(tokenizer):
-            raise ValueError(
-                f"Invalid tokenizer: {tokenizer!r}. "
-                f"Must contain only alphanumeric characters, spaces, and underscores."
-            )
+        _check_tokenizer(tokenizer)
 
         self.model_class = model_class
         self.fields = fields
-        self.tokenizer = tokenizer
+        self.tokenizer = tokenizer  # checked by the setter
         self.content_sync = content_sync
 
-        # Get table name - _table is set via set_db() or using()
         self.index_table = index_name  # Set later if needed
 
-        # Get database
-        self._db: Optional["SQLerDB"] = None
+        # The database given here, else the class binding (see _get_db)
+        self._db: Optional["SQLerDB"] = db
 
     @property
     def table(self) -> str:
-        """Get the table name from the model class."""
-        # Try _table first (set by set_db or using)
-        table = getattr(self.model_class, "_table", None)
-        if table:
-            return table
-        # Fallback to lowercase class name
-        return self.model_class.__name__.lower()
+        """The model's table, by the one rule every model route uses.
+
+        The table bound with ``set_db()``, else ``__tablename__``, else the plural
+        of the class name (``Article`` -> ``articles``); checked before it is used.
+        """
+        from sqler.models._table_names import _model_table_name
+
+        return _model_table_name(self.model_class)
+
+    @property
+    def fields(self) -> list[str]:
+        """The indexed field names (a copy: changing it changes nothing)."""
+        return list(self._fields)
+
+    @fields.setter
+    def fields(self, value: list[str]) -> None:
+        """Set the indexed field names (checked like the constructor's ``fields``)."""
+        names = list(value)
+        for f in names:
+            _check_search_field(f)
+        self._fields = tuple(names)
+
+    @property
+    def tokenizer(self) -> str:
+        """The FTS5 tokenizer."""
+        return self._tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, value: str) -> None:
+        """Set the tokenizer (checked like the constructor's ``tokenizer``)."""
+        self._tokenizer = _check_tokenizer(value)
 
     @property
     def index_table(self) -> str:
@@ -160,16 +203,20 @@ class FTSIndex:
 
     @index_table.setter
     def index_table(self, value: Optional[str]) -> None:
-        """Set the index table name."""
+        """Set the index table name (checked like the constructor's ``index_name``)."""
+        if value is not None:
+            validate_identifier(value)
         self._index_table = value
 
     def _get_db(self) -> "SQLerDB":
-        """Get the database connection."""
+        """The database given to this index, else the one the model class is bound to."""
         if self._db is not None:
             return self._db
         db = getattr(self.model_class, "_db", None)
         if db is None:
-            raise ValueError("Model has no database bound")
+            raise ValueError(
+                "Model has no database bound: pass db= to FTSIndex or to create()/rebuild()"
+            )
         return db
 
     def create(self, db: Optional["SQLerDB"] = None) -> None:
@@ -182,6 +229,11 @@ class FTSIndex:
             self._db = db
 
         db = self._get_db()
+
+        # A field is a column name of the index table: a dotted (nested) field is not one.
+        # index() reads the attribute of that name, so it could never be filled either.
+        for f in self.fields:
+            validate_identifier(f)
 
         # Build column list
         columns = ", ".join(self.fields)
@@ -340,6 +392,10 @@ class FTSIndex:
         if not ids:
             return []
 
+        # the database given to this index loads the rows (a class never bound has no
+        # other); a missing source table loads none
+        if self._db is not None:
+            return self.model_class.from_ids(ids, db=self._db)
         return self.model_class.from_ids(ids)
 
     def search_ranked(
@@ -363,6 +419,8 @@ class FTSIndex:
         Returns:
             List of SearchResult with scores (sorted by relevance)
         """
+        from sqler.models._table_names import _is_missing_table
+
         db = self._get_db()
         source_table = self.table
 
@@ -375,7 +433,12 @@ class FTSIndex:
         LIMIT ? OFFSET ?;
         """
 
-        cursor = db.adapter.execute(sql, [query, limit, offset])
+        try:
+            cursor = db.adapter.execute(sql, [query, limit, offset])
+        except sqlite3.OperationalError as exc:
+            if not _is_missing_table(exc, source_table):
+                raise
+            return []  # the source table was never created: no rows to rank
         rows = cursor.fetchall()
 
         if not rows:
@@ -449,7 +512,12 @@ class FTSIndex:
 
         # Load models
         ids = list(id_data.keys())
-        models = self.model_class.from_ids(ids)
+        # the database given to this index loads the rows (a class never bound has no
+        # other); a missing source table loads none
+        if self._db is not None:
+            models = self.model_class.from_ids(ids, db=self._db)
+        else:
+            models = self.model_class.from_ids(ids)
 
         # Create results
         results = []
@@ -489,6 +557,8 @@ class FTSIndex:
         Returns:
             Highlighted snippet string
         """
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
+            raise TypeError(f"max_tokens must be an integer, got {type(max_tokens).__name__}")
         db = self._get_db()
         field_idx = 0 if field is None else self.fields.index(field)
 
