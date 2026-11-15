@@ -27,10 +27,13 @@ import time
 import uuid
 
 import pytest
+from exception_points import stop_once_and_interrupt
 from sqler import AsyncSQLerDB, SQLerDB
 from sqler.adapter import SQLiteAdapter
 from sqler.exceptions import TransactionStateError
 from sqler.logging import query_logger
+
+ADAPTER = "sqler.adapter.synchronous"
 
 KINDS = ["memory", "file"]
 TRACED = ("BEGIN", "SAVEPOINT", "RELEASE", "ROLLBACK", "COMMIT", "INSERT", "SELECT")
@@ -388,7 +391,7 @@ def test_an_interrupt_while_the_nested_end_waits_leaves_as_it_is_and_the_transac
         with turn:  # the nested end now waits to take the connection
             holding.set()
             deadline = time.monotonic() + 10
-            while sys._current_frames()[main].f_code.co_name != "take":
+            while sys._current_frames()[main].f_code.co_name != "end_transaction":  # blocked on the turn's lock
                 assert time.monotonic() < deadline
                 time.sleep(0.001)
             signal.pthread_kill(main, signal.SIGINT)  # what Ctrl-C does
@@ -606,7 +609,7 @@ def test_a_rollback_that_fails_twice_on_the_memory_connection_keeps_it_until_one
             with pytest.raises(TransactionStateError) as raised:
                 s.insert("refused")
         assert (str(raised.value), str(raised.value.__cause__), len(logged)) == (NOT_ROLLED_BACK, INTERRUPTED, 0)
-        assert (s.adapter._shared._holder, s.conn.in_transaction) == (threading.get_ident(), True)
+        assert (s.adapter._shared._holder, s.conn.in_transaction) == (s.adapter._local.me, True)
         s.let_statements_run()
         s.insert("after the block")
         s.adapter.auto_commit()
@@ -650,7 +653,7 @@ def test_an_interrupt_between_the_two_tries_of_a_rollback_leaves_no_transaction_
     messages = [r.getMessage() for r in caplog.records]
     assert type(left) is KeyboardInterrupt
     if scene.place == "memory":
-        assert (messages, scene.adapter._shared._holder, scene.conn.in_transaction) == ([], threading.get_ident(), True)
+        assert (messages, scene.adapter._shared._holder, scene.conn.in_transaction) == ([], scene.adapter._local.me, True)
         scene.let_statements_run()
     else:
         assert (messages, scene.adapter._local.conn) == ([REPLACED_AFTER_AN_INTERRUPT], None)
@@ -697,7 +700,7 @@ def _the_rollback_failed_twice(s: Scene, caplog) -> None:
     does with it, then the next statement finds nothing of the transaction."""
     messages = [r.getMessage() for r in caplog.records]
     if s.place == "memory":
-        assert (messages, s.adapter._shared._holder, s.conn.in_transaction) == ([], threading.get_ident(), True)
+        assert (messages, s.adapter._shared._holder, s.conn.in_transaction) == ([], s.adapter._local.me, True)
         with pytest.raises(TransactionStateError) as raised:
             s.insert("refused")
         assert (str(raised.value), str(raised.value.__cause__)) == (NOT_ROLLED_BACK, INTERRUPTED)
@@ -812,3 +815,136 @@ def test_a_half_read_cursor_of_the_closed_connection_holds_the_lock_and_commits_
         assert s.committed() == ["after the cursor went", "before"]
     finally:
         s.db.close()
+
+
+# ---- an outermost end left by an interrupt: the count and SQLite agree ----
+
+
+@pytest.mark.skipif(not hasattr(ctypes.CDLL(None), "raise"), reason="needs libc's raise()")
+@pytest.mark.parametrize("end", ["transaction", "adapter"])
+def test_a_commit_that_fails_with_an_interrupt_pending_leaves_no_transaction_to_join(scene, end):
+    """The interrupt is raised by the first call after the failed ``COMMIT``: the count is
+    0 and the rollback still runs, so no later statement of the thread joins the block's
+    rows and commits them."""
+    if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
+        pytest.skip("this process does not turn SIGINT into KeyboardInterrupt")
+    with pytest.raises(KeyboardInterrupt):
+        if end == "transaction":
+            with scene.db.transaction():
+                scene.insert("in the block")
+                stop_once_and_interrupt(scene.conn)
+        else:
+            scene.adapter.begin_transaction()
+            scene.insert("in the block")
+            stop_once_and_interrupt(scene.conn)
+            scene.adapter.end_transaction(commit=True)
+    scene.let_statements_run()
+    assert (scene.adapter._txn_depth, scene.conn.in_transaction) == (0, False)
+    scene.insert("after")
+    scene.adapter.auto_commit()
+    assert scene.committed() == ["after", "before"]
+
+
+# ---- a versioned update ends its transaction through the adapter ----
+
+
+def _refused_update_whose_rollback_fails(s: Scene) -> BaseException:
+    """A versioned update that a trigger refuses (the transaction stays open), with every
+    rollback after it stopped; returns what left it."""
+    _id, _ = s.db.upsert_with_version("docs", None, {"k": 0}, None)
+    s.adapter.execute("CREATE TRIGGER refuse BEFORE UPDATE ON docs BEGIN SELECT RAISE(ABORT, 'refused'); END")
+    s.adapter.auto_commit()
+    rollbacks: list[str] = []
+    s.conn.set_trace_callback(lambda sql: rollbacks.append(sql) if sql.startswith("ROLLBACK") else None)
+    s.conn.set_progress_handler(lambda: 1 if rollbacks else 0, 1)
+    try:
+        s.db.upsert_with_version("docs", _id, {"k": 1}, 0)
+    except BaseException as exc:  # noqa: BLE001 - what left is the result
+        return exc
+    raise AssertionError("the refused update raised nothing")
+
+
+def test_a_versioned_update_whose_rollback_fails_twice_on_the_memory_connection_raises_its_own_error(tmp_path):
+    s = Scene("memory", tmp_path)
+    try:
+        left = _refused_update_whose_rollback_fails(s)
+        assert (type(left).__name__, str(left), getattr(left, "__notes__", [])) == ("IntegrityError", "refused", [])
+        assert (s.adapter._shared._holder, s.conn.in_transaction) == (s.adapter._local.me, True)
+        s.let_statements_run()
+        s.adapter.execute("DROP TRIGGER refuse")
+        s.adapter.auto_commit()
+        assert s.db.find_document_with_version("docs", 1) == {"_id": 1, "_version": 0, "k": 0}
+    finally:
+        s.db.close()
+
+
+@pytest.mark.parametrize("place", ["file", "named-memory"])
+def test_a_versioned_update_whose_rollback_fails_twice_on_a_threads_own_connection_closes_it(tmp_path, caplog, place):
+    s = Scene(place, tmp_path)
+    try:
+        caplog.set_level(logging.WARNING, logger="sqler.adapter.synchronous")
+        left = _refused_update_whose_rollback_fails(s)
+        messages = [r.getMessage() for r in caplog.records]
+        assert (type(left).__name__, str(left), messages, s.adapter._local.conn) == ("IntegrityError", "refused", [REPLACED], None)
+        s.adapter.execute("DROP TRIGGER refuse")
+        s.adapter.auto_commit()
+        assert s.db.find_document_with_version("docs", 1) == {"_id": 1, "_version": 0, "k": 0}
+    finally:
+        s.db.close()
+
+
+def test_a_refused_versioned_update_leaves_its_own_error_at_once_while_another_thread_holds_a_transaction():
+    """The update is refused at depth 0, its failed statement rolled back and gave the turn
+    back; another thread opens a transaction before the update's end runs. The end has
+    nothing of its thread's to roll back: it waits for no one, and the other thread's
+    transaction commits untouched."""
+    db = SQLerDB(SQLiteAdapter(":memory:", timeout_ms=5000))
+    _id, _ = db.upsert_with_version("docs", None, {"k": 0}, None)
+    db.adapter.execute("CREATE TABLE t (v TEXT)")
+    db.adapter.execute("CREATE TRIGGER refuse BEFORE UPDATE ON docs BEGIN SELECT RAISE(ABORT, 'refused'); END")
+    db.adapter.auto_commit()
+    at_the_end, other_in, other_go = threading.Event(), threading.Event(), threading.Event()
+
+    def other() -> None:
+        assert at_the_end.wait(10)
+        db.adapter.begin_transaction()
+        db.adapter.execute("INSERT INTO t VALUES ('of the other thread')")
+        other_in.set()
+        assert other_go.wait(10)
+        db.adapter.end_transaction(commit=True)
+
+    def holds_the_end_until_the_other_is_in(frame, event, arg):
+        if event == "call" and frame.f_code.co_name == "__exit__" and frame.f_globals["__name__"] == ADAPTER:
+            at_the_end.set()
+            assert other_in.wait(10)
+        return None
+
+    raised: list[BaseException] = []
+    thread = threading.Thread(target=lambda: raised.extend(_left_by(other)))
+    thread.start()
+    try:
+        sys.settrace(holds_the_end_until_the_other_is_in)
+        start = time.monotonic()
+        try:
+            with pytest.raises(sqlite3.IntegrityError) as left:
+                db.upsert_with_version("docs", _id, {"k": 1}, 0)
+        finally:
+            sys.settrace(None)
+        took = time.monotonic() - start
+        assert (str(left.value), took < 2.5) == ("refused", True)  # half the 5 s lock wait
+        other_go.set()
+        thread.join(10)
+        assert (thread.is_alive(), raised) == (False, [])
+        rows = [r[0] for r in db.adapter.execute("SELECT v FROM t").fetchall()]
+        assert (rows, db.find_document_with_version("docs", _id)) == (["of the other thread"], {"_id": 1, "_version": 0, "k": 0})
+    finally:
+        other_go.set()
+        db.close()
+
+
+def _left_by(work) -> list[BaseException]:
+    try:
+        work()
+    except BaseException as exc:  # noqa: BLE001 - handed to the test thread
+        return [exc]
+    return []

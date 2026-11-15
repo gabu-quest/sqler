@@ -1468,7 +1468,8 @@ class SQLerDB:
         Outside an explicit transaction the write lock is taken first with
         ``BEGIN IMMEDIATE`` (less live-lock under contention), and that
         transaction is ended on every path: committed on success, rolled back
-        when anything raises before the commit.
+        by the adapter's rule when anything raises before the commit, with the
+        error that raised leaving.
         """
         if self.adapter.in_transaction:
             cur = self.adapter.execute(sql, params)
@@ -1481,11 +1482,8 @@ class SQLerDB:
         try:
             cur = self.adapter.execute(sql, params)
             self.adapter.auto_commit()
-        except BaseException:
-            try:
-                self.adapter.execute("ROLLBACK;")
-            except sqlite3.Error:
-                pass  # already rolled back by the adapter, or nothing open
+        except BaseException as exc:
+            self.adapter.__exit__(type(exc), exc, exc.__traceback__)  # rolls back what is still open
             raise
         return cur
 
