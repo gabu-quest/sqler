@@ -500,6 +500,24 @@ def test_a_partial_save_of_a_row_that_is_gone_raises_not_found(db, cls):
 
 
 @pytest.mark.parametrize("cls", BASES, ids=lambda c: c.__name__)
+def test_a_full_save_of_a_row_that_is_gone_raises_and_stays_dirty(db, cls):
+    """A safe class reads the missing row as one at another version, as it always did."""
+    m = cls(key="k").save(db=db)
+    db.adapter.execute(f"DELETE FROM {cls.__tablename__} WHERE _id = ?", [m._id])
+    db.adapter.auto_commit()
+    m.value = "new"
+    if cls._versioned_rows:
+        refused = pytest.raises(StaleVersionError, match="Stale version: update rejected")
+    else:
+        refused = pytest.raises(NotFoundError, match=f"Row {m._id} of {cls.__tablename__} is not there")
+    with refused:
+        m.save(db=db)
+    assert _row(db, cls.__tablename__, m._id) is None
+    assert m.changed_fields == {"value"}
+    assert m.get_dirty_fields() == {"value"}
+
+
+@pytest.mark.parametrize("cls", BASES, ids=lambda c: c.__name__)
 def test_a_model_never_saved_is_saved_in_full_once(db, cls):
     m = cls(key="k", value="first")
     with query_logger.capture() as sent:

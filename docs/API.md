@@ -163,7 +163,12 @@ loading a row (`from_id()`, `from_ids()`, a queryset's `all()`, `first()`, `iter
 `update_one()`, `update_n()`, `refresh()`, a referenced row loaded with its parent, a
 search) gives the instance its home: the database and table of the row. Each successful
 `save()`, `save_partial()` and `save_many()` makes the database and table written to its
-home; a write that fails leaves the home as it was. `save()`, `refresh()`, `delete()`
+home; a write that fails leaves the home as it was. A `save()` of an instance with an
+`_id` whose row is not in the database written to (deleted since it was read, or never
+there, as with `save(db=other)`) writes no row and raises `NotFoundError` naming the
+table and the id (a safe model raises `StaleVersionError`); the instance keeps its `_id`,
+its changes and its home. To put a copy of a row into another database, save a new
+instance without the `_id` there (`Model(**fields).save(db=other)`). `save()`, `refresh()`, `delete()`
 and `get_audit_log()` use, in this order: the `db=` given, else the instance's home,
 else the class's `set_db()` database, else they raise `NotBoundError`. So a class bound
 to one database never writes a row read from another into its own, and a class bound to
@@ -1188,7 +1193,9 @@ key the document holds that names a column beside `data` (promoted by a class, b
 gives back what was written. A column whose key the document does not hold is not written:
 an update leaves its value, an insert gives it the column's `DEFAULT` (or NULL); a key held
 as `None` writes NULL. A model class without `__promoted__` saves through these methods, so
-its saves leave a column it has no field for as it is. In one call, rows that hold different
+its saves leave a column it has no field for as it is. `upsert_document` with an `_id`
+updates that row only: when the table has no row with that `_id` it writes no row and
+raises `NotFoundError`. In one call, rows that hold different
 keys each get their own (consecutive rows with the same keys share one statement;
 `AsyncSQLerDB.bulk_upsert` sends one statement per row). A value
 a column refuses (`NOT NULL`, `CHECK`) raises SQLite's `IntegrityError` and writes nothing of

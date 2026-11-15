@@ -302,9 +302,12 @@ class AsyncSQLerDB:
             cur = await self.adapter.execute(sql, params)
             try:
                 await self.adapter.auto_commit()
+                rowcount = cur.rowcount
             finally:
                 await cur.close()
-            return _id
+            if rowcount > 0:
+                return _id
+            _refuse_unwritten(True, table, _id)
 
     async def upsert_with_version_promoted(
         self,

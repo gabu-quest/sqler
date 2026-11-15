@@ -5,6 +5,8 @@ call the same hooks, on every sync base; and a delete with its policy is one tra
 import itertools
 import json
 import re
+import sqlite3
+import threading
 import types
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,8 +22,9 @@ from sqler import (
     SQLerMsgspecModel,
     SQLerSafeModel,
 )
-from sqler.exceptions import UniqueConstraintError
+from sqler.exceptions import NotFoundError, StaleVersionError, UniqueConstraintError
 from sqler.logging import query_logger
+from sqler.models._table_names import _home_of
 from sqler.models.mixins import (
     AuditLogMixin,
     AuditMixin,
@@ -766,3 +769,217 @@ def test_a_class_with_no_mixin_sends_the_statements_it_sent(db, kind):
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_timestamp_class_sends_what_a_plain_class_sends(db, kind):
     assert _statements(db, make(kind, TimestampMixin)) == _expected(kind)
+
+
+# ----- a save of a row that is not there ---------------------------------------------------------
+
+
+def _refused(kind):
+    """What a by-id save of a row that is not there raises: a safe class reads it as a row at
+    another version, every other class as a row that is gone."""
+    return StaleVersionError if kind in SAFE else NotFoundError
+
+
+def _delete_rows(db, table):
+    db.adapter.execute(f"DELETE FROM {table};")
+    db.adapter.auto_commit()
+
+
+def _gone_by_statement(db, Item, inst):
+    _delete_rows(db, Item.__tablename__)
+
+
+def _gone_by_delete_all(db, Item, inst):
+    Item.using(db).delete_all()
+
+
+def _never_there(db, Item, inst):
+    inst._id = 41
+
+
+def _gone_in_the_callers_transaction(db, Item, inst):
+    """Marks the case: the row is deleted inside the transaction the save runs in."""
+
+
+GONE = [_gone_by_statement, _gone_by_delete_all, _never_there, _gone_in_the_callers_transaction]
+MIXINS = {"none": (), "hooks_audit": (Recorded, AuditLogMixin), "timestamps": (TimestampMixin,)}
+
+
+@pytest.mark.parametrize("gone", GONE)
+@pytest.mark.parametrize("mixins", list(MIXINS))
+@pytest.mark.parametrize("promoted", [None, {"status": "TEXT"}], ids=["json", "promoted"])
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_save_of_a_row_that_is_not_there_raises_and_keeps_the_instance(
+    db, kind, promoted, mixins, gone
+):
+    Item = make(kind, *MIXINS[mixins], promoted=promoted)
+    inst = Item(name="first").save(db=db)
+    gone(db, Item, inst)
+    inst.name = "second"
+    before = (_identity(inst), _home_of(inst))
+    audit_before = _audit(db, Item) if mixins == "hooks_audit" else None
+    CALLS.clear()
+
+    if gone is _gone_in_the_callers_transaction:
+        with db.transaction():
+            db.adapter.execute(f"DELETE FROM {Item.__tablename__};")
+            with pytest.raises(_refused(kind)):
+                inst.save(db=db)
+    else:
+        with pytest.raises(_refused(kind)):
+            inst.save(db=db)
+
+    kept = [(1, "first")] if gone is _never_there else []
+    assert [(i, d["name"]) for i, d in _docs(db, Item)] == kept
+    assert (_identity(inst), _home_of(inst)) == before
+    assert inst.name == "second"
+    if mixins == "hooks_audit":
+        assert CALLS == [("before_save", "second")]
+        assert _audit(db, Item) == audit_before
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_save_of_a_row_another_connection_deleted_raises(kind, tmp_path):
+    path = str(tmp_path / "two.db")
+    one, two = SQLerDB.on_disk(path), SQLerDB.on_disk(path)
+    try:
+        Item = make(kind)
+        inst = Item(name="first").save(db=one)
+        _delete_rows(two, Item.__tablename__)
+        inst.name = "second"
+        with pytest.raises(_refused(kind)):
+            inst.save(db=one)
+        assert _docs(one, Item) == []
+        assert inst._id == 1
+    finally:
+        one.close()
+        two.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_save_after_another_thread_deleted_the_row_raises(kind, tmp_path):
+    path = str(tmp_path / "threads.db")
+    db = SQLerDB.on_disk(path)
+    try:
+        Item = make(kind)
+        inst = Item(name="first").save(db=db)
+
+        def delete():
+            other = SQLerDB.on_disk(path)
+            _delete_rows(other, Item.__tablename__)
+            other.close()
+
+        t = threading.Thread(target=delete)
+        t.start()
+        t.join()
+        inst.name = "second"
+        with pytest.raises(_refused(kind)):
+            inst.save(db=db)
+        assert _docs(db, Item) == []
+    finally:
+        db.close()
+
+
+def test_a_save_of_a_row_a_cascade_deleted_raises(db):
+    author = PlainAuthor(name="a").save(db=db)
+    book = PlainBook(title="b", author=author).save(db=db)
+    author.delete_with_policy(db=db, on_delete="cascade")
+    book.title = "c"
+    book.author = None
+    with pytest.raises(NotFoundError, match="Row 1 of wr_plain_books"):
+        book.save(db=db)
+    assert _docs(db, PlainBook) == []
+    assert book._id == 1
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_refused_save_the_caller_catches_and_commits_past_writes_nothing(db, kind):
+    Item = make(kind, Recorded, AuditLogMixin)
+    inst = Item(name="first").save(db=db)
+    _delete_rows(db, Item.__tablename__)
+    inst.name = "second"
+    with db.transaction():
+        with pytest.raises(_refused(kind)):
+            inst.save(db=db)
+        db.insert_document("beside", {"name": "the caller's own row"})
+    assert _docs(db, Item) == []
+    assert [r[1] for r in _audit(db, Item)] == ["create"]
+    assert db.find_document("beside", 1) == {"name": "the caller's own row", "_id": 1}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_save_of_a_row_read_from_another_table_that_is_gone_raises(db, kind):
+    Item = make(kind)
+    db.insert_document("wr_other_table", {"name": "first"})
+    inst = Item.using(db, table="wr_other_table").all()[0]
+    _delete_rows(db, "wr_other_table")
+    inst.name = "second"
+    with pytest.raises(_refused(kind)):
+        inst.save()
+    assert db.adapter.execute("SELECT count(*) FROM wr_other_table;").fetchone()[0] == 0
+    assert _docs(db, Item) == []
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_save_to_a_database_without_the_row_raises_and_the_home_stays(db, kind):
+    Item = make(kind)
+    inst = Item(name="first").save(db=db)
+    other = SQLerDB.in_memory(shared=False)
+    try:
+        inst.name = "second"
+        with pytest.raises(_refused(kind)):
+            inst.save(db=other)
+        assert _docs(other, Item) == []
+        inst.save()
+        assert [(i, d["name"]) for i, d in _docs(db, Item)] == [(1, "second")]
+        copy = Item(name=inst.name).save(db=other)
+        assert [(i, d["name"]) for i, d in _docs(other, Item)] == [(copy._id, "second")]
+        assert copy._id == 1
+    finally:
+        other.close()
+
+
+def test_the_refusal_names_the_table_the_id_and_how_to_copy_a_row(db):
+    with pytest.raises(NotFoundError) as caught:
+        db.upsert_document("wr_named", 7, {"name": "x"})
+    assert str(caught.value) == (
+        "Row 7 of wr_named is not there: a write by _id does not create it; to put a copy "
+        "into another database, save a new instance without the _id"
+    )
+    assert caught.value.id_ == 7
+    assert db.adapter.execute("SELECT count(*) FROM wr_named;").fetchone()[0] == 0
+
+
+def test_a_refused_update_sends_what_an_update_that_lands_sends(db):
+    db.insert_document("wr_counted", {"name": "x"})
+    with query_logger.capture() as landed:
+        db.upsert_document("wr_counted", 1, {"name": "y"})
+    with query_logger.capture() as refused:
+        with pytest.raises(NotFoundError):
+            db.upsert_document("wr_counted", 9, {"name": "y"})
+    assert [q.sql for q in refused] == [q.sql for q in landed]
+    assert [q.sql.split()[0] for q in refused] == ["CREATE", "UPDATE"]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_save_after_the_table_was_dropped_raises(db, kind):
+    """A plain class makes the table again and finds no row in it; a safe class's versioned
+    write meets the missing table (pinned as it is)."""
+    Item = make(kind)
+    inst = Item(name="first").save(db=db)
+    db.adapter.execute(f"DROP TABLE {Item.__tablename__};")
+    db.adapter.auto_commit()
+    inst.name = "second"
+    with pytest.raises(sqlite3.OperationalError if kind in SAFE else NotFoundError):
+        inst.save(db=db)
+    assert _docs(db, Item) == []
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_refresh_of_a_row_that_is_gone_raises_lookup_error(db, kind):
+    Item = make(kind)
+    inst = Item(name="first").save(db=db)
+    _delete_rows(db, Item.__tablename__)
+    with pytest.raises(LookupError, match="Row 1 not found for refresh"):
+        inst.refresh(db=db)
+    assert inst._id == 1
