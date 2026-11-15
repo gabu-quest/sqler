@@ -823,7 +823,10 @@ example because a raw `RELEASE` statement already ended the savepoint), the tran
 no longer be trusted, on the sync adapter as on the async one. After a failed `ROLLBACK TO`
 no `RELEASE` is sent, since that would keep the rows the rollback was to undo. The nested
 block raises `TransactionStateError` with the SQLite error as `__cause__` (a block that is
-already raising keeps its own exception, with the same sentence added as a note). From then
+already raising keeps its own exception, with the same sentence added as a note, once
+however many blocks it leaves; any other error raised by the end of a transaction while an
+exception leaves is named on that exception as a note, "ending the transaction failed:
+<type>: <message>"). From then
 on every statement of that thread in the transaction (`execute`, `executemany`,
 `executescript`, `commit`, a new nested transaction, `with adapter:`) raises the same error
 and sends nothing; the transaction ends with `ROLLBACK` whatever its block asks for, and the
@@ -833,14 +836,20 @@ end leaves as it is, and the transaction ends rolled back the same way. The same
 
 ### How long a statement waits for a lock
 
-`timeout_ms` (default 5000) is how long a statement of the sync adapter waits for another
-connection's lock before it raises `sqlite3.OperationalError: database is locked`. Pass it
-to `SQLiteAdapter(...)`, `SQLiteAdapter.on_disk()`, `SQLiteAdapter.in_memory()`,
-`SQLerDB.on_disk()` or `SQLerDB.in_memory()`; it is SQLite's `busy_timeout` on every
-connection the adapter opens, and on a plain `":memory:"` database also the wait for
-another thread's transaction. A `PRAGMA busy_timeout = N` in `pragmas` says the same thing:
+`timeout_ms` (default 5000) is how long a statement waits for another connection's lock
+before it raises `sqlite3.OperationalError: database is locked`. Pass it to
+`SQLiteAdapter(...)`, `AsyncSQLiteAdapter(...)`, their `on_disk()` and `in_memory()`, or
+`SQLerDB`/`AsyncSQLerDB` `.on_disk()` and `.in_memory()`; it is SQLite's `busy_timeout` on
+every connection the adapter opens (every connection of an async pool), and on a plain
+sync `":memory:"` database also the wait for another thread's transaction. The async
+adapter has a second wait, `acquire_timeout` (seconds): the wait for a connection of its
+own pool and for a turn in a transaction tasks share; `timeout_ms` is the wait for a lock
+another connection or process holds. A `PRAGMA busy_timeout = N` in `pragmas` says the same thing:
 without `timeout_ms` it sets the number, and beside a `timeout_ms` that differs `connect()`
-raises `ValueError`. A shared-cache in-memory database does not wait: SQLite calls no busy
+raises `ValueError`. `connect()` on the async adapter opens its pool once: on a connected
+adapter, or beside another `connect()` or a statement's own connect, it opens nothing more;
+a `connect()` that fails closes every connection it opened and raises the error that made it
+fail. A shared-cache in-memory database does not wait: SQLite calls no busy
 handler for its table locks, so such a statement raises "database table is locked" at once.
 
 ### Async transactions shared by tasks
@@ -2043,7 +2052,8 @@ def safe_delete(model):
 SQLite allows only one writer at a time. If you see this error:
 - Reduce concurrent write operations
 - Use transactions to batch writes: `with db.transaction(): ...`
-- Increase `timeout_ms` (default 5000), e.g. `SQLerDB.on_disk("app.db", timeout_ms=15000)`
+- Increase `timeout_ms` (default 5000), e.g. `SQLerDB.on_disk("app.db", timeout_ms=15000)` or
+  `AsyncSQLerDB.on_disk("app.db", timeout_ms=15000)` (`acquire_timeout` is a different wait)
 - For high write loads, consider a write queue or single-writer pattern
 
 **"Model X is not bound"**

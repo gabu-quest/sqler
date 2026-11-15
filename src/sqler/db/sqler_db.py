@@ -1589,10 +1589,24 @@ def _end_transaction(adapter, commit: bool, leaving: Optional[BaseException]) ->
     try:
         adapter.end_transaction(commit=commit)
     except Exception as ended:
-        if leaving is None:
-            raise
-        if isinstance(ended, TransactionStateError) and not isinstance(leaving, TransactionStateError):
-            leaving.add_note(str(ended))
+        _ended_while_leaving(ended, leaving)
+
+
+def _ended_while_leaving(ended: Exception, leaving: Optional[BaseException]) -> None:
+    """The end of a transaction raised ``ended``: raise it, or, while ``leaving`` is on its way
+    out, name it on ``leaving`` as a note, once (a nested block it left already may have
+    added it). A ``TransactionStateError`` is the sentence of a rolled-back transaction;
+    any other error is named with its type and message."""
+    if leaving is None:
+        raise ended
+    if isinstance(ended, TransactionStateError):
+        if isinstance(leaving, TransactionStateError):
+            return
+        note = str(ended)
+    else:
+        note = f"ending the transaction failed: {type(ended).__name__}: {ended}"
+    if note not in getattr(leaving, "__notes__", ()):
+        leaving.add_note(note)
 
 
 class Transaction:

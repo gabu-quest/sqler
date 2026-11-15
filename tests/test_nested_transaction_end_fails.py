@@ -11,6 +11,7 @@ for the same failure.
 
 import asyncio
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -157,6 +158,42 @@ def test_an_outer_block_raising_after_the_failed_end_keeps_its_exception_with_a_
     assert t.steps()[-1] == "ROLLBACK"
     _after_the_transaction(t)
     assert t.rows() == ["after", "before"]
+
+
+def test_an_exception_leaving_a_transaction_block_and_the_db_block_has_the_note_once(t):
+    with pytest.raises(ValueError) as raised:
+        with t.db:
+            with t.db.transaction():
+                with pytest.raises(Undo):
+                    with t.db.transaction():
+                        t.insert("nested, to be undone")
+                        _released_behind_sqlers_back(t, "sp_2")
+                        raise Undo()
+                raise ValueError("its own")
+    assert (str(raised.value), raised.value.__notes__) == ("its own", [ROLLED_BACK])
+    _after_the_transaction(t)
+    assert t.rows() == ["after", "before"]
+
+
+# ---- an end error that is not the rolled-back sentence, while an exception leaves ----
+
+
+def test_an_end_error_while_an_exception_leaves_is_named_on_that_exception_once():
+    from sqler.db.sqler_db import _ended_while_leaving
+
+    leaving = ValueError("its own")
+    for _ in range(2):  # the same end error met by two blocks it leaves: one note
+        _ended_while_leaving(sqlite3.OperationalError("disk I/O error"), leaving)
+    assert leaving.__notes__ == ["ending the transaction failed: OperationalError: disk I/O error"]
+
+
+def test_an_end_error_with_no_exception_leaving_is_raised():
+    from sqler.db.sqler_db import _ended_while_leaving
+
+    ended = sqlite3.OperationalError("disk I/O error")
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        _ended_while_leaving(ended, None)
+    assert (raised.value is ended, getattr(ended, "__notes__", [])) == (True, [])
 
 
 # ---- every later statement in the transaction raises and sends nothing ----

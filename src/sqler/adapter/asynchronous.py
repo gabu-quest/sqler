@@ -26,7 +26,7 @@ from sqler.exceptions import (
 from sqler.logging import query_logger
 
 from .abstract import AsyncAdapterABC
-from .synchronous import _broken, _read_hit_missing_table
+from .synchronous import _agreed_lock_wait, _broken, _lock_wait, _read_hit_missing_table
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,33 @@ def _check_aiosqlite() -> None:
                 f"aiosqlite {aiosqlite.__version__}'s {call} does not take the {count} arguments sqler's "
                 "async adapter passes it to keep a cursor's rows when its connection changes hands"
             ) from None
+
+
+async def _close_all(conns) -> None:
+    """Close every connection in ``conns``, all of them whatever happens on the way.
+
+    A close that raises is not raised: the caller is closing for a reason of its own (an
+    error on its way out, a pool given up) and that reason is what the caller sees. A
+    cancellation that arrives meanwhile waits for the closes and then leaves.
+    """
+    if not conns:
+        return
+
+    async def close(conn: aiosqlite.Connection) -> None:
+        try:
+            await conn.close()
+        except Exception:
+            pass
+
+    closing = asyncio.gather(*(close(conn) for conn in conns))
+    cancelled: Optional[BaseException] = None
+    while not closing.done():
+        try:
+            await asyncio.shield(closing)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    if cancelled is not None:
+        raise cancelled
 
 
 def _in_thread(conn: aiosqlite.Connection, fn, *args):
@@ -355,9 +382,14 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     the transaction ends, and its end returns it whether the commit or rollback
     works.
 
-    ``acquire_timeout`` bounds the wait for a free connection, in seconds
-    (``None`` waits forever); a wait that runs out raises
-    ``ConnectionPoolExhaustedError``.
+    Two waits. ``acquire_timeout`` (seconds, ``None`` waits forever) is the wait for a
+    connection of this adapter's pool (running out raises ``ConnectionPoolExhaustedError``)
+    and for a turn in a transaction tasks share (see below). ``timeout_ms`` is the wait for
+    a lock another connection or process holds: SQLite's ``busy_timeout`` on every
+    connection, the same number and the same rules as ``SQLiteAdapter``'s ``timeout_ms``. It
+    does not reach a shared-cache in-memory database: SQLite calls no busy handler for a
+    table lock there, so a statement that meets one raises ``sqlite3.OperationalError``
+    ("database table is locked") at once.
 
     Tasks started inside a transaction share its connection, which has one stack of
     savepoints. A context's place is its innermost savepoint still open on that stack,
@@ -381,7 +413,13 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         pragmas: Optional[list[str]] = None,
         pool_size: int = 1,
         acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S,
+        timeout_ms: Optional[int] = None,
     ):
+        """``timeout_ms``: as for ``SQLiteAdapter`` (not given: a ``busy_timeout`` pragma in
+        ``pragmas``, else 5000; given beside one, they must agree or ``connect()`` raises
+        ``ValueError``); a value that is not a whole number from 0 to 2**31 - 1 raises
+        ``ValueError`` here."""
+        self.timeout_ms, self._timeout_given = _lock_wait(timeout_ms)
         self.path = path
         self.pragmas = pragmas or []
         self.acquire_timeout = acquire_timeout
@@ -412,18 +450,40 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
 
     async def _open(self) -> aiosqlite.Connection:
         conn = await aiosqlite.connect(self.path, uri=True)
-        for pragma in self.pragmas:
-            await conn.execute(pragma)
-        await conn.commit()
+        try:
+            # not connect(timeout=): Python truncates the seconds to milliseconds (1.001 s waits 1000 ms)
+            await conn.execute(f"PRAGMA busy_timeout = {self.timeout_ms}")
+            for pragma in self.pragmas:
+                await conn.execute(pragma)
+            await conn.commit()
+            if self.pragmas:
+                # SQLite has read the pragmas: its busy_timeout is the one number
+                cur = await conn.execute("PRAGMA busy_timeout")
+                busy = (await cur.fetchone())[0]
+                await cur.close()
+                self.timeout_ms = _agreed_lock_wait(self.timeout_ms, self._timeout_given, busy)
+        except BaseException:
+            await _close_all([conn])  # a connection that could not be set up is not left open
+            raise
         return conn
 
     async def connect(self) -> None:
+        """Open the pool; on a connected adapter, nothing. One connect runs at a time."""
         _check_aiosqlite()
-        for _ in range(self._pool_size):
-            conn = await self._open()
-            self._all_conns.append(conn)
-            self._pool.put_nowait(conn)
-        self._connected = True
+        async with self._connect_lock:
+            if self._connected:
+                return
+            opened: list[aiosqlite.Connection] = []
+            try:
+                for _ in range(self._pool_size):
+                    opened.append(await self._open())
+            except BaseException:
+                await _close_all(opened)  # the connect that failed leaves nothing open
+                raise
+            for conn in opened:
+                self._all_conns.append(conn)
+                self._pool.put_nowait(conn)
+            self._connected = True
 
     def _pinned(self) -> Optional[aiosqlite.Connection]:
         """The connection pinned in this context, unless its lease has been returned."""
@@ -507,10 +567,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     async def _replace(self, bad: aiosqlite.Connection) -> None:
         # no cursor is left on it: _reclaim read them all ahead of the rollback that failed
         self._unread.pop(bad, None)
-        try:
-            await bad.close()
-        except Exception:
-            pass
+        await _close_all([bad])
         try:
             fresh = await self._open()
         except Exception:
@@ -519,7 +576,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
                 self._all_conns.remove(bad)
             return
         if bad not in self._all_conns:  # the adapter closed while we were opening
-            await fresh.close()
+            await _close_all([fresh])
             return
         self._all_conns[self._all_conns.index(bad)] = fresh
         self._pool.put_nowait(fresh)
@@ -541,9 +598,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
                 raise TransactionStateError(_ENDED)
             self._txn_savepoints.set(())
         if not self._connected:
-            async with self._connect_lock:
-                if not self._connected:
-                    await self.connect()
+            await self.connect()
         conn = await self._checkout()
         lease = _Lease(conn)
         self._leases.add(lease)
@@ -709,19 +764,18 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             self._lose_cursors(conn, "the adapter was closed before the rows of this cursor were read")
         if self._reclaims:
             await asyncio.gather(*self._reclaims, return_exceptions=True)
-        for conn in self._all_conns:
-            try:
-                await conn.close()
-            except Exception:
-                pass
-        self._all_conns.clear()
-        # Drain the queue
-        while not self._pool.empty():
-            try:
-                self._pool.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        self._connected = False
+        async with self._connect_lock:  # a connect under way ends first, and this closes what it opened
+            conns = list(self._all_conns)
+            self._all_conns.clear()
+            while not self._pool.empty():
+                try:
+                    self._pool.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            # before the closes: a close cancelled while they run leaves no closed connection
+            # in the pool of an adapter that says it is connected
+            self._connected = False
+            await _close_all(conns)
 
     async def execute(self, query: str, params: Optional[List[Any]] = None) -> aiosqlite.Cursor:
         """Execute a SQL query with optional parameters and return cursor."""
@@ -1181,7 +1235,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         name: Optional[str] = None,
         *,
         acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S,
+        timeout_ms: int = 5000,
     ) -> Self:
+        """An in-memory database with some pragmas applied; ``timeout_ms`` as for the constructor."""
         pragmas = [
             "PRAGMA foreign_keys = ON",
             "PRAGMA synchronous = OFF",
@@ -1195,15 +1251,19 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             uri = f"file:{ident}?mode=memory&cache=shared"
         else:
             uri = ":memory:"
-        return cls(uri, pragmas=pragmas, pool_size=1, acquire_timeout=acquire_timeout)
+        return cls(uri, pragmas=pragmas, pool_size=1, acquire_timeout=acquire_timeout, timeout_ms=timeout_ms)
 
     @classmethod
     def on_disk(
-        cls, path: str = "sqler.db", *, acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S
+        cls,
+        path: str = "sqler.db",
+        *,
+        acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S,
+        timeout_ms: int = 5000,
     ) -> Self:
+        """A database file at ``path`` with some pragmas applied; ``timeout_ms`` as for the constructor."""
         pragmas = [
             "PRAGMA foreign_keys = ON",
-            "PRAGMA busy_timeout = 5000",
             "PRAGMA journal_mode = WAL",
             "PRAGMA synchronous = NORMAL",
             "PRAGMA cache_size = -64000",
@@ -1211,4 +1271,4 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             "PRAGMA mmap_size = 268435456",
             "PRAGMA temp_store = MEMORY",
         ]
-        return cls(path, pragmas=pragmas, pool_size=4, acquire_timeout=acquire_timeout)
+        return cls(path, pragmas=pragmas, pool_size=4, acquire_timeout=acquire_timeout, timeout_ms=timeout_ms)
