@@ -23,6 +23,12 @@ _BROKEN = (
 )
 
 
+_INSIDE = (
+    "commit() cannot end a transaction opened by begin_transaction: nothing was committed and the "
+    "transaction goes on; end it by leaving its db.transaction() block, or with end_transaction()"
+)
+
+
 def _broken(failed: tuple[str, BaseException]) -> TransactionStateError:
     """The error for a statement or an end in a transaction where a nested end failed ``(how, error)``."""
     error = TransactionStateError(_BROKEN.format(failed[0]))
@@ -782,11 +788,15 @@ class SQLiteAdapter(AdapterABC):
         return cursor
 
     def commit(self) -> None:
-        """Commit the current transaction.
+        """Commit what this thread wrote outside an explicit transaction.
 
-        Outside an explicit transaction a commit that fails (a deferred
-        constraint, a lock) rolls the transaction back before the error is raised.
+        A commit that fails (a deferred constraint, a lock) rolls the transaction back
+        before the error is raised. Inside this thread's explicit transaction it raises
+        ``TransactionStateError`` and commits nothing: the transaction goes on, and
+        ``end_transaction`` ends it (``auto_commit`` is the call that skips the commit there).
         """
+        if self._txn_depth > 0:
+            raise _broken(self._local.broken) if self._local.broken is not None else TransactionStateError(_INSIDE)
         shared = self._shared
         if shared is None:
             self._commit(self._conn())

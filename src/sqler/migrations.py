@@ -187,7 +187,7 @@ class MigrationRunner:
         );
         """
         self.db.adapter.execute(ddl)
-        self.db.adapter.commit()
+        self.db.adapter.auto_commit()  # inside the caller's transaction the table is theirs to roll back
 
     def _validate_migrations(self) -> None:
         """Validate migration versions are sequential and unique."""
