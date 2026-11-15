@@ -1379,7 +1379,8 @@ def test_a_transaction_sqlite_ended_itself_keeps_another_thread_out_until_its_th
         seen.append(_ended_by_sqlite(database))
         seen.append("idle")
         assert go_on.wait(10)
-        database.adapter.end_transaction(commit=False)
+        with pytest.raises(TransactionStateError):  # it ends the broken transaction rolled back
+            database.adapter.end_transaction(commit=False)
 
     try:
         worker = _start(holder)
@@ -1389,7 +1390,7 @@ def test_a_transaction_sqlite_ended_itself_keeps_another_thread_out_until_its_th
             time.sleep(0.001)
         with pytest.raises(sqlite3.OperationalError) as raised:
             _count(database)
-        assert (str(raised.value), seen) == (LOCKED, [("UniqueConstraintError", False), "idle"])
+        assert (str(raised.value), seen) == (LOCKED, [("TransactionStateError", False), "idle"])
         go_on.set()
         assert _join_all([worker]) == [False]
         assert (worker[1], _rows(database), shared._holder) == ([], ["before"], None)
@@ -1398,11 +1399,10 @@ def test_a_transaction_sqlite_ended_itself_keeps_another_thread_out_until_its_th
         database.close()
 
 
-def test_a_thread_whose_nested_end_failed_still_raises_after_another_thread_freed_the_turn():
-    """SQLite ended the thread's whole transaction, the nested end after it failed and its
-    ``give`` was skipped: the thread is left behind and another thread's statement frees
-    the turn. The thread's own next statement raises as in any transaction whose nested
-    end failed, and its outermost end ends it."""
+def test_a_thread_whose_transaction_broke_still_raises_after_another_thread_freed_the_turn():
+    """SQLite ended the thread's whole transaction with a statement whose own ``give`` was
+    skipped: the thread is left behind and another thread's statement frees the turn. The
+    thread's own next statement raises as in any broken transaction, and its ends end it."""
     database = _memory_db(2000)
     _unique_table(database)
     adapter, shared = database.adapter, database.adapter._shared
@@ -1412,14 +1412,15 @@ def test_a_thread_whose_nested_end_failed_still_raises_after_another_thread_free
     def holder() -> None:
         adapter.begin_transaction()
         adapter.begin_transaction()
-        seen.append(_ended_by_sqlite(database))
-        seen.append(_what_left(lambda: adapter.end_transaction(commit=True), "give-entry", "trace"))
+        ended = lambda: adapter.execute("INSERT OR ROLLBACK INTO u VALUES ('taken')")  # noqa: E731
+        seen.append(_what_left(ended, "give-entry", "trace"))
         failed.set()
         assert freed.wait(10)
         with pytest.raises(TransactionStateError):
             _in(database, "after the failed end")
-        with pytest.raises(TransactionStateError):
-            adapter.end_transaction(commit=True)
+        for _ in range(2):  # the nested end sends nothing, the outermost one rolls back
+            with pytest.raises(TransactionStateError):
+                adapter.end_transaction(commit=True)
         _insert(database, "after the transaction")
 
     try:
@@ -1429,7 +1430,7 @@ def test_a_thread_whose_nested_end_failed_still_raises_after_another_thread_free
         freed.set()
         assert _join_all([worker]) == [False]
         assert worker[1] == []
-        assert seen == [("UniqueConstraintError", False), (TransactionStateError, ["give-entry"])]
+        assert seen == [(RAISED["trace"], ["give-entry"])]
         assert (freed_for_main, _rows(database), shared._holder) == (1, ["after the transaction", "before"], None)
     finally:
         freed.set()

@@ -868,6 +868,28 @@ one it was started inside):
   through it to the transaction's block, and what the block wrote is the transaction's
   (it is kept if the transaction commits).
 
+### Raw statements and transactions
+
+A raw statement sent through `adapter.execute()` or `adapter.executemany()` may do anything
+SQLite allows except end or open a transaction behind the adapter; the same holds on the sync
+and the async adapter, and SQLite's own state after the statement decides, not its text.
+
+- Inside a transaction: a statement that ends it (a raw `COMMIT`, `END` or `ROLLBACK`, or a
+  failure SQLite answers by rolling the whole transaction back, such as `ON CONFLICT
+  ROLLBACK`) raises `TransactionStateError` at that statement. What was written before it
+  was committed or rolled back by it and cannot be put back; every later statement in the
+  transaction and the block's end raise the same error and send nothing. End a transaction
+  by leaving its `db.transaction()` block, and raise in the block to roll it back. Raw
+  `SAVEPOINT` work that leaves the transaction open is not refused.
+- Outside a transaction: raw work that SQLite holds in a transaction (a raw `BEGIN`, or a
+  raw write not committed yet) stays pending on the connection (async: on the task's pinned
+  connection, which no other task gets). `db.transaction()` and `begin_transaction()` then
+  raise `TransactionStateError` and send nothing: keep the work with `db.adapter.commit()`
+  or drop it with `db.adapter.execute("ROLLBACK")`, then begin again. A write that opens no
+  transaction of its own (a plain `save()`) commits the pending work with its own, as
+  `sqlite3` does. Outside a transaction, what was sent since the last commit is one unit: a
+  statement that fails rolls all of it back (the raw work with it) and raises its error.
+
 ### Nested transactions whose end fails
 
 A `db.transaction()` inside another one is a savepoint: its block ends with `RELEASE`, or
