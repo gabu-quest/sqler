@@ -985,6 +985,31 @@ def test_a_complete_unrecorded_table_is_used_while_another_connection_writes(run
         db.close()
 
 
+def test_an_async_complete_unrecorded_table_is_used_while_another_connection_writes(run):
+    _legacy(run.path, [{"name": "a"}], columns={"status": "TEXT"})
+    holder = sqlite3.connect(run.path)
+
+    async def scene():
+        db = AsyncSQLerDB.on_disk(run.path, timeout_ms=50)
+        await db.connect()
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            await db.ensure_table(TABLE, promoted={"status": "TEXT"})
+            held = (db._promoted_of(TABLE), set(db._unrecorded), await db.find_document(TABLE, 1), _records(run.path))
+            holder.rollback()
+            await db.ensure_table(TABLE, promoted={"status": "TEXT"})  # the next ensure that can writes it
+            return held, set(db._unrecorded), _records(run.path)
+        finally:
+            await db.close()
+
+    try:
+        held, unrecorded, after = run.go(scene())
+    finally:
+        holder.close()
+    assert held == (["status"], {TABLE}, {"name": "a", "_id": 1, "status": None}, [])
+    assert (unrecorded, after) == (set(), [(TABLE, "status")])
+
+
 def test_a_read_only_database_on_a_complete_table_records_nothing_and_says_so(run):
     """The ensure tries to record, the database refuses the write (the first statement of the
     record, its ``CREATE``, is sent and refused), and the table is remembered as settled with
