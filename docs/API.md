@@ -844,6 +844,25 @@ TxItem(name="D").save()
 assert TxItem.query().count() == 2
 ```
 
+### `commit()`, `auto_commit()` and the adapter block
+
+Only the end of a transaction opened by `begin_transaction` (the `db.transaction()` block,
+or `adapter.end_transaction()`) ends it; the same rule holds on the sync and the async
+adapter. Outside such a transaction, `adapter.commit()` commits what the thread (async:
+the task) wrote on its connection, and the adapter block (`with db.adapter:` /
+`async with db.adapter:`) commits its writes when it ends, or rolls them back when an
+exception leaves it. Inside one (a transaction of this thread; async: of this task or
+one it was started inside):
+
+- `adapter.commit()` raises `TransactionStateError` and commits nothing; the transaction
+  goes on and can still be used. A transaction whose nested end failed raises that
+  failure's error instead.
+- `adapter.auto_commit()` does nothing: it is the call for "commit unless a transaction
+  is open".
+- The adapter block neither commits nor rolls back when it ends; an exception leaves
+  through it to the transaction's block, and what the block wrote is the transaction's
+  (it is kept if the transaction commits).
+
 ### Nested transactions whose end fails
 
 A `db.transaction()` inside another one is a savepoint: its block ends with `RELEASE`, or

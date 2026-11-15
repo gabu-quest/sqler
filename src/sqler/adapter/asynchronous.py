@@ -26,7 +26,7 @@ from sqler.exceptions import (
 from sqler.logging import query_logger
 
 from .abstract import AsyncAdapterABC
-from .synchronous import _agreed_lock_wait, _broken, _lock_wait, _read_hit_missing_table
+from .synchronous import _INSIDE, _agreed_lock_wait, _broken, _lock_wait, _read_hit_missing_table
 
 logger = logging.getLogger(__name__)
 
@@ -869,6 +869,15 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         return cursor
 
     async def commit(self) -> None:
+        """Commit what this context wrote on its pinned connection outside an explicit transaction.
+
+        With no connection pinned there is nothing to commit. Inside the explicit transaction
+        this context is in (its own, or one it inherited from the task that started it) it
+        raises ``TransactionStateError`` and commits nothing: the transaction goes on, and
+        ``end_transaction`` ends it (``auto_commit`` is the call that skips the commit there).
+        """
+        if (lease := self._txn()) is not None:
+            raise _broken(lease.broken) if lease.broken else TransactionStateError(_INSIDE)
         conn = self._pinned()
         if conn is None:
             return
@@ -1183,8 +1192,10 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
+        """Commit the block's writes, or roll them back while an exception leaves; inside
+        this context's explicit transaction, the transaction goes on."""
         conn = self._pinned()
-        if conn is None:
+        if conn is None or self._txn() is not None:
             return
         try:
             if exc_type is None:

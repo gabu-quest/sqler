@@ -16,6 +16,7 @@ nested transaction of another task is open is rolled back, and both sides are to
 """
 
 import asyncio
+import contextvars
 import os
 import sqlite3
 import tempfile
@@ -2258,3 +2259,158 @@ async def test_a_plain_statement_whose_place_ended_before_it_ran_waits_again(mak
         "COMMIT",
     ]
     assert await t.rows() == ["g", "z"]
+
+
+# --- commit() and the adapter block inside a transaction opened by begin_transaction ------
+
+COMMIT_INSIDE = (
+    "commit() cannot end a transaction opened by begin_transaction: nothing was committed and the "
+    "transaction goes on; end it by leaving its db.transaction() block, or with end_transaction()"
+)
+
+
+async def commit_refused(adapter: AsyncSQLiteAdapter) -> None:
+    with pytest.raises(TransactionStateError) as raised:
+        await adapter.commit()
+    assert str(raised.value) == COMMIT_INSIDE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("commit", [False, True], ids=["rolled-back", "committed"])
+async def test_commit_inside_a_transaction_raises_and_the_transaction_goes_on(make_db, commit):
+    t = await make_db()
+    await t.adapter.begin_transaction()
+    await t.insert("first")
+    await commit_refused(t.adapter)
+    assert t.adapter._depth() == 1
+    await t.insert("second")
+    await t.adapter.end_transaction(commit=commit)
+    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT first", "INSERT second", "COMMIT" if commit else "ROLLBACK"]
+    assert await t.rows() == (["first", "second"] if commit else [])
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_commit_inside_a_nested_transaction_and_after_it_ended_raises(make_db):
+    t = await make_db()
+    with pytest.raises(Undo):
+        async with t.db.transaction():
+            await t.insert("first")
+            async with t.db.transaction():
+                await t.insert("nested")
+                await commit_refused(t.adapter)
+            await commit_refused(t.adapter)
+            raise Undo()
+    assert t.steps()[-1] == "ROLLBACK"
+    assert "COMMIT" not in t.steps()
+    assert await t.rows() == []
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_commit_from_a_child_task_that_inherited_the_transaction_raises(make_db):
+    t = await make_db()
+    with pytest.raises(Undo):
+        async with t.db.transaction():
+            await t.insert("first")
+            await asyncio.create_task(commit_refused(t.adapter))
+            await t.insert("second")
+            raise Undo()
+    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT first", "INSERT second", "ROLLBACK"]
+    assert await t.rows() == []
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_commit_from_a_task_outside_the_transaction_does_nothing(make_db):
+    """Passes on base: a task that did not inherit the transaction has no connection pinned."""
+    t = await make_db()
+    with pytest.raises(Undo):
+        async with t.db.transaction():
+            await t.insert("first")
+            outside = asyncio.get_running_loop().create_task(t.adapter.commit(), context=contextvars.Context())
+            assert await outside is None
+            raise Undo()
+    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT first", "ROLLBACK"]
+    assert await t.rows() == []
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_commit_in_a_transaction_whose_nested_end_failed_raises_that_error_and_sends_nothing(make_db):
+    t = await make_db()
+    with pytest.raises(TransactionStateError):
+        async with t.db.transaction():
+            await t.insert("first")
+            with pytest.raises(TransactionStateError):
+                async with t.db.transaction():
+                    await t.adapter.execute("RELEASE SAVEPOINT sp_1")  # the user ends it behind sqler's back
+            with pytest.raises(TransactionStateError) as raised:
+                await t.adapter.commit()
+            assert str(raised.value) == BROKEN.format("committed")
+    assert t.steps()[-2:] == ["RELEASE SAVEPOINT sp_1", "ROLLBACK"]
+    assert await t.rows() == []
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_commit_after_an_outermost_commit_failed_does_nothing(make_db):
+    """Passes on base: the failed end left this task in no transaction and with no connection."""
+    t = await make_db()
+    for conn in t.adapter._all_conns:  # a pragma of each connection: either one may be the next
+        await conn.execute("PRAGMA foreign_keys = ON")
+    await t.adapter.execute("CREATE TABLE p (id INTEGER PRIMARY KEY)")
+    await t.adapter.execute("CREATE TABLE c (p INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)")
+    await t.adapter.auto_commit()
+    await t.adapter.begin_transaction()
+    await t.adapter.execute("INSERT INTO c VALUES (7)")
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
+        await t.adapter.end_transaction(commit=True)
+    assert await t.adapter.commit() is None
+    assert (t.adapter._pinned(), t.adapter.in_transaction) == (None, False)
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raises", [None, ValueError, asyncio.CancelledError], ids=["ends", "raises", "cancelled"])
+@pytest.mark.parametrize("commit", [False, True], ids=["rolled-back", "committed"])
+async def test_the_adapter_block_inside_a_transaction_leaves_it_alone(make_db, raises, commit):
+    t = await make_db()
+    await t.adapter.begin_transaction()
+    await t.insert("first")
+    try:
+        async with t.adapter:
+            await t.insert("block")
+            if raises is not None:
+                raise raises("inner")
+    except BaseException as exc:  # noqa: BLE001 - it leaves through the block as it was raised
+        assert type(exc) is raises
+    assert t.adapter._depth() == 1
+    await t.insert("second")
+    await t.adapter.end_transaction(commit=commit)
+    ends = "COMMIT" if commit else "ROLLBACK"
+    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT first", "INSERT block", "INSERT second", ends]
+    assert await t.rows() == (["block", "first", "second"] if commit else [])
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_the_adapter_block_around_a_transaction_commits_what_the_transaction_committed(make_db):
+    """Passes on base: block outside, transaction inside."""
+    t = await make_db()
+    async with t.adapter:
+        async with t.db.transaction():
+            await t.insert("in")
+        await t.insert("block")
+    assert await t.rows() == ["block", "in"]
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_commit_on_an_adapter_closed_inside_a_transaction_does_nothing(make_db):
+    """Passes on base: close() gives the transaction's connection back; nothing is pinned."""
+    t = await make_db()
+    await t.adapter.begin_transaction()
+    await t.insert("first")
+    await t.adapter.close()
+    assert await t.adapter.commit() is None
