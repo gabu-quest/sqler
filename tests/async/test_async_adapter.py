@@ -320,10 +320,62 @@ async def test_a_judged_failure_and_the_second_call_inside_a_transaction_end_not
     adapter = db.adapter
     async with db.transaction():
         await raw(adapter, "INSERT INTO t VALUES ('a')")
+        conn, lease = adapter._pinned(), adapter._task_lease.get()
         with pytest.raises(sqlite3.OperationalError) as refused:
             await adapter._execute_judged(REFUSED_WRITE)
         with pytest.raises(sqlite3.OperationalError):
             await adapter._end_failed_statement(refused.value)
+        # the transaction keeps its connection, and the next statement has its turn at once
+        assert (adapter._pinned() is conn, lease.returned, lease.broken, lease.turns) == (True, False, None, [])
+        assert adapter._turn(lease, adapter._txn_savepoints.get()) is True
         await raw(adapter, "INSERT INTO t VALUES ('b')")
     assert await pending(adapter) == (False, ["before", "a", "b"])
+    await adapter.auto_commit()
+
+
+SLOW = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000000) SELECT count(*) FROM c"
+
+
+async def test_a_cancellation_in_a_judged_statement_ends_the_unit(db):
+    """A cancellation is never the caller's to judge: it ends the unit as in ``execute``. The
+    task catches it and goes on: it holds no connection, and its commit makes nothing of the
+    unit durable."""
+    adapter = db.adapter
+    sending = asyncio.Event()
+    pinned: list = []
+
+    async def unit() -> None:
+        await raw(adapter, "INSERT INTO t VALUES ('first')")  # the unit's earlier write
+        pinned.append(adapter._pinned() is not None)
+        sending.set()
+        try:
+            await adapter._execute_judged(SLOW)  # queued in this step
+        except asyncio.CancelledError:
+            asyncio.current_task().uncancel()
+        pinned.append(adapter._pinned() is not None)
+        await adapter.commit()
+
+    task = asyncio.create_task(unit(), context=contextvars.Context())
+    await asyncio.wait_for(sending.wait(), BOUND_S)
+    task.cancel()
+    await asyncio.wait_for(task, BOUND_S)
+    while adapter._reclaims:  # the rollback runs once the cancelled statement is done
+        await asyncio.wait_for(asyncio.gather(*adapter._reclaims), BOUND_S)
+    assert pinned == [True, False]
+    assert [c.in_transaction for c in adapter._all_conns] == [False] * adapter._pool_size
+    assert adapter.pool_stats().available_connections == adapter._pool_size
+    assert await pending(adapter) == (False, ["before"])
+    await adapter.auto_commit()
+
+
+async def test_a_read_of_rows_that_fails_after_pending_work_rolls_the_whole_unit_back(db):
+    """Passes on base: a failed read of a cursor's rows ends the unit as a failed statement does."""
+    adapter = db.adapter
+    await raw(adapter, "INSERT INTO t VALUES ('raw')")  # not committed
+    cur = await adapter.execute("SELECT column1, json(column1) FROM (VALUES ('1'), ('2'), ('{'))")
+    assert await cur.fetchone() == ("1", "1")
+    with pytest.raises(sqlite3.OperationalError, match="^malformed JSON$"):
+        await cur.fetchall()
+    assert adapter._pinned() is None
+    assert await pending(adapter) == (False, ["before"])
     await adapter.auto_commit()
