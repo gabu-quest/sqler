@@ -351,11 +351,14 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             object.__setattr__(inst, "_id", id_)
         return instances
 
-    async def save(self: TAModel, *, db=None) -> TAModel:
+    async def save(self: TAModel, *, db=None, _partial: bool = False) -> TAModel:
         """Insert or update this instance.
 
         Args:
             db: Optional database to write to (overrides class-level binding).
+            _partial: Write only the fields that differ from the row as this model last
+                loaded or saved it, and leave the row's other fields as they are
+                (``save_partial()``). The row must exist.
 
         Returns:
             self: The same instance (for chaining).
@@ -369,7 +372,11 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         else:
             await db._ensure_table(table)
         payload = await self._adump_with_relations()
-        if promoted:
+        if _partial:
+            new_id = self._id
+            changed = _dirty.changed_fields(self._snapshot or {}, payload)
+            await db._update_fields(table, new_id, payload, changed, promoted or ())
+        elif promoted:
             promoted_fields = list(promoted.keys())
             new_id = await db.upsert_document_promoted(table, self._id, payload, promoted_fields)
         else:

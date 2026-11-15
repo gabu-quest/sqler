@@ -387,11 +387,14 @@ class SQLerModel(BaseModel):
             inst._snapshot = _dirty.snapshot(payload)
         return instances
 
-    def save(self: TModel, *, db=None) -> TModel:
+    def save(self: TModel, *, db=None, _partial: bool = False) -> TModel:
         """Insert or update this instance and update ``_id``.
 
         Args:
             db: Optional database to write to (overrides class-level binding).
+            _partial: Write only the fields that differ from the row as this model last
+                loaded or saved it, and leave the row's other fields as they are
+                (``save_partial()``). The row must exist.
 
         Returns:
             self: The same instance (for chaining).
@@ -402,6 +405,11 @@ class SQLerModel(BaseModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
+        if _partial:
+            new_id = self._id
+            changed = _dirty.changed_fields(self._snapshot or {}, payload)
+            db._update_fields(table, new_id, payload, changed, promoted or ())
+        elif promoted:
             promoted_fields = list(promoted.keys())
             new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
         else:

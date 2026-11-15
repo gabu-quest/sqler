@@ -20,16 +20,15 @@ Usage::
     print(user.changed_fields)  # {'name'}
     print(user.get_changes())  # {'name': ('Old Name', 'New Name')}
 
-    # Save only changed fields
-    user.save_changes()  # UPDATE only 'name' column
+    # Save only changed fields (with PartialUpdateMixin)
+    user.save_partial()  # writes only 'name'
 """
 
+import inspect
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional, Set, Tuple, Type, TypeVar
-
-from sqler.utils import validate_field_name
+from typing import Any, Optional, Set, Tuple, TypeVar
 
 T = TypeVar("T", bound="TrackedModel")
 
@@ -109,29 +108,23 @@ class ChangeTracker:
         return len(self._changes) > 0
 
 
-class TrackedModel:
-    """Mixin for SQLerModel to enable change tracking.
+class _ChangeTracking:
+    """The tracker of a model and its answers, for :class:`TrackedModel` and
+    :class:`AsyncTrackedModel`.
 
-    Usage::
-
-        class User(TrackedModel, SQLerModel):
-            name: str
-            email: str
-
-        user = User.from_id(1)
-        user.name = "New Name"
-
-        print(user.is_dirty)  # True
-        print(user.changed_fields)  # {'name'}
-        print(user.get_changes())  # {'name': ('Old Name', 'New Name')}
-
-        user.save_changes()  # Partial update
+    ``is_dirty`` here is a property, where the model bases have an ``is_dirty()`` method:
+    ``model.is_dirty`` is the tracker's answer, ``SQLerModel.is_dirty(model)`` the base's.
     """
 
     _tracker: Optional[ChangeTracker] = None
 
     def __init__(self, **data):
         super().__init__(**data)
+        self._init_tracker()
+
+    def __post_init__(self) -> None:
+        # a lite model: its dataclass ``__init__`` replaces the one above
+        super().__post_init__()  # type: ignore[misc]
         self._init_tracker()
 
     def _init_tracker(self) -> None:
@@ -212,39 +205,55 @@ class TrackedModel:
             return
         object.__setattr__(self, field, self._tracker._original[field])
 
+
+class TrackedModel(_ChangeTracking):
+    """Mixin for a sync model (``SQLerModel``, ``SQLerSafeModel`` and their lite twins) to
+    enable change tracking; an async model uses :class:`AsyncTrackedModel`.
+
+    Usage::
+
+        class User(TrackedModel, SQLerModel):
+            name: str
+            email: str
+
+        user = User.from_id(1)
+        user.name = "New Name"
+
+        print(user.is_dirty)  # True
+        print(user.changed_fields)  # {'name'}
+        print(user.get_changes())  # {'name': ('Old Name', 'New Name')}
+
+        user.save()  # the tracker is clean again
+    """
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        if any(inspect.iscoroutinefunction(vars(k).get("save")) for k in cls.__mro__):
+            raise TypeError(
+                f"{cls.__name__} is an async model: use AsyncTrackedModel "
+                "(and AsyncPartialUpdateMixin) in place of TrackedModel (and PartialUpdateMixin)"
+            )
+
     def save(self, *args, **kwargs):
         """Save and reset tracking."""
         result = super().save(*args, **kwargs)
         self.mark_clean()
         return result
 
-    async def asave(self, *args, **kwargs):
-        """Async save and reset tracking."""
-        result = await super().asave(*args, **kwargs)
+
+class AsyncTrackedModel(_ChangeTracking):
+    """Async twin of :class:`TrackedModel`, for ``AsyncSQLerModel``, ``AsyncSQLerSafeModel``
+    and their lite twins: ``await model.save()`` resets tracking once the save has run."""
+
+    async def save(self, *args, **kwargs):
+        """Save and reset tracking (async)."""
+        result = await super().save(*args, **kwargs)
         self.mark_clean()
         return result
 
-    @classmethod
-    def from_id(cls: Type[T], _id: int, **kwargs) -> Optional[T]:
-        """Load and initialize tracking."""
-        instance = super().from_id(_id, **kwargs)
-        if instance is not None:
-            instance._init_tracker()
-        return instance
-
-    @classmethod
-    async def afrom_id(cls: Type[T], _id: int, **kwargs) -> Optional[T]:
-        """Async load and initialize tracking."""
-        instance = await super().afrom_id(_id, **kwargs)
-        if instance is not None:
-            instance._init_tracker()
-        return instance
-
 
 class PartialUpdateMixin:
-    """Mixin that enables partial updates (only changed fields).
-
-    Works with TrackedModel to UPDATE only modified columns.
+    """Mixin that saves only the changed fields of a :class:`TrackedModel`.
 
     Usage::
 
@@ -258,102 +267,49 @@ class PartialUpdateMixin:
         user.save_partial()  # Only updates 'name', not 'email' or 'bio'
     """
 
-    def save_partial(self) -> "PartialUpdateMixin":
-        """Save only changed fields.
+    def save_partial(self, *, db=None) -> "PartialUpdateMixin":
+        """Save only the changed fields, through ``save()``.
 
-        If no fields changed, does nothing.
-        If model is new, does full save.
+        The fields that differ from the row as this model last loaded or saved it are
+        written, each as ``save()`` stores it, into the row ``save()`` writes; the row's
+        other fields are left as they are. Everything around ``save()`` runs as for
+        ``save()`` (the mixins, the version check of a safe model). A model never saved is
+        saved in full; with no changed field nothing is sent.
+
+        Args:
+            db: Optional database to write to (overrides class-level binding), as for ``save()``.
 
         Returns:
             Self after save
+
+        Raises:
+            NotFoundError: The row is gone: a write of some fields cannot recreate it.
+            StaleVersionError: A safe model's row is at another version (as for ``save()``).
         """
-        if not hasattr(self, "is_dirty"):
-            raise TypeError("PartialUpdateMixin requires TrackedModel")
-
-        # New models need full save
         if getattr(self, "_id", None) is None:
-            return self.save()
-
-        # No changes, skip
-        if not self.is_dirty:
+            return self.save(db=db)
+        if not _changed(self):
             return self
+        return self.save(db=db, _partial=True)
 
-        # Get changed fields and their values
-        changes = self.get_changes()
-        if not changes:
-            return self
 
-        # Build partial update
-        # Get the database adapter
-        db = getattr(type(self), "_db", None)
-        if db is None:
-            raise ValueError("Model has no database bound")
+class AsyncPartialUpdateMixin:
+    """Async twin of :class:`PartialUpdateMixin`, with :class:`AsyncTrackedModel`."""
 
-        # Build UPDATE statement for only changed fields
-        table = getattr(type(self), "_table", type(self).__name__.lower())
-        update_parts = []
-        values = []
-
-        for field_name, (_, new_value) in changes.items():
-            validate_field_name(field_name)
-            update_parts.append(f"json_set(data, '$.{field_name}', json(?))")
-            import json
-
-            values.append(json.dumps(new_value))
-
-        # Chain json_set calls
-        data_expr = "data"
-        for i, field_name in enumerate(changes.keys()):
-            data_expr = f"json_set({data_expr}, '$.{field_name}', json(?))"
-
-        sql = f"UPDATE {table} SET data = {data_expr} WHERE _id = ?"
-        values.append(self._id)
-
-        db.adapter.execute(sql, values)
-        db.adapter.auto_commit()
-
-        # Mark clean
-        self.mark_clean()
-        return self
-
-    async def asave_partial(self) -> "PartialUpdateMixin":
-        """Async version of save_partial."""
-        if not hasattr(self, "is_dirty"):
-            raise TypeError("PartialUpdateMixin requires TrackedModel")
-
+    async def save_partial(self, *, db=None) -> "AsyncPartialUpdateMixin":
+        """Save only the changed fields (async); see :meth:`PartialUpdateMixin.save_partial`."""
         if getattr(self, "_id", None) is None:
-            return await self.asave()
-
-        if not self.is_dirty:
+            return await self.save(db=db)
+        if not _changed(self):
             return self
+        return await self.save(db=db, _partial=True)
 
-        changes = self.get_changes()
-        if not changes:
-            return self
 
-        db = getattr(type(self), "_db", None)
-        if db is None:
-            raise ValueError("Model has no database bound")
-
-        table = getattr(type(self), "__sqler_table__", type(self).__name__.lower())
-        values = []
-
-        data_expr = "data"
-        for field_name, (_, new_value) in changes.items():
-            validate_field_name(field_name)
-            data_expr = f"json_set({data_expr}, '$.{field_name}', json(?))"
-            import json
-
-            values.append(json.dumps(new_value))
-
-        sql = f"UPDATE {table} SET data = {data_expr} WHERE _id = ?"
-        values.append(self._id)
-
-        await db.adapter.execute(sql, values)
-        await db.adapter.auto_commit()
-
-        self.mark_clean()
-        return self
+def _changed(model: Any) -> Set[str]:
+    try:
+        return model.changed_fields
+    except AttributeError:
+        raise TypeError("PartialUpdateMixin requires TrackedModel") from None
 
 
 class DiffMixin:
