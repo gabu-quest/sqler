@@ -150,6 +150,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`bulk_upsert` gives the caller's documents their new `_id` only when the whole call succeeded.** After a failure they are as they were passed; before, they kept the ids of rows that had been rolled back.
 - **`AsyncSQLerDB.bulk_upsert` is one transaction, as the sync method is.** A failure half way writes nothing, where it left the rows before the failure written.
 - **A write by `_id` creates no table.** `upsert_document` with an `_id` and a save of a loaded row raised `NotFoundError` on a database without the table and left an empty table behind; an update of some fields and an async plain model saved by `_id` made the table too. They create nothing now.
+- **A cached query no longer returns rows that a committed write has replaced.** With `CacheAwareModel` on a class, a function cached with `cached_query(table=...)` could go on returning the old rows after a write until the entry's lifetime ended: a reader that ran between a writer's `save()` and its commit stored the old rows again, and only `save()` and `delete()` of an instance told the cache at all. Now every way of writing the class's rows drops the cached results of its table: `save()`, `save_partial()`, `save_many()`, `delete()`, `delete_with_policy()`, the rows a delete's policy nulls or deletes, and a queryset's `update()`, `update_one()`, `update_n()` and `delete_all()`, sync and async. While a transaction of this process that wrote the table is open (`db.transaction()`, `with db:`), no result of the table is served from the cache or stored in it, and a result is stored only if the table was not written while its function ran. The mixin sends no statement.
+- **On an async model, `CacheAwareModel` tells the cache when the awaited write has run**, not when the coroutine is made.
+- **`save_many()` leaves the change tracker of a `TrackedModel` or `AsyncTrackedModel` clean**, as a loop of `save()` does. The instances read dirty after it, with their history.
 
 ### Changed
 
@@ -234,6 +237,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **A raw statement that ends a transaction raises `TransactionStateError` at that statement.** Inside a transaction, a raw `COMMIT`, `END` or `ROLLBACK` (any spelling), or a failure SQLite answers by rolling the whole transaction back (such as `ON CONFLICT ROLLBACK`), raises it with SQLite's error as the cause; every later statement in the transaction and the block's end raise the same error and send nothing. Before, the transaction went on unseen: a raw `ROLLBACK` lost the earlier rows and kept the later ones, and a block that raised after a raw `COMMIT` left its rows committed.
 - **`insert_many`, `bulk_upsert` and their variants check the table's columns once per call.** A call of one row carries the check in its statement; a call of several rows sends it first, as one small `SELECT` in the call's transaction. A call costs about 3 µs more for one row and 9 to 16 µs more for a few; from a thousand rows on it is within 2% of before.
 - **`AsyncSQLerDB.bulk_upsert` sends its rows as the sync method does**: inserts first, then updates, rows with the same keys in one statement. A document passed twice in one call makes two rows; before, the second was an update of the first.
+- **`CacheAwareModel` names its cached results by the table its rows are written to.** `Meta.cache_table` still works, as a second name for the same results; the fallback to the class name in lower case is gone, so an entry tagged with that name is no longer dropped by a write. `cached_query`, `async_cached_query`, `QueryCache.set` and `invalidate_table` take a model class for `table=`. Table names are compared without regard to case, as SQLite compares them.
+- **A write tells every `QueryCache`**, also one passed to the decorator as `cache=`; before, only the global cache was told. While a table is written inside an open transaction, `QueryCache.get` and `has` find no entry of it and `set` stores none.
 
 ### Removed
 
@@ -243,6 +248,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`TrackedModel.asave()`, `TrackedModel.afrom_id()` and `PartialUpdateMixin.asave_partial()`**, which called methods no model has. On an async model use `AsyncTrackedModel` and `AsyncPartialUpdateMixin`; `TrackedModel` on an async model raises `TypeError` when the class is defined.
 - **`TrackedModel.from_id()`.** The model base's `from_id()` already returns a tracked, clean model.
 - **`sqler.ResolutionError`, `sqler.CircularReferenceError`, `sqler.MaxDepthExceededError`, `sqler.MissingReferenceError` and its alias `sqler.MissingReferenceWarning`** (also from `sqler.exceptions`), **and from `sqler.utils`: `CircularReferenceError`, `ReferenceTracker`, `collect_references`, `ResolutionWarning`, `ResolutionResult`.** Nothing raised or returned them. Code that caught one can drop the handler: a cycle closes on its objects, a deep chain loads whole, and a reference to a row that is gone reads as `None` (left out of a list). The error to catch is the one a refused row raises, with its note.
+- **`CacheAwareModel.asave()` and `adelete()`, and `SearchableMixin.asave()` and `adelete()`**, which called methods no model has. `await model.save()` and `await model.delete()` on an async model are the calls.
 
 ### Added
 
