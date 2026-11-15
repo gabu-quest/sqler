@@ -783,6 +783,32 @@ in that transaction by any task (`execute`, `executemany`, a new nested transact
 that was waiting its turn) raises the same `TransactionStateError` and sends nothing, and a
 nested block that ends in it raises it too.
 
+### Async cursors
+
+The cursor `await adapter.execute(...)` returns reads only what its statement saw while the
+connection was its task's. SQLite reads a statement's rows as they are fetched; so before
+another task sends a statement on that connection (a task that took it from the pool, a
+child task that shares the pin, a sibling in a shared transaction) or a rollback ends its
+transaction, the rows the cursor has not returned yet are read, in the connection's thread
+ahead of that statement, and the cursor serves them from memory. Rows its own transaction
+wrote and then rolled back are served: they are what the statement saw. While only its own
+task uses the connection it reads lazily, as SQLite does (a row the task inserts before the
+first fetch is in the result), and a cursor nobody holds any more, or one that is closed or
+has returned its last row, is never read ahead. A statement whose rows raise part-way (a
+`json()` of a malformed value, say) raises at the same read either way. A cursor serving
+rows from memory answers `fetchone`, `fetchmany` (`arraysize` honoured), `fetchall`,
+`async for`, `async with`, `close`, `description`, `rowcount` and `lastrowid` as before;
+`connection` and `row_factory` stay the wrapped cursor's (the connection the statement ran
+on, the factory the rows were built with: setting it after the rows were read changes none
+of them). Of two statements that two tasks sharing one connection send at the same moment,
+the one handed to the connection first is answered whole, as if the other had not been
+sent. A statement cancelled while the read of another cursor's rows that it set off is
+running leaves that cursor all its rows. If the adapter is closed, or the connection
+breaks so that the read itself fails (the connection is then replaced), before a cursor's
+rows could be read, a later read raises `NotConnectedError` and touches no connection. A
+statement sent on `adapter.connection` (the raw `aiosqlite` connection) is outside this
+rule: the adapter does not see it, and a lazy cursor on that connection may read its work.
+
 ---
 
 ## Data Integrity

@@ -2073,7 +2073,7 @@ async def test_a_nested_transaction_whose_deadline_passes_after_its_turn_still_o
 
 # --- a statement whose place ended before it ran waits again, where it was ------------------
 
-# its first row comes at once; the rest (about a second of work) runs when it is fetched
+# its first row comes at once; the rest (about a second of work) is read before another task's statement
 LAZY = (
     "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000000) "
     "SELECT 1 UNION ALL SELECT count(*) FROM c"
@@ -2135,9 +2135,12 @@ async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, blo
             if block:
                 block_the_loop_until(got["asked_at"] + x_timeout)
                 got["unblocked_at"] = loop.time()
-            fetch = asyncio.ensure_future(cur.fetchall())  # S's RELEASE is queued behind the rest of the read
+            fetch = asyncio.ensure_future(cur.fetchall())
+            # G's insert had the rest of the read done before it; S's RELEASE is queued behind this
+            busy = asyncio.ensure_future(lease.conn.execute(SLOW))
         assert await fetch == [(1,), (3000000,)]
         await cur.close()
+        await (await busy).close()
         await asyncio.wait_for(asyncio.gather(tg, tx, tz), BOUND_S)
         assert (lease.turns, lease.savepoints) == ([], [])
     await assert_pool_clean(t)

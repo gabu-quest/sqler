@@ -217,20 +217,22 @@ async def test_failed_statement_inside_a_transaction_keeps_the_pin_until_its_end
 
 @pytest.fixture
 def hang_execute(monkeypatch):
-    """While ``state["on"]`` is true, ``Connection.execute`` sleeps before it sends the statement.
+    """While ``state["on"]`` is true, a statement sleeps before it is handed to the SQLite thread.
 
     So a cancellation lands before SQLite sees anything; the tests under "item 1" below
-    cancel a statement that is really waiting in the SQLite thread.
+    cancel a statement that is really waiting in the SQLite thread. The hook is where
+    aiosqlite queues a call for its thread, and holds back only the call named ``execute``.
     """
-    real = aiosqlite.Connection.execute
-    state = {"on": False}
+    real = aiosqlite.Connection._execute
+    state = {"on": False, "held": 0}
 
-    async def execute(self, sql, parameters=None):
-        if state["on"]:
+    async def _execute(self, fn, *args, **kwargs):
+        if state["on"] and getattr(fn, "__name__", "") == "execute":
+            state["held"] += 1
             await asyncio.sleep(60)
-        return await real(self, sql, parameters)
+        return await real(self, fn, *args, **kwargs)
 
-    monkeypatch.setattr(aiosqlite.Connection, "execute", execute)
+    monkeypatch.setattr(aiosqlite.Connection, "_execute", _execute)
     return state
 
 
@@ -252,6 +254,7 @@ async def test_statement_cancelled_by_wait_for_before_it_reaches_sqlite_returns_
         adapter, cancelled_statement, lambda: _write(adapter, "same")
     )
 
+    assert hang_execute["held"] == 1  # the statement was held back, so SQLite never saw it
     assert isinstance(seen["error"], asyncio.TimeoutError)
     assert seen["connection_after_fail"] is None
     assert await _values(adapter) == ["dup", "other", "same"]
