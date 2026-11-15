@@ -26,6 +26,29 @@ def _broken(failed: tuple[str, BaseException]) -> TransactionStateError:
     return error
 
 
+def _lock_wait(timeout_ms: Optional[int]) -> tuple[int, bool]:
+    """An adapter's ``timeout_ms`` argument checked: ``(milliseconds, given)``; not given, 5000.
+
+    Raises:
+        ValueError: ``timeout_ms`` is not a whole number from 0 to 2**31 - 1.
+    """
+    if timeout_ms is None:
+        return 5000, False
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 0 <= timeout_ms < 2**31:
+        raise ValueError(f"timeout_ms must be a whole number of milliseconds from 0 to 2**31 - 1, not {timeout_ms!r}")
+    return timeout_ms, True
+
+
+def _agreed_lock_wait(timeout_ms: int, given: bool, busy: int) -> int:
+    """The lock wait once SQLite has read the pragmas and reads back ``busy`` as its busy_timeout.
+
+    A pragma decides the number when ``timeout_ms`` was not given; both given, they must agree.
+    """
+    if busy != timeout_ms and given:
+        raise ValueError(f"timeout_ms={timeout_ms} and the busy_timeout pragma ({busy}) disagree: give one of them")
+    return busy
+
+
 def _read_hit_missing_table(query: str, exc: BaseException) -> bool:
     """True when ``query`` is a read and ``exc`` is SQLite's "no such table" for it.
 
@@ -294,14 +317,9 @@ class SQLiteAdapter(AdapterABC):
         Raises:
             ValueError: ``timeout_ms`` is not a whole number from 0 to 2**31 - 1.
         """
-        if timeout_ms is not None and (
-            isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 0 <= timeout_ms < 2**31
-        ):
-            raise ValueError(f"timeout_ms must be a whole number of milliseconds from 0 to 2**31 - 1, not {timeout_ms!r}")
+        self.timeout_ms, self._timeout_given = _lock_wait(timeout_ms)
         self.path = path
         self.pragmas = pragmas or []
-        self.timeout_ms = 5000 if timeout_ms is None else timeout_ms
-        self._timeout_given = timeout_ms is not None
         self._local = _ThreadState()
         self._conns_lock = threading.RLock()
         self._conns: weakref.WeakSet[_ThreadConnection] = weakref.WeakSet()
@@ -373,13 +391,7 @@ class SQLiteAdapter(AdapterABC):
             if self.pragmas:
                 # SQLite has read the pragmas: its busy_timeout is the one number
                 busy = cur.execute("PRAGMA busy_timeout").fetchone()[0]
-                if busy != self.timeout_ms:
-                    if self._timeout_given:
-                        raise ValueError(
-                            f"timeout_ms={self.timeout_ms} and the busy_timeout pragma ({busy}) disagree: "
-                            "give one of them"
-                        )
-                    self.timeout_ms = busy
+                self.timeout_ms = _agreed_lock_wait(self.timeout_ms, self._timeout_given, busy)
         except BaseException:
             conn.close()  # a connection that could not be set up is not left open
             raise

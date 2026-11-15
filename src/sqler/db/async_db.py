@@ -9,6 +9,7 @@ from sqler.db.sqler_db import (
     _AT_VERSION,
     _MAX_VARIABLES,
     _columns_sql,
+    _ended_while_leaving,
     _fields_update,
     _id_params,
     _in_order,
@@ -20,7 +21,7 @@ from sqler.db.sqler_db import (
     _rows_sql,
     _split_promoted,
 )
-from sqler.exceptions import StaleVersionError, TransactionStateError
+from sqler.exceptions import StaleVersionError
 from sqler.query.query import is_missing_table
 from sqler.utils import (
     validate_check_expression,
@@ -61,17 +62,24 @@ class AsyncSQLerDB:
         *,
         name: Optional[str] = None,
         acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S,
+        timeout_ms: int = 5000,
     ) -> "AsyncSQLerDB":
-        """In-memory database; ``acquire_timeout`` bounds the wait for a pooled connection (seconds, ``None`` = forever)."""
-        adapter = AsyncSQLiteAdapter.in_memory(shared=shared, name=name, acquire_timeout=acquire_timeout)
+        """In-memory database; ``acquire_timeout`` and ``timeout_ms`` are the two waits of ``AsyncSQLiteAdapter``."""
+        adapter = AsyncSQLiteAdapter.in_memory(
+            shared=shared, name=name, acquire_timeout=acquire_timeout, timeout_ms=timeout_ms
+        )
         return cls(adapter)
 
     @classmethod
     def on_disk(
-        cls, path: str = "sqler.db", *, acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S
+        cls,
+        path: str = "sqler.db",
+        *,
+        acquire_timeout: Optional[float] = DEFAULT_ACQUIRE_TIMEOUT_S,
+        timeout_ms: int = 5000,
     ) -> "AsyncSQLerDB":
-        """Database file at ``path``; ``acquire_timeout`` bounds the wait for a pooled connection (seconds, ``None`` = forever)."""
-        adapter = AsyncSQLiteAdapter.on_disk(path, acquire_timeout=acquire_timeout)
+        """Database file at ``path``; ``acquire_timeout`` and ``timeout_ms`` are the two waits of ``AsyncSQLiteAdapter``."""
+        adapter = AsyncSQLiteAdapter.on_disk(path, acquire_timeout=acquire_timeout, timeout_ms=timeout_ms)
         return cls(adapter)
 
     def __init__(self, adapter: AsyncSQLiteAdapter):
@@ -916,23 +924,25 @@ class AsyncSQLerDB:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Exit async context manager; commit, or roll back while the caller's exception leaves."""
-        await self._end_level(exc_type is None, quiet=exc_type is not None)
+        await self._end_level(exc_type is None, leaving=exc_val)
         return False
 
     async def _begin_level(self) -> None:
         await self.adapter.begin_transaction()
         self._open.set((*self._open.get(), _Level(set(), {}, self.adapter._depth())))
 
-    async def _end_level(self, commit: bool, *, quiet: bool = False) -> None:
-        """End this task's innermost level; the async twin of ``SQLerDB._end_level``."""
+    async def _end_level(self, commit: bool, *, leaving: Optional[BaseException] = None) -> None:
+        """End this task's innermost level; the async twin of ``SQLerDB._end_level``.
+
+        ``leaving``: the caller's exception on its way out (see ``sqler_db._end_transaction``).
+        """
         levels = self._open.get()
         level = levels[-1] if levels else None  # none: begun in another task; nothing to merge
         self._open.set(levels[:-1])
         try:
             await self.adapter.end_transaction(commit=commit)
-        except Exception:
-            if not quiet:
-                raise
+        except Exception as ended:
+            _ended_while_leaving(ended, leaving)
             return
         if commit and level is not None and (above := self._learned()) is not None:
             above[0].update(level.versioned)
@@ -951,9 +961,9 @@ class AsyncTransaction:
         self._db = db
         self._active = False
 
-    async def _end(self, commit: bool, quiet: bool = False) -> None:
+    async def _end(self, commit: bool, leaving: Optional[BaseException] = None) -> None:
         self._active = False
-        await self._db._end_level(commit, quiet=quiet)
+        await self._db._end_level(commit, leaving=leaving)
 
     async def __aenter__(self):
         """Begin the transaction."""
@@ -964,19 +974,12 @@ class AsyncTransaction:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Commit on success, rollback on exception.
 
-        When the block raised and the transaction it was nested in had already ended, the
-        block's exception goes on with a note that nothing written in it was committed.
+        When the block raised and the transaction was rolled back for a reason of its own
+        (a nested end that failed, or the transaction it was nested in had already ended),
+        the block's exception goes on with that sentence as a note.
         """
-        if not self._active:
-            return False
-        if exc_type is None:
-            await self._end(True)
-            return False
-        try:
-            await self._end(False)
-        except TransactionStateError as ended:
-            if not isinstance(exc_val, TransactionStateError):
-                exc_val.add_note(str(ended))
+        if self._active:
+            await self._end(exc_type is None, leaving=exc_val)
         return False
 
     async def commit(self):

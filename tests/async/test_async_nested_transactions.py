@@ -1736,6 +1736,56 @@ async def test_a_parent_raising_after_a_failed_nested_rollback_keeps_its_excepti
     await assert_pool_clean(t)
 
 
+class OwnError(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("own", [OwnError, KeyboardInterrupt], ids=["exception", "keyboard-interrupt"])
+async def test_the_callers_exception_leaving_the_db_block_after_a_failed_nested_rollback_has_the_note(make_db, own):
+    t = await make_db()
+    with pytest.raises(own) as raised:
+        async with t.db:
+            await t.insert("outer")
+            with pytest.raises(Undo):
+                async with t.db.transaction():
+                    await t.adapter.execute("RELEASE SAVEPOINT sp_1")  # the user ends it behind sqler's back
+                    raise Undo()
+            raise own("its own")
+    assert (str(raised.value), raised.value.__notes__) == ("its own", [BROKEN.format("rolled back")])
+    assert await t.rows() == []
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_an_exception_leaving_a_nested_block_and_the_db_block_has_the_note_once(make_db):
+    t = await make_db()
+    with pytest.raises(Undo) as raised:
+        async with t.db:
+            await t.insert("outer")
+            async with t.db.transaction():
+                await t.adapter.execute("RELEASE SAVEPOINT sp_1")
+                raise Undo()
+    assert raised.value.__notes__ == [BROKEN.format("rolled back")]
+    assert await t.rows() == []
+    await assert_pool_clean(t)
+
+
+@pytest.mark.asyncio
+async def test_the_db_block_ending_without_an_exception_after_a_failed_nested_rollback_raises(make_db):
+    t = await make_db()
+    with pytest.raises(TransactionStateError) as raised:
+        async with t.db:
+            await t.insert("outer")
+            with pytest.raises(Undo):
+                async with t.db.transaction():
+                    await t.adapter.execute("RELEASE SAVEPOINT sp_1")
+                    raise Undo()
+    assert (str(raised.value), getattr(raised.value, "__notes__", [])) == (BROKEN.format("rolled back"), [])
+    assert await t.rows() == []
+    await assert_pool_clean(t)
+
+
 @pytest.mark.asyncio
 async def test_a_savepoint_that_sqlite_refuses_opened_nothing_and_leaves_no_place_behind(make_db):
     t = await make_db()
