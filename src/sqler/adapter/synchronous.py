@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import threading
 import time
@@ -13,6 +14,8 @@ from sqler.logging import query_logger
 from ..exceptions import NotConnectedError, QueryError, TransactionStateError, unique_violation_from
 from .abstract import AdapterABC, CursorLike
 
+logger = logging.getLogger(__name__)
+
 _BROKEN = (
     "a nested transaction could not be {}, so the transaction it is part of ends rolled back: "
     "nothing written in it is committed"
@@ -24,6 +27,54 @@ def _broken(failed: tuple[str, BaseException]) -> TransactionStateError:
     error = TransactionStateError(_BROKEN.format(failed[0]))
     error.__cause__ = failed[1]
     return error
+
+
+_KEPT = (
+    'the transaction could not be rolled back: the one connection of the ":memory:" database keeps it, '
+    "and every statement tries the rollback again first"
+)
+
+
+def _kept(error: BaseException) -> TransactionStateError:
+    """The error for an end or a statement while the one ``":memory:"`` connection keeps a
+    transaction its rollback could not end (``error``: SQLite's, from the last try)."""
+    kept = TransactionStateError(_KEPT)
+    kept.__cause__ = error
+    return kept
+
+
+def _roll_back(conn: sqlite3.Connection, shared: Optional["_SharedConnection"], local: Optional["_ThreadState"]) -> None:
+    """Roll back ``conn``'s transaction; a rollback that fails is tried once more at once.
+
+    Whatever leaves the tries (SQLite's error twice, an interrupt between them), a
+    transaction SQLite still counts as open is never joined by a later statement. A thread's
+    own connection (``local``'s) is forgotten and closed, which rolls back: the thread opens
+    a new one at its next statement. The one ``":memory:"`` connection (``shared``) cannot
+    be closed without losing the database: it keeps the transaction and its holder, and
+    ``shared.unended`` names what left until a rollback that ``take`` tries succeeds.
+    SQLite's error ends here; anything else is raised on.
+    """
+    left: Optional[BaseException] = None
+    try:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            conn.rollback()  # an interrupt that was a one-off
+    except BaseException as exc:  # noqa: BLE001 - settled below, and raised on unless SQLite's
+        left = exc
+    try:
+        kept = left is not None and conn.in_transaction
+    except sqlite3.Error:  # closed meanwhile, which rolled back
+        kept = False
+    if shared is not None:
+        shared.unended = left if kept else None
+    elif kept and local is not None:
+        if local.conn is conn:
+            local.conn = local.owner = None
+        conn.close()  # SQLite rolls back what a closing connection leaves open
+        logger.warning("rollback of a reclaimed connection failed (%s: %s); replacing it", type(left).__name__, left)
+    if left is not None and not isinstance(left, sqlite3.Error):
+        raise left
 
 
 def _lock_wait(timeout_ms: Optional[int]) -> tuple[int, bool]:
@@ -100,6 +151,7 @@ class _ThreadState(threading.local):
     and how a nested end in its transaction failed (``None``: none did)."""
 
     conn: Optional[sqlite3.Connection] = None
+    owner: Optional[_ThreadConnection] = None
     txn_depth = 0
     broken: Optional[tuple[str, BaseException]] = None
 
@@ -114,12 +166,16 @@ class _SharedConnection:
     the thread stays the holder while its transaction is open. A thread that ends as the
     holder has its transaction rolled back.
 
+    A transaction whose rollback failed stays open on the connection with its holder
+    (``unended``: SQLite's error). Every statement, of any thread, first tries the rollback
+    again; until one succeeds the holder's statements raise, and the other threads wait.
+
     Every change that can let a waiter go on (the holder gives the connection up, ends, or
     the connection closes) wakes every waiter: each checks again, and those that still
     cannot go on wait again. A waiter that leaves ``take`` by an exception holds nothing.
     """
 
-    __slots__ = ("conn", "timeout", "_turn", "_holder", "_waiting", "_closed", "_ends", "__weakref__")
+    __slots__ = ("conn", "timeout", "_turn", "_holder", "_waiting", "_closed", "_ends", "unended", "__weakref__")
 
     def __init__(self, conn: sqlite3.Connection, timeout: float):
         self.conn = conn
@@ -129,6 +185,7 @@ class _SharedConnection:
         self._waiting = 0  # threads that wait for the holder's transaction to end
         self._closed = False
         self._ends = threading.local()  # per thread: what gives the turn back when it ends
+        self.unended: Optional[BaseException] = None
 
     def _free(self) -> bool:
         return self._holder is None or self._closed
@@ -144,6 +201,13 @@ class _SharedConnection:
         turn.acquire()
         try:
             holder = self._holder
+            if self.unended is not None and not self._closed:
+                _roll_back(self.conn, self, None)
+                if self.unended is None:
+                    holder = self._holder = None
+                    turn.notify_all()
+                elif holder == threading.get_ident():
+                    raise _kept(self.unended)
             if holder is not None and holder != threading.get_ident():
                 self._waiting += 1
                 try:
@@ -185,12 +249,9 @@ class _SharedConnection:
         with self._turn:
             if self._holder != ident:
                 return
-            self._holder = None
-            try:
-                self.conn.rollback()
-            except sqlite3.Error:
-                pass
-            finally:
+            _roll_back(self.conn, self, None)
+            if self.unended is None:
+                self._holder = None
                 self._turn.notify_all()
 
     def close(self) -> None:
@@ -355,10 +416,7 @@ class SQLiteAdapter(AdapterABC):
         """
         if self._txn_depth > 0 or not conn.in_transaction:
             return
-        try:
-            conn.rollback()
-        except sqlite3.Error:
-            pass  # the caller sees the original error
+        _roll_back(conn, self._shared, self._local)  # the caller sees the original error
 
     def connect(self) -> None:
         if self._memory_singleton:
@@ -645,10 +703,9 @@ class SQLiteAdapter(AdapterABC):
                         self._end_failed_implicit_transaction(conn)
                         raise
                 else:
-                    try:
-                        conn.rollback()
-                    except sqlite3.Error:
-                        pass
+                    _roll_back(conn, shared, local)
+                    if shared is not None and shared.unended is not None:
+                        raise _kept(shared.unended)
             finally:
                 if shared is not None:
                     shared.give(0)
