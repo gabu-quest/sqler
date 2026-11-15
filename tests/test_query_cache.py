@@ -300,7 +300,7 @@ def disk_db(tmp_path):
     d.close()
 
 
-# ----- p61: a reader between the writer's save and its commit ----------------------------
+# ----- a reader between the writer's save and its commit ---------------------------------
 
 
 def test_a_result_read_before_a_commit_is_not_served_after_it(disk_db):
