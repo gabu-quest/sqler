@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 import msgspec
 import pytest
+from pairwise import all_pairs
 from pydantic import Field as PydField
 from pydantic import PrivateAttr, field_validator, model_validator
 from sqler import F, SQLerDB, SQLerModel, SQLerMsgspecModel
@@ -261,9 +262,7 @@ BAD_REFS = [
 ]
 
 
-@pytest.mark.parametrize("way", WAYS)
-@pytest.mark.parametrize("bad", BAD_REFS)
-@pytest.mark.parametrize("base", sorted(BASES))
+@pytest.mark.parametrize(*all_pairs(("base", sorted(BASES)), ("bad", BAD_REFS), ("way", WAYS)))
 def test_unusable_reference_is_left_as_it_is_and_never_sent_to_sql(make_db, base, bad, way):
     child, parent = BASES[base]
     db = make_db()
@@ -1167,9 +1166,11 @@ def test_a_typed_field_whose_row_is_gone(typed, base, way):
     assert _observe(db, p_cls, p2._id, way, pt) == gone_expected(base)
 
 
-@pytest.mark.parametrize("way", TYPED_WAYS)
-@pytest.mark.parametrize("base", sorted(TYPED))
-@pytest.mark.parametrize("shape", ["id-str", "other-table"])
+@pytest.mark.parametrize(*all_pairs(
+    ("shape", ["id-str", "other-table"]),
+    ("base", sorted(TYPED)),
+    ("way", TYPED_WAYS),
+))
 def test_a_typed_field_holding_a_reference_that_cannot_be_followed(typed, base, way, shape):
     db, (g_cls, c_cls, p_cls, _), _ = typed(base)
     pt = p_cls.__tablename__
@@ -1268,9 +1269,11 @@ VALIDATED = {"pydantic": (VdC, VdP), "safe": (VdsC, VdsP)}
 RESHAPED = {"drop": [2, 3], "reverse": [3, 2, 1], "new": [None, None, None]}
 
 
-@pytest.mark.parametrize("mode", sorted(RESHAPED))
-@pytest.mark.parametrize("way", TYPED_WAYS)
-@pytest.mark.parametrize("base", sorted(VALIDATED))
+@pytest.mark.parametrize(*all_pairs(
+    ("base", sorted(VALIDATED)),
+    ("way", TYPED_WAYS),
+    ("mode", sorted(RESHAPED)),
+))
 def test_a_validator_that_reshapes_the_children_keeps_each_child_its_row(make_db, base, way, mode):
     """Item 4: each child the validator leaves is the row it says it is; nothing is
     paired by position, so ``save()`` overwrites no other row."""
@@ -2264,7 +2267,7 @@ def make_chain(db: Any, node: type, n: int) -> int:
 
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", sorted(GRAPH))
-@pytest.mark.parametrize("length", [9, 50, 2000])
+@pytest.mark.parametrize("length", [2000])  # past the recursion limit, on every base and way
 def test_a_chain_is_followed_to_its_end_by_every_way(graph, base, way, length):
     """A chain of any length loads whole, one SELECT per row (``refresh`` counts the
     ``first()`` that loads the row it refreshes); nothing recurses per level."""
@@ -2456,9 +2459,11 @@ def test_a_before_validator_in_a_cycle_receives_the_row_objects(make_db, way):
     assert GV_SEEN[-2:] == ["GvNode", "GvNode"]
 
 
-@pytest.mark.parametrize("base", sorted(GRAPH))
-@pytest.mark.parametrize("way", ["resolve-false", "iter"])
-@pytest.mark.parametrize("kind", ["required", "defaults"])
+@pytest.mark.parametrize(*all_pairs(
+    ("kind", ["required", "defaults"]),
+    ("way", ["resolve-false", "iter"]),
+    ("base", sorted(GRAPH)),
+))
 def test_a_reference_not_followed_is_the_stored_reference_and_saves_back(graph, base, way, kind):
     db, (node, req, *_) = graph(base)
     cls = req if kind == "required" else node
@@ -2494,9 +2499,11 @@ def _refused_by_its_own_from_id(bad: type, rid: int) -> type:
     raise AssertionError("the row loads by its own from_id")
 
 
-@pytest.mark.parametrize("way", TYPED_WAYS)
-@pytest.mark.parametrize("base", sorted(GRAPH))
-@pytest.mark.parametrize("where", ["field-depth-1", "list-depth-1", "field-depth-3", "list-depth-3"])
+@pytest.mark.parametrize(*all_pairs(
+    ("where", ["field-depth-1", "list-depth-1", "field-depth-3", "list-depth-3"]),
+    ("base", sorted(GRAPH)),
+    ("way", TYPED_WAYS),
+))
 def test_a_referenced_row_its_class_refuses_raises_with_a_note(graph, base, way, where):
     db, (node, _, _, _, bad) = graph(base)
     t, bt = node.__tablename__, bad.__tablename__

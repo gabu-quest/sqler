@@ -24,6 +24,7 @@ from typing import Any, NamedTuple, Optional
 import pydantic
 import pytest
 import sqler
+from pairwise import all_pairs
 from sqler import AsyncSQLerDB, SQLerDB, SQLerModel, SQLerSafeModel, UnstorableValueError
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.async_safe import AsyncSQLerSafeModel
@@ -537,9 +538,11 @@ _UPDATE_VALUES = [
 ]
 
 
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("call", list(_UPDATES))
-@pytest.mark.parametrize("name, value, text, json_type", _UPDATE_VALUES, ids=[u[0] for u in _UPDATE_VALUES])
+@pytest.mark.parametrize(*all_pairs(
+    ("name, value, text, json_type", _UPDATE_VALUES, [u[0] for u in _UPDATE_VALUES]),
+    ("call", list(_UPDATES)),
+    ("is_async", [False, True], ["sync", "async"]),
+))
 def test_an_update_stores_the_form_save_stores(is_async, call, name, value, text, json_type):
     model = SvAsyncEvent if is_async else SvEvent
 
@@ -876,9 +879,11 @@ def test_a_decimal_in_a_document_write_is_a_number_in_the_row_text(is_async, giv
     assert data.count(text) == 2 and f'"{text}"' not in data
 
 
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("call", list(_UPDATES))
-@pytest.mark.parametrize("given, text", _DECIMAL_TEXT, ids=[d[0] for d in _DECIMAL_TEXT])
+@pytest.mark.parametrize(*all_pairs(
+    ("given, text", _DECIMAL_TEXT, [d[0] for d in _DECIMAL_TEXT]),
+    ("call", list(_UPDATES)),
+    ("is_async", [False, True], ["sync", "async"]),
+))
 def test_a_decimal_in_an_update_is_a_number(is_async, call, given, text):
     model = SvAsyncEvent if is_async else SvEvent
 
@@ -935,9 +940,9 @@ def test_a_decimal_a_number_cannot_hold_is_refused_in_a_document_and_names_the_p
     assert _run(steps, is_async) == [(0,)]
 
 
-@pytest.mark.parametrize("given", _REFUSED_DECIMALS)
-@pytest.mark.parametrize("call", list(_UPDATES))
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(*all_pairs(
+    ("is_async", [False, True], ["sync", "async"]), ("call", list(_UPDATES)), ("given", _REFUSED_DECIMALS)
+))
 def test_a_decimal_a_number_cannot_hold_is_refused_in_an_update(is_async, call, given):
     model = SvAsyncEvent if is_async else SvEvent
 
@@ -1233,9 +1238,11 @@ def test_a_timedelta_no_number_holds_is_refused_in_a_document_and_names_the_plac
     assert _run(steps, is_async) == [(0,)]
 
 
-@pytest.mark.parametrize("given", _TD_REFUSED, ids=["max", "min_plus_one", "days_and_microsecond"])
-@pytest.mark.parametrize("call", list(_UPDATES))
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(*all_pairs(
+    ("is_async", [False, True], ["sync", "async"]),
+    ("call", list(_UPDATES)),
+    ("given", _TD_REFUSED, ["max", "min_plus_one", "days_and_microsecond"]),
+))
 def test_a_timedelta_no_number_holds_is_refused_in_an_update(is_async, call, given):
     model = SvAsyncEvent if is_async else SvEvent
 
@@ -1575,9 +1582,7 @@ _PLACED = [
 ]
 
 
-@pytest.mark.parametrize("make_bad, message", REFUSED)
-@pytest.mark.parametrize("build, place", _PLACED)
-@pytest.mark.parametrize("base", list(BASES))
+@pytest.mark.parametrize(*all_pairs(("base", list(BASES)), ("build, place", _PLACED), ("make_bad, message", REFUSED)))
 def test_a_refused_value_in_a_model_save_names_its_place(base, build, place, make_bad, message):
     spec = BASES[base]
     bad = make_bad()

@@ -472,13 +472,6 @@ class SQLerModel(BaseModel):
 
         return find_referrers(db, target_table, target_id)
 
-    @classmethod
-    def _find_ref_paths(cls, data: dict, allowed_tables: set[str], target_id: int) -> list[str]:
-        """Recursively find JSON paths containing references to a target row."""
-        from .integrity import find_ref_paths
-
-        return find_ref_paths(data, allowed_tables, target_id)
-
     # ----- reference validation -----
     @classmethod
     def validate_references(cls):

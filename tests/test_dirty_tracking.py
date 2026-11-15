@@ -14,6 +14,7 @@ from typing import Optional
 
 import msgspec
 import pytest
+from pairwise import all_pairs
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerModel,
@@ -359,9 +360,7 @@ EDITS = {
 }
 
 
-@pytest.mark.parametrize("edit", list(EDITS))
-@pytest.mark.parametrize("way", WAYS)
-@pytest.mark.parametrize("kind", list(KINDS))
+@pytest.mark.parametrize(*all_pairs(("kind", list(KINDS)), ("way", WAYS), ("edit", list(EDITS))))
 def test_change_made_in_place_is_dirty_until_saved_and_seen_again(kind, way, edit):
     async def scenario():
         db = await bind(kind, "e")

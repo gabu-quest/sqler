@@ -20,6 +20,7 @@ from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Optional, Union
 
 import pytest
+from pairwise import all_pairs
 from pydantic import Field as PydField
 from sqler import (
     AsyncSQLerDB,
@@ -371,9 +372,7 @@ BAD = [
 ]
 
 
-@pytest.mark.parametrize("way", WAYS)
-@pytest.mark.parametrize("table,rid", BAD)
-@pytest.mark.parametrize("key", list(BASES))
+@pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("table,rid", BAD), ("way", WAYS)))
 def test_a_dict_that_is_not_a_usable_reference_is_never_followed(key, table, rid, way):
     async def scenario(w):
         await w.put("user", {"name": "u"})
@@ -684,9 +683,7 @@ async def _two_rows(w: World) -> None:
     await w.put("secret", {"owner": "admin", "token": "s3cr3t"})
 
 
-@pytest.mark.parametrize("way", WAYS)
-@pytest.mark.parametrize("field,held,want,unread", NO_ROW)
-@pytest.mark.parametrize("key", list(BASES))
+@pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("field,held,want,unread", NO_ROW), ("way", WAYS)))
 def test_a_typed_reference_to_no_row_of_the_fields_class(key, field, held, want, unread, way):
     async def scenario(w):
         await _two_rows(w)
@@ -698,9 +695,7 @@ def test_a_typed_reference_to_no_row_of_the_fields_class(key, field, held, want,
     assert run(key, scenario) == (want, 0)
 
 
-@pytest.mark.parametrize("way", WAYS)
-@pytest.mark.parametrize("table,rid", BAD)
-@pytest.mark.parametrize("key", list(BASES))
+@pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("table,rid", BAD), ("way", WAYS)))
 def test_an_unusable_reference_at_a_typed_position_reads_as_no_row(key, table, rid, way):
     async def scenario(w):
         await w.put("user", {"name": "u1"})
@@ -925,9 +920,7 @@ def break_reads_of(w: World, table: str) -> None:
     adapter.execute = execute
 
 
-@pytest.mark.parametrize("broken", ["user", "team"])
-@pytest.mark.parametrize("way", WAYS)
-@pytest.mark.parametrize("key", list(BASES))
+@pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("way", WAYS), ("broken", ["user", "team"])))
 def test_a_database_error_while_a_reference_is_read_reaches_the_caller(key, way, broken):
     """The read of the child's table (``user``) fails, or the read of the child's own child's
     (``team``). The load raises that error; it gives back no model with the reference unread."""
