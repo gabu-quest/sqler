@@ -20,7 +20,7 @@ from sqler.exceptions import (
     UnstorableValueError,
 )
 from sqler.query import SQLerQuery
-from sqler.query.query import is_missing_table
+from sqler.query.query import end_failed, is_missing_table
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -38,7 +38,166 @@ class _Level(NamedTuple):
 
     versioned: set[str]
     promoted: dict[str, list[str]]
+    layouts: dict[str, tuple[str, ...]]
     depth: int
+
+
+class _TableMemory:
+    """What a database object remembers of its tables: the names ``SELECT *`` gives for each
+    (``_layouts``), which of them have ``_version`` (``_versioned_tables``), and the promoted
+    columns of each it has seen settled (``_promoted_columns``); each open level of its own
+    transactions remembers what it learned in it (``_levels()``).
+
+    The promoted columns and the version of a table hold for the names remembered beside them.
+    A statement built from them carries the guard of those names (:func:`_guard`), so SQLite
+    refuses it once the table has other columns; only then is the table learned again.
+    The class provides ``_levels()`` and ``_adapter_depth()``.
+    """
+
+    def _init_memory(self) -> None:
+        self._versioned_tables: set[str] = set()
+        self._promoted_columns: dict[str, list[str]] = {}
+        self._layouts: dict[str, tuple[str, ...]] = {}
+        # tables seen settled whose record could not be written then: the next ensure writes it
+        self._unrecorded: set[str] = set()
+
+    def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]], dict[str, tuple[str, ...]]]]:
+        """Where a statement's lesson about a table is kept.
+
+        The innermost open level of this object's own transactions, if the adapter's depth is
+        still that level's; with no level open, the shared memory, at depth 0. Anywhere else
+        the transaction is not this object's (the adapter used directly, another thread's on
+        the single ``":memory:"`` connection): nowhere. That transaction holds the write lock,
+        so a statement built from a table read in it is not refused for a change made since.
+        """
+        depth = self._adapter_depth()
+        levels = self._levels()
+        if levels:
+            level = levels[-1]
+            return (level.versioned, level.promoted, level.layouts) if level.depth == depth else None
+        return (self._versioned_tables, self._promoted_columns, self._layouts) if depth == 0 else None
+
+    def _remember(self, table: str, names: tuple[str, ...], *, promoted: Optional[list[str]] = None) -> None:
+        """Remember that ``table`` has the columns ``names`` (as ``SELECT *`` gives them), and,
+        when given, its ``promoted`` columns. Promoted columns remembered for other names are
+        forgotten."""
+        learned = self._learned()
+        if learned is not None:
+            _put(learned, table, names, promoted)
+
+    def _forget(self, table: str) -> None:
+        """Forget everything remembered about ``table``, in every level and in the shared memory."""
+        places = [(level.versioned, level.promoted, level.layouts) for level in self._levels()]
+        for versioned, promoted, layouts in [*places, (self._versioned_tables, self._promoted_columns, self._layouts)]:
+            versioned.discard(table)
+            promoted.pop(table, None)
+            layouts.pop(table, None)
+
+    def _merge(self, level: _Level) -> None:
+        """``level`` committed: what it learned goes to the level above, or at the outermost
+        level to the shared memory."""
+        above = self._learned()
+        if above is not None:
+            for table, names in level.layouts.items():
+                _put(above, table, names, level.promoted.get(table))
+
+    def _known(self, table: str) -> Optional[tuple[tuple[str, ...], Optional[list[str]], bool]]:
+        """The names, promoted columns (``None``: not checked yet) and version remembered for
+        ``table`` here and now, from the innermost place that remembers its names."""
+        levels = self._levels()
+        for level in reversed(levels) if levels else ():
+            names = level.layouts.get(table)
+            if names is not None:
+                return names, level.promoted.get(table), table in level.versioned
+        names = self._layouts.get(table)
+        return None if names is None else (names, self._promoted_columns.get(table), table in self._versioned_tables)
+
+    def _is_versioned(self, table: str) -> bool:
+        """Whether ``table`` is remembered to have its ``_version`` column, here and now."""
+        known = self._known(table)
+        return known is not None and known[2]
+
+    def _promoted_of(self, table: str) -> Optional[list[str]]:
+        """The promoted columns remembered for ``table`` here and now; ``None`` if it is not remembered."""
+        known = self._known(table)
+        return None if known is None else known[1]
+
+    def _layout_of(self, table: str) -> Optional[tuple[str, ...]]:
+        """The names ``SELECT *`` gives for ``table``, as remembered here and now; ``None`` if not remembered."""
+        known = self._known(table)
+        return None if known is None else known[0]
+
+    def _seen(self, table: str, layout: tuple[str, ...], names: list[str], added: tuple[str, ...] = ()) -> None:
+        """Remember ``table`` as just read (``_names``), with the columns ``added`` since by
+        this object: the promoted columns remembered for that layout stay, and a table with
+        none is remembered as having none (an ensure's check needs no statement for it)."""
+        promoted = self._promoted_of(table) if self._layout_of(table) == layout else None
+        if promoted is None and not _promoted_in(names):
+            promoted = []
+        self._remember(table, (*layout, *added), promoted=promoted)
+
+    def _guard_of(self, table: str, names: Optional[tuple[str, ...]]) -> str:
+        """The guard (:func:`_guard`) of ``names``, those a statement on ``table`` is built
+        from; empty for none. The caller passes the names it read, so the guard and what the
+        statement is kept under cannot differ."""
+        return "" if names is None else _guard(table, names)
+
+
+def _put(place: Any, table: str, names: tuple[str, ...], promoted: Optional[list[str]]) -> None:
+    """Remember in ``place`` (a level's or the shared memory's sets) that ``table`` has the
+    columns ``names``, and its ``promoted`` columns when given; promoted columns remembered
+    for other names are dropped."""
+    versioned, known, layouts = place
+    if layouts.get(table) != names:
+        known.pop(table, None)
+    layouts[table] = names
+    (versioned.add if "_version" in names else versioned.discard)(table)
+    if promoted is not None:
+        known[table] = promoted
+
+
+def _quoted(name: str) -> str:
+    """``name`` as an identifier only: a double-quoted name SQLite cannot resolve would be read
+    as a string, and the guard would hold for a column that is gone."""
+    return "`" + name.replace("`", "``") + "`"
+
+
+@functools.lru_cache(maxsize=512)
+def _guard(table: str, names: tuple[str, ...], value: bool = False) -> str:
+    """The guard a statement built from what is remembered of the validated ``table`` carries:
+    a ``CASE`` whose ``ELSE`` never runs and reads the row value of ``names`` against
+    ``SELECT *`` of the table. SQLite checks it each time it prepares the statement, so the
+    statement is refused once the table has other columns (a name it lacks by its name,
+    another count as "sub-select returns N columns"), and runs as before while it has these.
+
+    ``IN``, not ``=``: SQLite resolves the names before it compares the counts, and a name a
+    connection does not find makes it reload a schema another connection changed, so a
+    connection that has not seen a column this object learned elsewhere runs the statement.
+
+    A term of a ``WHERE``, which is 1; with ``value``, an expression to put in place of one
+    ``?`` of an ``INSERT``, which is that variable."""
+    row = ", ".join(_quoted(name) for name in names)
+    return f"CASE WHEN 1 THEN {'?' if value else '1'} ELSE (SELECT ({row}) IN (SELECT * FROM {table}) FROM {table}) END"
+
+
+def _and_guard(table: str, names: Any) -> str:
+    """`` AND `` and the guard of ``names`` (:func:`_guard`), to end a ``WHERE``; empty without ``names``."""
+    return f" AND {_guard(table, names)}" if names else ""
+
+
+@functools.lru_cache(maxsize=512)
+def _check_sql(table: str, names: tuple[str, ...]) -> str:
+    """The guard of ``names`` (:func:`_guard`) as a statement of its own, which reads no row:
+    sent first in a transaction, it holds for the statements after it there that are built
+    from those names and carry no guard (the bulk writes, the triggers of a search index)."""
+    return f"SELECT {_guard(table, names)};"
+
+
+def _and_fields(columns: list[str], fields: Any) -> list[str]:
+    """The promoted ``columns`` of a table, then each of the caller's ``fields`` they lack: a
+    write names that one as a column, so SQLite refuses it while the table lacks it."""
+    missing = [f for f in fields if f not in columns]
+    return [*columns, *missing] if missing else columns
 
 
 # ---- a stored row read by its id: the one column list and the one row-to-document rule ----
@@ -64,8 +223,16 @@ def _promoted_in(names: Any) -> list[str]:
 
 
 def _columns_sql(table: str) -> str:
-    """The statement that lists the columns of the validated ``table``: no rows when it is missing."""
-    return f'PRAGMA table_info("{table}");'
+    """The statement that lists the columns of the validated ``table``, generated ones too
+    (:func:`_layout`): no rows when it is missing."""
+    return f'PRAGMA table_xinfo("{table}");'
+
+
+def _layout(rows: Any) -> tuple[tuple[str, ...], list[str]]:
+    """The rows of :func:`_columns_sql` as the names ``SELECT *`` gives (all but a hidden
+    column of a virtual table) and the names of the stored columns, those a statement can
+    write (a generated column is not one)."""
+    return tuple(row[1] for row in rows if row[6] != 1), [row[1] for row in rows if row[6] == 0]
 
 
 def _row_columns(promoted: Any = (), versioned: bool = False) -> tuple[str, ...]:
@@ -80,12 +247,13 @@ _MAX_VARIABLES = 999
 
 
 @functools.lru_cache(maxsize=512)
-def _rows_sql(table: str, columns: tuple[str, ...], n: int) -> str:
+def _rows_sql(table: str, columns: tuple[str, ...], n: int, names: Optional[tuple[str, ...]] = None) -> str:
     """The statement that reads ``n`` ids of the validated ``table`` with ``columns``, one
-    variable per id; for ``n == 0`` the ids come as one JSON array in one variable. Built once
-    per shape, so a one-id read builds no text."""
+    variable per id; for ``n == 0`` the ids come as one JSON array in one variable; with the
+    guard of the remembered ``names`` (:func:`_guard`) when given. Built once per shape, so a
+    one-id read builds no text."""
     ids = "SELECT value FROM json_each(?)" if n == 0 else ",".join("?" * n)
-    return f"SELECT {', '.join(columns)} FROM {table} WHERE _id IN ({ids});"
+    return f"SELECT {', '.join(columns)} FROM {table} WHERE _id IN ({ids}){_and_guard(table, names)};"
 
 
 def _row_documents(rows: Any, columns: list[str]) -> list[dict[str, Any]]:
@@ -124,8 +292,12 @@ def _select_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) 
     """The rows of ``ids`` read with ``columns``, in stored order; ``None`` when ``table`` is
     missing (a read creates no table)."""
     n, params = _id_params(ids)
+    sql = _rows_sql(table, columns, n)
     try:
-        return adapter.execute(_rows_sql(table, columns, n), params).fetchall()
+        try:
+            return adapter._execute_judged(sql, params).fetchall()
+        except Exception as exc:
+            end_failed(adapter, exc, table, sql)
     except sqlite3.OperationalError as exc:
         if is_missing_table(exc, table):
             return None
@@ -192,15 +364,22 @@ def _runs(docs: list[dict[str, Any]], columns: Any, fixed: int) -> Any:
         yield keys, run
 
 
-def _insert_sql(table: str, held: Any, n: int, *, versioned: bool = False, upsert: bool = False) -> str:
+@functools.lru_cache(maxsize=512)
+def _insert_sql(
+    table: str, held: Any, n: int, *, versioned: bool = False, upsert: bool = False, guard: Optional[tuple[str, ...]] = None
+) -> str:
     """The ``INSERT`` of ``n`` rows into the validated ``table`` that names ``data`` and the
     columns ``held``, nothing else (a column it does not name gets its DEFAULT, or keeps its
     value on an update). ``versioned``: ``_version`` 0; ``upsert``: each row leads with its
-    ``_id`` and an existing row takes ``data`` and ``held``."""
+    ``_id`` and an existing row takes ``data`` and ``held``. ``guard``: the remembered names
+    whose guard (:func:`_guard`) the first row carries (:func:`_first`). Built once per shape."""
     names = ["_id", "data", *held] if upsert else ["data", "_version", *held] if versioned else ["data", *held]
     lead = ["?", "json(?)"] if upsert else ["json(?)", "0"] if versioned else ["json(?)"]
     mark = f"({', '.join([*lead, *['?'] * len(held)])})"
-    sql = f"INSERT INTO {table} ({', '.join(names)}) VALUES {', '.join([mark] * n)}"
+    marks = [mark] * n
+    if guard:
+        marks[0] = mark.replace("json(?)", f"json({_guard(table, guard, True)})", 1)
+    sql = f"INSERT INTO {table} ({', '.join(names)}) VALUES {', '.join(marks)}"
     if upsert:
         sets = ", ".join(f"{c} = excluded.{c}" for c in ("data", *held))
         sql += f" ON CONFLICT(_id) DO UPDATE SET {sets}"
@@ -223,15 +402,21 @@ def _json_path(key: str) -> str:
 
 
 def _fields_update(
-    table: str, _id: Any, doc: dict[str, Any], fields: Any, promoted: Any, expected_version: Optional[int]
-) -> Optional[tuple[str, list[Any]]]:
+    table: str,
+    _id: Any,
+    doc: dict[str, Any],
+    fields: Any,
+    promoted: Any,
+    expected_version: Optional[int],
+    layout: Any = None,
+) -> Optional[tuple[str, list[Any], Any]]:
     """The ``UPDATE`` of row ``_id`` of the validated ``table`` that writes the ``fields`` of
-    ``doc`` and leaves the row's other fields as they are, with its parameters; ``None`` when
-    an unversioned write has nothing to write.
+    ``doc`` and leaves the row's other fields as they are, with its parameters and ``layout``;
+    ``None`` when an unversioned write has nothing to write.
 
     A JSON field is set in ``data`` from its JSON text, a promoted one in its column, all in
     one statement; with ``expected_version`` the row is written only at that version and its
-    ``_version`` goes up by one. A name in ``fields`` that ``doc`` does not hold (a key of
+    ``_version`` goes up by one; with ``layout``, the guard of those remembered names. A name in ``fields`` that ``doc`` does not hold (a key of
     the row the model has no field for) is not written and not removed. A JSON field's name
     is bound, never put into the SQL text."""
     json_doc, columns = _split_promoted({k: v for k, v in doc.items() if k in fields}, promoted)
@@ -250,11 +435,12 @@ def _fields_update(
     for col, val in columns.items():
         sets.append(f"{col} = ?")
         params.append(val)
+    guard = _and_guard(table, layout)
     if expected_version is None:
-        return (f"UPDATE {table} SET {', '.join(sets)} WHERE _id = ?;", [*params, _id]) if sets else None
+        return (f"UPDATE {table} SET {', '.join(sets)} WHERE _id = ?{guard};", [*params, _id], layout) if sets else None
     sets.append("_version = _version + 1")
     v = expected_version
-    return f"UPDATE {table} SET {', '.join(sets)} WHERE {_AT_VERSION};", [*params, _id, v, v, v]
+    return f"UPDATE {table} SET {', '.join(sets)} WHERE {_AT_VERSION}{guard};", [*params, _id, v, v, v], layout
 
 
 def _refuse_unwritten(gone: bool, table: str, _id: Any) -> None:
@@ -266,6 +452,123 @@ def _refuse_unwritten(gone: bool, table: str, _id: Any) -> None:
             id_=_id,
         )
     raise StaleVersionError("Stale version: update rejected")
+
+
+def _create_sql(table: str) -> str:
+    """The ``CREATE TABLE IF NOT EXISTS`` of the validated ``table`` with no column beside ``data``."""
+    return f"""
+        CREATE TABLE IF NOT EXISTS {table} (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data JSON NOT NULL
+        );
+        """
+
+
+def _upsert_sql(table: str, _id: Any, doc: dict[str, Any], fields: Any, layout: Any = None) -> tuple[str, list[Any], Any]:
+    """The ``INSERT`` of ``doc`` into the validated ``table``, or the ``UPDATE`` of row ``_id``
+    with it, each key of ``fields`` in its column, with its parameters and ``layout``, the
+    remembered names whose guard it carries (:func:`_guard`)."""
+    json_doc, values = _split_promoted(doc, fields)
+    params = [dumps(json_doc), *values.values()]
+    if _id is not None:
+        params.append(_id)
+    return _write_text(table, _id is None, False, tuple(values), layout), params, layout
+
+
+def _versioned_sql(
+    table: str, _id: Any, doc: dict[str, Any], expected_version: Optional[int], fields: Any, layout: Any = None
+) -> tuple[str, list[Any], Any]:
+    """:func:`_upsert_sql` of a versioned row: a new row at version 0, or row ``_id`` written
+    only at ``expected_version``, its version moved by one."""
+    json_doc, values = _split_promoted(doc, fields)
+    params = [dumps(json_doc), *values.values()]
+    if _id is not None:
+        v = expected_version
+        params += (_id, v, v, v)
+    return _write_text(table, _id is None, True, tuple(values), layout), params, layout
+
+
+@functools.lru_cache(maxsize=512)
+def _write_text(table: str, insert: bool, versioned: bool, held: tuple[str, ...], layout: Any) -> str:
+    """The text of :func:`_upsert_sql` (``versioned``: of :func:`_versioned_sql`) for the
+    columns ``held``, built once per table, statement, columns and remembered names."""
+    if insert:
+        lead = ["data", "_version"] if versioned else ["data"]
+        marks = ", ".join([f"json({_guard(table, layout, True) if layout else '?'})", *["0"] * versioned, *["?"] * len(held)])
+        return f"INSERT INTO {table} ({', '.join([*lead, *held])}) VALUES ({marks});"
+    sets = ", ".join(["data = json(?)", *["_version = _version + 1"] * versioned, *(f"{col} = ?" for col in held)])
+    return f"UPDATE {table} SET {sets} WHERE {_AT_VERSION if versioned else '_id = ?'}{_and_guard(table, layout)};"
+
+
+# Each function below that ``yield``s is a run of statements both database classes send the
+# same way (``SQLerDB._sent_all`` and its async twin), in one transaction: it yields
+# ``(sql, params, names)``, gets back the statement's ``lastrowid``, and returns its answer.
+# Its first statement, the one the sender may build again, is guarded by ``layout``, the names
+# remembered beside ``columns``, and is yielded with those names (:func:`_first`); the
+# statements after it carry no guard: the transaction's write lock keeps the table as it is.
+
+
+def _first(table: str, layout: Any, n: int) -> Any:
+    """How the first INSERT of a run, of ``n`` rows, is guarded by the remembered ``layout``
+    (``None`` for a later INSERT, which is not): returns the names its own text is to carry
+    (:func:`_insert_sql`), or yields the check (:func:`_check_sql`) to send before it and
+    returns ``None``. An INSERT of one row carries the guard, as a single write does; a guard
+    in any row of a many-row ``VALUES`` takes the whole statement off SQLite's fast path,
+    which costs more from the second row on than the check as a statement of its own."""
+    if layout and n > 1:
+        yield _check_sql(table, layout), [], layout
+        return None
+    return layout or None
+
+
+def _inserts(table: str, docs: list[dict[str, Any]], versioned: bool, columns: Any, layout: Any = None) -> Any:
+    """The multi-row INSERTs of ``docs`` into the validated ``table``: each run of consecutive
+    documents that hold the same keys of the checked ``columns`` is one statement
+    (:func:`_runs`), within SQLite's variable limit; a column a document does not hold is not
+    named, so it gets its DEFAULT. Returns the ids, in order: the ids of one statement are
+    contiguous, because the transaction holds the write lock from its ``BEGIN IMMEDIATE``."""
+    ids: list[int] = []
+    for held, rows in _runs(docs, columns or (), 0):
+        guard, layout = (yield from _first(table, layout, len(rows))), None
+        params = [p for _, text, values in rows for p in (text, *values)]
+        last = yield _insert_sql(table, held, len(rows), versioned=versioned, guard=guard), params, guard
+        ids.extend(range(last - len(rows) + 1, last + 1))
+    return ids
+
+
+def _bulk_upserts(table: str, docs: list[dict[str, Any]], columns: Any, layout: Any = None) -> Any:
+    """``bulk_upsert``: the documents without an ``_id`` inserted as :func:`_inserts` inserts
+    them, then those with one written into their rows, made if missing. Returns the ``_id`` of
+    each document, in input order; ``docs`` are not written to (:func:`_hand_ids`)."""
+    # by their index in ``docs``, each without its ``_id`` key, which is the row's column
+    inserts = [i for i, doc in enumerate(docs) if doc.get("_id") is None]
+    updates = [i for i, doc in enumerate(docs) if doc.get("_id") is not None]
+    bodies = [{k: v for k, v in doc.items() if k != "_id"} for doc in docs]
+    assigned = [0] * len(docs)
+    for held, rows in _runs([bodies[i] for i in inserts], columns, 0):
+        guard, layout = (yield from _first(table, layout, len(rows))), None
+        params = [p for _, text, values in rows for p in (text, *values)]
+        last = yield _insert_sql(table, held, len(rows), guard=guard), params, guard
+        for j, (k, _, _) in enumerate(rows):
+            assigned[inserts[k]] = last - len(rows) + 1 + j
+    for held, rows in _runs([bodies[i] for i in updates], columns, 1):
+        guard, layout = (yield from _first(table, layout, len(rows))), None
+        params = [p for k, text, values in rows for p in (int(docs[updates[k]]["_id"]), text, *values)]
+        yield _insert_sql(table, held, len(rows), upsert=True, guard=guard), params, guard
+        for k, _, _ in rows:
+            assigned[updates[k]] = int(docs[updates[k]]["_id"])
+    return assigned
+
+
+def _hand_ids(docs: list[dict[str, Any]], ids: list[int]) -> list[int]:
+    """Give each of the caller's ``docs`` that had no ``_id`` its new one, once the bulk upsert
+    that made the rows has succeeded: after a failure the documents are as they were passed,
+    so none holds the id of a row that is not there. Returns ``ids``."""
+    new = [doc.get("_id") is None for doc in docs]
+    for doc, _id, was_new in zip(docs, ids, new):
+        if was_new:  # a dict passed twice gets the id of its last row
+            doc["_id"] = _id
+    return ids
 
 
 # ---- a promoted column: the statements that make it, move the values into it, and record it ----
@@ -373,16 +676,15 @@ def _refused(table: str, column: str, rows: int, first_id: int) -> SchemaError:
     )
 
 
-def _settled(table: Any) -> Any:
-    """Read which promoted columns of ``table`` hold their values. A column the database does not
-    record as settled is read for rows whose document still holds its key, as an earlier version
-    of sqler left them: none, and it is settled; some, and ``SchemaError`` names them, because a
-    row does not say whether its column or its document is newer. Returns ``(column names of the
-    table, the columns to record)``."""
-    names = [row[1] for row in (yield _columns_sql(table), [])]
+def _settled(table: Any, names: list[str]) -> Any:
+    """Read which promoted columns of ``table``, whose columns are ``names``, hold their values.
+    A column the database does not record as settled is read for rows whose document still
+    holds its key, as an earlier version of sqler left them: none, and it is settled; some, and
+    ``SchemaError`` names them, because a row does not say whether its column or its document
+    is newer. Returns the columns to record."""
     promoted = _promoted_in(names)
     if not promoted:
-        return names, []
+        return []
     try:
         rows = yield f"SELECT col FROM {_SETTLED} WHERE tbl = ?;", [table]
     except sqlite3.OperationalError as exc:
@@ -392,7 +694,7 @@ def _settled(table: Any) -> Any:
     settled = {row[0].lower() for row in rows}
     unsettled = [col for col in promoted if col.lower() not in settled]
     if not unsettled:
-        return names, []
+        return []
     (row,) = yield _tally_sql(table, unsettled, [f"t{i} IS NOT NULL" for i in range(len(unsettled))])
     held = {c: {"rows": row[2 * i], "first_id": row[2 * i + 1]} for i, c in enumerate(unsettled) if row[2 * i]}
     if held:
@@ -407,7 +709,7 @@ def _settled(table: Any) -> Any:
             "key out of the documents.",
             details={"table": table, "columns": held},
         )
-    return names, unsettled
+    return unsettled
 
 
 def _record(table: str, columns: list[str], *, made: bool = False) -> Any:
@@ -444,15 +746,15 @@ def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], mod
     ones to it and move each row's value from its document into its column (a row without the
     key gets what it read through ``model``), and follow its search indexes. The record is
     written before any change, so a foreign ``_sqler_promoted`` refuses with nothing made.
-    Returns its promoted columns.
+    Returns its promoted columns and the names ``SELECT *`` gives for it then.
 
     Nothing is changed when a row's value cannot be kept (``SchemaError``)."""
-    names = [row[1] for row in (yield _columns_sql(table), [])]
+    layout, names = _layout((yield _columns_sql(table), []))
     if not names:
         defs = [f"{col} {d}" for col, d in promoted.items()] + [f"CHECK ({c})" for c in checks.values()]
         yield from _record(table, list(promoted), made=True)  # first: a foreign record table changes nothing
         yield f"CREATE TABLE IF NOT EXISTS {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL{''.join(', ' + d for d in defs)});", []
-        return list(promoted)
+        return list(promoted), ("_id", "data", *promoted)
     added = {col: d for col, d in promoted.items() if col not in names}
     if added:
         fills, conditions = {}, []
@@ -482,13 +784,13 @@ def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], mod
         from sqler.fts import _follow_promotion  # fts imports this module
 
         yield from _follow_promotion(table, list(added), columns)
-    return columns
+    return columns, (*layout, *added)
 
 
 def _moved(table: str, column: str, keep: str) -> Any:
     """``move_promoted``: take ``column``'s key out of every document of ``table``, its value going
     into the column (``keep="document"``) or not (``keep="column"``), and record the column."""
-    info = {row[1]: row for row in (yield _columns_sql(table), [])}
+    info = {row[1]: row for row in (yield _columns_sql(table), []) if row[6] == 0}
     if not info:
         raise TableNotFoundError(f"Table {table} does not exist", table=table)
     if column not in _promoted_in(info):
@@ -519,7 +821,7 @@ def _unwritable(exc: sqlite3.OperationalError) -> bool:
     return code is not None and (code & 0xFF) in (sqlite3.SQLITE_READONLY, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 
 
-class SQLerDB:
+class SQLerDB(_TableMemory):
     """Document store for JSON blobs on SQLite.
 
     SQLerDB persists Python dicts as JSON in a table with schema
@@ -566,15 +868,18 @@ class SQLerDB:
         self.adapter.connect()
         # serialize DDL operations (e.g., adding _version) across threads
         self._ddl_lock = threading.RLock()
-        # what is remembered about committed tables: versioned tables, and the promoted columns
-        # of each table this object has seen settled (:func:`_settled`)
-        self._versioned_tables: set[str] = set()
-        self._promoted_columns: dict[str, list[str]] = {}
-        # tables seen settled whose record could not be written then: the next ensure writes it
-        self._unrecorded: set[str] = set()
+        # what is remembered about committed tables (``_TableMemory``): versioned tables, and the
+        # promoted columns of each table this object has seen settled (:func:`_settled`)
+        self._init_memory()
         # what each open level of this object's own transactions learned, innermost last; per
         # thread, like the adapter's depth
         self._open = _OpenLevels()
+
+    def _levels(self) -> list[_Level]:
+        return self._open.levels
+
+    def _adapter_depth(self) -> int:
+        return self.adapter._txn_depth
 
     def ensure_table(
         self,
@@ -623,13 +928,7 @@ class SQLerDB:
             table: Table name to ensure.
         """
         table = validate_table_name(table)
-        ddl = f"""
-        CREATE TABLE IF NOT EXISTS {table} (
-            _id INTEGER PRIMARY KEY AUTOINCREMENT,
-            data JSON NOT NULL
-        );
-        """
-        self.adapter.execute(ddl)
+        self.adapter.execute(_create_sql(table))
         self.adapter.auto_commit()
 
     def _ensure_promoted(
@@ -682,11 +981,12 @@ class SQLerDB:
             validate_check_expression(chk_expr)
 
         with self._ddl_lock:
-            names, unsettled = self._run(_settled(table))
+            layout, names = self._names(table)
+            unsettled = self._run(_settled(table, names))
             unrecorded = False
             if not names or any(col not in names for col in promoted):
                 with self:  # one transaction: the column, its values and the record, or nothing
-                    columns = self._run(_promotion(table, promoted, checks, model))
+                    columns, layout = self._run(_promotion(table, promoted, checks, model))
             else:
                 columns = _promoted_in(names)
                 if unsettled:
@@ -697,7 +997,7 @@ class SQLerDB:
                         if not _unwritable(exc):
                             raise
                         unrecorded = True  # settled all the same: there is nothing to add or move
-            self._remember(table, promoted=columns)
+            self._remember(table, layout, promoted=columns)
             (self._unrecorded.add if unrecorded else self._unrecorded.discard)(table)
 
     def move_promoted(self, table: str, column: str, *, keep: str) -> None:
@@ -726,77 +1026,148 @@ class SQLerDB:
             self._run(_moved(table, column, keep))
 
     def _run(self, steps: Any) -> Any:
-        """Send each statement ``steps`` yields, answer it with its rows or its error, and
-        return what ``steps`` returns."""
+        """Send each statement ``steps`` yields, answer it with its rows or its
+        ``sqlite3.OperationalError``, and return what ``steps`` returns. A failure ends what a
+        failed statement ends only when ``steps`` raises it (or its own error for it): one it
+        reads as an answer (the record of settled columns not there) ends nothing."""
+        adapter = self.adapter
         try:
             step = next(steps)
             while True:
                 try:
-                    rows = self.adapter.execute(*step).fetchall()
+                    rows = adapter._execute_judged(*step).fetchall()
                 except sqlite3.OperationalError as exc:
-                    step = steps.throw(exc)
+                    try:
+                        step = steps.throw(exc)
+                    except StopIteration:
+                        raise
+                    except Exception as raised:
+                        adapter._end_failed_statement(raised)
+                except Exception as exc:
+                    adapter._end_failed_statement(exc)
                 else:
                     step = steps.send(rows)
         except StopIteration as done:
             return done.value
 
-    def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]]]]:
-        """Where an ensure call keeps what it learned about a table.
+    def _names(self, table: str) -> tuple[tuple[str, ...], list[str]]:
+        """The names ``SELECT *`` gives for the validated ``table`` and the names of its stored
+        columns (:func:`_layout`); none when it is missing."""
+        return _layout(self.adapter.execute(_columns_sql(table)).fetchall())
 
-        The innermost open level of this object's own transactions, if the adapter's depth is
-        still that level's; with no level open, the shared memory, at depth 0. Anywhere else
-        the transaction is not this object's (the adapter used directly, another thread's on
-        the single ``":memory:"`` connection): nowhere. Forgetting costs a repeated
-        ``CREATE TABLE IF NOT EXISTS``, remembering wrongly loses a write.
+    def _sent(self, table: str, make: Any, *, immediate: bool = False) -> Any:
+        """Send the statement ``make()`` builds from what this object remembers of ``table``
+        and return its cursor; ``None`` when ``make()`` returns ``None`` (nothing to send).
+        ``make()`` gives ``(sql, params, names)``: ``names`` are the remembered names the
+        statement was built from, whose guard it carries (:func:`_guard`), ``None`` for none.
+
+        SQLite refuses the statement when the table no longer has those names. When the names
+        the table has now differ (:meth:`_has_moved`), nothing has been ended and the statement is
+        built and sent again; any other failure ends what a failed statement ends (all that
+        was sent since the last commit, outside a transaction) and is raised as it is, but a
+        read of a missing ``table``, which ends nothing (:func:`end_failed`).
+
+        ``immediate``: outside a transaction the write lock is taken first with
+        ``BEGIN IMMEDIATE`` (less live-lock under contention), and that transaction is ended
+        on every path: committed on success, rolled back by the adapter's rule when anything
+        raises before the commit, with the error that raised leaving.
         """
-        depth = self.adapter._txn_depth
-        levels = self._open.levels
-        if levels:
-            level = levels[-1]
-            return (level.versioned, level.promoted) if level.depth == depth else None
-        return (self._versioned_tables, self._promoted_columns) if depth == 0 else None
+        adapter = self.adapter
+        while True:
+            step = make()
+            if step is None:
+                return None
+            sql, params, names = step
+            try:
+                if immediate and not adapter.in_transaction:
+                    return self._sent_immediate(sql, params)
+                return adapter._execute_judged(sql, params)
+            except Exception as exc:
+                if isinstance(exc, sqlite3.OperationalError) and self._has_moved(table, names):
+                    continue
+                end_failed(adapter, exc, table, sql)
 
-    def _remember(self, table: str, *, promoted: Optional[list[str]] = None) -> None:
-        """Remember ``table``'s ``promoted`` columns, or without them that it has ``_version``."""
-        learned = self._learned()
-        if learned is None:
-            return
-        if promoted is None:
-            learned[0].add(table)
-        else:
-            learned[1][table] = promoted
+    def _sent_immediate(self, sql: str, params: list[Any]) -> Any:
+        """The statement sent in a transaction of its own begun with ``BEGIN IMMEDIATE`` and committed."""
+        try:
+            self.adapter.execute("BEGIN IMMEDIATE;")
+        except (RuntimeError, ValueError):
+            pass  # an adapter that cannot run BEGIN here: the statement runs in its own transaction
+        try:
+            cursor = self.adapter.execute(sql, params)
+            self.adapter.auto_commit()
+        except BaseException as exc:
+            self.adapter.__exit__(type(exc), exc, exc.__traceback__)  # rolls back what is still open
+            raise
+        return cursor
 
-    def _is_versioned(self, table: str) -> bool:
-        """Whether ``table`` is remembered to have its ``_version`` column, here and now."""
-        return table in self._versioned_tables or any(table in level.versioned for level in self._open.levels)
+    def _has_moved(self, table: str, names: Optional[tuple[str, ...]]) -> bool:
+        """Whether ``table`` has other names now than ``names``, those a refused statement was
+        built from: the names remembered now when they are others (another statement learned
+        the table since), else the names read now (:meth:`_learn`). A statement built from
+        nothing remembered, or a table that is gone or cannot be read now, has nothing to
+        build again from."""
+        if names is None:
+            return False  # SQLite refused it for itself
+        now = self._layout_of(table)
+        if now is None or now == names:
+            try:
+                now = self._learn(table)[0]
+            except sqlite3.OperationalError:
+                return False
+        return bool(now) and now != names
 
-    def _promoted_of(self, table: str) -> Optional[list[str]]:
-        """The promoted columns remembered for ``table`` here and now; ``None`` if it is not remembered."""
-        for level in reversed(self._open.levels):
-            if table in level.promoted:
-                return level.promoted[table]
-        return self._promoted_columns.get(table)
+    def _memory_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]]]:
+        """The promoted columns of the validated ``table`` (:meth:`_columns_of`) and the names
+        remembered beside them, whose guard a statement built from those columns carries.
+
+        A writer splits a document by these columns. ``fields``: the columns a caller says
+        the table has (a class's promoted fields); one the table lacks is added
+        (:func:`_and_fields`), so its write is refused rather than put into ``data``."""
+        if self._open.levels:
+            known = self._known(table)
+            layout, columns = (None, None) if known is None else known[:2]
+        else:  # no transaction of this object's is open: the shared memory, read here (every call comes through)
+            layout = self._layouts.get(table)
+            columns = None if layout is None else self._promoted_columns.get(table)
+        if columns is None:
+            columns, layout = self._columns_of(table), self._layout_of(table)
+        return (_and_fields(columns, fields) if fields else columns), layout
 
     def _columns_of(self, table: str) -> list[str]:
         """The promoted columns of the validated ``table``, which every reader sets over the
         document: remembered, or else checked once as an ensure checks them (:func:`_settled`,
-        which writes nothing) and remembered (a table without any as having none). A missing
-        table has none and is not remembered.
+        which writes nothing) and remembered with the table's names (a table without any as
+        having none). A missing table has none and is not remembered.
 
         Raises:
             SchemaError: A document still holds the key of a column, which would hide its value.
         """
         promoted = self._promoted_of(table)
-        if promoted is None:
-            names, unsettled = self._run(_settled(table))
-            promoted = _promoted_in(names)
-            learned = self._learned() if names else None
-            if learned is not None:
-                # an entry made since the statements above (another thread's ensure) is newer
-                promoted = learned[1].setdefault(table, promoted)
-                if unsettled:
-                    self._unrecorded.add(table)
-        return promoted
+        return self._learn(table)[1] if promoted is None else promoted
+
+    def _learn(self, table: str) -> tuple[tuple[str, ...], list[str]]:
+        """Read the names ``SELECT *`` gives for the validated ``table`` and its promoted columns,
+        checked as an ensure checks them (:func:`_settled`, which writes nothing), and remember
+        them; returns both, none for a missing table, which is forgotten. Where nothing can be
+        remembered (a transaction that is not this object's), names other than those
+        remembered are forgotten, so no statement is built from them again.
+
+        Raises:
+            SchemaError: A document still holds the key of a column, which would hide its value.
+        """
+        layout, names = self._names(table)
+        unsettled = self._run(_settled(table, names))
+        promoted = _promoted_in(names)
+        if not names:
+            self._forget(table)
+        elif self._learned() is not None:
+            self._remember(table, layout, promoted=promoted)
+            if unsettled:
+                self._unrecorded.add(table)
+        elif layout != self._layout_of(table):
+            self._forget(table)
+        return layout, promoted
 
     def upsert_document_promoted(
         self,
@@ -811,40 +1182,38 @@ class SQLerDB:
             table: Table name.
             _id: Existing id to update, or ``None`` to insert.
             doc: Full document payload.
-            promoted_fields: Keys to extract from doc into real columns.
+            promoted_fields: Columns the table must have. Every key that names a
+                column of the table, as it is now, goes into it; one of these the table
+                lacks is refused by SQLite.
 
         Returns:
             int: The existing or newly assigned ``_id``.
+
+        Raises:
+            NotFoundError: There is no row ``_id``, or no such table; nothing is written.
         """
-        table = validate_table_name(table)
-        # Split promoted from JSON
-        json_doc, promoted_vals = _split_promoted(doc, promoted_fields)
+        return self._upsert(validate_table_name(table), _id, doc, promoted_fields)
 
-        payload = dumps(json_doc)
+    def _upsert(self, table: str, _id: Optional[int], doc: dict[str, Any], fields: Any = ()) -> int:
+        """Write ``doc`` as a new row, or into row ``_id``, each key of the table's columns in
+        its column (:meth:`_memory_of`, with the caller's ``fields``), with the guard of what is
+        remembered of it (:meth:`_sent`). A write by ``_id`` makes no table."""
 
-        if _id is None:
-            # INSERT
-            cols = ["data"] + list(promoted_vals.keys())
-            placeholders = ["json(?)"] + ["?" for _ in promoted_vals]
-            params = [payload] + list(promoted_vals.values())
-            sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(placeholders)});"
-            cursor = self.adapter.execute(sql, params)
-            self.adapter.auto_commit()
-            return cursor.lastrowid
-        else:
-            # UPDATE
-            set_parts = ["data = json(?)"]
-            params: list[Any] = [payload]
-            for col, val in promoted_vals.items():
-                set_parts.append(f"{col} = ?")
-                params.append(val)
-            params.append(_id)
-            sql = f"UPDATE {table} SET {', '.join(set_parts)} WHERE _id = ?;"
-            cur = self.adapter.execute(sql, params)
-            self.adapter.auto_commit()
-            if cur.rowcount > 0:
-                return _id
+        def make() -> tuple[str, list[Any]]:
+            return _upsert_sql(table, _id, doc, *self._memory_of(table, fields))
+
+        try:
+            cursor = self._sent(table, make)
+        except sqlite3.OperationalError as exc:
+            if _id is None or not is_missing_table(exc, table):
+                raise
             _refuse_unwritten(True, table, _id)
+        self.adapter.auto_commit()
+        if _id is None:
+            return cursor.lastrowid
+        if cursor.rowcount > 0:
+            return _id
+        _refuse_unwritten(True, table, _id)
 
     def upsert_with_version_promoted(
         self,
@@ -861,47 +1230,46 @@ class SQLerDB:
             _id: Existing row id for update; ``None`` to insert.
             doc: Document to write.
             expected_version: Version expected by the caller.
-            promoted_fields: Keys to extract into real columns.
+            promoted_fields: Columns the table must have. Every key that names a
+                column of the table, as it is now, goes into it; one of these the table
+                lacks is refused by SQLite.
 
         Returns:
             tuple[int, int]: The row id and new version.
         """
-        table = validate_table_name(table)
-        json_doc, promoted_vals = _split_promoted(doc, promoted_fields)
-        if not self._is_versioned(table):
-            self._ensure_versioned_table(table)
+        return self._upsert_versioned(validate_table_name(table), _id, doc, expected_version, promoted_fields)
 
-        payload = dumps(json_doc)
-
-        if _id is None:
-            cols = ["data", "_version"] + list(promoted_vals.keys())
-            placeholders = ["json(?)", "0"] + ["?" for _ in promoted_vals]
-            params = [payload] + list(promoted_vals.values())
-            sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(placeholders)});"
-            cur = self.adapter.execute(sql, params)
-            self.adapter.auto_commit()
-            return cur.lastrowid, 0
-
-        if expected_version is None:
+    def _upsert_versioned(
+        self,
+        table: str,
+        _id: Optional[int],
+        doc: dict[str, Any],
+        expected_version: Optional[int],
+        fields: Any = (),
+    ) -> tuple[int, int]:
+        """``upsert_with_version`` of ``doc``, split as :meth:`_upsert` splits it. The table
+        gets its ``_version`` column first; a write by ``_id`` makes no table (``NotFoundError``)."""
+        if _id is not None and expected_version is None:
             raise ValueError("expected_version required for update")
 
-        set_parts = ["data = json(?)", "_version = _version + 1"]
-        params_list: list[Any] = [payload]
-        for col, val in promoted_vals.items():
-            set_parts.append(f"{col} = ?")
-            params_list.append(val)
-        params_list.extend([_id, expected_version, expected_version, expected_version])
+        def make() -> tuple[str, list[Any]]:
+            self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
+            if not self._is_versioned(table) and (_id is None or self._has_version_column(table) is not None):
+                self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
+            return _versioned_sql(table, _id, doc, expected_version, *self._memory_of(table, fields))
 
-        sql = (
-            f"UPDATE {table} SET {', '.join(set_parts)} "
-            f"WHERE {_AT_VERSION};"
-        )
-        cur = self._versioned_update(sql, params_list)
-        rc = getattr(cur, "rowcount", -1)
-        if rc <= 0:
-            self.adapter.execute(
-                f"SELECT _version FROM {table} WHERE _id = ?;", [_id]
-            ).fetchone()
+        if _id is None:
+            cursor = self._sent(table, make)
+            self.adapter.auto_commit()
+            return cursor.lastrowid, 0
+        try:
+            cursor = self._sent(table, make, immediate=True)
+        except sqlite3.OperationalError as exc:
+            if not is_missing_table(exc, table):
+                raise
+            _refuse_unwritten(False, table, _id)  # a row at another version, as with the table there
+        if cursor.rowcount <= 0:
+            self.adapter.execute(f"SELECT _version FROM {table} WHERE _id = ?;", [_id]).fetchone()
             raise StaleVersionError("Stale version: update rejected")
         return _id, expected_version + 1
 
@@ -918,7 +1286,7 @@ class SQLerDB:
         """
         table = validate_table_name(table)
         self._ensure_table(table)
-        return self.upsert_document_promoted(table, None, doc, self._columns_of(table))
+        return self._upsert(table, None, doc)
 
     def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
         """Insert or update a document, as :meth:`insert_document` writes it; an update leaves a
@@ -933,13 +1301,14 @@ class SQLerDB:
             int: The existing or newly assigned ``_id``.
 
         Raises:
-            NotFoundError: The table has no row ``_id``; nothing is written.
+            NotFoundError: The table has no row ``_id``, or there is no such table; nothing is
+                written and no table is made.
         """
         table = validate_table_name(table)
-        self._ensure_table(table)
         if _id is None:
+            self._ensure_table(table)
             return self.insert_document(table, doc)
-        return self.upsert_document_promoted(table, _id, doc, self._columns_of(table))
+        return self._upsert(table, _id, doc)
 
     def _update_fields(
         self,
@@ -952,29 +1321,36 @@ class SQLerDB:
     ) -> Optional[int]:
         """Write the ``fields`` of ``doc`` into row ``_id`` and leave its other fields as they
         are, in one statement: a field that names a column beside ``data`` in its column, the
-        rest in ``data``. The columns are the table's (:meth:`_columns_of`), whatever
-        ``promoted`` the caller passes. With ``expected_version`` the row is written only at
+        rest in ``data``. The columns are the table's, with the caller's ``promoted``
+        (:meth:`_memory_of`). With ``expected_version`` the row is written only at
         that version, as ``upsert_with_version`` writes it, and the new version is returned.
 
         Raises:
-            NotFoundError: The row is gone: a write of some fields cannot recreate it.
+            NotFoundError: The row is gone, or the table: a write of some fields cannot
+                recreate it, and makes no table.
             StaleVersionError: The row is at another version.
         """
         table = validate_table_name(table)
-        if expected_version is None:
-            self._ensure_table(table)
-        elif not self._is_versioned(table):
-            self._ensure_versioned_table(table)
-        update = _fields_update(table, _id, doc, fields, self._columns_of(table), expected_version)
-        if update is None:
+
+        def make() -> Optional[tuple[str, list[Any]]]:
+            if expected_version is not None and not self._is_versioned(table) and self._has_version_column(table) is not None:
+                self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
+            columns, layout = self._memory_of(table, promoted)
+            return _fields_update(table, _id, doc, fields, columns, expected_version, layout)
+
+        try:
+            cur = self._sent(table, make, immediate=expected_version is not None)
+        except sqlite3.OperationalError as exc:
+            if not is_missing_table(exc, table):
+                raise
+            _refuse_unwritten(True, table, _id)
+        if cur is None:
             return None
         if expected_version is None:
-            cur = self.adapter.execute(*update)
             self.adapter.auto_commit()
             if cur.rowcount > 0:
                 return None
             _refuse_unwritten(True, table, _id)
-        cur = self._versioned_update(*update)
         if cur.rowcount > 0:
             return expected_version + 1
         row = self.adapter.execute(f"SELECT 1 FROM {table} WHERE _id = ?;", [_id]).fetchone()
@@ -999,7 +1375,7 @@ class SQLerDB:
             return []
         table = validate_table_name(table)
         self._ensure_table(table)
-        return self._insert_many_chunked(table, docs, versioned=False, promoted_fields=self._columns_of(table))
+        return self._insert_many_chunked(table, docs, versioned=False)
 
     def insert_many_promoted(
         self, table: str, docs: list[dict[str, Any]], promoted_fields: list[str]
@@ -1009,7 +1385,9 @@ class SQLerDB:
         Args:
             table: Table name.
             docs: List of full document payloads.
-            promoted_fields: Keys to extract from each doc into real columns.
+            promoted_fields: Columns the table must have. Every key that names a
+                column of the table, as it is now, goes into it; one of these the table
+                lacks is refused by SQLite.
 
         Returns:
             list[int]: Assigned ``_id`` for each document, preserving order.
@@ -1036,9 +1414,9 @@ class SQLerDB:
         if not docs:
             return []
         table = validate_table_name(table)
-        columns = self._columns_of(table)
+        self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
         self._ensure_versioned_table(table)
-        ids = self._insert_many_chunked(table, docs, versioned=True, promoted_fields=columns)
+        ids = self._insert_many_chunked(table, docs, versioned=True)
         return [(id_, 0) for id_ in ids]
 
     def insert_many_with_version_promoted(
@@ -1049,7 +1427,9 @@ class SQLerDB:
         Args:
             table: Table name.
             docs: List of full document payloads.
-            promoted_fields: Keys to extract into real columns.
+            promoted_fields: Columns the table must have. Every key that names a
+                column of the table, as it is now, goes into it; one of these the table
+                lacks is refused by SQLite.
 
         Returns:
             list[tuple[int, int]]: ``(id, 0)`` pairs for each document.
@@ -1071,24 +1451,39 @@ class SQLerDB:
         promoted_fields: list[str] | None = None,
     ) -> list[int]:
         """Internal: the multi-row INSERTs of ``docs`` into the validated ``table``, in one
-        transaction. Each run of consecutive documents that hold the same keys of the checked
-        ``promoted_fields`` is one statement (:func:`_runs`), within SQLite's variable limit;
-        a column a document does not hold is not named, so it gets its DEFAULT.
+        transaction (:func:`_inserts`), split as :meth:`_upsert` splits a document.
         """
-        all_ids: list[int] = []
         with self.transaction():
-            for held, rows in _runs(docs, promoted_fields or (), 0):
-                params = [p for _, text, values in rows for p in (text, *values)]
-                cursor = self.adapter.execute(_insert_sql(table, held, len(rows), versioned=versioned), params)
+            return self._sent_all(table, lambda: _inserts(table, docs, versioned, *self._memory_of(table, promoted_fields or ())))
+
+    def _sent_all(self, table: str, make: Any) -> Any:
+        """Send the statements of the steps ``make()`` makes (each answered with its cursor's
+        ``lastrowid``) and return what they return: the first one, built from what this
+        object remembers of ``table``, as :meth:`_sent` sends one (built and sent again when
+        the table has other names now), the rest after it in the transaction it is in, whose
+        write lock keeps the table as it is."""
+        adapter = self.adapter
+        while True:
+            steps = make()
+            sql, params, names = next(steps)
+            try:
+                cursor = adapter._execute_judged(sql, params)
+                break
+            except Exception as exc:
+                if isinstance(exc, sqlite3.OperationalError) and self._has_moved(table, names):
+                    continue
+                end_failed(adapter, exc, table, sql)
+        execute = adapter.execute
+        try:
+            while True:
                 try:
-                    last_id = cursor.lastrowid
+                    last = cursor.lastrowid
                 finally:
                     cursor.close()
-                # ID range is contiguous because BEGIN IMMEDIATE (from
-                # self.transaction()) holds an exclusive write lock, preventing
-                # concurrent inserts from interleaving AUTOINCREMENT IDs.
-                all_ids.extend(range(last_id - len(rows) + 1, last_id + 1))
-        return all_ids
+                sql, params, _ = steps.send(last)
+                cursor = execute(sql, params)
+        except StopIteration as done:
+            return done.value
 
     def bulk_upsert(self, table: str, docs: list[dict[str, Any]]) -> list[int]:
         """Upsert multiple documents efficiently.
@@ -1097,9 +1492,9 @@ class SQLerDB:
         (with ``_id``) are updated.
 
         Uses chunked multi-row INSERT statements (same pattern as
-        ``_insert_many_chunked``) to minimize per-row Python overhead. A column
-        whose key a document does not hold is not written: a new row gets its
-        DEFAULT, an existing row keeps its value.
+        ``_insert_many_chunked``) to minimize per-row Python overhead, in one
+        transaction. A column whose key a document does not hold is not written: a
+        new row gets its DEFAULT, an existing row keeps its value.
 
         Args:
             table: Table name.
@@ -1113,28 +1508,9 @@ class SQLerDB:
         self._ensure_table(table)
         if not docs:
             return []
-        columns = self._columns_of(table)
-        # inserts (no _id) and updates (an _id), by their index in ``docs``, so the ids come back
-        # in input order; each without its ``_id`` key, which is the row's column
-        inserts = [i for i, doc in enumerate(docs) if doc.get("_id") is None]
-        updates = [i for i, doc in enumerate(docs) if doc.get("_id") is not None]
-        bodies = [{k: v for k, v in doc.items() if k != "_id"} for doc in docs]
-        assigned = [0] * len(docs)
-        with self.adapter as adapter:
-            for held, rows in _runs([bodies[i] for i in inserts], columns, 0):
-                params = [p for _, text, values in rows for p in (text, *values)]
-                last_id = adapter.execute(_insert_sql(table, held, len(rows)), params).lastrowid
-                # ID range is contiguous because BEGIN IMMEDIATE (from
-                # self.adapter context) holds an exclusive write lock.
-                for j, (k, _, _) in enumerate(rows):
-                    i = inserts[k]
-                    assigned[i] = docs[i]["_id"] = last_id - len(rows) + 1 + j
-            for held, rows in _runs([bodies[i] for i in updates], columns, 1):
-                params = [p for k, text, values in rows for p in (int(docs[updates[k]]["_id"]), text, *values)]
-                adapter.execute(_insert_sql(table, held, len(rows), upsert=True), params)
-                for k, _, _ in rows:
-                    assigned[updates[k]] = int(docs[updates[k]]["_id"])
-        return assigned
+        with self.transaction():
+            ids = self._sent_all(table, lambda: _bulk_upserts(table, docs, *self._memory_of(table)))
+        return _hand_ids(docs, ids)
 
     def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         """Fetch a document by id.
@@ -1174,38 +1550,51 @@ class SQLerDB:
 
         Returns the stored rows of ``ids`` (stored order) and the columns they were read
         with: the promoted columns of ``table`` (:meth:`_columns_of`), and ``_version`` when
-        ``versioned``. A missing table gives ``None`` rows and is not created. A table without
-        its ``_version`` column (:meth:`_has_version_column`) gives its rows at version 0 and
-        keeps its schema: the first versioned write adds the column.
+        ``versioned``, read with the guard of what is remembered (:meth:`_sent`). A missing table
+        gives ``None`` rows and is not created. A table without its ``_version`` column
+        (:meth:`_has_version_column`) gives its rows at version 0 and keeps its schema: the
+        first versioned write adds the column.
         """
         table = validate_table_name(table)
-        has_version = versioned and self._has_version_column(table)
-        promoted = self._columns_of(table)
-        columns = _row_columns(promoted, versioned)
-        if versioned and not has_version:
-            rows = _select_rows(self.adapter, table, _row_columns(promoted), ids)
-            return (None if rows is None else [(r[0], r[1], 0, *r[2:]) for r in rows]), columns
-        return _select_rows(self.adapter, table, columns, ids), columns
+        n, params = _id_params(ids)
+        adapter = self.adapter
+        columns = _row_columns((), versioned)  # of the rows given
+        try:
+            while True:  # the loop of :meth:`_sent`, written here: every read comes through
+                promoted, layout = self._memory_of(table)
+                columns = _row_columns(promoted, versioned)
+                read = _row_columns(promoted) if versioned and not self._has_version_column(table) else columns
+                sql = _rows_sql(table, read, n, layout)
+                try:
+                    cursor = adapter._execute_judged(sql, params)
+                    break
+                except Exception as exc:
+                    if isinstance(exc, sqlite3.OperationalError) and self._has_moved(table, layout):
+                        continue
+                    end_failed(adapter, exc, table, sql)
+            rows = cursor.fetchall()
+        except sqlite3.OperationalError as exc:
+            if is_missing_table(exc, table):
+                return None, columns  # a read creates no table
+            raise
+        return (rows if read is columns else [(r[0], r[1], 0, *r[2:]) for r in rows]), columns
 
     def _has_version_column(self, table: str) -> Optional[bool]:
         """Whether the validated ``table`` has its ``_version`` column; writes nothing.
 
         ``True`` when it has it, ``False`` when the table is there without it, ``None`` when
-        there is no such table. Remembered, or else looked up with one ``PRAGMA table_info``
-        and remembered once it has it (and, as an ensure does, that it has no promoted
-        columns, where it has none). A table without the column, or a missing table, is not
-        remembered: each call looks again, one statement, until a versioned write adds the
-        column.
+        there is no such table. Read from the names remembered for it, or else looked up with
+        one ``PRAGMA table_xinfo`` and remembered (:meth:`_seen`); a missing table is not
+        remembered.
         """
         if self._is_versioned(table):
             return True
-        names = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
-        if names and self._promoted_of(table) is None and not _promoted_in(names):
-            self._remember(table, promoted=[])
-        if "_version" not in names:
-            return False if names else None
-        self._remember(table)
-        return True
+        layout = self._layout_of(table)
+        if layout is None:
+            layout, names = self._names(table)
+            if layout:
+                self._seen(table, layout, names)
+        return ("_version" in layout) if layout else None
 
     def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
@@ -1429,21 +1818,21 @@ class SQLerDB:
 
     def _begin_level(self) -> None:
         self.adapter.begin_transaction()
-        self._open.levels.append(_Level(set(), {}, self.adapter._txn_depth))
+        self._open.levels.append(_Level(set(), {}, {}, self.adapter._txn_depth))
 
     def _end_level(self, commit: bool, *, leaving: Optional[BaseException] = None) -> None:
         """End this thread's innermost level; what it learned about tables goes with it.
 
-        A commit moves it to the level above, or at the outermost level to the shared memory;
-        a rollback, or a commit that fails, drops it. That runs no statement and raises
-        nothing. ``leaving``: the caller's exception on its way out (see ``_end_transaction``).
+        A commit moves it to the level above, or at the outermost level to the shared memory
+        (``_merge``); a rollback, or a commit that fails, drops it. That runs no statement and
+        raises nothing. ``leaving``: the caller's exception on its way out (see
+        ``_end_transaction``).
         """
         levels = self._open.levels
         level = levels.pop() if levels else None  # none: begun on another thread; nothing to merge
         _end_transaction(self.adapter, commit, leaving)
-        if commit and level is not None and (above := self._learned()) is not None:
-            above[0].update(level.versioned)
-            above[1].update(level.promoted)
+        if commit and level is not None:
+            self._merge(level)
 
     # ---- versioned (optimistic locking) helpers ----
 
@@ -1457,46 +1846,17 @@ class SQLerDB:
         """
         self._ensure_table(table)
         # fast path: check without lock
-        cols = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
-        if self._promoted_of(table) is None and not _promoted_in(cols):
-            self._remember(table, promoted=[])  # promoted columns are remembered once checked
-        if "_version" in cols:
-            self._remember(table)
-            return
-        # serialize DDL; re-check inside lock
-        with self._ddl_lock:
-            cols = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
-            if "_version" not in cols:
-                self.adapter.execute(
-                    f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'
-                )
-                self.adapter.auto_commit()
-            self._remember(table)
-
-    def _versioned_update(self, sql: str, params: list[Any]) -> Any:
-        """Run a versioned ``UPDATE`` and commit it unless an explicit transaction is open.
-
-        Outside an explicit transaction the write lock is taken first with
-        ``BEGIN IMMEDIATE`` (less live-lock under contention), and that
-        transaction is ended on every path: committed on success, rolled back
-        by the adapter's rule when anything raises before the commit, with the
-        error that raised leaving.
-        """
-        if self.adapter.in_transaction:
-            cur = self.adapter.execute(sql, params)
-            self.adapter.auto_commit()
-            return cur
-        try:
-            self.adapter.execute("BEGIN IMMEDIATE;")
-        except (RuntimeError, ValueError):
-            pass  # an adapter that cannot run BEGIN here: the UPDATE runs in its own transaction
-        try:
-            cur = self.adapter.execute(sql, params)
-            self.adapter.auto_commit()
-        except BaseException as exc:
-            self.adapter.__exit__(type(exc), exc, exc.__traceback__)  # rolls back what is still open
-            raise
-        return cur
+        layout, names = self._names(table)
+        added: tuple[str, ...] = ()
+        if "_version" not in layout:
+            # serialize DDL; re-check inside lock
+            with self._ddl_lock:
+                layout, names = self._names(table)
+                if "_version" not in layout:
+                    self.adapter.execute(f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;')
+                    self.adapter.auto_commit()
+                    added = ("_version",)
+        self._seen(table, layout, names, added)
 
     def upsert_with_version(
         self, table: str, _id: Optional[int], doc: dict[str, Any], expected_version: Optional[int]
@@ -1520,8 +1880,7 @@ class SQLerDB:
             ValueError: If updating with ``_id`` but ``expected_version`` is None.
             RuntimeError: On stale version conflicts (no rows updated).
         """
-        table = validate_table_name(table)
-        return self.upsert_with_version_promoted(table, _id, doc, expected_version, self._columns_of(table))
+        return self._upsert_versioned(validate_table_name(table), _id, doc, expected_version)
 
     def find_document_with_version(self, table: str, _id: int) -> Optional[dict[str, Any]]:
         """Fetch a document by id including ``_version`` in the result dict.

@@ -896,28 +896,33 @@ def test_a_msgspec_query_reads_a_typed_reference_to_no_row_by_the_same_rule():
 
 
 def break_reads_of(w: World, table: str) -> None:
-    """From now on a SELECT from ``table`` raises what a locked database raises."""
+    """From now on a SELECT from ``table`` raises what a locked database raises, sent with the
+    adapter's ``execute`` or with ``_execute_judged`` (the readers that read a missing table
+    as no row)."""
     adapter = w.db.adapter
-    real = adapter.execute
 
     def refused(sql: str) -> bool:
         return sql.lstrip().upper().startswith("SELECT") and f"FROM {table}" in sql
 
-    if inspect.iscoroutinefunction(real):
+    def broken(real):
+        if inspect.iscoroutinefunction(real):
 
-        async def execute(sql, *args, **kwargs):
-            if refused(sql):
-                raise sqlite3.OperationalError("database is locked")
-            return await real(sql, *args, **kwargs)
+            async def execute(sql, *args, **kwargs):
+                if refused(sql):
+                    raise sqlite3.OperationalError("database is locked")
+                return await real(sql, *args, **kwargs)
 
-    else:
+            return execute
 
         def execute(sql, *args, **kwargs):
             if refused(sql):
                 raise sqlite3.OperationalError("database is locked")
             return real(sql, *args, **kwargs)
 
-    adapter.execute = execute
+        return execute
+
+    adapter.execute = broken(adapter.execute)
+    adapter._execute_judged = broken(adapter._execute_judged)
 
 
 @pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("way", WAYS), ("broken", ["user", "team"])))

@@ -276,7 +276,8 @@ def test_the_query_of_a_missing_table_answers_as_an_empty_one(db, path, route, n
 @pytest.mark.parametrize("name", list(QS_CALLS))
 def test_the_queryset_of_a_missing_table_answers_as_an_empty_one(db, path, route, name):
     call, empty = QS_CALLS[name]
-    assert _answers(db, path, QS_ROUTES[route], call) == (empty, empty, 1, False)
+    # two statements: the look at the table its database remembers nothing of, then its own
+    assert _answers(db, path, QS_ROUTES[route], call) == (empty, empty, 2, False)
 
 
 def test_db_query_is_bound_to_the_adapter_itself(db):

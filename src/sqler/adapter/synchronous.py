@@ -145,19 +145,6 @@ def _agreed_lock_wait(timeout_ms: int, given: bool, busy: int) -> int:
     return busy
 
 
-def _read_hit_missing_table(query: str, exc: BaseException) -> bool:
-    """True when ``query`` is a read and ``exc`` is SQLite's "no such table" for it.
-
-    A read opens no transaction and changes nothing, so its failure says nothing about
-    the thread's earlier uncommitted statements: they stay for the caller to commit.
-    Callers (a model read of a table nobody created) answer "empty" for it.
-    """
-    if not isinstance(exc, sqlite3.OperationalError) or not str(exc).startswith("no such table"):
-        return False
-    words = query.split(None, 1)
-    return bool(words) and words[0].upper() in ("SELECT", "WITH")
-
-
 def _names_memory_database(path: str) -> bool:
     """True for a ``file:`` URI that names an in-memory database: ``file::memory:``,
     ``mode=memory`` or ``vfs=memdb`` (not the plain ``":memory:"``, which is one connection)."""
@@ -770,7 +757,7 @@ class SQLiteAdapter(AdapterABC):
             error_msg = str(exc) or type(exc).__name__
             if inside:
                 self._still_open(conn, exc)
-            elif not _read_hit_missing_table(query, exc):
+            else:
                 self._end_failed_implicit_transaction(conn, exc, judged)
             converted = unique_violation_from(exc)
             if converted is not None:

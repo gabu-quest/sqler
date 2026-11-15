@@ -1256,10 +1256,13 @@ async def test_delete_all_of_nothing_sends_only_its_own_statement(base, referabl
 
         statements = await sent(lambda: settle(q.delete_all()))
 
-        returning = " RETURNING _id, data" + (", _version" if "Safe" in base.__name__ else "")
+        version = ["_version"] if "Safe" in base.__name__ else []
+        returning = " RETURNING " + ", ".join(["_id", "data", *version])
+        t = Target.__tablename__
+        row = ", ".join(f"`{name}`" for name in ["_id", "data", *version])
+        guard = f"CASE WHEN 1 THEN 1 ELSE (SELECT ({row}) IN (SELECT * FROM {t}) FROM {t}) END"  # never runs
         assert statements == [
-            f"DELETE FROM {Target.__tablename__} WHERE JSON_EXTRACT(data, '$.name') = ?"
-            + (returning if referable else "")
+            f"DELETE FROM {t} WHERE JSON_EXTRACT(data, '$.name') = ? AND {guard}" + (returning if referable else "")
         ]
     finally:
         await settle(db.close())

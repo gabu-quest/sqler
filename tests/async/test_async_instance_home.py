@@ -736,6 +736,13 @@ def _set_query(door: str, Row, Other, db):
     return Other.using(db, Row.__tablename__)
 
 
+def _g(table, *names):
+    """The guard a statement built from what its database remembers of ``table`` carries
+    (``names``: the columns ``SELECT *`` gives): a branch that never runs."""
+    row = ", ".join(f"`{name}`" for name in names)
+    return f"CASE WHEN 1 THEN 1 ELSE (SELECT ({row}) IN (SELECT * FROM {table}) FROM {table}) END"
+
+
 async def _sent(run):
     with query_logger.capture() as log:
         result = await settle(run())
@@ -752,13 +759,14 @@ async def test_count_and_exists_on_a_table_without_the_column_send_their_one_sta
     try:
         bind_unversioned(Row, db)
         table = Row.__tablename__
+        count = f"SELECT COUNT(*) FROM {table} WHERE {_g(table, '_id', 'data')}"
         assert await _sent(lambda: _set_query(door, Row, Other, db).count()) == (
             1,
-            [f"SELECT COUNT(*) FROM {table}"],
+            [f'PRAGMA table_xinfo("{table}");', count],  # the database learns the table once
         )
         assert await _sent(lambda: _set_query(door, Row, Other, db).exists()) == (
             True,
-            [f"SELECT COUNT(*) FROM {table}"],  # the one statement exists() sends
+            [count],  # the one statement exists() sends
         )
     finally:
         await close(db)
@@ -884,8 +892,9 @@ async def test_each_door_asks_for_the_version_column_once_per_database_object(ba
     Row = await _with_version_column(base, path)
     Other = row_class(base)
     t = Row.__tablename__
-    look = f'PRAGMA table_info("{t}");'
-    by_id = f"SELECT _id, data, _version FROM {t} WHERE _id IN (?);"
+    look = f'PRAGMA table_xinfo("{t}");'
+    guard = _g(t, "_id", "data", "_version")
+    by_id = f"SELECT _id, data, _version FROM {t} WHERE _id IN (?) AND {guard};"
     for door, select in (
         ("using(db).all()", lambda db: Row.using(db).all()),
         ("using(db, table).all()", lambda db: Other.using(db, t).all()),
@@ -899,8 +908,8 @@ async def test_each_door_asks_for_the_version_column_once_per_database_object(ba
             count = (await _sent(lambda: Row.using(db).count()))[1]
         finally:
             await close(db)
-        read = f"SELECT _id, data, _version FROM {t}" if door.startswith("using") else by_id
-        assert (door, first, second, count) == (door, [look, read], [read], [f"SELECT COUNT(*) FROM {t}"])
+        read = f"SELECT _id, data, _version FROM {t} WHERE {guard}" if door.startswith("using") else by_id
+        assert (door, first, second, count) == (door, [look, read], [read], [f"SELECT COUNT(*) FROM {t} WHERE {guard}"])
 
 
 @pytest.mark.asyncio
@@ -911,21 +920,20 @@ async def test_a_query_made_before_another_database_object_adds_the_column_reads
     t = Row.__tablename__
     reader, writer = await open_db(base, path), await open_db(base, path)
     try:
-        look = f'PRAGMA table_info("{t}");'
-        # no column: each query looks again, one statement more
-        for _ in range(2):
+        look = f'PRAGMA table_xinfo("{t}");'
+        old = f"SELECT _id, data FROM {t} WHERE {_g(t, '_id', 'data')}"
+        new = f"SELECT _id, data, _version FROM {t} WHERE {_g(t, '_id', 'data', '_version')}"
+        # no column: the table is learned once, without it
+        for sent_here in ([look, old], [old]):
             got, sent = await _sent(lambda: Row.using(reader).all())
-            assert ([(g.name, g._version) for g in got], sent) == ([("old", 0)], [look, f"SELECT _id, data FROM {t}"])
+            assert ([(g.name, g._version) for g in got], sent) == ([("old", 0)], sent_here)
         held = await settle(Row.from_id(1, db=writer))
         held.name = "written"
         await settle(held.save())  # the writer adds the column
         got, sent = await _sent(lambda: Row.using(reader).all())
-        assert ([(g.name, g._version) for g in got], sent) == (
-            [("written", 1)],
-            [look, f"SELECT _id, data, _version FROM {t}"],
-        )
+        assert ([(g.name, g._version) for g in got], sent) == ([("written", 1)], [old, look, new])  # refused, learned
         _, sent = await _sent(lambda: Row.using(reader).all())
-        assert sent == [f"SELECT _id, data, _version FROM {t}"]
+        assert sent == [new]
     finally:
         await close(reader, writer)
 
@@ -940,7 +948,7 @@ async def test_what_a_rolled_back_transaction_learned_of_the_column_is_asked_aga
     path = str(tmp_path / "v.db")
     Row = await _with_version_column(base, path)
     t = Row.__tablename__
-    look, read = f'PRAGMA table_info("{t}");', f"SELECT _id, data, _version FROM {t}"
+    look, read = f'PRAGMA table_xinfo("{t}");', f"SELECT _id, data, _version FROM {t} WHERE {_g(t, '_id', 'data', '_version')}"
     db = await open_db(base, path)
     try:
         with pytest.raises(_Undone):

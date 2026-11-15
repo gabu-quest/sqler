@@ -1431,7 +1431,7 @@ def test_manual_index_in_the_same_database_sends_the_statements_it_sent(two_dbs)
     deleted = [q.sql for q in sent if "mposts_fts" in q.sql]
     assert saved == [
         "DELETE FROM mposts_fts WHERE rowid = ?;",
-        "INSERT INTO mposts_fts(rowid, title) SELECT t._id, json_extract(t.data, '$.title') FROM mposts AS t WHERE t._id = ?;",
+        "INSERT INTO mposts_fts(rowid, title) SELECT t._id, json_extract(t.data, '$.title') FROM mposts AS t WHERE t._id = ? AND CASE WHEN 1 THEN 1 ELSE (SELECT (`_id`, `data`) IN (SELECT * FROM mposts) FROM mposts) END;",
     ]
     assert deleted == ["DELETE FROM mposts_fts WHERE rowid = ?;"]
 

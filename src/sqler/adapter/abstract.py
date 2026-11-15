@@ -1,6 +1,6 @@
 import sqlite3
 from abc import ABC, abstractmethod
-from typing import Any, Iterator, List, Optional, Protocol
+from typing import Any, Iterator, List, NoReturn, Optional, Protocol
 
 
 class AdapterError(Exception):
@@ -55,6 +55,18 @@ class AdapterABC(ABC):
         """
         pass
 
+    def _execute_judged(self, query: str, params: Optional[List[Any]] = None) -> CursorLike:
+        """``execute`` for sqler's own senders, which read some failures of a statement as an
+        answer. An adapter that does not tell the two apart sends it as any statement: by the
+        time the failure is read, its ``execute`` has ended what it ends."""
+        return self.execute(query, params)
+
+    def _end_failed_statement(self, exc: Exception) -> NoReturn:
+        """Raise ``exc``, the failure of a statement sent with ``_execute_judged`` that its
+        sender did not read as an answer, once what a failed statement ends is ended: here
+        ``execute`` ended it already."""
+        raise exc
+
     @abstractmethod
     def executemany(self, query: str, param_list: List[List[Any]]) -> sqlite3.Cursor:
         """Executes a query with many params and returns cursor."""
@@ -100,6 +112,14 @@ class AsyncAdapterABC(ABC):
         Returns a cursor-like object.
         """
         pass
+
+    async def _execute_judged(self, query: str, params: Optional[List[Any]] = None) -> Any:
+        """Async twin of :meth:`AdapterABC._execute_judged`."""
+        return await self.execute(query, params)
+
+    async def _end_failed_statement(self, exc: Exception) -> NoReturn:
+        """Async twin of :meth:`AdapterABC._end_failed_statement`."""
+        raise exc
 
     @abstractmethod
     async def executemany(self, query: str, param_list: List[List[Any]]) -> Any:

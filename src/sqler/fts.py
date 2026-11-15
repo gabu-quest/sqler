@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
 
 from sqler.db.async_db import AsyncSQLerDB
+from sqler.db.sqler_db import _check_sql, _guard
 from sqler.exceptions import SchemaError, SearchQueryError
 from sqler.models._table_names import _instance_binding
 from sqler.utils import validate_field_name, validate_identifier
@@ -478,8 +479,20 @@ class FTSIndex:
             )
 
     def _trigger_sql(self, db: "SQLerDB") -> dict[str, str]:
-        """The statement of each trigger of this content_sync index (see :func:`_trigger_sql`)."""
-        return _trigger_sql(self.index_table, self.table, self.fields, db._columns_of(self.table))
+        """The statement of each trigger of this content_sync index (see :func:`_trigger_sql`),
+        built from the table as it is: the database sends the check of the names it remembers
+        (``_check_sql``) first, in the caller's transaction, and learns the table again if
+        SQLite refuses it."""
+        table = self.table
+
+        def make() -> Optional[tuple[str, list[Any], Any]]:
+            layout = db._memory_of(table)[1]
+            return (_check_sql(table, layout), [], layout) if layout else None
+
+        checked = db._sent(table, make)
+        if checked is not None:
+            checked.close()
+        return _trigger_sql(self.index_table, table, self.fields, db._columns_of(table))
 
     def drop(self, db: Optional["SQLerDB"] = None) -> None:
         """Drop the FTS index and its triggers."""
@@ -492,21 +505,33 @@ class FTSIndex:
                 db.adapter.execute(f"DROP TRIGGER IF EXISTS {name};")
             db.adapter.execute(f"DROP TABLE IF EXISTS {self.index_table};")
 
-    def _fill_sql(self, db: "SQLerDB", row: str) -> str:
-        """The ``INSERT`` of the index row of the stored row ``row`` (see :func:`_fill_sql`)."""
-        return _fill_sql(self.index_table, self.fields, db._columns_of(self.table), row)
+    def _filled(self, db: "SQLerDB", rows: str, params: list[Any]) -> None:
+        """Index the rows of the table that ``rows`` (a ``WHERE`` term on ``t``; empty: every
+        row) picks, each
+        field read where the database remembers it is stored, with the guard of what it
+        remembers (``SQLerDB._sent``)."""
+        table = self.table
+
+        def make() -> tuple[str, list[Any], Any]:
+            columns, layout = db._memory_of(table)
+            fill = _fill_sql(self.index_table, self.fields, columns, "t")
+            terms = [term for term in (rows, layout and _guard(table, layout)) if term]
+            where = f" WHERE {' AND '.join(terms)}" if terms else ""
+            return f"{fill} FROM {table} AS t{where};", params, layout
+
+        db._sent(table, make)
 
     def _fill(self, db: "SQLerDB") -> None:
         """Make the index hold every row of the table and nothing else."""
         db.adapter.execute(f"DELETE FROM {self.index_table};")
-        db.adapter.execute(f"{self._fill_sql(db, 't')} FROM {self.table} AS t;")
+        self._filled(db, "", [])
 
     def _refill(self, _id: int, db: Optional["SQLerDB"] = None) -> None:
         """Make the index row of ``_id`` what its stored row says: none when it has no row.
         ``db`` is the database to do it in, else the index's."""
         db = db if db is not None else self._get_db()
         db.adapter.execute(f"DELETE FROM {self.index_table} WHERE rowid = ?;", [_id])
-        db.adapter.execute(f"{self._fill_sql(db, 't')} FROM {self.table} AS t WHERE t._id = ?;", [_id])
+        self._filled(db, "t._id = ?", [_id])
         db.adapter.auto_commit()
 
     def rebuild(self, db: Optional["SQLerDB"] = None) -> int:

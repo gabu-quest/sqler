@@ -131,47 +131,54 @@ class Safe(AsyncSQLerSafeModel):
     k: int = 0
 
 
+def _g(table, *names):
+    """The guard a statement built from what its database remembers of ``table`` carries
+    (``names``: the columns ``SELECT *`` gives): a branch that never runs."""
+    row = ", ".join(f"`{name}`" for name in names)
+    return f"CASE WHEN 1 THEN 1 ELSE (SELECT ({row}) IN (SELECT * FROM {table}) FROM {table}) END"
+
+
 PINS = [
     (
         Plain,
         lambda q: q.filter(F("k") == 0).update(name="x", k=F("k") + 1),
         "UPDATE asw_pin_plain SET data = json_set(data, '$.name', ?, '$.k', "
-        "json_extract(data, '$.k') + ?) WHERE JSON_EXTRACT(data, '$.k') = ?",
+        "json_extract(data, '$.k') + ?) WHERE JSON_EXTRACT(data, '$.k') = ? AND " + _g("asw_pin_plain", "_id", "data"),
         ["x", 1, 0],
     ),
     (
         Plain,
         lambda q: q.filter(F("k") >= 0).order_by("name", desc=True).update_one(name="y"),
         "UPDATE asw_pin_plain SET data = json_set(data, '$.name', ?) WHERE _id = (SELECT _id FROM "
-        "asw_pin_plain WHERE JSON_EXTRACT(data, '$.k') >= ? ORDER BY json_extract(data, '$.name') "
+        "asw_pin_plain WHERE JSON_EXTRACT(data, '$.k') >= ? AND " + _g("asw_pin_plain", "_id", "data") + " ORDER BY json_extract(data, '$.name') "
         "DESC LIMIT 1) RETURNING _id, data",
         ["y", 0],
     ),
     (
         Plain,
         lambda q: q.filter(F("name") == "nope").delete_all(),
-        "DELETE FROM asw_pin_plain WHERE JSON_EXTRACT(data, '$.name') = ?",
+        "DELETE FROM asw_pin_plain WHERE JSON_EXTRACT(data, '$.name') = ? AND " + _g("asw_pin_plain", "_id", "data"),
         ["nope"],
     ),
     (
         Safe,
         lambda q: q.filter(F("_id") == 1).update_one(k=6),
         "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 WHERE "
-        "_id = (SELECT _id FROM asw_pin_safe WHERE _id = ? LIMIT 1) RETURNING _id, data, _version",
+        "_id = (SELECT _id FROM asw_pin_safe WHERE _id = ? AND " + _g("asw_pin_safe", "_id", "data", "_version") + " LIMIT 1) RETURNING _id, data, _version",
         [6, 1],
     ),
     (
         Safe,
         lambda q: q.filter(F("_id") >= 1).update_n(3, k=7),
         "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 WHERE "
-        "_id IN (SELECT _id FROM asw_pin_safe WHERE _id >= ? LIMIT 3) RETURNING _id, data, _version",
+        "_id IN (SELECT _id FROM asw_pin_safe WHERE _id >= ? AND " + _g("asw_pin_safe", "_id", "data", "_version") + " LIMIT 3) RETURNING _id, data, _version",
         [7, 1],
     ),
     (
         Safe,
         lambda q: q.filter(F("_id") == 1).update(k=5),
         "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 "
-        "WHERE _id = ?",
+        "WHERE _id = ? AND " + _g("asw_pin_safe", "_id", "data", "_version"),
         [5, 1],
     ),
 ]
@@ -628,8 +635,8 @@ async def test_delete_all_of_one_row_and_of_ten_thousand_send_the_same_statement
         assert count == len(ids)
         assert [(e.sql, list(e.params or [])) for e in got] == [
             (
-                f"DELETE FROM {Item.__tablename__} WHERE JSON_EXTRACT(data, '$.name') = ? "
-                f"RETURNING _id, data{version}",
+                f"DELETE FROM {Item.__tablename__} WHERE JSON_EXTRACT(data, '$.name') = ? AND "
+                f"{_g(Item.__tablename__, '_id', 'data', *version[2:].split())} RETURNING _id, data{version}",
                 [name],
             ),
             look(ids),

@@ -28,7 +28,7 @@ order given, with the definition given (for example
 its column and not in `data`.
 
 Every column beside `data` but `_version` whose name sqler takes for a promoted column
-(a column added with plain SQL too; `PRAGMA table_info` lists it, so a generated column is
+(a column added with plain SQL too; a generated column is
 not one) is such a column, and every writer of sqler keeps the rule. A write puts each key
 the document holds that names such a column, in the same case, into the column in its
 stored form, and every other key into `data`. A column whose key the document does not
@@ -37,8 +37,11 @@ gives it its `DEFAULT`, or NULL, or raises `IntegrityError` for a `NOT NULL` col
 one. A key held with the value `None` writes NULL. So a write never changes the value of a
 column the document does not name. This holds for the database object's document writers
 (`insert_document`, `upsert_document`, `insert_many`, `insert_many_with_version`,
-`bulk_upsert`, `upsert_with_version`, and a save of some fields) and for the saves of a
-model class without `__promoted__`, also one that has no field for the column. One exception: `bulk_upsert` writes an existing row as an
+`bulk_upsert`, `upsert_with_version`, their `*_promoted` forms, and a save of some fields),
+for the saves of every model class, also one that has no field for the column or promotes
+other fields, and for the write of a row whose reference a delete sets to null. A class's
+`__promoted__` (a `*_promoted` writer's list) names columns the table must have: a write of
+one the table lacks is refused by SQLite, not put into `data`. One exception: `bulk_upsert` writes an existing row as an
 insert that becomes an update, and SQLite checks `NOT NULL` first, so a `NOT NULL` column
 without a `DEFAULT` refuses such a row whose document lacks its key. A value a column
 refuses raises SQLite's `IntegrityError` and nothing of the call is written. A key in
@@ -46,12 +49,31 @@ another case than its column's name (`Status` beside the column `status`) is a k
 `data`.
 
 A database object learns a table's columns once, at its first ensure, read or write of
-the table, and keeps them: a column added after that by another database object or by
-plain SQL is seen by a new database object, and until then this object writes that key
-into `data`. A reader that knows the column takes the column, so a value written that way
-is in the file but hidden from it, with no error: promote a field while no other process
-has the table open, or restart the others after it. (Inside a transaction opened on the
-adapter itself nothing is remembered: each write reads the columns again.)
+the table, and remembers them as `SELECT *` gives them. Each statement it builds from what
+it remembers carries a guard, `CASE WHEN 1 THEN 1 ELSE (SELECT (<the names>) IN (SELECT *
+FROM <table>) FROM <table>) END` (in an `INSERT`, on its first value; a bulk write whose
+first statement has several rows, and the triggers of a search index, send it alone, as a
+`SELECT`, first in their transaction, and the statements after it there carry none), whose
+`ELSE` never runs: SQLite checks its names when it prepares the statement, and again after any change of
+the schema by any connection, so it refuses the statement once the table has other columns
+(another database object or process promoted a column, renamed or dropped one, added
+`_version`, dropped or made the table). Only then does the object learn the table again and
+build the statement again, so each key lands in its column, with no error: a refused statement
+is built again when the names the table has now are not the names it was built from, also
+when another thread or task of the object learned them first; nothing sent before it is
+undone. A refusal that is not of those names (the caller's own mistake) ends what any failed
+statement ends and is raised as it is; a read of a table that is not there ends nothing and
+reads as no row. SQLite charges about 0.1 µs for the guard on a statement it has prepared,
+and 12 to 20 µs when it prepares the text (its first use on a connection, and once after
+each change of the schema). In Python, on a statement SQLite does not refuse, a by-id read
+costs about 0.2 µs more than a sqler without the guard, a single write under 1 µs, and a
+query of a model's rows nothing measurable. A bulk write of one row costs about 3 µs more;
+one of several rows sends the check as a statement of its own (a guard in any row of a
+many-row `INSERT` takes it off SQLite's fast path) and costs about 9 to 12 µs more a call,
+`bulk_upsert` about 5 µs more than that; from a thousand rows on a bulk write is within 2%. `sql`, `debug()`, `explain()` and
+`explain_query_plan()` show a query without it; `query_logger` logs what is sent, with it.
+(Inside a transaction opened on the adapter itself nothing is remembered: each write reads
+the columns again.)
 
 ## The version column
 

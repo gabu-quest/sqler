@@ -503,11 +503,13 @@ async def test_async_bound_query_runs_only_its_select_when_the_table_exists(tmp_
         everything = await cls.query().all()
 
         table = cls._table
+        # each carries the guard of the columns its database remembers, a branch that never runs
+        guard = f"WHERE CASE WHEN 1 THEN 1 ELSE (SELECT (`_id`, `data`) IN (SELECT * FROM {table}) FROM {table}) END"
         assert (first.n, count, [r.n for r in everything]) == (1, 1, [1])
         assert traced == [
-            f"SELECT _id, data FROM {table} LIMIT 1",
-            f"SELECT COUNT(*) FROM {table}",
-            f"SELECT _id, data FROM {table}",
+            f"SELECT _id, data FROM {table} {guard} LIMIT 1",
+            f"SELECT COUNT(*) FROM {table} {guard}",
+            f"SELECT _id, data FROM {table} {guard}",
         ]
     finally:
         for conn in adapter._all_conns:

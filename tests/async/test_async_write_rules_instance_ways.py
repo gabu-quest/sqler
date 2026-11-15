@@ -565,12 +565,9 @@ async def test_a_failed_write_the_caller_catches_and_commits_past_keeps_nothing(
 # delete() and each policy). A delete with a policy that touches referrers also looks through
 # the registered tables for them; those reads depend on what else is registered and are left
 # out.
-UNVERSIONED = (
-    ["CREATE", "CREATE", "CREATE", "INSERT"],
-    ["CREATE", "CREATE", "UPDATE"],
-    ["CREATE", "INSERT"],
-)
-VERSIONED = (["INSERT"], ["UPDATE"], ["INSERT"])
+# a write by _id makes no table; a batch of several rows sends the check of the columns first (a ``SELECT``)
+UNVERSIONED = (["CREATE", "CREATE", "INSERT"], ["UPDATE"], ["CREATE", "SELECT", "INSERT"])
+VERSIONED = (["INSERT"], ["UPDATE"], ["SELECT", "INSERT"])
 A_DELETE = ["CREATE", "DELETE"]
 
 
@@ -599,7 +596,8 @@ async def test_a_class_with_no_row_rule_sends_the_statements_it_sent(db, kind, m
         other = await Item(name=policy).save(db=db)
         sent.append(await _sent(lambda: other.delete_with_policy(db=db, on_delete=policy)))
 
-    assert sent == [*(VERSIONED if kind in SAFE else UNVERSIONED), *[A_DELETE] * 4]
+    expected = VERSIONED if kind in SAFE else UNVERSIONED
+    assert sent == [*expected, *[A_DELETE] * 4]
 
 
 # ----- a save of a row that is not there ---------------------------------------------------------
@@ -681,6 +679,7 @@ async def test_a_save_to_a_database_without_the_row_raises_and_the_home_stays(db
         with pytest.raises(_refused(kind)):
             await inst.save(db=other)
         assert await _docs(other, Item) == []
+        assert await _exists(other, Item.__tablename__) is False
         await inst.save()
         assert [(i, d["name"]) for i, d in await _docs(db, Item)] == [(1, "second")]
         copy = await Item(name=inst.name).save(db=other)
@@ -698,7 +697,7 @@ async def test_the_refusal_names_the_table_the_id_and_how_to_copy_a_row(db):
         "into another database, save a new instance without the _id"
     )
     assert caught.value.id_ == 7
-    assert (await _rows(db, "SELECT count(*) FROM awr_named;"))[0][0] == 0
+    assert await _rows(db, "SELECT name FROM sqlite_master WHERE name = 'awr_named';") == []
 
 
 async def test_a_refused_update_sends_what_an_update_that_lands_sends(db):
@@ -709,7 +708,7 @@ async def test_a_refused_update_sends_what_an_update_that_lands_sends(db):
         with pytest.raises(NotFoundError):
             await db.upsert_document("awr_counted", 9, {"name": "y"})
     assert [q.sql for q in refused] == [q.sql for q in landed]
-    assert [q.sql.split()[0] for q in refused] == ["CREATE", "UPDATE"]
+    assert [q.sql.split()[0] for q in refused] == ["UPDATE"]
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -720,3 +719,82 @@ async def test_a_refresh_of_a_row_that_is_gone_raises_lookup_error(db, kind):
     with pytest.raises(LookupError, match="Row 1 not found for refresh"):
         await inst.refresh(db=db)
     assert inst._id == 1
+
+
+# ----- a set_null write is the database's by-id write: the table as it is now ---------------------
+
+
+class NulledAuthor(AsyncSQLerModel):
+    __tablename__ = "awr_nulled_authors"
+    name: str
+
+
+class StampedBook(TimestampMixin, AsyncSQLerModel):
+    __tablename__ = "awr_stamped_books"
+    title: str
+    author: Optional[NulledAuthor] = None
+
+
+class SafeBook(AsyncSQLerSafeModel):
+    __tablename__ = "awr_safe_books"
+    title: str
+    author: Optional[NulledAuthor] = None
+
+
+def _raw(path, sql):
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+
+async def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(tmp_path):
+    from sqler import SQLerDB
+
+    path = str(tmp_path / "stamped.db")
+    db = AsyncSQLerDB.on_disk(path)
+    await db.connect()
+    try:
+        author = await NulledAuthor(name="a").save(db=db)
+        book = await StampedBook(title="b", author=author).save(db=db)
+        await db.find_document("awr_stamped_books", book._id)
+        other = SQLerDB.on_disk(path)
+        other.ensure_table("awr_stamped_books", promoted={"updated_at": "TEXT"})
+        other.close()
+        [(old,)] = _raw(path, "SELECT updated_at FROM awr_stamped_books")
+        await author.delete_with_policy(db=db, on_delete="set_null")
+        read = (await StampedBook.from_id(book._id, db=db)).updated_at.isoformat()
+    finally:
+        await db.close()
+    [(data, new)] = _raw(path, "SELECT data, updated_at FROM awr_stamped_books")
+    assert json.loads(data) == {"created_at": book.created_at.isoformat(), "title": "b", "author": None}
+    assert (new != old, read) == (True, new)
+
+
+async def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_writes_the_row(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / "safe.db")
+    db = AsyncSQLerDB.on_disk(path)
+    await db.connect()
+    try:
+        author = await NulledAuthor(name="a").save(db=db)
+        book = await SafeBook(title="b", author=author).save(db=db)
+        await db.find_document_with_version("awr_safe_books", book._id)
+        conn = sqlite3.connect(path)
+        [(data,)] = conn.execute("SELECT data FROM awr_safe_books").fetchall()
+        conn.executescript(
+            "DROP TABLE awr_safe_books; CREATE TABLE awr_safe_books (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL);"
+        )
+        conn.execute("INSERT INTO awr_safe_books (_id, data) VALUES (1, ?)", [data])
+        conn.commit()
+        conn.close()
+        await author.delete_with_policy(db=db, on_delete="set_null")
+    finally:
+        await db.close()
+    [(data, version)] = _raw(path, "SELECT data, _version FROM awr_safe_books")
+    assert (json.loads(data), version) == ({"title": "b", "author": None, "_version": 1}, 1)
+    assert _raw(path, "SELECT count(*) FROM awr_nulled_authors") == [(0,)]

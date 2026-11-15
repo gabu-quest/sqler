@@ -35,7 +35,6 @@ from .synchronous import (
     _agreed_lock_wait,
     _broken,
     _lock_wait,
-    _read_hit_missing_table,
 )
 
 logger = logging.getLogger(__name__)
@@ -746,7 +745,8 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         back (all that was sent since the last commit: one unit) and returned to the pool
         (or replaced if the rollback fails). ``judged``: the statement was sent with
         ``_execute_judged``, whose caller reads an ``Exception`` as an answer: it ends
-        nothing. Inside an explicit transaction the caller ends the transaction, unless
+        nothing, and a connection the task holds with nothing uncommitted is given back, as
+        after a read that succeeded. Inside an explicit transaction the caller ends the transaction, unless
         SQLite ended it as the statement ``sent`` failed (what SQLite said in the
         connection's thread): then the transaction is broken (``_ended_behind``) and
         ``TransactionStateError`` is raised from ``exc``. A statement of the transaction
@@ -769,6 +769,8 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
                 raise self._ended_behind(lease, exc)
             return
         if judged and isinstance(exc, Exception):
+            if sent is None or not sent._open:  # a connection with nothing uncommitted goes back
+                await self._release()
             return
         lease = self._drop_pin()
         if lease is not None:
@@ -900,7 +902,6 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         raise exc
 
     async def _execute(self, query: str, params: Optional[List[Any]], judged: bool) -> aiosqlite.Cursor:
-        was_pinned = self._pinned() is not None
         conn = await self._acquire()
         lease = self._task_lease.get()
         _logging = query_logger.enabled
@@ -920,11 +921,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             # nobody gets this cursor: a read ahead of it already queued reads nothing
             wrapped._lose("the statement of this cursor failed")
             error_msg = str(exc) or type(exc).__name__
-            # a read of a missing table changed nothing: work this task left uncommitted
-            # on its pinned connection stays for the caller to commit; a pinned connection
-            # with nothing uncommitted is given back, as after any other failed statement
-            if not (was_pinned and wrapped._open and _read_hit_missing_table(query, exc)):
-                await self._release_after_failure(exc, wrapped, judged)
+            await self._release_after_failure(exc, wrapped, judged)
             converted = unique_violation_from(exc)
             if converted is not None:
                 raise converted from exc

@@ -367,8 +367,6 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         if promoted:
             checks = getattr(cls, "__checks__", None)
             await db._ensure_promoted(table, promoted, checks, model=cls)
-        else:
-            await db._ensure_table(table)
         payload = await self._adump_with_relations()
         if _partial:
             new_id = self._id

@@ -1,3 +1,4 @@
+import json
 import re
 import sqlite3
 from typing import Any, Optional, Self
@@ -10,6 +11,7 @@ from sqler.query.query import (
     PaginatedResult,
     _rewrite_promoted_refs,
     _WriteStatements,
+    aend_failed,
     is_missing_table,
 )
 from sqler.utils import validate_field_name
@@ -52,7 +54,7 @@ class AsyncSQLerQuery(_WriteStatements):
 
     def _clone(self, **kwargs) -> Self:
         """Create a clone with optional overrides."""
-        return self.__class__(
+        clone = self.__class__(
             table=kwargs.get("table", self._table),
             adapter=kwargs.get("adapter", self._adapter),
             expression=kwargs.get("expression", self._expression),
@@ -68,27 +70,60 @@ class AsyncSQLerQuery(_WriteStatements):
             group_by_fields=kwargs.get("group_by_fields", self._group_by_fields),
             having=kwargs.get("having", self._having),
         )
+        clone._db = kwargs.get("db", self._db)
+        clone._use = kwargs.get("use", self._use)
+        clone._guard = kwargs.get("guard", self._guard)
+        clone._names = kwargs.get("names", self._names)
+        return clone
 
-    async def _execute(self, sql: str, params: list[Any]):
-        """Run one statement on the query's own table; ``None`` when that table does not exist.
+    async def _laid_out(self) -> Self:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._laid_out`."""
+        db, table = self._db, self._table
+        promoted, names = await db._memory_of(table)
+        version = self._include_version
+        if version and self._use:
+            has = await db._has_version_column(table)
+            if self._use == "update" and has is False:
+                await db._ensure_versioned_table(table)
+                promoted, names = await db._memory_of(table)
+            version = self._use == "update" or bool(has)
+        key = (names, promoted, version)
+        laid = self._laid
+        if laid is None or laid[0] != key:
+            made = self._clone(
+                promoted_fields=promoted, include_version=version, db=None, guard=db._guard_of(table, names), names=names
+            )
+            laid = self._laid = (key, made)
+        return laid[1]
 
-        A missing table reads as an empty one and is not created: each caller returns what its
-        statement gives on a table with no rows, and runs nothing more (the adapter has already
-        ended the failed statement).
-        """
+    async def _execute(self, build) -> tuple[Self, Any]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._execute`."""
+        used = self
+
+        async def make() -> tuple[str, list[Any], Any]:
+            nonlocal used
+            used = await self._laid_out()
+            return (*build(used), used._names)
+
         try:
-            return await self._adapter.execute(sql, params)
+            if self._db is not None:
+                cursor = await self._db._sent(self._table, make)
+                return used, cursor
+            sql, params = build(self)
+            try:
+                return self, await self._adapter._execute_judged(sql, params)
+            except Exception as exc:
+                await aend_failed(self._adapter, exc, self._table, sql)
         except sqlite3.OperationalError as exc:
             if is_missing_table(exc, self._table):
-                return None
+                return used, None
             raise
 
     async def _rows(self, *, include_id: bool = False) -> list[tuple]:
         """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        sql, params = self._build_query(include_id=include_id)
-        cur = await self._execute(sql, params)
+        _, cur = await self._execute(lambda q: q._build_query(include_id=include_id))
         if cur is None:
             return []
         try:
@@ -201,7 +236,7 @@ class AsyncSQLerQuery(_WriteStatements):
             agg = f"{func}({self._field_expr(field)})"
 
         select_parts = group_exprs + [agg]
-        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        where = self._filter_sql()
         group_by = "GROUP BY " + ", ".join(group_exprs)
 
         having_clause = ""
@@ -240,7 +275,7 @@ class AsyncSQLerQuery(_WriteStatements):
             having_clause = f"HAVING {having_sql}"
 
         sql = f"SELECT {', '.join(select_parts)} FROM {self._table} {where} {group_by} {having_clause}".strip()
-        sql = " ".join(sql.split())
+        sql = self._squeezed(sql)
         sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
@@ -254,8 +289,7 @@ class AsyncSQLerQuery(_WriteStatements):
         self, func: str, field: Optional[str] = None
     ) -> list[dict[str, Any]]:
         """Execute a grouped aggregate and return list[dict]."""
-        sql, params = self._build_grouped_aggregate_query(func, field)
-        cur = await self._execute(sql, params)
+        _, cur = await self._execute(lambda q: q._build_grouped_aggregate_query(func, field))
         if cur is None:
             return []
         rows = await cur.fetchall()
@@ -272,7 +306,7 @@ class AsyncSQLerQuery(_WriteStatements):
         return results
 
     def _build_query(self, *, include_id: bool = False) -> tuple[str, list[Any]]:
-        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        where = self._filter_sql()
         order = ""
         if self._order_fields:
             parts = []
@@ -302,7 +336,7 @@ class AsyncSQLerQuery(_WriteStatements):
         else:
             select = "data"
         sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
-        sql = " ".join(sql.split())
+        sql = self._squeezed(sql)
         sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
@@ -315,7 +349,7 @@ class AsyncSQLerQuery(_WriteStatements):
         """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX)."""
         if field is not None and field != "_id":
             validate_field_name(field)
-        where = f"WHERE {self._expression.sql}" if self._expression else ""
+        where = self._filter_sql()
         if field is None:
             select = f"{func}(*)"
         elif field == "_id":
@@ -325,7 +359,7 @@ class AsyncSQLerQuery(_WriteStatements):
         else:
             select = f"{func}(json_extract(data, '$.{field}'))"
         sql = f"SELECT {select} FROM {self._table} {where}".strip()
-        sql = " ".join(sql.split())
+        sql = self._squeezed(sql)
         sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
@@ -383,8 +417,7 @@ class AsyncSQLerQuery(_WriteStatements):
     async def all(self) -> list[str]:
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        sql, params = self._build_query()
-        cur = await self._execute(sql, params)
+        _, cur = await self._execute(lambda q: q._build_query())
         if cur is None:
             return []
         rows = await cur.fetchall()
@@ -405,8 +438,7 @@ class AsyncSQLerQuery(_WriteStatements):
             raise NoAdapterError("No adapter set for query")
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("COUNT")
-        sql, params = self._build_aggregate_query("COUNT")
-        cur = await self._execute(sql, params)
+        _, cur = await self._execute(lambda q: q._build_aggregate_query("COUNT"))
         if cur is None:
             return 0
         row = await cur.fetchone()
@@ -420,8 +452,7 @@ class AsyncSQLerQuery(_WriteStatements):
             raise NoAdapterError("No adapter set for query")
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("SUM", field)
-        sql, params = self._build_aggregate_query("SUM", field)
-        cur = await self._execute(sql, params)
+        _, cur = await self._execute(lambda q: q._build_aggregate_query("SUM", field))
         if cur is None:
             return None
         row = await cur.fetchone()
@@ -435,8 +466,7 @@ class AsyncSQLerQuery(_WriteStatements):
             raise NoAdapterError("No adapter set for query")
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("AVG", field)
-        sql, params = self._build_aggregate_query("AVG", field)
-        cur = await self._execute(sql, params)
+        _, cur = await self._execute(lambda q: q._build_aggregate_query("AVG", field))
         if cur is None:
             return None
         row = await cur.fetchone()
@@ -450,8 +480,7 @@ class AsyncSQLerQuery(_WriteStatements):
             raise NoAdapterError("No adapter set for query")
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("MIN", field)
-        sql, params = self._build_aggregate_query("MIN", field)
-        cur = await self._execute(sql, params)
+        _, cur = await self._execute(lambda q: q._build_aggregate_query("MIN", field))
         if cur is None:
             return None
         row = await cur.fetchone()
@@ -465,8 +494,7 @@ class AsyncSQLerQuery(_WriteStatements):
             raise NoAdapterError("No adapter set for query")
         if self._group_by_fields:
             return await self._execute_grouped_aggregate("MAX", field)
-        sql, params = self._build_aggregate_query("MAX", field)
-        cur = await self._execute(sql, params)
+        _, cur = await self._execute(lambda q: q._build_aggregate_query("MAX", field))
         if cur is None:
             return None
         row = await cur.fetchone()
@@ -485,14 +513,7 @@ class AsyncSQLerQuery(_WriteStatements):
         validate_field_name(field)
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        where = f"WHERE {self._expression.sql}" if self._expression else ""
-        sql = f"SELECT DISTINCT json_extract(data, '$.{field}') FROM {self._table} {where}".strip()
-        sql = " ".join(sql.split())
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-        params = self._expression.params if self._expression else []
-        cur = await self._execute(sql, params)
+        _, cur = await self._execute(lambda q: q._distinct_sql(field))
         if cur is None:
             return []
         rows = await cur.fetchall()
@@ -533,15 +554,16 @@ class AsyncSQLerQuery(_WriteStatements):
     async def all_dicts(self) -> list[dict[str, Any]]:
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        import json
-
-        sql, params = self._build_query(include_id=True)
-        cur = await self._execute(sql, params)
+        query, cur = await self._execute(lambda q: q._build_query(include_id=True))
         if cur is None:
             return []
         rows = await cur.fetchall()
         await cur.close()
         await self._adapter.auto_commit()
+        return query._documents(rows)
+
+    def _documents(self, rows: Any) -> list[dict[str, Any]]:
+        """The documents of rows read with :meth:`_build_query`'s ``include_id`` columns."""
         ver_offset = 1 if self._include_version else 0
         promoted_start = 2 + ver_offset
 
@@ -595,8 +617,7 @@ class AsyncSQLerQuery(_WriteStatements):
             int: Number of rows updated.
         """
         self._write_checks(fields)
-        where, params = self._where()
-        cur = await self._execute(*self._update_sql(fields, where, params, returning=False))
+        _, cur = await self._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
         if cur is None:
             return 0
         rowcount = cur.rowcount
@@ -636,29 +657,29 @@ class AsyncSQLerQuery(_WriteStatements):
 
     async def _update_picked(self, fields: dict, n: int, op: str) -> list[dict[str, Any]]:
         self._write_checks(fields, n)
-        cur = await self._execute(*self._update_picked_sql(fields, n, op))
+        query, cur = await self._execute(lambda q: q._update_picked_sql(fields, n, op))
         if cur is None:
             return []
         rows = await cur.fetchall()
         await cur.close()
         await self._adapter.auto_commit()
-        return [self._returned(row) for row in rows]
+        return [query._returned(row) for row in rows]
 
     async def _changed(self, fields: dict, n: Optional[int] = None) -> list[tuple[dict, dict]]:
         """Async twin of :meth:`SQLerQuery._changed` (run it inside a transaction)."""
         self._write_checks(fields, n)
-        cur = await self._execute(*self._picked(n, self._returning()))
+        query, cur = await self._execute(lambda q: q._picked(n, q._returning()))
         if cur is None:
             return []
         rows = await cur.fetchall()
         await cur.close()
-        before = {doc["_id"]: doc for doc in map(self._returned, rows)}
+        before = {doc["_id"]: doc for doc in map(query._returned, rows)}
         if not before:
             return []
-        cur = await self._adapter.execute(*self._update_ids_sql(fields, list(before)))
+        cur = await self._adapter.execute(*query._update_ids_sql(fields, list(before)))
         rows = await cur.fetchall()
         await cur.close()
-        after = {doc["_id"]: doc for doc in map(self._returned, rows)}
+        after = {doc["_id"]: doc for doc in map(query._returned, rows)}
         return [(doc, after[_id]) for _id, doc in before.items()]
 
     async def delete(self) -> int:
@@ -669,7 +690,7 @@ class AsyncSQLerQuery(_WriteStatements):
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        cur = await self._execute(*self._delete_sql())
+        _, cur = await self._execute(lambda q: q._delete_sql())
         if cur is None:
             return 0
         rowcount = cur.rowcount
@@ -681,9 +702,9 @@ class AsyncSQLerQuery(_WriteStatements):
         """Async twin of :meth:`SQLerQuery._deleted` (run it inside a transaction)."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        cur = await self._execute(*self._delete_sql(returning=True))
+        query, cur = await self._execute(lambda q: q._delete_sql(returning=True))
         if cur is None:
             return []
         rows = await cur.fetchall()
         await cur.close()
-        return [self._returned(row) for row in rows]
+        return [query._returned(row) for row in rows]
