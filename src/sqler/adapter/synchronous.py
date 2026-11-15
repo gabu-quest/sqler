@@ -10,8 +10,20 @@ from typing import Any, ContextManager, Optional, Self
 
 from sqler.logging import query_logger
 
-from ..exceptions import NotConnectedError, QueryError, unique_violation_from
+from ..exceptions import NotConnectedError, QueryError, TransactionStateError, unique_violation_from
 from .abstract import AdapterABC, CursorLike
+
+_BROKEN = (
+    "a nested transaction could not be {}, so the transaction it is part of ends rolled back: "
+    "nothing written in it is committed"
+)
+
+
+def _broken(failed: tuple[str, BaseException]) -> TransactionStateError:
+    """The error for a statement or an end in a transaction where a nested end failed ``(how, error)``."""
+    error = TransactionStateError(_BROKEN.format(failed[0]))
+    error.__cause__ = failed[1]
+    return error
 
 
 def _read_hit_missing_table(query: str, exc: BaseException) -> bool:
@@ -61,10 +73,12 @@ class _ThreadConnection:
 
 
 class _ThreadState(threading.local):
-    """One thread's connection (``None`` until it opens one) and depth of explicit transactions."""
+    """One thread's connection (``None`` until it opens one), depth of explicit transactions,
+    and how a nested end in its transaction failed (``None``: none did)."""
 
     conn: Optional[sqlite3.Connection] = None
     txn_depth = 0
+    broken: Optional[tuple[str, BaseException]] = None
 
 
 class _SharedConnection:
@@ -96,8 +110,13 @@ class _SharedConnection:
     def _free(self) -> bool:
         return self._holder is None or self._closed
 
-    def take(self) -> sqlite3.Connection:
-        """Wait for the turn and hold it for one statement; the caller then calls ``give``."""
+    def take(self, broken: Optional[tuple[str, BaseException]] = None) -> sqlite3.Connection:
+        """Wait for the turn and hold it for one statement; the caller then calls ``give``.
+
+        ``broken``: the calling thread's transaction had a nested end fail; nothing is taken.
+        """
+        if broken is not None:
+            raise _broken(broken)
         turn = self._turn
         turn.acquire()
         try:
@@ -234,35 +253,55 @@ class SQLiteAdapter(AdapterABC):
           transaction on it belongs to the thread that opened it, and the other
           threads' statements wait for it to end (at most ``timeout_ms``)
         - WAL mode for improved concurrency
-        - Configurable query timeout via busy_timeout pragma
+        - One lock wait, ``timeout_ms``, on every connection
         - Optional slow query logging
         - Transaction-aware auto-commit (respects explicit transactions)
         - A statement or commit that fails outside an explicit transaction
           rolls back the transaction Python's ``sqlite3`` opened for it, so the
           thread's connection keeps no lock
+        - A nested transaction whose end fails in SQLite ends its transaction
+          rolled back: that end, every later statement of the thread in the
+          transaction and the transaction's own end raise ``TransactionStateError``
 
     Args:
         path: Path to the database file, or ":memory:" for in-memory.
         pragmas: Optional list of PRAGMA statements to execute on connect.
-        timeout_ms: Query timeout in milliseconds (default 5000).
+        timeout_ms: How long a statement waits for a lock, in milliseconds.
     """
 
     def __init__(
         self,
         path: str = "sqler.db",
         pragmas: Optional[list[str]] = None,
-        timeout_ms: int = 5000,
+        timeout_ms: Optional[int] = None,
     ):
         """Initialize the adapter.
 
         Args:
             path: Path to the SQLite database file.
             pragmas: Optional list of SQL PRAGMA statements to apply on connection.
-            timeout_ms: Busy timeout in milliseconds (how long to wait for locks).
+            timeout_ms: How long a statement waits for another connection's lock, in
+                milliseconds (SQLite's ``busy_timeout`` on every connection the adapter
+                opens; on a plain ``":memory:"`` adapter, also the wait for another
+                thread's transaction). It does not reach a shared-cache in-memory
+                database: SQLite calls no busy handler for a table lock there, so a
+                statement that meets one raises ``sqlite3.OperationalError`` ("database
+                table is locked") at once.
+                Not given: a ``busy_timeout`` pragma in ``pragmas``, else 5000. Given
+                beside such a pragma, the two must agree (``connect()`` raises
+                ``ValueError`` otherwise).
+
+        Raises:
+            ValueError: ``timeout_ms`` is not a whole number from 0 to 2**31 - 1.
         """
+        if timeout_ms is not None and (
+            isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 0 <= timeout_ms < 2**31
+        ):
+            raise ValueError(f"timeout_ms must be a whole number of milliseconds from 0 to 2**31 - 1, not {timeout_ms!r}")
         self.path = path
         self.pragmas = pragmas or []
-        self.timeout_ms = timeout_ms
+        self.timeout_ms = 5000 if timeout_ms is None else timeout_ms
+        self._timeout_given = timeout_ms is not None
         self._local = _ThreadState()
         self._conns_lock = threading.RLock()
         self._conns: weakref.WeakSet[_ThreadConnection] = weakref.WeakSet()
@@ -312,16 +351,38 @@ class SQLiteAdapter(AdapterABC):
             with self._conns_lock:
                 if self._anchor is None:
                     self._anchor = sqlite3.connect(self.path, uri=True, check_same_thread=False)
+        was_connected = self._connected
         self._connected = True
-        _ = self._conn()  # Ensure a connection for this thread
+        try:
+            self._conn()  # a connection for this thread
+        except BaseException:
+            if not was_connected:
+                self.close()  # the connect that failed leaves nothing open
+            raise
 
     def _open(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, uri=True, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        for pragma in self.pragmas:
-            cur.execute(pragma)
-        conn.commit()
+        try:
+            cur = conn.cursor()
+            # not connect(timeout=): Python truncates the seconds to milliseconds (1.001 s waits 1000 ms)
+            cur.execute(f"PRAGMA busy_timeout = {self.timeout_ms}")
+            for pragma in self.pragmas:
+                cur.execute(pragma)
+            conn.commit()
+            if self.pragmas:
+                # SQLite has read the pragmas: its busy_timeout is the one number
+                busy = cur.execute("PRAGMA busy_timeout").fetchone()[0]
+                if busy != self.timeout_ms:
+                    if self._timeout_given:
+                        raise ValueError(
+                            f"timeout_ms={self.timeout_ms} and the busy_timeout pragma ({busy}) disagree: "
+                            "give one of them"
+                        )
+                    self.timeout_ms = busy
+        except BaseException:
+            conn.close()  # a connection that could not be set up is not left open
+            raise
         return conn
 
     def _holding(self) -> ContextManager[sqlite3.Connection]:
@@ -333,7 +394,7 @@ class SQLiteAdapter(AdapterABC):
 
     @contextmanager
     def _turn_of(self, shared: _SharedConnection) -> Iterator[sqlite3.Connection]:
-        conn = shared.take()
+        conn = shared.take(self._local.broken)
         try:
             yield conn
         finally:
@@ -342,10 +403,15 @@ class SQLiteAdapter(AdapterABC):
     def _conn(self) -> sqlite3.Connection:
         """This thread's connection; on a plain ``":memory:"`` adapter the shared one,
         whose statements go through ``_shared.take()`` and ``give()``. Code outside the
-        adapter that works on the connection itself holds it with ``_holding()``."""
+        adapter that works on the connection itself holds it with ``_holding()``.
+
+        Raises ``TransactionStateError`` in a transaction whose nested end failed: the ends
+        of a transaction read ``_local.conn`` themselves."""
         if not self._connected:
             raise NotConnectedError("Database not connected, call connect() first")
         local = self._local  # read once: close() on another thread replaces it
+        if local.broken is not None:
+            raise _broken(local.broken)
         conn = local.conn
         if conn is not None:
             return conn
@@ -391,7 +457,7 @@ class SQLiteAdapter(AdapterABC):
         Automatically logs the query if query_logger is enabled.
         """
         shared = self._shared  # not None: the one ":memory:" connection, which waits for its turn
-        conn = self._conn() if shared is None else shared.take()
+        conn = self._conn() if shared is None else shared.take(self._local.broken)
         try:
             cursor = conn.cursor()
             _logging = query_logger.enabled
@@ -438,7 +504,7 @@ class SQLiteAdapter(AdapterABC):
         none of the rows.
         """
         shared = self._shared
-        conn = self._conn() if shared is None else shared.take()
+        conn = self._conn() if shared is None else shared.take(self._local.broken)
         try:
             cursor = conn.cursor()
             cursor.executemany(query, param_list or [])
@@ -462,13 +528,15 @@ class SQLiteAdapter(AdapterABC):
         the open transaction before it runs a script, which would end it unseen.
         """
         if self._txn_depth > 0:
+            if self._local.broken is not None:
+                raise _broken(self._local.broken)
             raise QueryError(
                 "executescript cannot run inside a transaction: "
                 "SQLite commits the open transaction before it runs a script",
                 sql=script,
             )
         shared = self._shared
-        conn = self._conn() if shared is None else shared.take()
+        conn = self._conn() if shared is None else shared.take(self._local.broken)
         try:
             cursor = conn.cursor()
             cursor.executescript(script)
@@ -491,7 +559,7 @@ class SQLiteAdapter(AdapterABC):
         constraint, a lock) rolls the transaction back before the error is raised.
         """
         shared = self._shared
-        conn = self._conn() if shared is None else shared.take()
+        conn = self._conn() if shared is None else shared.take(self._local.broken)
         try:
             conn.commit()
         except BaseException as exc:
@@ -524,7 +592,7 @@ class SQLiteAdapter(AdapterABC):
         Uses SAVEPOINTs for nested transactions to allow proper inner rollback.
         """
         shared = self._shared
-        conn = self._conn() if shared is None else shared.take()
+        conn = self._conn() if shared is None else shared.take(self._local.broken)
         try:
             depth = self._txn_depth  # nested: a savepoint
             conn.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT sp_{depth}")
@@ -534,20 +602,30 @@ class SQLiteAdapter(AdapterABC):
                 shared.give(self._txn_depth)
 
     def end_transaction(self, *, commit: bool = True) -> None:
-        """End an explicit transaction (decrements depth counter).
+        """End this thread's innermost explicit transaction (decrements depth counter).
 
         Args:
             commit: If True, commit on outermost transaction. If False, rollback.
+
+        Raises:
+            TransactionStateError: the end of a nested transaction failed in SQLite, here
+                or earlier in this transaction (``__cause__`` is SQLite's error). The
+                transaction ends rolled back whatever ``commit`` says; a nested end after
+                the failure sends nothing. An interrupt during a nested end leaves as it
+                is, and the transaction ends rolled back the same way.
         """
-        if self._txn_depth <= 0:
+        local = self._local
+        depth = local.txn_depth
+        if depth <= 0:
             return  # No active transaction
-        self._txn_depth -= 1
+        local.txn_depth = depth = depth - 1
+        failed = local.broken
         shared = self._shared
-        conn = self._conn() if shared is None else shared.take()
-        try:
-            if self._txn_depth == 0:
-                # Outermost: commit or rollback entire transaction
-                if commit:
+        if depth == 0:
+            local.broken = None
+            conn = local.conn if shared is None else shared.take()
+            try:
+                if commit and failed is None:
                     try:
                         conn.commit()
                     except BaseException:
@@ -559,25 +637,33 @@ class SQLiteAdapter(AdapterABC):
                         conn.rollback()
                     except sqlite3.Error:
                         pass
-            else:
-                # Nested: release or rollback savepoint
-                sp = f"sp_{self._txn_depth}"
+            finally:
+                if shared is not None:
+                    shared.give(0)
+        elif failed is None:
+            try:
+                conn = local.conn if shared is None else shared.take()
                 try:
-                    if commit:
-                        conn.execute(f"RELEASE SAVEPOINT {sp}")
-                    else:
-                        conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-                        conn.execute(f"RELEASE SAVEPOINT {sp}")  # Clean up after rollback
-                except sqlite3.Error:
-                    pass
-        finally:
-            if shared is not None:
-                shared.give(self._txn_depth)
+                    if not commit:
+                        conn.execute(f"ROLLBACK TO SAVEPOINT sp_{depth}")
+                    conn.execute(f"RELEASE SAVEPOINT sp_{depth}")
+                finally:
+                    if shared is not None:
+                        shared.give(depth)
+            except BaseException as exc:
+                # a RELEASE after a failed ROLLBACK TO would keep the rows it was to undo
+                local.broken = failed = ("committed" if commit else "rolled back", exc)
+                if not isinstance(exc, Exception):
+                    raise
+        if failed is not None:
+            raise _broken(failed)
 
     def __enter__(self):
         """Enter context manager; connect if not connected"""
         if self._local.conn is None:
             self.connect()
+        else:
+            self._conn()  # in a transaction whose nested end failed: raises
         return self
 
     def __exit__(self, exception_type, exception_value, exception_traceback):
@@ -599,8 +685,8 @@ class SQLiteAdapter(AdapterABC):
     ### factories
 
     @classmethod
-    def in_memory(cls, shared: bool = True, name: Optional[str] = None) -> Self:
-        """Connects to an in memory db with some pragmas applied"""
+    def in_memory(cls, shared: bool = True, name: Optional[str] = None, *, timeout_ms: int = 5000) -> Self:
+        """Connects to an in memory db with some pragmas applied; ``timeout_ms`` as for the constructor."""
         pragmas = [
             "PRAGMA foreign_keys = ON",
             "PRAGMA synchronous = OFF",
@@ -614,7 +700,7 @@ class SQLiteAdapter(AdapterABC):
             uri = f"file:{ident}?mode=memory&cache=shared"
         else:
             uri = ":memory:"
-        return cls(uri, pragmas=pragmas)
+        return cls(uri, pragmas=pragmas, timeout_ms=timeout_ms)
 
     _PRAGMA_KEYS = [
         "foreign_keys", "busy_timeout", "journal_mode", "synchronous",
@@ -639,11 +725,10 @@ class SQLiteAdapter(AdapterABC):
         return report
 
     @classmethod
-    def on_disk(cls, path: str = "sqler.db") -> Self:
-        """Connects (creates if not exist) a db on disk with some pragmas applied"""
+    def on_disk(cls, path: str = "sqler.db", *, timeout_ms: int = 5000) -> Self:
+        """Connects (creates if not exist) a db on disk with some pragmas applied; ``timeout_ms`` as for the constructor."""
         pragmas = [
             "PRAGMA foreign_keys = ON",
-            "PRAGMA busy_timeout = 5000",
             "PRAGMA journal_mode = WAL",
             "PRAGMA synchronous = NORMAL",
             "PRAGMA cache_size = -64000",
@@ -651,4 +736,4 @@ class SQLiteAdapter(AdapterABC):
             "PRAGMA mmap_size = 268435456",
             "PRAGMA temp_store = MEMORY",
         ]
-        return cls(path, pragmas=pragmas)
+        return cls(path, pragmas=pragmas, timeout_ms=timeout_ms)

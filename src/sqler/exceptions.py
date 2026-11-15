@@ -196,10 +196,16 @@ class LockTimeoutError(ConcurrencyError):
 
 
 class TransactionStateError(ConcurrencyError):
-    """Raised when a transaction ended while another task's nested transaction in it was open.
+    """Raised when a transaction can no longer be trusted to commit what it was told to.
 
-    The transaction is rolled back; the task that ended it and the task whose nested
-    transaction was open both get this error.
+    Two cases, sync and async alike where they apply; in both the transaction is rolled back:
+
+    - the end of a nested transaction failed in SQLite: that end, every later statement in
+      the transaction and the transaction's own end raise this error (``__cause__`` is
+      SQLite's error);
+    - async only: a transaction ended while another task's nested transaction in it was
+      open; the task that ended it and the task whose nested transaction was open both
+      get this error.
     """
 
     pass

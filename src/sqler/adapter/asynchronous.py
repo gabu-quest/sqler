@@ -21,24 +21,13 @@ from sqler.logging import query_logger
 from sqler.pool import PoolStats
 
 from .abstract import AsyncAdapterABC
-from .synchronous import _read_hit_missing_table
+from .synchronous import _broken, _read_hit_missing_table
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_ACQUIRE_TIMEOUT_S: Optional[float] = 30.0
 
 _ENDED = "the transaction this nested transaction was part of has ended; nothing written in it was committed"
-_BROKEN = (
-    "a nested transaction could not be {}, so the transaction it is part of ends rolled back: "
-    "nothing written in it is committed"
-)
-
-
-def _broken(failed: tuple[str, Exception]) -> TransactionStateError:
-    """The error for a statement or an end in a transaction where a nested end failed ``(how, error)``."""
-    error = TransactionStateError(_BROKEN.format(failed[0]))
-    error.__cause__ = failed[1]
-    return error
 
 
 class _Savepoint:

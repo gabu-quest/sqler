@@ -6,7 +6,7 @@ from typing import Any, NamedTuple, Optional
 
 from sqler._stored import dumps, stored
 from sqler.adapter import SQLiteAdapter
-from sqler.exceptions import InvalidIdentifierError, StaleVersionError
+from sqler.exceptions import InvalidIdentifierError, StaleVersionError, TransactionStateError
 from sqler.query import SQLerQuery
 from sqler.query.query import is_missing_table
 from sqler.utils import (
@@ -130,7 +130,7 @@ class SQLerDB:
     """
 
     @classmethod
-    def in_memory(cls, shared: bool = True, *, name: Optional[str] = None) -> "SQLerDB":
+    def in_memory(cls, shared: bool = True, *, name: Optional[str] = None, timeout_ms: int = 5000) -> "SQLerDB":
         """Create a SQLerDB backed by an in-memory SQLite database.
 
         Args:
@@ -138,24 +138,28 @@ class SQLerDB:
                 see the same in-memory database.
             name: Optional shared cache identifier; use the same name to
                 connect multiple adapters to a shared in-memory database.
+            timeout_ms: How long a statement waits for a lock, in milliseconds
+                (see ``SQLiteAdapter``).
 
         Returns:
             SQLerDB: Connected database instance.
         """
-        adapter = SQLiteAdapter.in_memory(shared=shared, name=name)
+        adapter = SQLiteAdapter.in_memory(shared=shared, name=name, timeout_ms=timeout_ms)
         return cls(adapter)
 
     @classmethod
-    def on_disk(cls, path: str = "sqler.db") -> "SQLerDB":
+    def on_disk(cls, path: str = "sqler.db", *, timeout_ms: int = 5000) -> "SQLerDB":
         """Create a SQLerDB backed by a persistent file on disk.
 
         Args:
             path: Path to the SQLite database file (created if missing).
+            timeout_ms: How long a statement waits for a lock, in milliseconds
+                (see ``SQLiteAdapter``).
 
         Returns:
             SQLerDB: Connected database instance.
         """
-        adapter = SQLiteAdapter.on_disk(path)
+        adapter = SQLiteAdapter.on_disk(path, timeout_ms=timeout_ms)
         return cls(adapter)
 
     def __init__(self, adapter: SQLiteAdapter):
@@ -1006,24 +1010,23 @@ class SQLerDB:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit context manager; commit, or roll back while the caller's exception leaves."""
-        self._end_level(exc_type is None, quiet=exc_type is not None)
+        self._end_level(exc_type is None, leaving=exc_val)
         return False
 
     def _begin_level(self) -> None:
         self.adapter.begin_transaction()
         self._open.levels.append(_Level(set(), {}, self.adapter._txn_depth))
 
-    def _end_level(self, commit: bool, *, quiet: bool = False) -> None:
+    def _end_level(self, commit: bool, *, leaving: Optional[BaseException] = None) -> None:
         """End this thread's innermost level; what it learned about tables goes with it.
 
         A commit moves it to the level above, or at the outermost level to the shared memory;
         a rollback, or a commit that fails, drops it. That runs no statement and raises
-        nothing. ``quiet``: an error of the adapter's own is not raised (the caller's
-        exception is on its way out).
+        nothing. ``leaving``: the caller's exception on its way out (see ``_end_transaction``).
         """
         levels = self._open.levels
         level = levels.pop() if levels else None  # none: begun on another thread; nothing to merge
-        _end_transaction(self.adapter, commit, quiet)
+        _end_transaction(self.adapter, commit, leaving)
         if commit and level is not None and (above := self._learned()) is not None:
             above[0].update(level.versioned)
             above[1].update(level.promoted)
@@ -1154,14 +1157,21 @@ class _OpenLevels(threading.local):
         self.levels: list[_Level] = []
 
 
-def _end_transaction(adapter, commit: bool, quiet: bool) -> None:
-    """End the adapter's innermost transaction; ``quiet``: an error of its own is not raised
-    (the adapter closed inside the block, say), so the caller's exception is the one that leaves."""
+def _end_transaction(adapter, commit: bool, leaving: Optional[BaseException]) -> None:
+    """End the adapter's innermost transaction.
+
+    While the caller's exception ``leaving`` is on its way out, an error of the end is not
+    raised (the adapter closed inside the block, say): that exception is the one that
+    leaves, and when the end says the transaction was rolled back
+    (``TransactionStateError``) it goes on with that sentence as a note.
+    """
     try:
         adapter.end_transaction(commit=commit)
-    except Exception:
-        if not quiet:
+    except Exception as ended:
+        if leaving is None:
             raise
+        if isinstance(ended, TransactionStateError) and not isinstance(leaving, TransactionStateError):
+            leaving.add_note(str(ended))
 
 
 class Transaction:
@@ -1177,12 +1187,12 @@ class Transaction:
         self._db = db  # None: a bare adapter transaction (PooledSQLerDB)
         self._active = False
 
-    def _end(self, commit: bool, quiet: bool = False) -> None:
+    def _end(self, commit: bool, leaving: Optional[BaseException] = None) -> None:
         self._active = False
         if self._db is None:
-            _end_transaction(self.adapter, commit, quiet)
+            _end_transaction(self.adapter, commit, leaving)
         else:
-            self._db._end_level(commit, quiet=quiet)
+            self._db._end_level(commit, leaving=leaving)
 
     def __enter__(self):
         """Begin the transaction."""
@@ -1194,9 +1204,13 @@ class Transaction:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Commit on success, rollback on exception."""
+        """Commit on success, rollback on exception.
+
+        When the block raised and the transaction was rolled back for a reason of its own
+        (a nested end that failed), the block's exception goes on with that sentence as a note.
+        """
         if self._active:
-            self._end(exc_type is None, quiet=exc_type is not None)
+            self._end(exc_type is None, leaving=exc_val)
         return False
 
     def commit(self):

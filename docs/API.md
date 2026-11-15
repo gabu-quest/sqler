@@ -749,6 +749,34 @@ TxItem(name="D").save()
 assert TxItem.query().count() == 2
 ```
 
+### Nested transactions whose end fails
+
+A `db.transaction()` inside another one is a savepoint: its block ends with `RELEASE`, or
+with `ROLLBACK TO` then `RELEASE` when it raised. If SQLite refuses one of them (for
+example because a raw `RELEASE` statement already ended the savepoint), the transaction can
+no longer be trusted, on the sync adapter as on the async one. After a failed `ROLLBACK TO`
+no `RELEASE` is sent, since that would keep the rows the rollback was to undo. The nested
+block raises `TransactionStateError` with the SQLite error as `__cause__` (a block that is
+already raising keeps its own exception, with the same sentence added as a note). From then
+on every statement of that thread in the transaction (`execute`, `executemany`,
+`executescript`, `commit`, a new nested transaction, `with adapter:`) raises the same error
+and sends nothing; the transaction ends with `ROLLBACK` whatever its block asks for, and the
+block that ends it raises the error too. An interrupt (`KeyboardInterrupt`) during a nested
+end leaves as it is, and the transaction ends rolled back the same way. The same holds for
+`adapter.begin_transaction()` and `adapter.end_transaction()` called directly.
+
+### How long a statement waits for a lock
+
+`timeout_ms` (default 5000) is how long a statement of the sync adapter waits for another
+connection's lock before it raises `sqlite3.OperationalError: database is locked`. Pass it
+to `SQLiteAdapter(...)`, `SQLiteAdapter.on_disk()`, `SQLiteAdapter.in_memory()`,
+`SQLerDB.on_disk()` or `SQLerDB.in_memory()`; it is SQLite's `busy_timeout` on every
+connection the adapter opens, and on a plain `":memory:"` database also the wait for
+another thread's transaction. A `PRAGMA busy_timeout = N` in `pragmas` says the same thing:
+without `timeout_ms` it sets the number, and beside a `timeout_ms` that differs `connect()`
+raises `ValueError`. A shared-cache in-memory database does not wait: SQLite calls no busy
+handler for its table locks, so such a statement raises "database table is locked" at once.
+
 ### Async transactions shared by tasks
 
 Tasks started inside `async with db.transaction():` share its connection. Each task's
@@ -1819,7 +1847,7 @@ def safe_delete(model):
 SQLite allows only one writer at a time. If you see this error:
 - Reduce concurrent write operations
 - Use transactions to batch writes: `with db.transaction(): ...`
-- Increase `busy_timeout` pragma (default is 5000ms)
+- Increase `timeout_ms` (default 5000), e.g. `SQLerDB.on_disk("app.db", timeout_ms=15000)`
 - For high write loads, consider a write queue or single-writer pattern
 
 **"Model X is not bound"**
