@@ -3,6 +3,7 @@
 Tests health, stats, vacuum, checkpoint.
 """
 
+from examples.fastapi.db import get_db
 from fastapi.testclient import TestClient
 
 
@@ -80,3 +81,13 @@ class TestSeed:
         assert {"articles", "writers", "cities", "countries"} <= set(tables)
         assert {"_id", "data"} <= {c["name"] for c in tables["countries"]["columns"]}
         assert any(i["table"] == "countries" and i["columns"] == ["code"] for i in data["indices"])
+
+    def test_schema_leaves_out_the_tables_sqler_keeps_for_itself(self, client: TestClient):
+        """A table with a promoted column has sqler record it in ``_sqler_promoted``; the view
+        lists the table and not the record."""
+        db = get_db()
+        db.ensure_table("schema_promoted", promoted={"status": "TEXT"})
+        made = db.execute_sql("SELECT name FROM sqlite_master WHERE name IN ('schema_promoted', '_sqler_promoted') ORDER BY name")
+        assert [r["name"] for r in made] == ["_sqler_promoted", "schema_promoted"]
+        names = [t["name"] for t in client.get("/api/db/schema").json()["tables"]]
+        assert [n for n in names if n in ("schema_promoted", "_sqler_promoted")] == ["schema_promoted"]

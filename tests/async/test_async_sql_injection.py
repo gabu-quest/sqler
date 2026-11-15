@@ -599,7 +599,7 @@ class TestAsyncPromotedWriteNames:
         before = await self._state(pdb)
         with pytest.raises(_InvalidTableNameError):
             await _ASYNC_PROMOTED_WRITES[method](pdb, "jobs\n", ["s"])
-        assert await self._state(pdb) == before == [[(1, "first", 0)], [("jobs",), ("sqlite_sequence",)]]
+        assert await self._state(pdb) == before == [[(1, "first", 0)], [("_sqler_promoted",), ("jobs",), ("sqlite_sequence",)]]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("method", list(_ASYNC_PROMOTED_WRITES))

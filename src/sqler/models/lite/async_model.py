@@ -328,7 +328,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
 
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            await db._ensure_promoted(table, promoted, checks)
+            await db._ensure_promoted(table, promoted, checks, model=cls)
 
         payloads = [await inst._adump_with_relations() for inst in instances]
 
@@ -359,7 +359,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            await db._ensure_promoted(table, promoted, checks)
+            await db._ensure_promoted(table, promoted, checks, model=cls)
         else:
             await db._ensure_table(table)
         payload = await self._adump_with_relations()

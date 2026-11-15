@@ -135,7 +135,8 @@ async def test_a_thousand_saves_in_one_transaction_create_the_new_table_once(db)
         async with db.transaction():
             for i in range(1000):
                 await AMemPromo(name=str(i)).save(db=db)
-    assert len(_kind(sent, "CREATE TABLE")) == 1
+    assert len(_kind(sent, "CREATE TABLE IF NOT EXISTS AMEM_PROMOS")) == 1
+    assert len(_kind(sent, "CREATE TABLE IF NOT EXISTS _SQLER_PROMOTED")) == 1  # the record table
     assert await AMemPromo.using(db).count() == 1000
 
 

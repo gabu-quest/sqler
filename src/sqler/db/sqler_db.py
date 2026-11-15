@@ -1,6 +1,9 @@
+import dataclasses
 import functools
 import json
+import re
 import sqlite3
+import sys
 import threading
 from typing import Any, NamedTuple, Optional
 
@@ -10,7 +13,9 @@ from sqler.exceptions import (
     InvalidFieldNameError,
     InvalidIdentifierError,
     NotFoundError,
+    SchemaError,
     StaleVersionError,
+    TableNotFoundError,
     TransactionStateError,
     UnstorableValueError,
 )
@@ -209,6 +214,257 @@ def _refuse_unwritten(gone: bool, table: str, _id: Any) -> None:
     raise StaleVersionError("Stale version: update rejected")
 
 
+# ---- a promoted column: the statements that make it, move the values into it, and record it ----
+#
+# Each function below that ``yield``s is a run of statements both database classes send the
+# same way (``SQLerDB._run`` and its async twin): it yields ``(sql, params)``, gets back the
+# rows read, or the ``sqlite3.OperationalError`` the statement raised, and returns its answer.
+
+
+# The promoted columns of each table that hold their values: no row's document holds their key.
+# A table of sqler's own (``SQLER_TABLES``), beside the tables, as the migrations table is.
+_SETTLED = "_sqler_promoted"
+_SETTLED_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {_SETTLED} (tbl TEXT NOT NULL COLLATE NOCASE, "
+    "col TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY (tbl, col)) WITHOUT ROWID;"
+)
+
+# a column definition ``validate_column_def`` accepted: TYPE [NOT NULL] [DEFAULT <literal>]
+_DEFINITION = re.compile(r"\s*\w+(?:\s*\([^)]*\))?(\s+NOT\s+NULL)?(?:\s+DEFAULT\s+(.+?))?\s*$", re.IGNORECASE | re.DOTALL)
+
+_NO_FILL = object()  # a row without the key keeps what ADD COLUMN gave it: the DEFAULT, or NULL
+_KEEP = object()  # the column keeps its values; only the key leaves the documents
+_UNFILLABLE = object()  # a default no column holds: a list, a dict, a value with no stored form
+
+
+def _fill_of(model: Any, name: str) -> Any:
+    """What a row without the key ``name`` reads through ``model``, in stored form: its field's
+    default; ``_NO_FILL`` without a model, a field or a default; ``_UNFILLABLE`` when no column
+    holds that default."""
+    if model is None:
+        return _NO_FILL
+    fields = getattr(model, "__dataclass_fields__", None)
+    if fields is not None:  # a lite class
+        f = fields.get(name)
+        if f is None or (f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING):
+            return _NO_FILL
+        value = f.default_factory() if f.default is dataclasses.MISSING else f.default
+    elif hasattr(model, "__struct_fields__"):  # a msgspec class
+        msgspec = sys.modules["msgspec"]
+        f = next((f for f in msgspec.structs.fields(model) if f.name == name), None)
+        if f is None or (f.default is msgspec.NODEFAULT and f.default_factory is msgspec.NODEFAULT):
+            return _NO_FILL
+        value = f.default_factory() if f.default is msgspec.NODEFAULT else f.default
+    else:
+        f = model.model_fields.get(name)
+        if f is None or f.is_required():
+            return _NO_FILL
+        if getattr(f, "default_factory_takes_validated_data", False):  # pydantic 2.10 and later
+            return _UNFILLABLE  # worked out from the row's other fields: no one value for a column
+        value = f.get_default(call_default_factory=True)
+    try:
+        value = stored(value, field=name)
+    except UnstorableValueError:
+        return _UNFILLABLE
+    return _UNFILLABLE if isinstance(value, (list, dict)) else value
+
+
+def _tally_sql(table: str, columns: list[str], conditions: list[str]) -> tuple[str, list[Any]]:
+    """One pass over ``table`` that counts, for each of ``columns``, the rows that meet its
+    condition, and finds the first of them. A condition reads ``t<i>``, the JSON type of the
+    i-th column's key in the document (NULL: no key), and ``v<i>``, the SQL type of its value."""
+    picks = ", ".join(f"json_type(data, ?) AS t{i}, typeof(json_extract(data, ?)) AS v{i}" for i in range(len(columns)))
+    tallies = ", ".join(f"COUNT(CASE WHEN {c} THEN 1 END), MIN(CASE WHEN {c} THEN _id END)" for c in conditions)
+    params = [p for col in columns for p in (_json_path(col),) * 2]
+    return f"SELECT {tallies} FROM (SELECT _id, {picks} FROM {table});", params
+
+
+def _unkept(i: int, not_null: bool, without_key: bool) -> str:
+    """The rows whose value the i-th column cannot take as the row reads it: a list, a dict or a
+    reference; an integer SQLite holds only as a float; JSON null in a NOT NULL column; and with
+    ``without_key``, no key (the field's default does not fit the column)."""
+    sql = f"t{i} IN ('array', 'object') OR (t{i} = 'integer' AND v{i} <> 'integer')"
+    if not_null:
+        sql += f" OR t{i} = 'null'"
+    return sql + (f" OR t{i} IS NULL" if without_key else "")
+
+
+def _move_sql(table: str, fills: dict[str, Any]) -> tuple[str, list[Any]]:
+    """The one ``UPDATE`` that takes each column's key out of every document and puts its value
+    in the column: JSON null as NULL, never the column's DEFAULT. A row without the key gets the
+    column's fill (``_NO_FILL``: what it holds; ``_KEEP``: the column is not written)."""
+    sets, params = [], []
+    for col, fill in fills.items():
+        if fill is _KEEP:
+            continue
+        absent = col if fill is _NO_FILL else "?"
+        sets.append(f"{col} = CASE WHEN json_type(data, ?) IS NULL THEN {absent} ELSE json_extract(data, ?) END")
+        params += [_json_path(col)] if fill is _NO_FILL else [_json_path(col), fill]
+        params.append(_json_path(col))
+    paths = [_json_path(col) for col in fills]
+    sets.append(f"data = json_remove(data{', ?' * len(paths)})")
+    sql = f"UPDATE {table} SET {', '.join(sets)}"
+    if all(fill is _NO_FILL or fill is _KEEP for fill in fills.values()):  # only the rows with a key change
+        sql += " WHERE " + " OR ".join(["json_type(data, ?) IS NOT NULL"] * len(paths))
+        paths *= 2
+    return sql + ";", params + paths
+
+
+def _refused(table: str, column: str, rows: int, first_id: int) -> SchemaError:
+    return SchemaError(
+        f"Cannot promote {table}.{column}: {rows} row(s) hold a value the column cannot keep as the row "
+        "reads it (a list, a dict or a reference; an integer past 64 bits; null, or no key and no "
+        f"default the column holds, in a NOT NULL column); the first is _id {first_id}. Nothing was changed.",
+        details={"table": table, "column": column, "rows": rows, "first_id": first_id},
+    )
+
+
+def _settled(table: Any) -> Any:
+    """Read which promoted columns of ``table`` hold their values. A column the database does not
+    record as settled is read for rows whose document still holds its key, as an earlier version
+    of sqler left them: none, and it is settled; some, and ``SchemaError`` names them, because a
+    row does not say whether its column or its document is newer. Returns ``(column names of the
+    table, the columns to record)``."""
+    names = [row[1] for row in (yield _columns_sql(table), [])]
+    promoted = _promoted_in(names)
+    if not promoted:
+        return names, []
+    try:
+        rows = yield f"SELECT col FROM {_SETTLED} WHERE tbl = ?;", [table]
+    except sqlite3.OperationalError as exc:
+        if not is_missing_table(exc, _SETTLED):
+            raise _not_the_record(exc) or exc
+        rows = []
+    settled = {row[0].lower() for row in rows}
+    unsettled = [col for col in promoted if col.lower() not in settled]
+    if not unsettled:
+        return names, []
+    (row,) = yield _tally_sql(table, unsettled, [f"t{i} IS NOT NULL" for i in range(len(unsettled))])
+    held = {c: {"rows": row[2 * i], "first_id": row[2 * i + 1]} for i, c in enumerate(unsettled) if row[2 * i]}
+    if held:
+        found = "; ".join(f"{c}: {h['rows']} row(s), the first _id {h['first_id']}" for c, h in held.items())
+        raise SchemaError(
+            f"Table {table} has columns beside data whose key is still in the documents of some rows "
+            f"({found}): a read gives the column's value, not the document's. An earlier version of "
+            "sqler left them so when it added a column, and so does a column added by other means. "
+            "Whether the column or the document is newer cannot be told from the row: settle each with "
+            f"db.move_promoted({table!r}, {next(iter(held))!r}, keep='document') (the document's value "
+            "goes into the column) or keep='column' (the column keeps its value); either takes the "
+            "key out of the documents.",
+            details={"table": table, "columns": held},
+        )
+    return names, unsettled
+
+
+def _record(table: str, columns: list[str], *, made: bool = False) -> Any:
+    """Record ``columns`` of ``table`` as holding their values; ``made``: the table is being
+    made now, and what is recorded under its name (a table of that name dropped by plain SQL)
+    is not its own."""
+    if not columns:
+        return
+    yield _SETTLED_DDL, []
+    try:
+        if made:
+            yield f"DELETE FROM {_SETTLED} WHERE tbl = ?;", [table]
+        yield f"INSERT OR IGNORE INTO {_SETTLED} (tbl, col) VALUES {', '.join(['(?, ?)'] * len(columns))};", [
+            v for col in columns for v in (table, col)
+        ]
+    except sqlite3.OperationalError as exc:
+        raise _not_the_record(exc) or exc
+
+
+def _not_the_record(exc: sqlite3.OperationalError) -> Optional[SchemaError]:
+    """The error for a table named ``_sqler_promoted`` that is not sqler's record, when ``exc``
+    (from a statement on it) says its columns are not the record's; else ``None``."""
+    if "no such column" not in str(exc) and "has no column named" not in str(exc):
+        return None
+    return SchemaError(
+        f"{_SETTLED} is not sqler's record of settled columns: a table of that name with other "
+        "columns is in the database. sqler keeps that name for itself; rename that table.",
+        details={"table": _SETTLED},
+    )
+
+
+def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], model: Any) -> Any:
+    """Under the write lock: create ``table`` with its ``promoted`` columns, or add the missing
+    ones to it and move each row's value from its document into its column (a row without the
+    key gets what it read through ``model``), and follow its search indexes. The record is
+    written before any change, so a foreign ``_sqler_promoted`` refuses with nothing made.
+    Returns its promoted columns.
+
+    Nothing is changed when a row's value cannot be kept (``SchemaError``)."""
+    names = [row[1] for row in (yield _columns_sql(table), [])]
+    if not names:
+        defs = [f"{col} {d}" for col, d in promoted.items()] + [f"CHECK ({c})" for c in checks.values()]
+        yield from _record(table, list(promoted), made=True)  # first: a foreign record table changes nothing
+        yield f"CREATE TABLE IF NOT EXISTS {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL{''.join(', ' + d for d in defs)});", []
+        return list(promoted)
+    added = {col: d for col, d in promoted.items() if col not in names}
+    if added:
+        fills, conditions = {}, []
+        for i, (col, definition) in enumerate(added.items()):
+            not_null, default = _DEFINITION.match(definition).groups()
+            if not_null and (default is None or default.upper() == "NULL"):
+                raise SchemaError(
+                    f"Cannot promote {table}.{col}: SQLite cannot add a NOT NULL column with no DEFAULT "
+                    "to an existing table. Give it a DEFAULT, or leave out NOT NULL. Nothing was changed.",
+                    details={"table": table, "column": col},
+                )
+            fill = _fill_of(model, col)
+            # a row without the key would read a value the column cannot hold
+            without_key = fill is _UNFILLABLE or (fill is None and bool(not_null))
+            fills[col] = _NO_FILL if without_key else fill
+            conditions.append(_unkept(i, bool(not_null), without_key))
+        (row,) = yield _tally_sql(table, list(added), conditions)
+        for i, col in enumerate(added):
+            if row[2 * i]:
+                raise _refused(table, col, row[2 * i], row[2 * i + 1])
+    columns = _promoted_in(names) + list(added)
+    yield from _record(table, columns)  # before any change: a foreign record table changes nothing
+    if added:
+        for col, definition in added.items():
+            yield f'ALTER TABLE "{table}" ADD COLUMN {col} {definition};', []
+        yield _move_sql(table, fills)
+        from sqler.fts import _follow_promotion  # fts imports this module
+
+        yield from _follow_promotion(table, list(added), columns)
+    return columns
+
+
+def _moved(table: str, column: str, keep: str) -> Any:
+    """``move_promoted``: take ``column``'s key out of every document of ``table``, its value going
+    into the column (``keep="document"``) or not (``keep="column"``), and record the column."""
+    info = {row[1]: row for row in (yield _columns_sql(table), [])}
+    if not info:
+        raise TableNotFoundError(f"Table {table} does not exist", table=table)
+    if column not in _promoted_in(info):
+        raise SchemaError(
+            f"{column} is not a promoted column of {table}", details={"table": table, "column": column}
+        )
+    if keep == "document":
+        (row,) = yield _tally_sql(table, [column], [_unkept(0, bool(info[column][3]), False)])
+        if row[0]:
+            raise _refused(table, column, row[0], row[1])
+    yield from _record(table, [column])
+    yield _move_sql(table, {column: _NO_FILL if keep == "document" else _KEEP})
+    from sqler.fts import _follow_promotion  # fts imports this module
+
+    yield from _follow_promotion(table, [column], _promoted_in(info))
+
+
+def _keep_word(keep: Any) -> str:
+    if keep not in ("document", "column"):
+        raise ValueError(f"keep must be 'document' or 'column', not {keep!r}")
+    return keep
+
+
+def _unwritable(exc: sqlite3.OperationalError) -> bool:
+    """Whether ``exc`` says the database takes no write now: opened read-only or ``query_only``,
+    or another connection holds the write lock past the busy timeout."""
+    code = getattr(exc, "sqlite_errorcode", None)  # an error sqler raised itself carries none
+    return code is not None and (code & 0xFF) in (sqlite3.SQLITE_READONLY, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
 class SQLerDB:
     """Document store for JSON blobs on SQLite.
 
@@ -256,9 +512,12 @@ class SQLerDB:
         self.adapter.connect()
         # serialize DDL operations (e.g., adding _version) across threads
         self._ddl_lock = threading.RLock()
-        # what is remembered about committed tables: versioned tables, promoted columns per table
+        # what is remembered about committed tables: versioned tables, and the promoted columns
+        # of each table this object has seen settled (:func:`_settled`)
         self._versioned_tables: set[str] = set()
         self._promoted_columns: dict[str, list[str]] = {}
+        # tables seen settled whose record could not be written then: the next ensure writes it
+        self._unrecorded: set[str] = set()
         # what each open level of this object's own transactions learned, innermost last; per
         # thread, like the adapter's depth
         self._open = _OpenLevels()
@@ -275,7 +534,10 @@ class SQLerDB:
 
         Safe to call again: on an existing table it adds the promoted columns
         and the ``_version`` column that are missing, and changes nothing else
-        (CHECK constraints are only written when the table is created).
+        (CHECK constraints are only written when the table is created). A
+        column added to a table with rows takes each row's value out of its
+        document, in the same transaction; a row without the key gets the
+        column's DEFAULT, or NULL.
 
         Args:
             table: Table name (``[a-zA-Z_][a-zA-Z0-9_]*``).
@@ -289,6 +551,9 @@ class SQLerDB:
             InvalidTableNameError: The table name is not accepted.
             InvalidIdentifierError: A promoted column name is not accepted.
             InvalidColumnDefError: A column definition or CHECK expression is not accepted.
+            SchemaError: A promoted column cannot be added and nothing was changed: a row's
+                value cannot be kept in it, it is NOT NULL with no DEFAULT, or an earlier
+                version left its values in the documents (see :meth:`move_promoted`).
         """
         if promoted or checks:
             self._ensure_table_with_promoted(table, promoted or {}, checks)
@@ -318,30 +583,41 @@ class SQLerDB:
         table: str,
         promoted: dict[str, str],
         checks: Optional[dict[str, str]] = None,
+        *,
+        model: Any = None,
     ) -> None:
         """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here
-        with every column of ``promoted``."""
+        with every column of ``promoted`` and its record written."""
         known = self._promoted_of(table)
-        if known is None or any(col not in known for col in promoted):
-            self._ensure_table_with_promoted(table, promoted, checks)
+        if known is None or any(col not in known for col in promoted) or table in self._unrecorded:
+            self._ensure_table_with_promoted(table, promoted, checks, model=model)
 
     def _ensure_table_with_promoted(
         self,
         table: str,
         promoted: dict[str, str],
         checks: Optional[dict[str, str]] = None,
+        *,
+        model: Any = None,
     ) -> None:
         """Create or upgrade a table with promoted columns.
 
         Promoted columns are real SQLite columns that live alongside the JSON
-        ``data`` blob. They get CHECK constraints on fresh tables and are
-        added via ALTER TABLE on existing ones.
+        ``data`` blob. They get CHECK constraints on fresh tables. Added to a
+        table that has rows, a column takes each row's value out of its document,
+        all in one transaction, and a row without the key gets what it read
+        before: the default of ``model``'s field, else the column's DEFAULT.
 
         Args:
             table: Table name.
             promoted: ``{column_name: column_def}`` mapping, e.g.
                 ``{"status": "TEXT NOT NULL DEFAULT 'pending'"}``.
             checks: Optional ``{name: expression}`` CHECK constraints.
+            model: The model class whose rows the table holds, if any.
+
+        Raises:
+            SchemaError: A row's value cannot be kept, a NOT NULL column has no DEFAULT,
+                or a column an earlier version promoted is not settled (``move_promoted``).
         """
         table = validate_table_name(table)
         checks = checks or {}
@@ -352,35 +628,63 @@ class SQLerDB:
             validate_check_expression(chk_expr)
 
         with self._ddl_lock:
-            # Check if table exists
-            cur = self.adapter.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
-                [table],
-            )
-            exists = cur.fetchone() is not None
-
-            if not exists:
-                # Build CREATE TABLE with promoted columns + checks
-                col_defs = ["_id INTEGER PRIMARY KEY AUTOINCREMENT", "data JSON NOT NULL"]
-                for col_name, col_def in promoted.items():
-                    col_defs.append(f"{col_name} {col_def}")
-                for chk_name, chk_expr in checks.items():
-                    col_defs.append(f"CHECK ({chk_expr})")
-                ddl = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
-                self.adapter.execute(ddl)
-                self.adapter.auto_commit()
-                columns = list(promoted)
+            names, unsettled = self._run(_settled(table))
+            unrecorded = False
+            if not names or any(col not in names for col in promoted):
+                with self:  # one transaction: the column, its values and the record, or nothing
+                    columns = self._run(_promotion(table, promoted, checks, model))
             else:
-                existing = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
-                added = [col for col in promoted if col not in existing]
-                for col_name in added:
-                    self.adapter.execute(
-                        f'ALTER TABLE "{table}" ADD COLUMN {col_name} {promoted[col_name]};'
-                    )
-                self.adapter.auto_commit()
-                columns = _promoted_in(existing) + added
-
+                columns = _promoted_in(names)
+                if unsettled:
+                    try:
+                        with self:
+                            self._run(_record(table, unsettled))
+                    except sqlite3.OperationalError as exc:
+                        if not _unwritable(exc):
+                            raise
+                        unrecorded = True  # settled all the same: there is nothing to add or move
             self._remember(table, promoted=columns)
+            (self._unrecorded.add if unrecorded else self._unrecorded.discard)(table)
+
+    def move_promoted(self, table: str, column: str, *, keep: str) -> None:
+        """Settle a promoted column whose values an earlier version of sqler left in the documents.
+
+        That version added the column and left each row's value in its document; since then a
+        write may have changed either, and a row does not say which is newer. This takes the
+        key out of every document, in one transaction, and records the column as settled.
+
+        Args:
+            table: Table name.
+            column: The promoted column.
+            keep: ``"document"``: a row whose document holds the key gets that value in the
+                column. ``"column"``: the column keeps its values.
+
+        Raises:
+            ValueError: ``keep`` is neither word.
+            TableNotFoundError: The table does not exist.
+            SchemaError: The column is not a promoted column of the table, or (``keep="document"``)
+                a document's value cannot go into the column; nothing is changed.
+        """
+        keep = _keep_word(keep)
+        table = validate_table_name(table)
+        validate_column_name(column)
+        with self._ddl_lock, self:
+            self._run(_moved(table, column, keep))
+
+    def _run(self, steps: Any) -> Any:
+        """Send each statement ``steps`` yields, answer it with its rows or its error, and
+        return what ``steps`` returns."""
+        try:
+            step = next(steps)
+            while True:
+                try:
+                    rows = self.adapter.execute(*step).fetchall()
+                except sqlite3.OperationalError as exc:
+                    step = steps.throw(exc)
+                else:
+                    step = steps.send(rows)
+        except StopIteration as done:
+            return done.value
 
     def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]]]]:
         """Where an ensure call keeps what it learned about a table.
@@ -420,17 +724,24 @@ class SQLerDB:
         return self._promoted_columns.get(table)
 
     def _columns_of(self, table: str) -> list[str]:
-        """The promoted columns of the validated ``table``: remembered, or else read from the
-        table once and remembered as an ensure call remembers them (a table without any as
-        having none). A missing table has none and is not remembered."""
+        """The promoted columns of the validated ``table``, which every reader sets over the
+        document: remembered, or else checked once as an ensure checks them (:func:`_settled`,
+        which writes nothing) and remembered (a table without any as having none). A missing
+        table has none and is not remembered.
+
+        Raises:
+            SchemaError: A document still holds the key of a column, which would hide its value.
+        """
         promoted = self._promoted_of(table)
         if promoted is None:
-            names = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
+            names, unsettled = self._run(_settled(table))
             promoted = _promoted_in(names)
             learned = self._learned() if names else None
             if learned is not None:
-                # an entry made since the statement above (another thread's ensure) is newer
+                # an entry made since the statements above (another thread's ensure) is newer
                 promoted = learned[1].setdefault(table, promoted)
+                if unsettled:
+                    self._unrecorded.add(table)
         return promoted
 
     def upsert_document_promoted(
@@ -1154,8 +1465,8 @@ class SQLerDB:
         self._ensure_table(table)
         # fast path: check without lock
         cols = [row[1] for row in self.adapter.execute(_columns_sql(table)).fetchall()]
-        if self._promoted_of(table) is None:
-            self._remember(table, promoted=_promoted_in(cols))
+        if self._promoted_of(table) is None and not _promoted_in(cols):
+            self._remember(table, promoted=[])  # promoted columns are remembered once checked
         if "_version" in cols:
             self._remember(table)
             return

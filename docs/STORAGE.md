@@ -64,3 +64,35 @@ indexed as the column itself. `unique=True` makes a `UNIQUE` index.
 | `applied_at` | `TEXT NOT NULL` |
 | `duration_ms` | `REAL NOT NULL` |
 | `checksum` | `TEXT` |
+
+## The record of settled promoted columns
+
+sqler keeps a table of its own, `_sqler_promoted`, beside the migrations table:
+`CREATE TABLE IF NOT EXISTS _sqler_promoted (tbl TEXT NOT NULL COLLATE NOCASE, col TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY (tbl, col)) WITHOUT ROWID`.
+A row `(tbl, col)` says that the promoted column `col` of table `tbl` holds its values: no
+document of that table holds a key named `col`.
+
+- sqler writes a row when it makes a table with its promoted columns, when it adds a
+  promoted column to a table (the values move out of the documents in the same
+  transaction), and when it finds an existing column with no such key, or settles it with
+  `move_promoted`. A table sqler makes with promoted columns replaces what was recorded
+  under its name.
+- A column beside `data` that is not recorded is checked once by each database object, at
+  its first ensure or its first read of the table: a document that still holds the key
+  makes that call raise `SchemaError`, because a read sets the column over the document.
+  When the database takes no write at that moment (opened read-only, or another
+  connection holds the write lock past the busy timeout) a table found settled is used as
+  settled and its row is not written; each later ensure of that database object checks
+  again and tries to write it, waiting up to the busy timeout.
+- Code that writes with plain SQL keeps the rule: a key put into `data` under a recorded
+  column's name is not read (the column wins). The database object's own document
+  methods (`insert_document`, `upsert_document`, `insert_many`, `bulk_upsert`,
+  `upsert_with_version`) write the whole document into `data` and are plain SQL in this
+  respect: on a table with promoted columns write through its model, or through
+  `upsert_document_promoted`, `insert_many_promoted` and `upsert_with_version_promoted`.
+- sqler drops and renames no table. A table dropped and made again with plain SQL keeps
+  what is recorded under its name and counts as settled: a key such a table holds in a
+  document under a recorded column's name is not read, with no error. Delete its rows
+  from `_sqler_promoted` to have it checked again.
+- `_sqler_promoted` and `_sqler_migrations` are not names for your own tables: sqler
+  refuses them as table names and leaves them out of its table counts.

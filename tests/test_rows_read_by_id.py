@@ -234,9 +234,9 @@ def test_a_class_that_declares_a_column_its_table_was_made_without(db):
     db.insert_document("rbi_lates", {"name": "l", "status": "json"})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        RbiLate.set_db(db)  # adds the column, NULL in the old row
-    assert RbiLate.from_id(1).status is None
-    assert [r.status for r in RbiLate.from_ids([1])] == [None]
+        RbiLate.set_db(db)  # adds the column, and the old row's value moves into it
+    assert RbiLate.from_id(1).status == "json"
+    assert [r.status for r in RbiLate.from_ids([1])] == ["json"]
     assert db.find_documents("rbi_lates", [1]) == [db.find_document("rbi_lates", 1)]
 
 
@@ -451,8 +451,8 @@ def test_a_table_is_learned_once_and_a_known_table_asks_nothing(db, fresh):
     _with_ready_job()
     RbiPlain(name="p").save()
     first = _reads(lambda: fresh.find_document("rbi_jobs", 1))
-    assert len(first) == 2
-    assert _reads(lambda: fresh.find_document("rbi_jobs", 1)) == first[1:]
+    assert len(first) == 3  # its columns, then its record of settled columns (read once), then the row
+    assert _reads(lambda: fresh.find_document("rbi_jobs", 1)) == first[2:]
     assert len(_reads(lambda: fresh.find_documents("rbi_plains", [1]))) == 2
     assert len(_reads(lambda: fresh.find_documents("rbi_plains", [1]))) == 1  # remembered as having none
     assert len(_reads(lambda: db.find_document("rbi_jobs", 1))) == 1  # the object that ensured it
@@ -540,7 +540,7 @@ def test_a_class_with_a_promoted_column_saves_through_an_object_that_learned_its
         ),
         (
             "CREATE TABLE rbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, extra TEXT)",
-            ("""'{"name": "a", "extra": "json"}'""", "'col'"),
+            ("""'{"name": "a"}'""", "'col'"),  # a key "extra" in the document too is refused
             {"name": "a", "_id": 1, "extra": "col"},
         ),
         (

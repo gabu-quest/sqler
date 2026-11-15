@@ -31,6 +31,13 @@ class AsyncSQLerQuerySet(Generic[T]):
         clone._resolve = self._resolve
         return clone
 
+    async def _checked(self) -> AsyncSQLerQuery:
+        """The query, once its database has checked the table (``SchemaError`` when a promoted
+        column the rows are read with would hide a value still in a document)."""
+        if self._query._promoted_fields and self._db is not None:
+            await self._db._columns_of(self._query._table)
+        return self._query
+
     def resolve(self, flag: bool) -> "AsyncSQLerQuerySet[T]":
         """Toggle relation hydration on result materialization (default True)."""
         clone = self._copy(self._query)
@@ -74,7 +81,7 @@ class AsyncSQLerQuerySet(Generic[T]):
     # execution
     async def all(self) -> list[T]:
         """Execute and return a list of model instances."""
-        return await self._load(await self._query.all_dicts())
+        return await self._load(await (await self._checked()).all_dicts())
 
     async def as_dicts(self) -> list[dict[str, Any]]:
         """Execute and return raw dicts without Pydantic hydration.
@@ -83,10 +90,10 @@ class AsyncSQLerQuerySet(Generic[T]):
         limits, and ``.select()`` field projection — but skips model
         validation, type coercion, computed fields, and relation resolution.
         """
-        return await self._query.all_dicts()
+        return await (await self._checked()).all_dicts()
 
     async def first(self) -> Optional[T]:
-        row = await self._query.first_dict()
+        row = await (await self._checked()).first_dict()
         if row is None:
             return None
         return (await self._load([row]))[0]
@@ -110,35 +117,35 @@ class AsyncSQLerQuerySet(Generic[T]):
         return inst
 
     async def count(self) -> int:
-        return await self._query.count()
+        return await (await self._checked()).count()
 
     async def sum(self, field: str) -> Optional[float]:
         """Return the sum of values for the specified field."""
-        return await self._query.sum(field)
+        return await (await self._checked()).sum(field)
 
     async def avg(self, field: str) -> Optional[float]:
         """Return the average of values for the specified field."""
-        return await self._query.avg(field)
+        return await (await self._checked()).avg(field)
 
     async def min(self, field: str) -> Optional[Any]:
         """Return the minimum value for the specified field."""
-        return await self._query.min(field)
+        return await (await self._checked()).min(field)
 
     async def max(self, field: str) -> Optional[Any]:
         """Return the maximum value for the specified field."""
-        return await self._query.max(field)
+        return await (await self._checked()).max(field)
 
     async def exists(self) -> bool:
         """Check if any rows match the query."""
-        return await self._query.exists()
+        return await (await self._checked()).exists()
 
     async def paginate(self, page: int, per_page: int = 20):
         """Return a paginated result set."""
-        return await self._query.paginate(page, per_page)
+        return await (await self._checked()).paginate(page, per_page)
 
     async def distinct_values(self, field: str) -> list[Any]:
         """Return distinct values for a JSON field."""
-        return await self._query.distinct_values(field)
+        return await (await self._checked()).distinct_values(field)
 
     async def update(self, **fields) -> int:
         """Update matching rows with the given field values.
@@ -149,7 +156,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         Returns:
             int: Number of rows updated.
         """
-        return await self._query.update(**fields)
+        return await (await self._checked()).update(**fields)
 
     async def update_one(self, **fields) -> Optional[T]:
         """Atomically update one matching row and return it as a model instance.
@@ -160,7 +167,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         Returns:
             Model instance or None if no row matched.
         """
-        doc = await self._query.update_one(**fields)
+        doc = await (await self._checked()).update_one(**fields)
         if doc is None:
             return None
         inst = self._sourced(_refs.from_row(self._model_cls, doc, doc), self._reads_other_table())
@@ -176,7 +183,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         Returns:
             list: Model instances, or empty list if no rows matched.
         """
-        docs = await self._query.update_n(n, **fields)
+        docs = await (await self._checked()).update_n(n, **fields)
         results: list[T] = []
         other_table = self._reads_other_table()
         for doc in docs:
@@ -193,7 +200,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         Returns:
             int: Number of rows deleted.
         """
-        return await self._query.delete()
+        return await (await self._checked()).delete()
 
     def offset(self, n: int) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""

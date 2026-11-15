@@ -1191,7 +1191,7 @@ class TestPromotedWriteNames:
         before = self._untouched(pdb)
         with pytest.raises(InvalidTableNameError):
             _PROMOTED_WRITES[method](pdb, "jobs\n", ["s"])
-        assert self._untouched(pdb) == before == ([(1, "first", 0)], ["jobs", "sqlite_sequence"])
+        assert self._untouched(pdb) == before == ([(1, "first", 0)], ["_sqler_promoted", "jobs", "sqlite_sequence"])
 
     @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
     def test_hostile_promoted_field_is_refused(self, pdb, method):
