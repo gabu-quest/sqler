@@ -211,7 +211,7 @@ class U(SQLerModel):
 
 class Post(SQLerModel):
     title: str
-    author: dict | None = None
+    author: U | None = None
 
 
 def test_C09_delete_policy_restrict():
@@ -219,7 +219,7 @@ def test_C09_delete_policy_restrict():
     U.set_db(db)
     Post.set_db(db)
     u = U(name="Writer").save()
-    _ = Post(title="Post A", author={"_table": "u", "_id": u._id}).save()
+    _ = Post(title="Post A", author=u).save()
 
     with pytest.raises(ReferentialIntegrityError):
         u.delete_with_policy(on_delete="restrict")
@@ -385,14 +385,14 @@ def test_C16_delete_policies_readme():
 
     class DIPost(SQLerModel):
         title: str
-        author: dict | None = None
+        author: DIUser | None = None
 
     # restrict scenario
     restrict_db = SQLerDB.in_memory()
     DIUser.set_db(restrict_db)
     DIPost.set_db(restrict_db)
     writer = DIUser(name="Writer").save()
-    DIPost(title="Post A", author={"_table": "diusers", "_id": writer._id}).save()
+    DIPost(title="Post A", author=writer).save()
     with pytest.raises(ReferentialIntegrityError):
         writer.delete_with_policy(on_delete="restrict")
 
@@ -401,7 +401,7 @@ def test_C16_delete_policies_readme():
     DIUser.set_db(set_null_db)
     DIPost.set_db(set_null_db)
     nullable = DIUser(name="Nullable").save()
-    post = DIPost(title="Post B", author={"_table": "diusers", "_id": nullable._id}).save()
+    post = DIPost(title="Post B", author=nullable).save()
     nullable.delete_with_policy(on_delete="set_null")
     assert DIPost.from_id(post._id).author is None
 
@@ -410,7 +410,7 @@ def test_C16_delete_policies_readme():
     DIUser.set_db(cascade_db)
     DIPost.set_db(cascade_db)
     cascade = DIUser(name="Cascade").save()
-    DIPost(title="Post C", author={"_table": "diusers", "_id": cascade._id}).save()
+    DIPost(title="Post C", author=cascade).save()
     cascade.delete_with_policy(on_delete="cascade")
     assert DIPost.query().count() == 0
 

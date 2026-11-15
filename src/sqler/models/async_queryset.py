@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, Optional, Type, TypeVar
 
+from sqler import registry
 from sqler.models import _refs, _write_rules
 from sqler.models._table_names import _Home
 from sqler.query import SQLerExpression
@@ -19,15 +20,23 @@ class AsyncSQLerQuerySet(Generic[T]):
     def __init__(self, model_cls: Type[T], query: AsyncSQLerQuery, db: Any = None) -> None:
         """``db``: the database ``query`` reads, which reads the rows references point at
         (optional: without it they are read as ``_id`` and ``data`` through the query's
-        adapter)."""
+        adapter).
+
+        The table is noted as one where rows of ``model_cls`` live (``registry.note``), so a
+        delete of a row they may refer to reads its fields there."""
         self._model_cls = model_cls
         self._query = query
         self._db = db
         self._resolve = True
+        if isinstance(model_cls, type):
+            registry.note(query._table, model_cls)
 
     def _copy(self, query: AsyncSQLerQuery) -> "AsyncSQLerQuerySet[T]":
         """A queryset on ``query`` holding everything this one holds but its query."""
-        clone = self.__class__(self._model_cls, query, self._db)
+        clone = object.__new__(self.__class__)  # not __init__: its class and table are noted
+        clone._model_cls = self._model_cls
+        clone._query = query
+        clone._db = self._db
         clone._resolve = self._resolve
         return clone
 
@@ -186,19 +195,20 @@ class AsyncSQLerQuerySet(Generic[T]):
         docs = await self._updated(fields, n, "IN")
         return self._models(docs)
 
-    async def delete_all(self) -> int:
+    async def delete_all(self, on_delete: str = "restrict") -> int:
         """Delete all matching rows (bulk delete).
 
         Note: This is named delete_all to avoid confusion with model.delete().
-        It runs no referential integrity check and calls no hook; an audit log gets a
-        ``delete`` row per row deleted, as :meth:`SQLerQuerySet.delete_all` writes them.
+        ``on_delete`` and the unit are as :meth:`SQLerQuerySet.delete_all` has them. A
+        queryset built without a database raises ``RuntimeError`` where the delete would be
+        such a unit, as a set-based update with row rules does.
 
         Returns:
             int: Number of rows deleted.
         """
-        if not _write_rules.row_rules(self._model_cls):
+        if not _write_rules.set_delete(self._model_cls, self._query._table, on_delete):
             return await (await self._checked()).delete()
-        return len(await self._written("rows", self._deleted_rows))
+        return len(await self._written("rows", self._deleted_rows, on_delete))
 
     @staticmethod
     async def _deleted_rows(query: AsyncSQLerQuery) -> list:
@@ -212,11 +222,12 @@ class AsyncSQLerQuerySet(Generic[T]):
             return await (await self._checked("update"))._update_picked(fields, n, op)
         return [after for _, after in await self._written("update", lambda q: q._changed(fields, n))]
 
-    async def _written(self, use: str, write) -> list:
-        """``write(query)`` and the rules of the class's audit log, as one unit (``use``: as
-        :meth:`_checked` takes it)."""
+    async def _written(self, use: str, write, on_delete: Optional[str] = None) -> list:
+        """Async twin of :meth:`SQLerQuerySet._written`."""
         query = await self._checked(use)
-        return await _write_rules.aset_write(self._model_cls, self._db, query._table, lambda: write(query))
+        return await _write_rules.aset_write(
+            self._model_cls, self._db, query._table, lambda: write(query), on_delete
+        )
 
     def offset(self, n: int) -> "AsyncSQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""

@@ -968,11 +968,42 @@ rule: the adapter does not see it, and a lazy cursor on that connection may read
 
 ### [C09] Delete policies: `restrict`
 
-`delete()` and `delete_with_policy()` (whose default is `on_delete="restrict"`) raise
-`ReferentialIntegrityError` and delete nothing while any row refers to the row, on every
-base, sync and async (`await a.delete()` too). The look for referring rows and the delete are
-one transaction (a savepoint inside yours), so no other connection writes a referrer in
-between.
+`delete()`, `delete_with_policy()` and a queryset's `delete_all()` (each with the default
+`on_delete="restrict"`) raise `ReferentialIntegrityError` and delete nothing while a row that
+stays refers to a row that goes, on every base, sync and async (`await a.delete()` too).
+`set_null` writes `None` in place of each such reference; `cascade` deletes the referring
+rows too, and theirs.
+
+- A row refers to another when it holds the reference at a position its class declares as a
+  model: `author: U | None`, `items: list[U]`, `by_key: dict[str, U]`, nested, or a base
+  class of `U`. These are the positions a load follows. Only a field declared as a model
+  counts: a dict shaped `{"_table": ..., "_id": ...}` in a plain `dict`, `list` or `Any`
+  field is data, and it neither refuses a delete nor is nulled or cascaded.
+  `validate_references()` still reports such a dict whose row is gone.
+- The fields that count for a table are those of every class whose rows live in it: the
+  class registered for it, a subclass that inherits its table, another class bound to it
+  (`__tablename__`, `set_db(db, table)`) and a class whose rows were read or written there
+  through `using(db, table)`. A class defined later, or bound later, counts from then on;
+  a class bound elsewhere still counts for the table it wrote to. Only classes this
+  process has defined are known: import the modules of the classes that refer to a table
+  before deleting from it.
+- Rows deleted together are no referrers of each other: a row that refers only to itself,
+  or a parent and its children in one `delete_all()`, go through under `restrict`.
+- The rows go, the look for referring rows runs and the policy acts in one transaction (a
+  savepoint inside yours); a refusal or a failure leaves every row as it was, and no other
+  connection writes a referrer in between.
+- The look reads only the tables whose classes can hold a reference to the table, once each
+  for any number of rows. A delete of a row of a class no class can refer to reads no other
+  table. A class whose annotations do not resolve yet is read whole.
+- A field that is the reference itself is looked up with
+  `json_extract(data, '$.<field>._id')`: on a large referring table, an index on it
+  (`db.create_index("posts", "author._id")`) lets the look skip the scan of the table. A
+  list or a dict of references is read row by row.
+- A row written by hand is read as a load reads it. One that SQLite's JSON functions
+  cannot read (`NaN`, `Infinity`, text that is no JSON) is not passed over: the look then
+  reads the table's rows in Python, which is slower. The one exception is a document that
+  repeats a key, which sqler never writes: the look, like every query and index, reads the
+  first, and a load reads the last.
 
 ```python
 from sqler import SQLerDB, SQLerModel, ReferentialIntegrityError
@@ -982,14 +1013,14 @@ class U(SQLerModel):
 
 class Post(SQLerModel):
     title: str
-    author: dict | None = None
+    author: U | None = None
 
 db = SQLerDB.in_memory()
 U.set_db(db)
 Post.set_db(db)
 
 u = U(name="Writer").save()
-Post(title="Post A", author={"_table":"u","_id":u._id}).save()
+Post(title="Post A", author=u).save()
 
 try:
     u.delete_with_policy(on_delete="restrict")
@@ -1029,14 +1060,14 @@ class DIUser(SQLerModel):
 
 class Post(SQLerModel):
     title: str
-    author: dict | None = None
+    author: DIUser | None = None
 
 # restrict: raises while references exist
 restrict_db = SQLerDB.in_memory()
 DIUser.set_db(restrict_db)
 Post.set_db(restrict_db)
 writer = DIUser(name="Writer").save()
-Post(title="Post A", author={"_table": "diusers", "_id": writer._id}).save()
+Post(title="Post A", author=writer).save()
 try:
     writer.delete_with_policy(on_delete="restrict")
 except ReferentialIntegrityError:
@@ -1047,7 +1078,7 @@ set_null_db = SQLerDB.in_memory()
 DIUser.set_db(set_null_db)
 Post.set_db(set_null_db)
 nullable = DIUser(name="Nullable").save()
-post = Post(title="Post B", author={"_table": "diusers", "_id": nullable._id}).save()
+post = Post(title="Post B", author=nullable).save()
 nullable.delete_with_policy(on_delete="set_null")
 assert Post.from_id(post._id).author is None
 
@@ -1056,7 +1087,7 @@ cascade_db = SQLerDB.in_memory()
 DIUser.set_db(cascade_db)
 Post.set_db(cascade_db)
 cascade = DIUser(name="Cascade").save()
-Post(title="Post C", author={"_table": "diusers", "_id": cascade._id}).save()
+Post(title="Post C", author=cascade).save()
 cascade.delete_with_policy(on_delete="cascade")
 assert Post.query().count() == 0
 ```
@@ -1364,8 +1395,12 @@ the rules of its own table's registered class), meet the same rules but the hook
 | `AuditLogMixin` | one `update` row per row changed (`changes` holds the old and new of each key that differs; the new value is what the row holds afterwards, F-expressions included) and one `delete` row per row deleted, in one unit with the write; each row is read and written inside that unit, so no other connection writes it in between |
 | `HooksMixin` | calls no hook; use a loop of `save()` where a hook must run |
 
-A class with no rule sends the one statement it sent before. `delete_all()` runs no
-referential check: a row that refers to a deleted row keeps its reference.
+A class with no rule sends the one statement it sent before. `delete_all(on_delete=...)`
+meets the delete policy as `delete()` does ([C09]): the default `restrict` refuses while a
+row outside the set refers to a row in it, and nothing is deleted. A class with no rule that
+no class can refer to sends its one `DELETE`; otherwise the `DELETE` returns the rows it
+deleted, and the look, the policy and the audit rows join it in one unit. A queryset's
+order and limit do not narrow the `DELETE`: it deletes every row the filter matches.
 
 A write made with `db.*` directly (`db.bulk_upsert`, `db.insert_document`, `db.execute`) is
 below the model and meets no rule of any class.

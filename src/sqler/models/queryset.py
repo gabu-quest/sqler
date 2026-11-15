@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, Iterator, Optional, Type, TypeVar
 
+from sqler import registry
 from sqler.models import _refs, _write_rules
 from sqler.models._table_names import _Home
 from sqler.query import SQLerExpression, SQLerQuery
@@ -22,15 +23,23 @@ class SQLerQuerySet(Generic[T]):
     def __init__(self, model_cls: Type[T], query: SQLerQuery, db: Any = None) -> None:
         """``db``: the database ``query`` reads, which reads the rows references point at
         (optional: without it they are read as ``_id`` and ``data`` through the query's
-        adapter)."""
+        adapter).
+
+        The table is noted as one where rows of ``model_cls`` live (``registry.note``), so a
+        delete of a row they may refer to reads its fields there."""
         self._model_cls = model_cls
         self._query = query
         self._db = db
         self._resolve = True
+        if isinstance(model_cls, type):
+            registry.note(query._table, model_cls)
 
     def _copy(self, query: SQLerQuery) -> "SQLerQuerySet[T]":
         """A queryset on ``query`` holding everything this one holds but its query."""
-        clone = self.__class__(self._model_cls, query, self._db)
+        clone = object.__new__(self.__class__)  # not __init__: its class and table are noted
+        clone._model_cls = self._model_cls
+        clone._query = query
+        clone._db = self._db
         clone._resolve = self._resolve
         return clone
 
@@ -232,20 +241,25 @@ class SQLerQuerySet(Generic[T]):
         docs = self._updated(fields, n, "IN")
         return self._models(docs)
 
-    def delete_all(self) -> int:
+    def delete_all(self, on_delete: str = "restrict") -> int:
         """Delete all matching rows (bulk delete).
 
         Note: This is named delete_all to avoid confusion with model.delete().
-        It runs no referential integrity check (a row that refers to a deleted one keeps
-        its reference) and calls no hook. An audit log gets a ``delete`` row per row
-        deleted, with the row as it was stored, in one transaction with the delete.
+        ``on_delete`` is what a row's ``delete_with_policy()`` takes, with the same default:
+        ``restrict`` raises ``ReferentialIntegrityError`` and deletes nothing while a row
+        outside the set refers to a row in it; ``set_null`` nulls those references;
+        ``cascade`` deletes those rows too. An audit log gets a ``delete`` row per row
+        deleted, with the row as it was stored. The rows, the policy and the audit rows are
+        one unit. It calls no hook. A class no class can refer to, with no row rules, sends
+        its one ``DELETE``. A queryset built without a database raises ``RuntimeError`` where
+        the delete would be such a unit, as a set-based update with row rules does.
 
         Returns:
             int: Number of rows deleted.
         """
-        if not _write_rules.row_rules(self._model_cls):
+        if not _write_rules.set_delete(self._model_cls, self._query._table, on_delete):
             return self._checked().delete()
-        return len(self._written("rows", lambda q: [(doc, None) for doc in q._deleted()]))
+        return len(self._written("rows", lambda q: [(doc, None) for doc in q._deleted()], on_delete))
 
     def _updated(self, fields: dict, n: int, op: str) -> list[dict]:
         """The documents ``update_one`` (``op`` ``=``) and ``update_n`` (``IN``) return, as
@@ -255,11 +269,14 @@ class SQLerQuerySet(Generic[T]):
             return self._checked("update")._update_picked(fields, n, op)
         return [after for _, after in self._written("update", lambda q: q._changed(fields, n))]
 
-    def _written(self, use: str, write) -> list:
-        """``write(query)`` and the rules of the class's audit log, as one unit (``use``: as
+    def _written(self, use: str, write, on_delete: Optional[str] = None) -> list:
+        """``write(query)``, what ``on_delete`` does about the rows that refer to the rows it
+        deletes, and the rules of the class's audit log, as one unit (``use``: as
         :meth:`_checked` takes it)."""
         query = self._checked(use)
-        return _write_rules.set_write(self._model_cls, self._db, query._table, lambda: write(query))
+        return _write_rules.set_write(
+            self._model_cls, self._db, query._table, lambda: write(query), on_delete
+        )
 
     def offset(self, n: int) -> "SQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""

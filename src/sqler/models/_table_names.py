@@ -90,12 +90,16 @@ def _register_defined_class(cls: type) -> None:
     A defined class registers only when no class holds its table or the holder is not
     bound: it never displaces a class bound with ``set_db()`` (``set_db()`` registers
     directly and always wins).
+
+    Every such class, registered or not, is one of the classes the registry gives for the
+    table its rows go to (``registry.holders()``): the delete policy reads its fields there.
     """
     from sqler import registry
     from sqler.exceptions import InvalidTableNameError
 
     if cls.__module__.split(".", 1)[0] == "sqler":
         return
+    registry.define(cls)
     if "__tablename__" not in cls.__dict__ and any(
         getattr(base, "__tablename__", None) or getattr(base, "_table", None)
         for base in cls.__mro__[1:]

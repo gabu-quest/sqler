@@ -589,3 +589,48 @@ async def test_an_instance_edited_and_not_saved_logs_the_stored_row_on_delete(db
     await inst.delete(db=db)
 
     assert await _after_creates(db, Item) == [(1, "delete", "alice", None, {"name": "stored", "count": 1})]
+
+
+# ----- delete_all() looks for the rows that refer to the set, once per referring table -----------
+
+
+def holder_of(kind, target):
+    """A class of ``kind`` whose ``target`` field holds a row of ``target``."""
+    table = f"asw_holder_{kind}_{next(_tables)}"
+    ns = {"__tablename__": table, "target": None, "__annotations__": {"target": Optional[target]}}
+    cls = types.new_class(f"Holder_{table}", (BASES[kind],), {}, lambda body: body.update(ns))
+    return dataclass(cls) if kind.startswith("lite") else cls
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_delete_all_of_one_row_and_of_ten_thousand_send_the_same_statements(db, kind):
+    Item = make(kind)
+    Holder = holder_of(kind, Item)
+    await Item.save_many([Item(name="one")] + [Item(name="many") for _ in range(10_000)], db=db)
+    await Holder().save(db=db)
+    version = ", _version" if kind in SAFE_KINDS else ""
+    names = [Item.__tablename__, Item.__name__.lower()]  # the names a reference to an Item may give, in order
+
+    def look(ids):
+        """The one read of the look for ``ids``: one id is also looked for by its digits."""
+        digits = "data GLOB ('*' || substr(?1, 2, length(?1) - 2) || '*') AND " if len(ids) == 1 else ""
+        sql = (
+            f"SELECT _id, data FROM {Holder.__tablename__} WHERE (({digits}(data GLOB '*{names[0]}*' OR "
+            f"data GLOB '*{names[1]}*' OR data GLOB '*\\u*')) OR data >= x'') AND "
+            "(json_extract(data, '$.target._id') IN (SELECT value FROM json_each(?1)));"
+        )
+        return sql, [json.dumps(ids)]
+
+    q = bound(Item, db)
+    for name, ids in (("one", [1]), ("many", list(range(2, 10_002)))):
+        with query_logger.capture() as got:
+            count = await q.filter(F("name") == name).delete_all()
+        assert count == len(ids)
+        assert [(e.sql, list(e.params or [])) for e in got] == [
+            (
+                f"DELETE FROM {Item.__tablename__} WHERE JSON_EXTRACT(data, '$.name') = ? "
+                f"RETURNING _id, data{version}",
+                [name],
+            ),
+            look(ids),
+        ]
