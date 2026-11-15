@@ -161,6 +161,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **A `mode="before"` validator on a typed reference field receives the child model** through `from_ids()`, `query().all()` and `first()`, as it does through `from_id()`. It received the stored dict.
 - **Async `query().all()` cuts a cycle of typed references where the other ways do**, one level earlier than before, with fewer statements.
 
+### Removed
+
+- **`PooledSQLerDB`, `PooledSQLiteAdapter`, `ConnectionPool` and the `sqler.pool` module**, with no alias. Use `SQLerDB`: it gives each thread its own connection and takes it back when the thread ends, so threads share one `SQLerDB` (`SQLerDB.on_disk(path)` in place of `PooledSQLerDB.on_disk(path, max_connections=n)`). There is no `max_connections`: the number of open connections is the number of live threads that used the database. `ConnectionPoolExhaustedError` stays; the async pool raises it.
+- **`PoolStats` moved from `sqler.pool` to `sqler.adapter.asynchronous`** and is exported from `sqler`. Its fields are unchanged. A `PoolStats` pickled by an older version does not load.
+- **`Transaction(adapter)` without a database.** `Transaction(adapter, db)` requires both; `db.transaction()` is the way to open one.
+
 ### Added
 
 - **`AsyncSQLiteAdapter.pool_stats()` and `AsyncSQLerDB.pool_stats()`** return `PoolStats`: pool size, free and in-use connections, checkouts, timeouts, average and longest wait.
