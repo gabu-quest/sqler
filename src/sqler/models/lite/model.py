@@ -415,35 +415,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
             on_delete: One of "restrict", "set_null", or "cascade".
         """
         db, table = _instance_binding(self, db)
-        _write_rules.delete(
-            self, db, table, on_delete, lambda: self._delete_row(db, table, on_delete)
-        )
-
-    def _delete_row(self, db, table: str, on_delete: str) -> None:
-        """Delete this instance's row under ``on_delete`` (``delete_with_policy()`` without
-        the rules of its class)."""
-        target = (table, int(self._id))
-
-        # Find referrers
-        from sqler.models import ReferentialIntegrityError
-        from sqler.models.integrity import (
-            cascade_delete,
-            find_referrers,
-            set_null_referrers,
-        )
-
-        referrers = find_referrers(db, table, int(self._id))
-        if on_delete == "restrict" and referrers:
-            raise ReferentialIntegrityError(
-                f"Cannot delete {table}:{self._id}; referenced by {len(referrers)} row(s)"
-            )
-        if on_delete == "set_null":
-            set_null_referrers(db, table, int(self._id), referrers)
-        elif on_delete == "cascade":
-            visited: set[tuple[str, int]] = {target}
-            cascade_delete(db, referrers, visited)
-
-        db.delete_document(table, self._id)
+        _write_rules.delete(self, db, table, on_delete)
         object.__setattr__(self, "_id", None)
 
     def refresh(self: T) -> T:

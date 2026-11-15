@@ -943,6 +943,12 @@ rule: the adapter does not see it, and a lazy cursor on that connection may read
 
 ### [C09] Delete policies: `restrict`
 
+`delete()` and `delete_with_policy()` (whose default is `on_delete="restrict"`) raise
+`ReferentialIntegrityError` and delete nothing while any row refers to the row, on every
+base, sync and async (`await a.delete()` too). The look for referring rows and the delete are
+one transaction (a savepoint inside yours), so no other connection writes a referrer in
+between.
+
 ```python
 from sqler import SQLerDB, SQLerModel, ReferentialIntegrityError
 
