@@ -1,11 +1,11 @@
-"""An async cursor returns only what its statement saw while the connection was its own.
+"""An async cursor returns only what its statement saw.
 
-``aiosqlite`` steps a statement when its rows are fetched. Once another context sends a
-statement on the cursor's connection (a task that took it from the pool, a child task that
+``aiosqlite`` steps a statement when its rows are fetched. Once a statement is sent on the
+cursor's connection (by its own task, a task that took it from the pool, a child task that
 shares the pin, a sibling in a shared transaction, the rollback that ends a transaction),
-a lazy fetch would see that context's work. The rows a live cursor has not read yet are
+a lazy fetch would see that statement's work. The rows a live cursor has not read yet are
 read first, in the connection's thread before that statement, and served from memory.
-While only the cursor's own task uses the connection it reads lazily, as SQLite does.
+While nothing else is sent on the connection it reads lazily, as SQLite does.
 
 Every wait is bounded, so a hang fails instead of stalling the suite.
 """
@@ -283,15 +283,30 @@ async def test_a_cursor_read_from_another_task_than_the_one_that_made_it(mem):
     assert ([r[0] for r in got], _tally(got)) == (list(range(N)), "2000 rows; 2000 clean, 0 dirty")
 
 
-# --- item 2: a task alone on its connection reads lazily ---------------------------------
+# --- item 2: a cursor reads lazily until a statement is sent on its connection ------------
 
 
-async def test_a_row_the_same_task_inserts_before_the_first_fetch_is_in_what_the_cursor_returns(mem):
+async def test_a_row_the_same_task_inserts_before_the_first_fetch_is_not_in_what_the_cursor_returns(mem):
     cur = await mem.execute("SELECT n, v FROM t ORDER BY rowid")
     await mem.execute("INSERT INTO t VALUES (?, 'later')", [N])
     got = await asyncio.wait_for(cur.fetchall(), 10)
     await mem.auto_commit()
-    assert ([r[0] for r in got], got[-1][1]) == (list(range(N + 1)), "later")
+    assert ([r[0] for r in got], got[-1][1]) == (list(range(N)), "clean")
+
+
+@pytest.mark.parametrize("read", ["lazily", "ahead"])
+async def test_a_cursor_closed_inside_its_loop_gives_no_row_after_the_close(read, mem):
+    cur = await mem.execute("SELECT n FROM t ORDER BY rowid")
+    if read == "ahead":
+        await mem.execute("SELECT 1")
+    got = []
+    with pytest.raises(sqlite3.ProgrammingError, match="closed cursor"):
+        async for row in cur:
+            got.append(row[0])
+            if len(got) == 3:
+                await cur.close()
+    await mem.auto_commit()
+    assert got == [0, 1, 2]
 
 
 async def test_fetchmany_10_of_five_million_rows_returns_at_once(mem):

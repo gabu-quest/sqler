@@ -1793,8 +1793,9 @@ async def test_the_db_block_ending_without_an_exception_after_a_failed_nested_ro
 async def test_a_savepoint_that_sqlite_refuses_opened_nothing_and_leaves_no_place_behind(make_db):
     t = await make_db()
     async with t.db.transaction():
-        # an INSERT ... RETURNING whose row is not read yet is a write in progress: SQLite refuses a SAVEPOINT
-        cur = await t.adapter.execute("INSERT INTO t (v) VALUES ('r') RETURNING v")
+        # an INSERT ... RETURNING whose row is not read yet is a write in progress: SQLite refuses a SAVEPOINT.
+        # Sent on the raw connection: the adapter reads the rows of its own cursors before the next statement
+        cur = await t.adapter.connection.execute("INSERT INTO t (v) VALUES ('r') RETURNING v")
         with pytest.raises(sqlite3.OperationalError, match="cannot open savepoint - SQL statements in progress"):
             async with t.db.transaction():
                 await t.insert("never")

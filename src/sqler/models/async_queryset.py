@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import Any, Generic, Optional, Type, TypeVar
+from typing import Any, AsyncIterator, Generic, Optional, Type, TypeVar
 
 from sqler import registry
 from sqler.models import _refs, _write_rules
@@ -104,6 +105,15 @@ class AsyncSQLerQuerySet(Generic[T]):
         validation, type coercion, computed fields, and relation resolution.
         """
         return await self._checked("rows").all_dicts()
+
+    async def iter(self) -> AsyncIterator[T]:
+        """Async twin of :meth:`sqler.models.queryset.SQLerQuerySet.iter`: ``async for model in
+        queryset.iter()`` gives the models one at a time, no reference followed, each with
+        its home. It holds a connection as :meth:`AsyncSQLerQuery.iter_dicts` does."""
+        home = _Home(self._db, self._query._table)
+        async with contextlib.aclosing(self._checked("rows").iter_dicts()) as docs:
+            async for doc in docs:
+                yield _refs.from_row(self._model_cls, doc, doc, home)
 
     async def first(self) -> Optional[T]:
         row = await self._checked("rows").first_dict()

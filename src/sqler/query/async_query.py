@@ -1,7 +1,7 @@
 import json
 import re
 import sqlite3
-from typing import Any, Optional, Self
+from typing import Any, AsyncIterator, Optional, Self
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
@@ -561,6 +561,29 @@ class AsyncSQLerQuery(_WriteStatements):
         await cur.close()
         await self._adapter.auto_commit()
         return query._documents(rows)
+
+    async def iter_dicts(self) -> AsyncIterator[dict[str, Any]]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery.iter_dicts`: ``async for doc in
+        query.iter_dicts()`` gives the documents ``all_dicts()`` gives, one at a time.
+
+        Outside a transaction the statement holds its connection until the iteration ends
+        (its rows run out, ``aclose()``, or the event loop closing an iterator that was
+        dropped or left by an exception); then it goes back to the pool.
+
+        Raises:
+            NoAdapterError: At the first step, if the query has no adapter.
+        """
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        query, cur = await self._execute(lambda q: q._build_query(include_id=True))
+        if cur is None:
+            return
+        try:
+            async for row in cur:
+                for doc in query._documents([row]):
+                    yield doc
+        finally:
+            self._adapter._end_read(cur)
 
     def _documents(self, rows: Any) -> list[dict[str, Any]]:
         """The documents of rows read with :meth:`_build_query`'s ``include_id`` columns."""
