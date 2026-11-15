@@ -722,20 +722,32 @@ def typed_fields(cls: Any) -> dict[str, Position]:
     name in an annotation cannot be found yet (a class defined before the class it
     refers to).
     """
+    return _typed_fields(cls)[0]
+
+
+def known_typed_fields(cls: Any) -> Optional[dict[str, Position]]:
+    """:func:`typed_fields` of ``cls``, or None while a name in one of its annotations cannot
+    be found yet (any field may then put a model anywhere)."""
+    typed, complete = _typed_fields(cls)
+    return typed if complete else None
+
+
+def _typed_fields(cls: Any) -> tuple[dict[str, Position], bool]:
     if not _is_model_class(cls):
-        return {}
+        return {}, True
     typed = _TYPED.get(cls)
-    if typed is None:
-        typed, complete = {}, True
-        for name, ann, owner in _annotations(cls):
-            at: dict = {}
-            complete &= _shape(ann, owner, at)
-            position = _position(at)
-            if position is not None:
-                typed[name] = position
-        if complete:
-            _TYPED[cls] = typed
-    return typed
+    if typed is not None:
+        return typed, True
+    typed, complete = {}, True
+    for name, ann, owner in _annotations(cls):
+        at: dict = {}
+        complete &= _shape(ann, owner, at)
+        position = _position(at)
+        if position is not None:
+            typed[name] = position
+    if complete:
+        _TYPED[cls] = typed
+    return typed, complete
 
 
 def _position(at: dict) -> Optional[Position]:
@@ -760,6 +772,8 @@ def _annotations(cls: Any) -> list:
         except NameError:  # it names a class that is not defined yet
             return [(n, _NOT_YET, cls) for n in names]
         return [(n, hints[n], cls) for n in names]
+    if not isinstance(getattr(cls, "__pydantic_fields__", None), dict):
+        return []  # a lite class left without ``@dataclass``: no field to read
     if not getattr(cls, "__pydantic_complete__", True):
         return [(n, _NOT_YET, cls) for n in cls.model_fields]
     return [(n, f.annotation, cls) for n, f in cls.model_fields.items()]

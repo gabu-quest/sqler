@@ -64,3 +64,26 @@ def test_delete_with_policy_invalid_mode_raises():
 
     with pytest.raises(ValueError, match="on_delete must be"):
         a.delete_with_policy(on_delete="CASCADE")  # case-sensitive
+
+
+def test_find_ref_paths_reads_any_position_and_compares_the_id_as_a_number():
+    """``find_ref_paths`` takes no class: it finds a reference at any position, also inside
+    another reference, compares ``int(_id)`` (a numeric string counts) and raises for an
+    ``_id`` that is no number."""
+    from sqler.models.integrity import find_ref_paths
+
+    def ref(rid):
+        return {"_table": "users", "_id": rid}
+
+    doc = {
+        "author": ref(1),
+        "comments": [{"user": ref(1)}, ref(2)],
+        "as_text": ref("1"),
+        "other_table": {"_table": "posts", "_id": 1},
+        "outer": {**ref(5), "inner": ref(1)},
+    }
+
+    assert find_ref_paths(doc, {"users"}, 1) == ["author", "comments[0].user", "as_text", "outer.inner"]
+    assert find_ref_paths(ref(1), {"users"}, 1) == ["$"]
+    with pytest.raises(ValueError, match=r"^invalid literal for int\(\) with base 10: 'x'$"):
+        find_ref_paths({"author": ref("x")}, {"users"}, 1)

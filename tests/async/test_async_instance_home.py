@@ -774,7 +774,8 @@ async def test_delete_all_on_a_table_without_the_column_deletes_and_keeps_the_sc
     db = await open_db(base, path)
     try:
         bind_unversioned(Row, db)
-        assert await settle(_set_query(door, Row, Other, db).delete_all()) == 1
+        # the plain Parent row refers to row 1: its reference is nulled, its schema kept
+        assert await settle(_set_query(door, Row, Other, db).delete_all(on_delete="set_null")) == 1
         assert await settle(Row.using(db).all()) == []
     finally:
         await close(db)

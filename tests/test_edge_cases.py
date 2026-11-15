@@ -175,17 +175,17 @@ def test_circular_reference_cascade_delete():
 
     class Node(SQLerModel):
         value: int
-        next: dict | None = None
+        next: "Node | None" = None
 
     db = SQLerDB.in_memory()
     Node.set_db(db)
 
     # Create circular reference: A -> B -> A
     node_a = Node(value=1).save()
-    node_b = Node(value=2, next={"_table": "nodes", "_id": node_a._id}).save()
+    node_b = Node(value=2, next=node_a).save()
 
     # Update A to point to B, creating cycle
-    node_a.next = {"_table": "nodes", "_id": node_b._id}
+    node_a.next = node_b
     node_a.save()
 
     # Cascade delete should handle the cycle without infinite loop
@@ -201,7 +201,7 @@ def test_self_referential_structure():
 
     class TreeNode(SQLerModel):
         value: str
-        parent: dict | None = None
+        parent: "TreeNode | None" = None
         children: list[dict] | None = None
 
     db = SQLerDB.in_memory()
@@ -209,8 +209,8 @@ def test_self_referential_structure():
 
     # Create tree: root -> child1, child2
     root = TreeNode(value="root", children=[]).save()
-    child1 = TreeNode(value="child1", parent={"_table": "treenodes", "_id": root._id}).save()
-    child2 = TreeNode(value="child2", parent={"_table": "treenodes", "_id": root._id}).save()
+    child1 = TreeNode(value="child1", parent=root).save()
+    child2 = TreeNode(value="child2", parent=root).save()
 
     # Delete root with cascade should delete children
     root.delete_with_policy(on_delete="cascade")
@@ -227,19 +227,18 @@ def test_multiple_references_to_same_target():
         name: str
 
     class Contract(SQLerModel):
-        party_a: dict | None = None
-        party_b: dict | None = None
-        witness: dict | None = None
+        party_a: Person | None = None
+        party_b: Person | None = None
+        witness: Person | None = None
 
     db = SQLerDB.in_memory()
     Person.set_db(db)
     Contract.set_db(db)
 
     person = Person(name="Alice").save()
-    ref = {"_table": "persons", "_id": person._id}
 
     # Same person in all three roles
-    contract = Contract(party_a=ref, party_b=ref, witness=ref).save()
+    contract = Contract(party_a=person, party_b=person, witness=person).save()
 
     # Restrict delete should fail
     with pytest.raises(ReferentialIntegrityError):
@@ -253,8 +252,9 @@ def test_multiple_references_to_same_target():
     assert updated.witness is None
 
 
-def test_nested_reference_in_list():
-    """Test references nested deeply in lists."""
+def test_a_reference_nested_in_an_untyped_list_is_data():
+    """A dict shaped as a reference inside a field that declares no model is data: no row
+    refers to the tag through it."""
 
     class Tag(SQLerModel):
         name: str
@@ -276,11 +276,8 @@ def test_nested_reference_in_list():
         ],
     ).save()
 
-    # Should find the nested reference
-    referrers = tag._find_referrers(db, "tags", tag._id)
-    assert len(referrers) == 1
-    assert referrers[0][0] == "articles"
-    assert referrers[0][1] == article._id
+    assert tag._find_referrers(db, "tags", tag._id) == []
+    assert Article.from_id(article._id).metadata[0]["value"] == {"_table": "tags", "_id": tag._id}
 
 
 # --- Query Builder Edge Cases ---

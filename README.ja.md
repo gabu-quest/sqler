@@ -287,14 +287,14 @@ class U(SQLerModel):
 
 class Post(SQLerModel):
     title: str
-    author: dict | None = None
+    author: U | None = None
 
 db = SQLerDB.in_memory()
 U.set_db(db)
 Post.set_db(db)
 
 u = U(name="Writer").save()
-Post(title="Post A", author={"_table":"u","_id":u._id}).save()
+Post(title="Post A", author=u).save()
 
 try:
     u.delete_with_policy(on_delete="restrict")
@@ -534,14 +534,14 @@ class DIUser(SQLerModel):
 
 class Post(SQLerModel):
     title: str
-    author: dict | None = None
+    author: DIUser | None = None
 
 # restrict: 参照が残れば例外
 restrict_db = SQLerDB.in_memory()
 DIUser.set_db(restrict_db)
 Post.set_db(restrict_db)
 writer = DIUser(name="Writer").save()
-Post(title="Post A", author={"_table": "diusers", "_id": writer._id}).save()
+Post(title="Post A", author=writer).save()
 try:
     writer.delete_with_policy(on_delete="restrict")
 except ReferentialIntegrityError:
@@ -552,7 +552,7 @@ set_null_db = SQLerDB.in_memory()
 DIUser.set_db(set_null_db)
 Post.set_db(set_null_db)
 nullable = DIUser(name="Nullable").save()
-post = Post(title="Post B", author={"_table": "diusers", "_id": nullable._id}).save()
+post = Post(title="Post B", author=nullable).save()
 nullable.delete_with_policy(on_delete="set_null")
 assert Post.from_id(post._id).author is None
 
@@ -561,7 +561,7 @@ cascade_db = SQLerDB.in_memory()
 DIUser.set_db(cascade_db)
 Post.set_db(cascade_db)
 cascade = DIUser(name="Cascade").save()
-Post(title="Post C", author={"_table": "diusers", "_id": cascade._id}).save()
+Post(title="Post C", author=cascade).save()
 cascade.delete_with_policy(on_delete="cascade")
 assert Post.query().count() == 0
 ```

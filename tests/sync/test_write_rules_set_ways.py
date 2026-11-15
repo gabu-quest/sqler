@@ -3,6 +3,7 @@
 stamps and write the audit rows of an audited class, as the instance ways do; and the rows a
 delete's policy nulls or deletes meet the rules of their own class. No hook is called."""
 
+import asyncio
 import itertools
 import json
 import re
@@ -23,8 +24,10 @@ from sqler import (
     SQLerMsgspecModel,
     SQLerSafeModel,
 )
-from sqler.exceptions import StaleVersionError
+from sqler.db.async_db import AsyncSQLerDB
+from sqler.exceptions import ReferentialIntegrityError, StaleVersionError
 from sqler.logging import query_logger
+from sqler.models import async_find_referrers, integrity
 from sqler.models.mixins import AuditLogMixin, AuditMixin, HooksMixin, TimestampMixin
 from sqler.query import F
 
@@ -961,3 +964,212 @@ def test_an_f_expression_on_a_promoted_field_logs_the_value_the_row_holds_after(
     assert _after_creates(db, Ranked) == [
         (2, "update", "alice", {"priority": {"old": 9, "new": 5}}, {"name": "p9", "priority": 5})
     ]
+
+
+# ----- delete_all() looks for the rows that refer to the set, once per referring table -----------
+
+
+def holder_of(kind, target, shape="one"):
+    """A class of ``kind`` whose ``target`` field holds a row of ``target`` (``shape``
+    "list": a list of them)."""
+    table = f"sw_holder_{kind}_{next(_tables)}"
+    held = Optional[target] if shape == "one" else Optional[list[target]]
+    ns = {"__tablename__": table, "target": None, "__annotations__": {"target": held}}
+    kwds = {"tag": False} if kind == "msgspec" else {}
+    cls = types.new_class(f"Holder_{table}", (BASES[kind],), kwds, lambda body: body.update(ns))
+    return dataclass(cls) if kind.startswith("lite") else cls
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_delete_all_of_one_row_and_of_ten_thousand_send_the_same_statements(db, kind):
+    Item = make(kind)
+    Holder = holder_of(kind, Item)
+    Item.save_many([Item(name="one")] + [Item(name="many") for _ in range(10_000)], db=db)
+    Holder().save(db=db)
+    version = ", _version" if kind in SAFE_KINDS else ""
+    names = [Item.__name__.lower(), Item.__tablename__]  # the names a reference to an Item may give, in order
+
+    def look(ids):
+        """The one read of the look for ``ids``: one id is also looked for by its digits."""
+        digits = "data GLOB ('*' || substr(?1, 2, length(?1) - 2) || '*') AND " if len(ids) == 1 else ""
+        sql = (
+            f"SELECT _id, data FROM {Holder.__tablename__} WHERE (({digits}(data GLOB '*{names[0]}*' OR "
+            f"data GLOB '*{names[1]}*' OR data GLOB '*\\u*')) OR data >= x'') AND "
+            "(json_extract(data, '$.target._id') IN (SELECT value FROM json_each(?1)));"
+        )
+        return sql, [json.dumps(ids)]
+
+    q = bound(Item, db)
+    for name, ids in (("one", [1]), ("many", list(range(2, 10_002)))):
+        count, sent = _sent(lambda: q.filter(F("name") == name).delete_all())
+        assert count == len(ids)
+        assert sent == [
+            (
+                f"DELETE FROM {Item.__tablename__} WHERE JSON_EXTRACT(data, '$.name') = ? "
+                f"RETURNING _id, data{version}",
+                [name],
+            ),
+            look(ids),
+        ]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_delete_reads_the_referring_table_once_and_no_other(db, kind):
+    Item = make(kind)
+    Holder = holder_of(kind, Item)
+    make(kind)  # a class that cannot refer to Item
+    item = Item(name="a").save(db=db)
+    Holder().save(db=db)
+
+    _, sent = _sent(lambda: item.delete(db=db))
+
+    assert [s for s, _ in sent if f" {Item.__tablename__} " not in s] == [
+        f"SELECT _id, data FROM {Holder.__tablename__} WHERE ((data GLOB ('*' || substr(?1, 2, "
+        f"length(?1) - 2) || '*') AND (data GLOB '*{Item.__name__.lower()}*' OR "
+        f"data GLOB '*{Item.__tablename__}*' OR data GLOB '*\\u*')) OR data >= x'') AND "
+        "(json_extract(data, '$.target._id') IN (SELECT value FROM json_each(?1)));"
+    ]
+
+
+def _escaped(text: str) -> str:
+    """``text`` with every character spelled as a JSON ``\\u`` escape."""
+    return "".join(f"\\u{ord(c):04x}" for c in text)
+
+
+# Rows written as raw text: ``{R}`` is where the reference goes (the field itself, or the
+# one entry of a list), ``{T}`` the target's table and ``{I}`` its id. True: the row refers.
+ROW_TEXTS = {
+    "not JSON": ("not json", False),
+    "spaces and newlines between tokens": (
+        '{\n  "target" :\n {R} \r\n}',
+        True,
+    ),
+    "keys in the other order": ('{"target": {R}}', True),
+    "the table name in \\u escapes": ('{"target": {R}}', True),
+    "the _id key in \\u escapes": ('{"target": {R}}', True),
+    "_id written as 1.0": ('{"target": {R}}', False),
+    "_id written as 1e0": ('{"target": {R}}', False),
+    "the id's digits in other fields, no reference": ('{"n": {I}, "note": "{I} {T}", "target": null}', False),
+    "non-ASCII text beside the reference": ('{"note": "\u65e5\u672c\u8a9e \u00fc", "target": {R}}', True),
+    "stored as a BLOB": ('{"target": {R}}', True),
+    "stored as a BLOB in UTF-16": ('{"target": {R}}', True),
+    "Infinity beside the reference": ('{"limit": Infinity, "target": {R}}', True),
+    "NaN beside the reference": ('{"limit": NaN, "target": {R}}', True),
+    "a row that is not JSON beside it": ('{"target": {R}}', True),
+    "unquoted keys": ("{target: {R}}", False),
+    "a list where the document goes": ("[{R}]", False),
+}
+
+
+def _reference_text(case: str, table: str, rid: int) -> str:
+    if case == "spaces and newlines between tokens":
+        return '{  "_table" :  "' + table + '" ,\n\t"_id"  :  ' + str(rid) + "\r\n }"
+    if case == "keys in the other order":
+        return '{"_id": ' + str(rid) + ', "_table": "' + table + '"}'
+    if case == "the table name in \\u escapes":
+        return '{"_table": "' + _escaped(table) + '", "_id": ' + str(rid) + "}"
+    if case == "the _id key in \\u escapes":
+        return '{"_table": "' + table + '", "' + _escaped("_id") + '": ' + str(rid) + "}"
+    if case == "_id written as 1.0":
+        return '{"_table": "' + table + '", "_id": ' + str(rid) + ".0}"
+    if case == "_id written as 1e0":
+        return '{"_table": "' + table + '", "_id": ' + str(rid) + "e0}"
+    return '{"_table": "' + table + '", "_id": ' + str(rid) + "}"
+
+
+@pytest.mark.parametrize("case", list(ROW_TEXTS))
+@pytest.mark.parametrize("shape", ["one", "list"])
+@pytest.mark.parametrize("look", ["sync", "async"])
+def test_how_a_row_is_written_does_not_change_whether_it_refers(tmp_path, look, shape, case):
+    """The look reads only what the row holds: a row that is not JSON raises nothing and
+    refers to nothing; spacing, key order, escapes and other text do not hide a reference;
+    an ``_id`` that is not an integer is no reference (the loader does not follow it). A
+    row Python reads and SQLite's JSON functions do not (``NaN``, ``Infinity``, a BLOB in
+    UTF-16), or one beside a row neither reads, is not passed over; a row only SQLite reads
+    refers to nothing, as no load reads it."""
+    path = str(tmp_path / "rows.db")
+    db = SQLerDB.on_disk(path)
+    try:
+        Item = make("pydantic")
+        Holder = holder_of("pydantic", Item, shape)
+        item = Item(name="a").save(db=db)
+        Holder().save(db=db)
+        text, refers = ROW_TEXTS[case]
+        reference = _reference_text(case, Item.__tablename__, item._id)
+        held = reference if shape == "one" else f"[{reference}]"
+        doc = text.replace("{R}", held).replace("{T}", Item.__tablename__).replace("{I}", str(item._id))
+        if case.startswith("stored as a BLOB"):
+            doc = doc.encode("utf-16" if case.endswith("UTF-16") else "utf-8")
+        db.adapter.execute(f"UPDATE {Holder.__tablename__} SET data = ?;", [doc])
+        if case == "a row that is not JSON beside it":
+            db.adapter.execute(
+                f"INSERT INTO {Holder.__tablename__} (data) VALUES (?);", [f"{item._id} {Item.__tablename__}"]
+            )
+        db.adapter.commit()
+        expected = [(Holder.__tablename__, 1, {"paths": ["target" if shape == "one" else "target[0]"]})]
+
+        if look == "sync":
+            if refers:
+                with pytest.raises(ReferentialIntegrityError, match=r"referenced by 1 row\(s\)$"):
+                    item.delete(db=db)
+                assert [i for i, _ in _stored(db, Item.__tablename__)] == [item._id]
+            else:
+                item.delete(db=db)
+                assert _stored(db, Item.__tablename__) == []
+        else:
+
+            async def referrers():
+                adb = AsyncSQLerDB.on_disk(path)
+                await adb.connect()
+                named = f"SELECT json_extract(data, '$.name') FROM {Item.__tablename__};"
+                try:
+                    async with adb.transaction():  # as a delete looks: a failed statement of the look leaves it whole
+                        await adb.adapter.execute(f"UPDATE {Item.__tablename__} SET data = json_set(data, '$.name', 'kept');")
+                        found = await async_find_referrers(adb, Item.__tablename__, [item._id])
+                    return found, [tuple(row) for row in await (await adb.adapter.execute(named)).fetchall()]
+                finally:
+                    await adb.close()
+
+            assert asyncio.run(referrers()) == (expected if refers else [], [("kept",)])
+        assert db.adapter.execute(f"SELECT data FROM {Holder.__tablename__};").fetchone()[0] == doc
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("ids", ["one", "several"])
+def test_a_row_sqlite_cannot_read_does_not_hide_the_referrers_of_a_set_of_ids(tmp_path, ids):
+    """The look for several ids tests the text for the names alone, so its second statement
+    (sent when SQLite's JSON functions fail on a row) uses no binding; for one id it uses
+    the id. Both find the referrer beside the row that is not JSON."""
+    db = SQLerDB.on_disk(str(tmp_path / "rows.db"))
+    try:
+        Item = make("pydantic")
+        Holder = holder_of("pydantic", Item, "one")
+        first, second = Item.save_many([Item(name="a"), Item(name="b")], db=db)
+        Holder().save(db=db)
+        held = '{"limit": NaN, "target": {"_table": "' + Item.__tablename__ + '", "_id": ' + str(second._id) + "}}"
+        db.adapter.execute(f"UPDATE {Holder.__tablename__} SET data = ?;", [held])
+        not_json = f"{second._id} {Item.__tablename__}"  # it passes the text test
+        db.adapter.execute(f"INSERT INTO {Holder.__tablename__} (data) VALUES (?);", [not_json])
+        db.adapter.commit()
+        looked_for = second._id if ids == "one" else [first._id, second._id]
+
+        assert integrity.find_referrers(db, Item.__tablename__, looked_for) == [
+            (Holder.__tablename__, 1, {"paths": ["target"]})
+        ]
+    finally:
+        db.close()
+
+
+def test_a_look_whose_second_statement_fails_too_raises_that_error():
+    """When SQLite's JSON functions fail on a row, the look is sent again without them. An
+    error of that second statement is no row's: it is raised, not read as no rows."""
+    Item = make("pydantic")
+    Holder = holder_of("pydantic", Item, "one")
+    look = integrity._look(Item.__tablename__, 1)
+    table, first, _ = next(look)
+    _, second, _ = look.send(sqlite3.OperationalError("malformed JSON"))
+    assert table == Holder.__tablename__
+    assert ("json_extract" in first, "json_" in second, " GLOB " in second) == (True, False, True)
+    with pytest.raises(sqlite3.OperationalError, match="^not a row's JSON$"):
+        look.send(sqlite3.OperationalError("not a row's JSON"))
