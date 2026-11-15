@@ -6,20 +6,28 @@ this module, and only this module and the mixins know which rules exist. A mixin
 a rule derives from :class:`WriteRules` and adds its part cooperatively:
 
 * ``_stamp()``: what to set on an instance just before it is written (the timestamp and
-  audit-field mixins).
+  audit-field mixins); ``_update_stamps()``: what a set-based update of the class's rows
+  sets on each, in the same statement.
 * ``_rows_written()`` / ``_arows_written()``, for a class whose ``_row_rules`` is true:
   told, inside the write's transaction, of each row written as
   ``(action, _id, before, after)``: ``action`` is ``"create"``, ``"update"`` or
   ``"delete"``, ``before`` is the stored document before (``None`` for a create) and
   ``after`` the one written (``None`` for a delete).
 
+The set-based ways (a queryset's ``update()``, ``update_one()``, ``update_n()`` and
+``delete_all()``) and the rows a delete's policy nulls or deletes come here too: they stamp and
+are told of their rows as an instance write is, and they call no hook (no instance exists).
+
 A class with no such mixin pays one ``isinstance`` test per write and no statement.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, ClassVar, Optional
 
+from sqler import registry
+from sqler._stored import column_arg, stored
 from sqler.models import _dirty
 
 Row = tuple[str, Any, Optional[dict], Optional[dict]]
@@ -35,6 +43,11 @@ class WriteRules:
 
     def _stamp(self) -> None:
         """Set what this class keeps on an instance just before it is written."""
+
+    @classmethod
+    def _update_stamps(cls) -> dict[str, Any]:
+        """The fields a set-based update of this class's rows sets on each, with their values."""
+        return {}
 
     @classmethod
     def _rows_written(cls, db, table: str, rows: list[Row]) -> None:
@@ -220,12 +233,12 @@ def delete(inst, db, table: str, on_delete: str, remove: Callable[[], None]) -> 
     if on_delete == "restrict" and not rules:
         return remove()
     row_id = inst._id
-    before = inst._dump_with_relations() if rules else None
     kept = _remember_identity(inst)
     try:
         with db.transaction():
+            before = db.find_document(table, row_id) if rules else None
             remove()
-            if rules:
+            if before is not None:
                 inst._rows_written(db, table, [("delete", row_id, before, None)])
     except BaseException:
         _restore_identity(inst, kept)
@@ -239,13 +252,142 @@ async def adelete(inst, db, table: str, on_delete: str, remove) -> None:
     if on_delete == "restrict" and not rules:
         return await remove()
     row_id = inst._id
-    before = await inst._adump_with_relations() if rules else None
     kept = _remember_identity(inst)
     try:
         async with db.transaction():
+            before = await db.find_document(table, row_id) if rules else None
             await remove()
-            if rules:
+            if before is not None:
                 await inst._arows_written(db, table, [("delete", row_id, before, None)])
     except BaseException:
         _restore_identity(inst, kept)
         raise
+
+
+# ----- the set-based ways: a queryset's update, update_one, update_n and delete_all ------
+
+
+def stamped(cls, fields: dict) -> dict:
+    """``fields`` and the class's update stamps; a field the caller names is the caller's
+    (no fields: none, which the update refuses)."""
+    if not fields or not issubclass(cls, WriteRules):
+        return fields
+    stamps = cls._update_stamps()
+    return {**fields, **{k: v for k, v in stamps.items() if k not in fields}}
+
+
+def row_rules(cls) -> bool:
+    return issubclass(cls, WriteRules) and cls._row_rules
+
+
+def _set_rows(pairs) -> list[Row]:
+    return [
+        ("delete", before["_id"], before, None)
+        if after is None
+        else ("update", before["_id"], before, _dirty.snapshot(after))
+        for before, after in pairs
+    ]
+
+
+def _unit_db(cls, db):
+    if db is None:
+        raise RuntimeError(f"{cls.__name__} has row rules: a set-based write needs the queryset's database")
+    return db
+
+
+def set_write(cls, db, table: str, write: Callable[[], list]) -> list:
+    """A set-based write on a class with row rules: ``write()`` writes the rows and returns
+    each as ``(before, after)`` (``after`` ``None`` for a delete); it and the rules are one
+    unit."""
+    with _unit_db(cls, db).transaction():
+        pairs = write()
+        cls._rows_written(db, table, _set_rows(pairs))
+    return pairs
+
+
+async def aset_write(cls, db, table: str, write) -> list:
+    """Async twin of :func:`set_write`; ``write()`` returns an awaitable."""
+    async with _unit_db(cls, db).transaction():
+        pairs = await write()
+        await cls._arows_written(db, table, _set_rows(pairs))
+    return pairs
+
+
+# ----- the rows a delete's policy changes: each meets the rules of its own class ---------
+
+
+def _class_of(table: str):
+    cls = registry.resolve(table)
+    return cls if isinstance(cls, type) and issubclass(cls, WriteRules) else None
+
+
+def _versioned(table: str) -> bool:
+    """Whether the class registered for ``table`` keeps a version on its rows."""
+    return bool(getattr(registry.resolve(table), "_versioned_rows", False))
+
+
+def _nulled_update(cls, table: str, row_id, doc: dict, versioned: bool) -> tuple[str, list]:
+    """The UPDATE that writes ``doc``, a referring row with its reference nulled, with the
+    stamps of its class (a promoted one in its column). A ``versioned`` row's version moves,
+    as with every other write of it: a holder who loaded the row before cannot save the
+    reference back."""
+    stamps = cls._update_stamps() if cls is not None else {}
+    promoted = getattr(cls, "__promoted__", None) or {}
+    columns, params = [", _version = _version + 1"] if versioned else [], []
+    for name, value in stamps.items():
+        if name in promoted:
+            columns.append(f", {name} = ?")
+            params.append(column_arg(value))
+        else:
+            doc[name] = stored(value)
+    return (
+        f"UPDATE {table} SET data = json(?){''.join(columns)} WHERE _id = ?;",
+        [json.dumps(doc), *params, row_id],
+    )
+
+
+def null_referrer(db, table: str, row_id, doc: dict) -> None:
+    """``set_null``: write ``doc`` into the referring row ``row_id``."""
+    cls = _class_of(table)
+    before = db.find_document(table, row_id) if cls is not None and cls._row_rules else None
+    versioned = _versioned(table)
+    if versioned and not db._is_versioned(table):
+        db._ensure_versioned_table(table)
+    db.adapter.execute(*_nulled_update(cls, table, row_id, doc, versioned))
+    db.adapter.auto_commit()
+    if before is not None:
+        after = _dirty.snapshot(db.find_document(table, row_id))
+        cls._rows_written(db, table, [("update", row_id, before, after)])
+
+
+async def anull_referrer(db, table: str, row_id, doc: dict) -> None:
+    """Async twin of :func:`null_referrer`."""
+    cls = _class_of(table)
+    before = await db.find_document(table, row_id) if cls is not None and cls._row_rules else None
+    versioned = _versioned(table)
+    if versioned and not db._is_versioned(table):
+        await db._ensure_versioned_table(table)
+    cursor = await db.adapter.execute(*_nulled_update(cls, table, row_id, doc, versioned))
+    await cursor.close()
+    await db.adapter.auto_commit()
+    if before is not None:
+        after = _dirty.snapshot(await db.find_document(table, row_id))
+        await cls._arows_written(db, table, [("update", row_id, before, after)])
+
+
+def delete_referrer(db, table: str, row_id) -> None:
+    """``cascade``: delete the referring row ``row_id``."""
+    cls = _class_of(table)
+    before = db.find_document(table, row_id) if cls is not None and cls._row_rules else None
+    db.delete_document(table, row_id)
+    if before is not None:
+        cls._rows_written(db, table, [("delete", row_id, before, None)])
+
+
+async def adelete_referrer(db, table: str, row_id) -> None:
+    """Async twin of :func:`delete_referrer`."""
+    cls = _class_of(table)
+    before = await db.find_document(table, row_id) if cls is not None and cls._row_rules else None
+    await db.delete_document(table, row_id)
+    if before is not None:
+        await cls._arows_written(db, table, [("delete", row_id, before, None)])
