@@ -68,7 +68,7 @@ def test_refresh_updates_snapshot_to_match_db(db):
 
 
 def test_refresh_snapshot_excludes_internal_keys(db):
-    """_snapshot should exclude _id and _version (mirrors queryset._attach_metadata)."""
+    """_snapshot should exclude _id and _version (as a row read by a queryset holds it)."""
     import warnings
 
     with warnings.catch_warnings():

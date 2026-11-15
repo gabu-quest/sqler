@@ -225,7 +225,7 @@ def _(mo):
     This happens transparently - you always get fully hydrated objects.
 
     But what if you want to skip hydration for performance? Let's explore
-    the `.resolve(False)` option and understand when it works (and when it doesn't).
+    the `.resolve(False)` option and what a field holds when it is used.
     """)
     return
 
@@ -233,40 +233,32 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ### 7a. Why `.resolve(False)` Fails with Strict Typing
+    ### 7a. `.resolve(False)` Keeps the Stored Reference
 
     With our current `Book` model (`author: Author | None`), skipping hydration
-    causes Pydantic validation to **fail**. The raw reference dict doesn't have
-    the required `name` and `country` fields that `Author` expects:
+    leaves the stored reference in the field: the dict `{"_table": ..., "_id": ...}`,
+    never an `Author` built from it. Saving such a book writes the reference back
+    unchanged:
     """)
     return
 
 
 @app.cell
 def _(Book):
-    # This will FAIL - the raw ref dict doesn't match Author's schema
-    try:
-        raw_books = Book.query().resolve(False).all()
-        print("This won't print - validation fails first!")
-    except Exception as e:
-        print(f"❌ ValidationError (expected!):\n   {type(e).__name__}")
-        print("   The raw ref {'_table': 'authors', '_id': 1} doesn't have 'name' or 'country'")
+    # The field holds the stored reference, whatever its type hint says
+    raw_books = Book.query().resolve(False).all()
+    print(f"book.author = {raw_books[0].author}")
+    print(f"type = {type(raw_books[0].author).__name__}")
     return
 
 
 @app.cell
 def _(mo):
     mo.md(r"""
-    ### 7b. Making `.resolve(False)` Work with Flexible Typing
+    ### 7b. The Same with a Flexible Type Hint
 
-    To use `.resolve(False)`, your model must accept raw refs. Change the type
-    hint to include `dict`:
-
-    ```python
-    author: Author | dict | None = None  # Accepts full objects OR raw refs
-    ```
-
-    Let's create a model that supports this:
+    A field may also say so in its type hint, `Author | dict | None`: it reads the
+    same way, the stored reference without hydration and the `Author` with it:
     """)
     return
 
@@ -285,9 +277,8 @@ def _(Author, SQLerModel, db):
     writer = Author.from_id(1)  # Get existing author
     Article(title="Understanding resolve(False)", author=writer).save()
 
-    # Now resolve(False) works!
     raw_articles = Article.query().resolve(False).all()
-    print("✅ With flexible typing, resolve(False) works:")
+    print("Without hydration:")
     print(f"   article.author = {raw_articles[0].author}")
     print(f"   type = {type(raw_articles[0].author).__name__}")
 
@@ -308,7 +299,7 @@ def _(mo):
     | **Performance** | Skip N+1 queries when you'll fetch related data separately |
     | **Deferred loading** | Get refs now, hydrate on-demand later |
 
-    **Remember:** Your model must use `Model | dict | None` typing for this to work!
+    **Remember:** without hydration a related field holds `{"_table": ..., "_id": ...}`.
     """)
     return
 
@@ -433,7 +424,7 @@ def _(mo):
     | Save related | Save child first, then parent with reference |
     | Auto hydration | Relationships are loaded automatically |
     | Query across | `Model.ref("field").field("nested_field")` |
-    | Skip hydration | `.resolve(False)` - requires `Model \| dict` typing |
+    | Skip hydration | `.resolve(False)` - the field holds the stored reference |
     | Update related | Modify + save related, then `.refresh()` parent |
 
     **Next up:** Tour 03 covers Safe Models with optimistic locking!

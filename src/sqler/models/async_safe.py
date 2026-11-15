@@ -79,29 +79,12 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         # For explicitness, no-op here; version checks happen on use.
 
     @classmethod
-    async def _aload_refs(cls: Type[TASafe], ids: list, seen: frozenset) -> dict:  # type: ignore[override]
-        """Load the rows ``ids`` with their versions and snapshots, one statement."""
-        db, table = cls._require_binding()
-        out: dict = {}
-        for doc in await _refs.aread_versioned(db, table, ids):
-            rid = doc["_id"]
-            try:
-                typed = await _refs.aresolve(doc, db, seen | {(table, rid)}, cls)
-                inst = _refs.from_row(cls, typed, doc)
-            except _refs.UNLOADABLE:
-                out[rid] = _refs.KEEP
-                continue
-            out[rid] = inst
-        return out
-
-    @classmethod
     async def from_id(cls: Type[TASafe], id_: int) -> Optional[TASafe]:  # type: ignore[override]
         db, table = cls._require_binding()
         doc = await db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        typed = await _refs.aresolve(doc, db, frozenset(), cls)
-        return _refs.from_row(cls, typed, doc)  # type: ignore[return-value]
+        return (await _refs.arun(_refs.load(cls, [doc], db, table)))[0]  # type: ignore[return-value]
 
     @classmethod
     async def asave_many(cls: Type[TASafe], instances: list[TASafe], *, db=None) -> list[TASafe]:  # type: ignore[override]
@@ -241,13 +224,10 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         doc = await db.find_document_with_version(table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        row, doc = doc, await _refs.aresolve(doc, db, frozenset(), cls)
-        fresh = cls.model_validate(doc)  # type: ignore[call-arg]
-        for fname in self.__class__.model_fields:
-            if fname == "_id":
-                continue
-            setattr(self, fname, getattr(fresh, fname))
-        self._id = doc.get("_id")
+        own = {(table, self._id): self}
+        return (await _refs.arun(_refs.load(cls, [doc], db, table, self._refreshed, own)))[0]  # type: ignore[return-value]
+
+    def _refreshed(self: TASafe, doc: dict, row: dict) -> TASafe:
+        super()._refreshed(doc, row)
         self._version = doc.get("_version", 0)
-        self._snapshot = _dirty.snapshot(row)
         return self

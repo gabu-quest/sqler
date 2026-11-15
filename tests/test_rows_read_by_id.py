@@ -200,10 +200,19 @@ def test_a_null_column_and_a_json_key_of_its_name_read_as_find_document_reads_th
         {"name": "m", "status": "col", "_id": 2},
     ]
     assert db.find_documents("rbi_jobs", [1, 2]) == one
-    RbiHolder(held={"_table": "rbi_jobs", "_id": 1}).save()
     RbiHolder(held={"_table": "rbi_jobs", "_id": 2}).save()
-    assert [_status(h.held) for h in RbiHolder.query().all()] == [None, "col"]
-    assert [_status(h.held) for h in RbiHolder.from_ids([1, 2])] == [None, "col"]
+    RbiHolder(held={"_table": "rbi_jobs", "_id": 1}).save()
+    assert [_status(h.held) for h in RbiHolder.query().limit(1).all()] == ["col"]
+    assert [_status(h.held) for h in RbiHolder.from_ids([1])] == ["col"]
+    # the NULL column is the row's ``status``: its class refuses it, by every way in
+    from pydantic import ValidationError
+
+    for load in (lambda: RbiHolder.from_id(2), lambda: RbiHolder.query().all()):
+        with pytest.raises(ValidationError) as caught:
+            load()
+        assert caught.value.__notes__ == [
+            "loading row 1 of 'rbi_jobs', referenced by field 'held' of row 2 of 'rbi_holders'"
+        ]
 
 
 def test_a_table_with_promoted_columns_read_through_a_class_that_declares_none(db):
@@ -433,7 +442,7 @@ def test_a_referenced_row_read_through_using_a_fresh_database_object_is_whole(db
     _with_ready_job()
     got = RbiHolder.using(fresh).first()
     assert got.typed.status == "ready"
-    assert got.held == {"name": "j", "_id": 1, "status": "ready"}
+    assert (type(got.held), got.held._id, got.held.status) == (RbiJob, 1, "ready")
     got.typed.save(db=fresh)
     assert _column(path, "rbi_jobs", "status") == "ready"
 
@@ -565,7 +574,9 @@ def test_a_hostile_table_name_is_refused_before_any_statement(db, fresh):
     assert captured == []
 
 
-def test_two_querysets_of_one_class_on_two_databases_read_their_own_child_rows(db, tmp_path):
+def test_a_child_of_a_bound_class_is_read_from_its_class_database_through_any_queryset(db, tmp_path):
+    """The parent rows are read from the queryset's database; a referenced row of a class
+    bound to a database is read from that one, where its ``save()`` writes it back."""
     _with_ready_job(status="here")
     other = SQLerDB.on_disk(str(tmp_path / "other.db"))
     try:
@@ -576,17 +587,18 @@ def test_two_querysets_of_one_class_on_two_databases_read_their_own_child_rows(d
     finally:
         other.close()
     assert (mine.typed.name, mine.typed.status, _status(mine.held)) == ("j", "here", "here")
-    assert (theirs.typed.name, theirs.typed.status, _status(theirs.held)) == ("o", "there", "there")
+    assert theirs.name == "h2"
+    assert (theirs.typed.name, theirs.typed.status, _status(theirs.held)) == ("j", "here", "here")
 
 
-def test_a_queryset_built_by_hand_reads_child_rows_as_before(db):
-    """Pinned: with no database handed over, a child row is read as ``_id`` and ``data``."""
+def test_a_queryset_built_by_hand_reads_the_child_rows_of_a_bound_class(db):
+    """With no database handed over, a child of a bound class is read from its database."""
     from sqler.models.queryset import SQLerQuerySet
     from sqler.query import SQLerQuery
 
     _with_ready_job()
     qs = SQLerQuerySet(RbiHolder, SQLerQuery(table="rbi_holders", adapter=db.adapter))
-    assert qs.first().held == {"name": "j", "_id": 1}
+    assert (qs.first().held._id, qs.first().held.status) == (1, "ready")
 
 
 # --- a queryset's copy carries everything the queryset holds -------------------------------
@@ -636,7 +648,7 @@ def test_every_chaining_method_keeps_the_database_of_using(db, fresh, method):
     assert qs._resolve is True
     assert qs._db is fresh
     if method in ROWS:
-        assert qs.first().held == {"name": "j", "_id": 1, "status": "ready"}
+        assert (qs.first().held._id, qs.first().held.status) == (1, "ready")
 
 
 # --- a by-id read does not fail on the number of ids -----------------------------------------

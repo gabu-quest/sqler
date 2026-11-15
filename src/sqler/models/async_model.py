@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import reprlib
 import warnings
 from typing import ClassVar, Optional, Type, TypeVar
 
@@ -76,6 +77,11 @@ class AsyncSQLerModel(BaseModel):
         super().__pydantic_init_subclass__(**kwargs)
         _register_defined_class(cls)
 
+    @reprlib.recursive_repr()
+    def __repr__(self) -> str:
+        """pydantic's, with a model met again inside itself (a cycle of rows) shown as ``...``."""
+        return super().__repr__()
+
     @classmethod
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
         warnings.warn(
@@ -125,7 +131,7 @@ class AsyncSQLerModel(BaseModel):
         doc = await _aread_document(db, table, id_)
         if doc is None:
             return None
-        return _refs.from_row(cls, await cls._aresolve_relations(doc, db=db), doc)
+        return (await _refs.arun(_refs.load(cls, [doc], db, table)))[0]
 
     @classmethod
     async def from_ids(cls: Type[TAModel], ids: list[int], *, db=None) -> list[TAModel]:
@@ -145,18 +151,9 @@ class AsyncSQLerModel(BaseModel):
         """
         if not ids:
             return []
-        given = db
         db, table = cls._resolve_binding(db)
         read = _refs.aread_versioned if cls._versioned_rows else _aread_documents
-        docs = await read(db, table, ids)
-        if not docs:
-            return []
-        # Use queryset's batch resolution for efficient nested ref loading
-        qs = cls.using(given) if given is not None else cls.query()
-        return [
-            _refs.from_row(cls, doc, row)
-            for row, doc in zip(docs, await qs._abatch_resolve(docs), strict=True)
-        ]
+        return await _refs.arun(_refs.load(cls, await read(db, table, ids), db, table))
 
     @classmethod
     async def count(cls: Type[TAModel]) -> int:
@@ -428,40 +425,17 @@ class AsyncSQLerModel(BaseModel):
         doc = await _aread_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        doc = await cls._aresolve_relations(doc, db=db)
-        fresh = cls.model_validate(doc)
-        for fname in self.__class__.model_fields:
-            if fname == "_id":
-                continue
+        own = {(table, self._id): self}
+        return (await _refs.arun(_refs.load(cls, [doc], db, table, self._refreshed, own)))[0]
+
+    def _refreshed(self: TAModel, doc: dict, row: dict) -> TAModel:
+        """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
+        fresh = _refs.validate(type(self), doc)
+        for fname in type(self).model_fields:
             setattr(self, fname, getattr(fresh, fname))
         self._id = doc.get("_id")
+        self._snapshot = _dirty.snapshot(row)
         return self
-
-    # ----- relationship helpers (async) -----
-    @classmethod
-    async def _aresolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
-        """Replace the references in ``data`` by the rows they point to (see ``_refs.aresolve``)."""
-        return await _refs.aresolve(data, db, _seen, cls)
-
-    @classmethod
-    async def _aload_refs(cls, ids: list, seen: frozenset) -> dict:
-        """Load the rows ``ids`` of this class's table with one statement.
-
-        Returns ``{id: instance}``; a row that is gone is missing, one that cannot be
-        hydrated maps to ``_refs.KEEP``.
-        """
-        db, table = cls._require_binding()
-        out: dict = {}
-        for doc in await _aread_documents(db, table, ids):
-            rid = doc["_id"]
-            try:
-                resolved = await cls._aresolve_relations(doc, db=db, _seen=seen | {(table, rid)})
-                inst = _refs.from_row(cls, resolved, doc)
-            except _refs.UNLOADABLE:
-                out[rid] = _refs.KEEP
-                continue
-            out[rid] = inst
-        return out
 
     async def _adump_with_relations(self) -> dict:
         """The document ``save()`` writes: each field in stored form, a related model (async

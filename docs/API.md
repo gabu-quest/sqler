@@ -526,6 +526,72 @@ q = User.query().filter(User.ref("address").field("city") == "Kyoto")
 assert [row.name for row in q.all()] == ["Alice"]
 ```
 
+### [C47] How references are loaded
+
+A stored reference is a dict `{"_table": ..., "_id": ...}`. In a field whose type hint
+names a model class (`Address | None`, `list[Address]`, `dict[str, Address]`), a reference
+into a table of that class is loaded as the model of its row. Every way of loading
+(`from_id`, `refresh`, `from_ids`, `query().all()`, `query().first()`, sync and async, on
+every model base) loads the same way:
+
+- **Followed to the end.** A chain of rows loads whole, however long: one `SELECT` per table
+  per level, never one per row of a level.
+- **One object per row per load.** A row reached twice is the same object: a diamond shares
+  its child, a cycle closes (`a.next.next is a`), and a row of the result that another row
+  references is that result. `refresh()` counts its own instance as the object of its row.
+- **A row that is gone** reads as `None` in a field and is left out of a list.
+- **A row its class refuses** raises what loading that row by its own `from_id` raises, with
+  a note naming the row, its table and the field that referenced it.
+- **Without loading** (`.resolve(False)`, `iter()`) the field holds the stored reference,
+  whatever its type hint says; saving the model writes it back unchanged.
+- A referenced row of a class bound to a database is read from that database, where its
+  `save()` writes it back; a row of a class bound to none from the database of the row that
+  references it.
+
+In a cycle the model that closes it is the object its row becomes once its own fields are
+validated: a `mode="before"` validator of the referring field receives that object before
+its fields are set (a pydantic one holds each field's default, a lite one no field, a
+msgspec one `None` in every field), a
+`mode="after"` one sees it validated. A required reference field closes the same way. The
+row is then built on that object, so it holds every field of its row whatever way its class
+keeps its state (`slots=True`, frozen, private attributes), and a `model_post_init`,
+`__post_init__` or after-validator that keeps `self` keeps the object the graph holds.
+pydantic runs a class's after-validators on every instance of it that it validates as a
+field value, so such a validator also sees the closing object before it is built. A
+msgspec model can only be made new by its class, so its closing object is made without
+`__post_init__` running on it, the row is then built as msgspec builds it, and its state is
+moved onto the closing object: `__post_init__` runs once for the row, on the row's values,
+and a hook that keeps `self` there keeps the object msgspec built, not the one the graph
+holds. A class that defines its own `model_validate`, and a pydantic validator that returns
+another object than the one it was given, are treated the same way: the model is built the
+class's way and its state is moved.
+`repr()` prints a model met again inside itself as `...`; `model_dump()` of a cycle raises
+`ValueError` (pydantic's), on the lite bases too. Two limits: on a msgspec model in a cycle
+`repr()` and `model_dump()` recurse until `RecursionError`, and `refresh()` fails on a
+frozen pydantic or frozen msgspec model (every other way of loading a frozen class works).
+
+```python
+from typing import Optional
+
+from sqler import SQLerDB, SQLerModel
+
+class Node(SQLerModel):
+    name: str = ""
+    next: Optional["Node"] = None
+
+Node.model_rebuild()
+db = SQLerDB.in_memory()
+Node.set_db(db)
+a = Node(name="a").save()
+b = Node(name="b", next=a).save()
+a.next = b
+a.save()
+
+got = Node.from_id(a._id)
+assert got.next.name == "b" and got.next.next is got
+assert Node.query().resolve(False).first().next == {"_table": Node.__tablename__, "_id": b._id}
+```
+
 ---
 
 ## Safe Models & Concurrency

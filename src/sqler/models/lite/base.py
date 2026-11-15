@@ -7,13 +7,14 @@ and other environments where Pydantic cannot be installed.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import typing
 from dataclasses import fields
 from datetime import date, datetime
 from typing import Any, ClassVar, Optional, Type, TypeVar
 
-from sqler.models import _dirty, _refs
+from sqler.models import _dirty
 
 T = TypeVar("T", bound="SQLerLiteModelBase")
 
@@ -23,6 +24,27 @@ def _is_classvar(ann: object) -> bool:
     if isinstance(ann, str):
         return "ClassVar" in ann
     return typing.get_origin(ann) is ClassVar
+
+
+def _asdict(value: Any, within: tuple) -> Any:
+    """``dataclasses.asdict(value)`` that raises ``ValueError`` on a dataclass met again
+    inside itself instead of recursing until ``RecursionError``."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        if id(value) in within:
+            raise ValueError("Circular reference detected (id repeated)")
+        within = (*within, id(value))
+        return {f.name: _asdict(getattr(value, f.name), within) for f in fields(value)}
+    if isinstance(value, tuple) and hasattr(value, "_fields"):  # a named tuple
+        return type(value)(*[_asdict(v, within) for v in value])
+    if isinstance(value, (list, tuple)):
+        return type(value)(_asdict(v, within) for v in value)
+    if isinstance(value, dict):
+        return {_asdict(k, within): _asdict(v, within) for k, v in value.items()}
+    return copy.deepcopy(value)
+
+
+# {class: the names of its fields ``__init__`` takes from a document} (see ``_init_fields``)
+_INIT_NAMES: dict[type, frozenset] = {}
 
 
 class SQLerLiteModelBase:
@@ -89,31 +111,26 @@ class SQLerLiteModelBase:
         Returns:
             New instance populated from dict.
         """
-        # Get dataclass field names
-        field_names = {f.name for f in fields(cls)}  # type: ignore[arg-type]
-
-        # Filter to only known fields (ignore extra like Pydantic's extra="ignore")
-        init_data = {}
-        for k, v in data.items():
-            if k not in field_names or k.startswith("_"):
-                continue
-            # a typed position holding a stored document the batch built no model of: its
-            # model; a reference that was not followed stays the dict it is
-            if isinstance(v, dict) and "_id" in v and "_table" not in v:
-                at = _refs.typed_fields(cls).get(k)
-                if at is not None and at.admits:
-                    init_data[k] = at.admits[0].model_validate(v)
-                    continue
-            init_data[k] = v
-
-        # Create instance
-        inst = cls(**init_data)
+        inst = cls(**cls._init_fields(data))
 
         # Set _id if present in data
         if "_id" in data:
             object.__setattr__(inst, "_id", data["_id"])
 
         return inst
+
+    @classmethod
+    def _init_fields(cls, data: dict) -> dict:
+        """The keyword arguments of ``__init__`` that ``data`` gives: its keys that are fields,
+        none starting with ``_`` (others are ignored, like pydantic's ``extra="ignore"``).
+        ``model_validate`` and the reference loader, which runs ``__init__`` on an object it
+        made before the row was built (a cycle), both take them from here."""
+        names = _INIT_NAMES.get(cls)
+        if names is None:  # a class's fields are fixed once ``@dataclass`` made it
+            names = _INIT_NAMES[cls] = frozenset(
+                f.name for f in fields(cls) if not f.name.startswith("_")  # type: ignore[arg-type]
+            )
+        return {k: v for k, v in data.items() if k in names}
 
     def model_dump(
         self,
@@ -143,23 +160,25 @@ class SQLerLiteModelBase:
             value = getattr(self, f.name)
             if exclude_none and value is None:
                 continue
-            result[f.name] = self._serialize_value(value)
+            result[f.name] = self._serialize_value(value, (id(self),))
 
         return result
 
     @staticmethod
-    def _serialize_value(value: Any) -> Any:
-        """Serialize a value for JSON storage."""
+    def _serialize_value(value: Any, within: tuple = ()) -> Any:
+        """Serialize a value for JSON storage. ``within``: the ids of the models being dumped
+        around ``value``; a model met again inside itself (a cycle of rows) raises
+        ``ValueError``, as pydantic's ``model_dump()`` does."""
         if isinstance(value, datetime):
             return value.isoformat()
         if isinstance(value, date):
             return value.isoformat()
         if isinstance(value, (list, tuple)):
-            return [SQLerLiteModelBase._serialize_value(v) for v in value]
+            return [SQLerLiteModelBase._serialize_value(v, within) for v in value]
         if isinstance(value, dict):
-            return {k: SQLerLiteModelBase._serialize_value(v) for k, v in value.items()}
+            return {k: SQLerLiteModelBase._serialize_value(v, within) for k, v in value.items()}
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            return dataclasses.asdict(value)
+            return _asdict(value, within)
         return value
 
     class _ModelFieldsDescriptor:
