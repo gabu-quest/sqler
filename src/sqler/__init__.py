@@ -14,14 +14,10 @@ from .db import SQLerDB
 from .db.async_db import AsyncSQLerDB
 from .exceptions import (
     BatchOperationError,
-    CircularReferenceError,
     ConcurrencyError,
     ConnectionPoolExhaustedError,
     IntegrityError,
     LockTimeoutError,
-    MaxDepthExceededError,
-    MissingReferenceError,
-    MissingReferenceWarning,
     ModelError,
     NoAdapterError,
     NotBoundError,
@@ -29,7 +25,6 @@ from .exceptions import (
     NotFoundError,
     QueryError,
     QueryTimeoutError,
-    ResolutionError,
     SchemaError,
     SearchQueryError,
     SQLerError,
@@ -297,12 +292,6 @@ __all__ = [
     "UniqueConstraintError",
     # Errors - Schema
     "SchemaError",
-    # Errors - Resolution
-    "ResolutionError",
-    "CircularReferenceError",
-    "MaxDepthExceededError",
-    "MissingReferenceError",
-    "MissingReferenceWarning",
     # Errors - Batch
     "BatchOperationError",
     # Errors - Pool

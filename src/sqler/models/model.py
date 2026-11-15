@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import reprlib
 import warnings
 from typing import ClassVar, Optional, Type, TypeVar
 
@@ -72,6 +73,11 @@ class SQLerModel(BaseModel):
     def __pydantic_init_subclass__(cls, **kwargs) -> None:
         super().__pydantic_init_subclass__(**kwargs)
         _register_defined_class(cls)
+
+    @reprlib.recursive_repr()
+    def __repr__(self) -> str:
+        """pydantic's, with a model met again inside itself (a cycle of rows) shown as ``...``."""
+        return super().__repr__()
 
     # ----- class methods -----
     @classmethod
@@ -178,7 +184,7 @@ class SQLerModel(BaseModel):
         doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        return _refs.from_row(cls, cls._resolve_relations(doc, db=db), doc)
+        return _refs.run(_refs.load(cls, [doc], db, table))[0]
 
     @classmethod
     def from_ids(cls: Type[TModel], ids: list[int], *, db=None) -> list[TModel]:
@@ -198,18 +204,9 @@ class SQLerModel(BaseModel):
         """
         if not ids:
             return []
-        given = db
         db, table = cls._resolve_binding(db)
         read = _refs.read_versioned if cls._versioned_rows else _read_documents
-        docs = read(db, table, ids)
-        if not docs:
-            return []
-        # Use queryset's batch resolution for efficient nested ref loading
-        qs = cls.using(given) if given is not None else cls.query()
-        return [
-            _refs.from_row(cls, doc, row)
-            for row, doc in zip(docs, qs._batch_resolve(docs), strict=True)
-        ]
+        return _refs.run(_refs.load(cls, read(db, table, ids), db, table))
 
     @classmethod
     def count(cls: Type[TModel]) -> int:
@@ -474,14 +471,14 @@ class SQLerModel(BaseModel):
         doc = _read_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        row, doc = doc, cls._resolve_relations(doc, db=db)
-        fresh = cls.model_validate(doc)  # type: ignore[call-arg]
-        # update fields in-place (excluding _id which is also present)
-        for fname in self.__class__.model_fields:
-            if fname == "_id":
-                continue
+        own = {(table, self._id): self}
+        return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]
+
+    def _refreshed(self: TModel, doc: dict, row: dict) -> TModel:
+        """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
+        fresh = _refs.validate(type(self), doc)
+        for fname in type(self).model_fields:
             setattr(self, fname, getattr(fresh, fname))
-        # set db id explicitly
         self._id = doc.get("_id")
         self._snapshot = _dirty.snapshot(row)
         return self
@@ -542,32 +539,6 @@ class SQLerModel(BaseModel):
     @classmethod
     def _is_ref_dict(cls, value: object) -> bool:
         return isinstance(value, dict) and "_table" in value and "_id" in value
-
-    @classmethod
-    def _resolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
-        """Replace the references in ``data`` by the rows they point to (see ``_refs.resolve``)."""
-        return _refs.resolve(data, db, _seen, cls)
-
-    @classmethod
-    def _load_refs(cls, ids: list, seen: frozenset) -> dict:
-        """Load the rows ``ids`` of this class's table with one statement.
-
-        Returns ``{id: instance}``; a row that is gone is missing, one that cannot be
-        hydrated maps to ``_refs.KEEP``.
-        """
-        db, table = cls._require_binding()
-        out: dict = {}
-        for doc in _read_documents(db, table, ids):
-            rid = doc["_id"]
-            try:
-                inst = _refs.from_row(
-                    cls, cls._resolve_relations(doc, db=db, _seen=seen | {(table, rid)}), doc
-                )
-            except _refs.UNLOADABLE:
-                out[rid] = _refs.KEEP
-                continue
-            out[rid] = inst
-        return out
 
     def _dump_with_relations(self) -> dict:
         """The document ``save()`` writes: each field in stored form, a related model as the

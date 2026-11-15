@@ -246,7 +246,7 @@ def _(mo):
         これは透過的に行われ、常に完全にハイドレートされたオブジェクトを取得できます。
 
         パフォーマンスのためにハイドレーションをスキップしたい場合は？
-        `.resolve(False)` オプションを探り、いつ機能するか（そしていつ機能しないか）を理解しましょう。
+        `.resolve(False)` オプションと、そのときフィールドが何を保持するかを見てみましょう。
         """
     )
     return
@@ -256,11 +256,11 @@ def _(mo):
 def _(mo):
     mo.md(
         r"""
-        ### 7a. 厳密な型指定で `.resolve(False)` が失敗する理由
+        ### 7a. `.resolve(False)` は保存された参照をそのまま保持する
 
-        現在の `Book` モデル（`author: Author | None`）では、ハイドレーションをスキップすると
-        Pydantic バリデーションが**失敗**します。生の参照辞書には `Author` が期待する
-        `name` と `country` フィールドがありません：
+        現在の `Book` モデル（`author: Author | None`）でハイドレーションをスキップすると、
+        フィールドには保存された参照（辞書 `{"_table": ..., "_id": ...}`）が入ります。
+        そこから `Author` が作られることはありません。そのまま保存すると参照は変わらず書き戻されます：
         """
     )
     return
@@ -268,13 +268,10 @@ def _(mo):
 
 @app.cell
 def _(Book):
-    # これは失敗します - 生の参照辞書は Author のスキーマに一致しない
-    try:
-        raw_books = Book.query().resolve(False).all()
-        print("これは表示されません - バリデーションが先に失敗します！")
-    except Exception as e:
-        print(f"❌ ValidationError（予想通り！）:\n   {type(e).__name__}")
-        print("   生の参照 {'_table': 'authors', '_id': 1} には 'name' や 'country' がありません")
+    # 型ヒントに関わらず、フィールドは保存された参照を保持する
+    raw_books = Book.query().resolve(False).all()
+    print(f"book.author = {raw_books[0].author}")
+    print(f"type = {type(raw_books[0].author).__name__}")
     return
 
 
@@ -282,16 +279,10 @@ def _(Book):
 def _(mo):
     mo.md(
         r"""
-        ### 7b. 柔軟な型指定で `.resolve(False)` を機能させる
+        ### 7b. 柔軟な型ヒントでも同じ
 
-        `.resolve(False)` を使用するには、モデルが生の参照を受け入れる必要があります。
-        型ヒントに `dict` を含めます：
-
-        ```python
-        author: Author | dict | None = None  # 完全なオブジェクトまたは生の参照を受け入れる
-        ```
-
-        これをサポートするモデルを作成しましょう：
+        型ヒントを `Author | dict | None` にしても読み方は同じです。ハイドレーションなしでは
+        保存された参照、ありでは `Author` になります：
         """
     )
     return
@@ -311,9 +302,8 @@ def _(Author, SQLerModel, db):
     writer = Author.from_id(1)  # 既存の著者を取得
     Article(title="resolve(False) を理解する", author=writer).save()
 
-    # これで resolve(False) が機能します！
     raw_articles = Article.query().resolve(False).all()
-    print("✅ 柔軟な型指定で resolve(False) が機能:")
+    print("ハイドレーションなし:")
     print(f"   article.author = {raw_articles[0].author}")
     print(f"   type = {type(raw_articles[0].author).__name__}")
 
@@ -335,7 +325,7 @@ def _(mo):
         | **パフォーマンス** | 関連データを別途取得する場合、N+1 クエリをスキップ |
         | **遅延読み込み** | 今は参照を取得し、後でオンデマンドでハイドレート |
 
-        **注意:** これを機能させるには `Model | dict | None` 型指定が必要です！
+        **注意:** ハイドレーションなしでは関連フィールドは `{"_table": ..., "_id": ...}` を保持します。
         """
     )
     return
@@ -468,7 +458,7 @@ def _(mo):
         | 関連の保存 | 子を先に保存、次に参照を持つ親を保存 |
         | 自動ハイドレーション | リレーションは自動的に読み込まれる |
         | 跨いだクエリ | `Model.ref("field").field("nested_field")` |
-        | ハイドレーションスキップ | `.resolve(False)` - `Model \| dict` 型指定が必要 |
+        | ハイドレーションスキップ | `.resolve(False)` - フィールドは保存された参照を保持 |
         | 関連の更新 | 関連を変更＋保存、次に親を `.refresh()` |
 
         **次へ：** ツアー 03 では楽観的ロック付きの Safe Model を扱います！

@@ -322,48 +322,44 @@ async def rdb():
         await db.close()
 
 
-class TestAsyncBatchResolveRejectsHostileRefs:
-    # a reference the walk refuses leads to no row of the field's class: it is left out of
-    # the dict, and no statement is sent for it
+class TestAsyncLoaderRejectsHostileRefs:
+    # a reference the loader refuses leads to no row of the field's class: it is left out of
+    # the dict, and no statement is sent for it: every statement names the holder's table
+
+    @staticmethod
+    async def _load(rdb, payload):
+        rid = await rdb.insert_document(AHolder.__tablename__, {"payload": payload})
+        with query_logger.capture() as sent:
+            got = await AHolder.from_id(rid)
+        return got.payload, sum(AHolder.__tablename__ not in q.sql for q in sent)
 
     @pytest.mark.parametrize("table", HOSTILE_TABLES)
     @pytest.mark.asyncio
     async def test_hostile_table_left_out(self, rdb, table):
-        ref = {"_table": table, "_id": 1}
-        with query_logger.capture() as sent:
-            out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert (out, len(sent)) == ([{"payload": {}, "_id": 1}], 0)
+        assert await self._load(rdb, {"k": {"_table": table, "_id": 1}}) == ({}, 0)
 
     @pytest.mark.parametrize("bad", BAD_IDS, ids=repr)
     @pytest.mark.asyncio
     async def test_bad_id_left_out(self, rdb, bad):
-        ref = {"_table": "hr_users", "_id": bad}
-        with query_logger.capture() as sent:
-            out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert (out, len(sent)) == ([{"payload": {}, "_id": 1}], 0)
+        assert await self._load(rdb, {"k": {"_table": "hr_users", "_id": bad}}) == ({}, 0)
 
     @pytest.mark.parametrize("edge", EDGE_IDS, ids=repr)
     @pytest.mark.asyncio
     async def test_edge_id_without_row_left_out(self, rdb, edge):
-        ref = {"_table": "hr_users", "_id": edge}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {}, "_id": 1}]
+        assert (await self._load(rdb, {"k": {"_table": "hr_users", "_id": edge}}))[0] == {}
 
     @pytest.mark.parametrize("table", ["hr_users\n", "hr_users\r\n", "\nhr_users"], ids=repr)
     @pytest.mark.asyncio
     async def test_newline_table_left_out(self, rdb, table):
-        ref = {"_table": table, "_id": 1}
-        with query_logger.capture() as sent:
-            out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert (out, len(sent)) == ([{"payload": {}, "_id": 1}], 0)
+        assert await self._load(rdb, {"k": {"_table": table, "_id": 1}}) == ({}, 0)
 
     @pytest.mark.asyncio
     async def test_bad_ref_does_not_stop_good_ref(self, rdb):
         bad = {"_table": "hr_users; x", "_id": 1}
         good = {"_table": "hr_users", "_id": 1}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"a": bad, "b": good}}])
-        assert list(out[0]["payload"]) == ["b"]
-        assert out[0]["payload"]["b"].name == "u1"
+        payload, _ = await self._load(rdb, {"a": bad, "b": good})
+        assert list(payload) == ["b"]
+        assert payload["b"].name == "u1"
 
     @pytest.mark.asyncio
     async def test_end_to_end_all(self, rdb):

@@ -194,7 +194,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        return _refs.from_row(cls, cls._resolve_relations(doc, db=db), doc)
+        return _refs.run(_refs.load(cls, [doc], db, table))[0]
 
     @classmethod
     def from_ids(cls: Type[T], ids: list[int], *, db=None) -> list[T]:
@@ -210,18 +210,9 @@ class SQLerLiteModel(SQLerLiteModelBase):
         """
         if not ids:
             return []
-        given = db
         db, table = cls._resolve_binding(db)
         read = _refs.read_versioned if cls._versioned_rows else _read_documents
-        docs = read(db, table, ids)
-        if not docs:
-            return []
-        # Use queryset's batch resolution
-        qs = cls.using(given) if given is not None else cls.query()
-        return [
-            _refs.from_row(cls, doc, row)
-            for row, doc in zip(docs, qs._batch_resolve(docs), strict=True)
-        ]
+        return _refs.run(_refs.load(cls, read(db, table, ids), db, table))
 
     @classmethod
     def count(cls: Type[T]) -> int:
@@ -459,12 +450,13 @@ class SQLerLiteModel(SQLerLiteModelBase):
         doc = _read_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        row, doc = doc, cls._resolve_relations(doc, db=db)
-        # Update fields in-place
+        own = {(table, self._id): self}
+        return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]
+
+    def _refreshed(self: T, doc: dict, row: dict) -> T:
+        """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
         for f in fields(self):
-            if f.name.startswith("_"):
-                continue
-            if f.name in doc:
+            if not f.name.startswith("_") and f.name in doc:
                 object.__setattr__(self, f.name, doc[f.name])
         object.__setattr__(self, "_snapshot", _dirty.snapshot(row))
         return self
@@ -476,30 +468,10 @@ class SQLerLiteModel(SQLerLiteModelBase):
         return isinstance(value, dict) and "_table" in value and "_id" in value
 
     @classmethod
-    def _resolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
-        """Replace the references in ``data`` by the rows they point to (see ``_refs.resolve``)."""
-        return _refs.resolve(data, db, _seen, cls)
-
-    @classmethod
-    def _load_refs(cls, ids: list, seen: frozenset) -> dict:
-        """Load the rows ``ids`` of this class's table with one statement.
-
-        Returns ``{id: instance}``; a row that is gone is missing, one that cannot be
-        hydrated maps to ``_refs.KEEP``.
-        """
-        db, table = cls._require_binding()
-        out: dict = {}
-        read = _refs.read_versioned if cls._versioned_rows else _read_documents
-        for raw in read(db, table, ids):
-            rid = raw["_id"]
-            try:
-                doc = cls._resolve_relations(raw, db=db, _seen=seen | {(table, rid)})
-                inst = _refs.from_row(cls, doc, raw)
-            except _refs.UNLOADABLE:
-                out[rid] = _refs.KEEP
-                continue
-            out[rid] = inst
-        return out
+    def _resolve_relations(cls, data: dict, db=None) -> dict:
+        """``data`` with the model of its row in place of each typed reference, loaded from
+        ``db`` or the class's database (see ``_refs.resolve``)."""
+        return _refs.resolve(data, db if db is not None else cls.db(), {}, cls)
 
     def _dump_with_relations(self) -> dict:
         """The document ``save()`` writes: each field in stored form, a related model as the

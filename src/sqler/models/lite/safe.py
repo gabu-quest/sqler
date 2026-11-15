@@ -113,7 +113,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         doc = db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        return _refs.from_row(cls, cls._resolve_relations(doc), doc)
+        return _refs.run(_refs.load(cls, [doc], db, table))[0]
 
     @classmethod
     def query(cls: Type[TSafe]) -> "SQLerQuerySet[TSafe]":
@@ -273,16 +273,13 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         doc = db.find_document_with_version(table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        doc_resolved = cls._resolve_relations(doc)
-        # Update fields in-place
-        for f in fields(self):
-            if f.name.startswith("_"):
-                continue
-            if f.name in doc_resolved:
-                object.__setattr__(self, f.name, doc_resolved[f.name])
+        own = {(table, self._id): self}
+        return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]
+
+    def _refreshed(self: TSafe, doc: dict, row: dict) -> TSafe:
+        super()._refreshed(doc, row)
         object.__setattr__(self, "_id", doc.get("_id"))
         object.__setattr__(self, "_version", doc.get("_version", 0))
-        object.__setattr__(self, "_snapshot", _dirty.snapshot(doc))
         return self
 
     def __repr__(self) -> str:

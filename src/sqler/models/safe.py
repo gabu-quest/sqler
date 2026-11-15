@@ -69,29 +69,12 @@ class SQLerSafeModel(SQLerModel):
         db._ensure_versioned_table(cls._table)  # type: ignore[arg-type]
 
     @classmethod
-    def _load_refs(cls: Type[TSafe], ids: list, seen: frozenset) -> dict:  # type: ignore[override]
-        """Load the rows ``ids`` with their versions and snapshots, one statement."""
-        db, table = cls._require_binding()
-        out: dict = {}
-        for doc in _refs.read_versioned(db, table, ids):
-            rid = doc["_id"]
-            try:
-                typed = _refs.resolve(doc, db, seen | {(table, rid)}, cls)
-                inst = _refs.from_row(cls, typed, doc)
-            except _refs.UNLOADABLE:
-                out[rid] = _refs.KEEP
-                continue
-            out[rid] = inst
-        return out
-
-    @classmethod
     def from_id(cls: Type[TSafe], id_: int) -> Optional[TSafe]:  # type: ignore[override]
         db, table = cls._require_binding()
         doc = db.find_document_with_version(table, id_)
         if doc is None:
             return None
-        typed = _refs.resolve(doc, db, frozenset(), cls)
-        return _refs.from_row(cls, typed, doc)  # type: ignore[return-value]
+        return _refs.run(_refs.load(cls, [doc], db, table))[0]  # type: ignore[return-value]
 
     @classmethod
     def query(cls: Type[TSafe]) -> SQLerQuerySet[TSafe]:  # type: ignore[override]
@@ -241,13 +224,10 @@ class SQLerSafeModel(SQLerModel):
         doc = db.find_document_with_version(table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        row, doc = doc, _refs.resolve(doc, db, frozenset(), cls)
-        fresh = cls.model_validate(doc)  # type: ignore[call-arg]
-        for fname in self.__class__.model_fields:
-            if fname == "_id":
-                continue
-            setattr(self, fname, getattr(fresh, fname))
-        self._id = doc.get("_id")
+        own = {(table, self._id): self}
+        return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]  # type: ignore[return-value]
+
+    def _refreshed(self: TSafe, doc: dict, row: dict) -> TSafe:
+        super()._refreshed(doc, row)
         self._version = doc.get("_version", 0)
-        self._snapshot = _dirty.snapshot(row)
         return self

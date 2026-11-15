@@ -108,11 +108,11 @@ async def test_from_id_of_a_two_row_cycle_runs_as_many_selects_as_from_ids(world
     await db.upsert_document(a_cls.__tablename__, a, {"name": "a", "other": ref(b_cls, b)})
     got, from_id_n = await selects(db, lambda: a_cls.from_id(a))
     _, from_ids_n = await selects(db, lambda: a_cls.from_ids([a]))
-    assert len(from_ids_n) == 3
-    assert len(from_id_n) == 3
+    assert len(from_ids_n) == 2
+    assert len(from_id_n) == 2
     assert got.other.name == "b"
-    assert got.other.other.name == "a"
-    assert got.other.other.other == ref(b_cls, b)
+    # the cycle closes on its objects: the row read first is the one ``b`` references
+    assert got.other.other is got
 
 
 @pytest.mark.asyncio
@@ -134,19 +134,20 @@ async def test_refresh_runs_as_many_selects_as_from_ids(world):
     inst = await a_cls.from_id(a)
     inst.name = "stale"
     _, n = await selects(db, inst.refresh)
-    assert len(n) == 3
+    assert len(n) == 2
     assert inst.name == "a"
     assert inst.other.name == "b"
+    assert inst.other.other is inst
 
 
 @pytest.mark.asyncio
-async def test_a_row_referencing_itself_is_cut_after_one_round(world):
+async def test_a_row_referencing_itself_is_its_own_reference_after_one_read(world):
     db, a_cls, _ = world
     a = await put(db, a_cls, name="a")
     await db.upsert_document(a_cls.__tablename__, a, {"name": "a", "other": ref(a_cls, a)})
     got, n = await selects(db, lambda: a_cls.from_id(a))
-    assert len(n) == 2
-    assert got.other.other == ref(a_cls, a)
+    assert len(n) == 1
+    assert got.other is got
 
 
 @pytest.mark.asyncio

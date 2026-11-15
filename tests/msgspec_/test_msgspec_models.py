@@ -389,14 +389,14 @@ class TestSQLerMsgspecModel:
 
 
 class TestMsgspecQuerysetCompat:
-    """Verify that queryset's _attach_metadata works with msgspec Structs."""
+    """A msgspec Struct read by a queryset knows its row."""
 
     @pytest.fixture
     def db(self):
         return SQLerDB.in_memory()
 
     def test_attach_metadata_on_all(self, db):
-        """_attach_metadata should set correct _id and _snapshot on Struct instances."""
+        """``all()`` sets the ``_id`` and the snapshot of each Struct instance."""
 
         class Item(SQLerMsgspecModel):
             __tablename__ = "msg_meta_items"

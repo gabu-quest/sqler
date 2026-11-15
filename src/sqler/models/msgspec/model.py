@@ -20,7 +20,7 @@ from typing import (
 from sqler import registry
 from sqler._stored import stored
 from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _dirty
+from sqler.models import _dirty, _refs
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
@@ -174,10 +174,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
     def from_id(cls: Type[T], id_: int) -> Optional[T]:
         """Hydrate an instance by ``_id``.
 
-        Note: relation resolution is not performed (prototype scope).
-        Fields containing reference dicts (``{"_table": ..., "_id": ...}``)
-        are returned as-is. Use ``SQLerLiteModel`` if relation hydration
-        is needed.
+        A typed reference is the model of its row, as on every base.
 
         Args:
             id_: Row id to load.
@@ -189,17 +186,13 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        inst = cls.model_validate(doc)
-        inst._id = doc.get("_id")
-        inst._snapshot = _dirty.snapshot(doc)
-        return inst
+        return _refs.run(_refs.load(cls, [doc], db, table))[0]
 
     @classmethod
     def from_ids(cls: Type[T], ids: list[int], *, db=None) -> list[T]:
         """Hydrate multiple instances by id list (batch operation).
 
-        Note: relation resolution is not performed (prototype scope).
-        See :meth:`from_id` for details.
+        A typed reference is the model of its row, as on every base.
 
         Args:
             ids: List of row ids to load.
@@ -212,16 +205,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         if not ids:
             return []
         db, table = cls._resolve_binding(db)
-        docs = _read_documents(db, table, ids)
-        if not docs:
-            return []
-        instances = []
-        for doc in docs:
-            inst = cls.model_validate(doc)
-            inst._id = doc.get("_id")
-            inst._snapshot = _dirty.snapshot(doc)
-            instances.append(inst)
-        return instances
+        return _refs.run(_refs.load(cls, _read_documents(db, table, ids), db, table))
 
     @classmethod
     def count(cls: Type[T]) -> int:
@@ -457,11 +441,15 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         doc = _read_document(db, table, self._id)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        # Update fields in-place
+        own = {(table, self._id): self}
+        return _refs.run(_refs.load(type(self), [doc], db, table, self._refreshed, own))[0]
+
+    def _refreshed(self: T, doc: dict, row: dict) -> T:
+        """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
         for f in _public_fields(type(self)):
             if f.name in doc:
                 setattr(self, f.name, doc[f.name])
-        self._snapshot = _dirty.snapshot(doc)
+        self._snapshot = _dirty.snapshot(row)
         return self
 
     def _dump_with_relations(self) -> dict:

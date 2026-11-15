@@ -13,12 +13,12 @@ import json
 import typing
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Optional, Union
+from typing import Any, Optional
 
 import pytest
 import pytest_asyncio
 from pydantic import Field as PydField
-from pydantic import field_validator
+from pydantic import PrivateAttr, field_validator, model_validator
 from sqler import AsyncSQLerDB, F
 from sqler.adapter import AsyncSQLiteAdapter
 from sqler.exceptions import StaleVersionError
@@ -108,33 +108,6 @@ class ALs_Parent(AsyncSQLerLiteSafeModel):
     gone: Any = None
     nowhere: Any = None
 
-
-class ACount_Pd(AsyncSQLerModel):
-    __tablename__ = "arep_count_pd"
-    name: str = ""
-    held: Optional[Union[int, APd_Child]] = None
-    per_row_calls: ClassVar[int] = 0
-
-    @classmethod
-    async def _aresolve_relations(cls, data, db=None, _seen=frozenset()):
-        cls.per_row_calls += 1
-        return await super()._aresolve_relations(data, db=db, _seen=_seen)
-
-
-@dataclass
-class ACount_Lt(AsyncSQLerLiteModel):
-    __tablename__ = "arep_count_lt"
-    name: str = ""
-    held: Optional[Union[int, ALt_Child]] = None
-    per_row_calls: ClassVar[int] = 0
-
-    @classmethod
-    async def _aresolve_relations(cls, data, db=None, _seen=frozenset()):
-        cls.per_row_calls += 1
-        return await super()._aresolve_relations(data, db=db, _seen=_seen)
-
-
-COUNTING = {"pydantic": (APd_Child, ACount_Pd), "lite": (ALt_Child, ACount_Lt)}
 
 BASES = {
     "pydantic": (APd_Child, APd_Parent),
@@ -374,7 +347,7 @@ async def test_a_thousand_references_into_one_table_are_one_statement(make_db, b
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("base", sorted(BASES))
-async def test_a_chain_six_levels_deep_through_all_stops_at_the_base_depth(make_db, base):
+async def test_a_chain_seven_rows_long_through_all_is_followed_to_its_end(make_db, base):
     n_cls = TYPED[base][3]
     db = await make_db()
     await bind(db, n_cls, n_cls)
@@ -389,20 +362,10 @@ async def test_a_chain_six_levels_deep_through_all_stops_at_the_base_depth(make_
     # n6 -> n5 -> n4 -> n3 -> n2 -> n1 -> n0
     node = (await n_cls.query().filter(F("_id") == ids[6]).all())[0]
     names = []
-    for _ in range(6):
-        names.append(node.name)
+    while node is not None:
+        names.append((node._id, node.name))
         node = node.one
-    assert names == ["n6", "n5", "n4", "n3", "n2", "n1"]
-    # the sixth level is left as the stored reference, inside a model the per-row pass does
-    # not walk; the parent's validation says what it says about it (the pydantic bases
-    # build an empty model from it)
-    assert pic(node) == CHAIN_CUT[base]
-
-
-CHAIN_CUT: dict = {'lite': ('ref', 'arep_lty_n', 1),
- 'lite-safe': ('ref', 'arep_ltys_n', 1),
- 'pydantic': ('ATyN', None, '-', {'name': '', 'one': None}),
- 'safe': ('ATysN', None, 0, {'name': '', 'one': None})}
+    assert names == [(ids[i], f"n{i}") for i in range(6, -1, -1)]
 
 
 async def _tables(db: AsyncSQLerDB) -> set[str]:
@@ -859,24 +822,22 @@ EXPECTED: dict = {('lite', 'all'): ({'name': 'p',
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_ref", [False, True])
-@pytest.mark.parametrize("base", sorted(COUNTING))
-async def test_all_follows_references_in_the_batch_and_never_row_by_row(make_db, base, with_ref):
-    """``all()`` reads what its rows refer to with the batch alone, as the sync one does: the
-    per-row resolver, which ``from_id`` goes through once, is called for no row."""
-    child, parent = COUNTING[base]
+@pytest.mark.parametrize("base", ["pydantic", "lite"])
+async def test_all_follows_references_level_by_level_and_never_row_by_row(make_db, base, with_ref):
+    """``all()`` of three parents reads the parents and then, if one holds a reference, its
+    child: one SELECT per level, never one per row."""
+    child, parent = BASES[base]
     db = await make_db()
     await bind(db, child, parent)
     c1 = await db.insert_document(child.__tablename__, {"name": "c1"})
     for i in range(3):
-        held = ref(child.__tablename__, c1) if (with_ref and i == 1) else i
-        await db.insert_document(parent.__tablename__, {"name": f"p{i}", "held": held})
-    parent.per_row_calls = 0
-    got = await parent.query().all()
+        one = ref(child.__tablename__, c1) if (with_ref and i == 1) else None
+        await db.insert_document(parent.__tablename__, {"name": f"p{i}", "one": one})
+    with query_logger.capture() as sent:
+        got = await parent.query().all()
     assert [g.name for g in got] == ["p0", "p1", "p2"]
-    assert (got[1].held.name if with_ref else got[1].held) == ("c1" if with_ref else 1)
-    assert parent.per_row_calls == 0
-    await parent.from_id(got[1]._id)
-    assert parent.per_row_calls == 1
+    assert (got[1].one.name if with_ref else got[1].one) == ("c1" if with_ref else None)
+    assert sum(q.sql.lstrip().upper().startswith("SELECT") for q in sent) == 1 + with_ref
 
 
 # ---- typed references keep their row ------------------------------------------------
@@ -1131,8 +1092,8 @@ async def test_a_list_holding_one_child_twice_reads_the_child_table_once(make_db
         (c_cls.__name__, 1), (c_cls.__name__, 2), (c_cls.__name__, 1)
     ]
     assert sent_to(sent, c_cls.__tablename__) == 1
-    # as on the base: the per-row ways put one model at both places, the batch one each
-    assert (got.many[0] is got.many[2]) is (way in ("from_id", "refresh"))
+    # one object per row per load, by every way (the batch ways built one each before)
+    assert got.many[0] is got.many[2]
 
 
 def chain(x: Any, depth: int = 4) -> list:
@@ -1150,23 +1111,18 @@ def chain(x: Any, depth: int = 4) -> list:
     return out
 
 
-# SELECTs of the cycle's table to load n1 (n1 -> n2 -> n1) and n3 (n3 -> n3), every way
-# in (refresh includes the first() that loads the row to refresh). On the base all() sent
-# 5 and 3: its per-row pass followed the reference the batch left at the cycle one level
-# further. The batch now hands that pass built children, so all() cuts where the others do.
-CYCLE_SELECTS = {"from_id": 3, "refresh": 4, "from_ids": 3, "all": 3, "first": 3}
-SELF_SELECTS = {"from_id": 2, "refresh": 3, "from_ids": 2, "all": 2, "first": 2}
-# what saving the level below each cut does, per base: on the pydantic bases it holds an
-# empty model and refuses, as AsyncSQLerModel.from_id's answer always did; on lite-safe it
-# is row n1 again, read at a version a.save() moved past; on lite it saves
-_REFUSE = (ValueError, "Related .*model must be saved before saving parent")
-BELOW_CUT = {"pydantic": _REFUSE, "safe": _REFUSE, "lite": None, "lite-safe": (StaleVersionError, None)}
+# SELECTs of the cycle's table to load n1 (n1 -> n2 -> n1) and n3 (n3 -> n3), every way in:
+# one per row (refresh adds the first() that loads the row to refresh)
+CYCLE_SELECTS = {"from_id": 2, "refresh": 3, "from_ids": 2, "all": 2, "first": 2}
+SELF_SELECTS = {"from_id": 1, "refresh": 2, "from_ids": 1, "all": 1, "first": 1}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", sorted(TYPED))
-async def test_a_cycle_through_typed_fields_ends_and_saves(make_db, base, way):
+async def test_a_cycle_through_typed_fields_closes_and_saves(make_db, base, way):
+    """Every way closes a cycle on its objects (it cut it before, leaving a blank model on
+    the pydantic bases whose save() refused); every model of it saves, rows unchanged."""
     db, (_, _, _, n_cls), _ = await _typed_world(make_db, base)
     nt = n_cls.__tablename__
     n1 = await db.insert_document(nt, {"name": "n1", "one": None})
@@ -1181,17 +1137,12 @@ async def test_a_cycle_through_typed_fields_ends_and_saves(make_db, base, way):
     with query_logger.capture() as sent:
         b = await load(n_cls, n3, way)
     assert sent_to(sent, nt) == SELF_SELECTS[way]
-    assert (chain(a, 5), chain(b, 5)) == CYCLE_CHAINS[(base, way)]
+    assert chain(a, 2) == [(1, "n1"), (2, "n2")]
+    assert a.one.one is a
+    assert (b._id, b.name, b.one is b) == (3, "n3", True)
     await a.save()
     await a.one.save()
     await b.save()
-    refused = BELOW_CUT[base]
-    for level in (a.one.one, b.one):
-        if refused is None:
-            await level.save()
-        else:
-            with pytest.raises(refused[0], match=refused[1]):
-                await level.save()
     after = await rows_of(db, nt)
     assert [r[1]["one"] for r in after] == [r[1]["one"] for r in before]
     assert [r[1]["one"] for r in after] == [
@@ -1269,20 +1220,30 @@ async def test_a_thousand_parents_sharing_one_child_read_it_once(make_db, base):
     assert {(type(g.one).__name__, g.one._id, g.one.name) for g in got} == {
         (c_cls.__name__, 2, "c2")
     }
-    assert got[0].one is not got[1].one  # each parent its own model, as on the base
+    assert got[0].one is got[999].one  # one object per row per load (one each before)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("base", ["pydantic", "safe"])
+@pytest.mark.parametrize("base", sorted(TYPED))
 async def test_a_load_without_resolution_is_left_as_it_was(make_db, base):
-    db, (_, _, p_cls, _), pid = await _typed_world(make_db, base)
+    """A reference not followed is the stored reference on the pydantic bases too (they
+    built a blank model of it before, whose parent's save() refused); saving writes the
+    row back unchanged."""
+    db, (_, c_cls, p_cls, _), pid = await _typed_world(make_db, base)
     got = await p_cls.query().filter(F("_id") == pid).resolve(False).first()
-    kind = "ATysC" if base == "safe" else "ATyC"
-    v = 0 if base == "safe" else "-"
-    empty = (kind, None, v, {"name": "", "g": None})
-    assert pic(got)[3] == {"title": "p", "one": empty, "many": [empty] * 3, "bag": {"a": empty}}
-    with pytest.raises(ValueError, match="Related .*model must be saved before saving parent"):
-        await got.save()
+    ct, pt = c_cls.__tablename__, p_cls.__tablename__
+    before = await rows_of(db, pt)
+    assert (got.one, got.many, got.bag) == (
+        {"_table": ct, "_id": 1},
+        [{"_table": ct, "_id": 1}, {"_table": ct, "_id": 2}, {"_table": ct, "_id": 1}],
+        {"a": {"_table": ct, "_id": 2}},
+    )
+    await got.save()
+    after = await rows_of(db, pt)
+    for rows in (before, after):
+        for r in rows:
+            r[1].pop("_version", None)
+    assert after == before
 
 
 # ---- a field validator that drops, reorders or replaces the children ------------------
@@ -1475,16 +1436,13 @@ async def _elsewhere(make_db, base: str):
 @pytest.mark.parametrize("base", sorted(ELSEWHERE))
 async def test_a_child_class_bound_elsewhere_or_never_bound(make_db, base, way):
     """A child whose class is bound to another database than the parent's, and one whose
-    class is never bound. On the pydantic bases the batch builds no child of a class bound
-    elsewhere: it stays what the base gave (``_id`` None). On the lite bases the batch
-    gives that child the ``_id`` of the row in the parent's database, and its ``save()``
-    writes the row of that number in its own class's database, as the released version
-    does. A class never bound reads the parent's database, so its child is built with its
-    row."""
+    class is never bound. By every way the first is read from its class's database, where
+    its ``save()`` writes it back; the second from the parent's database. Every way gives
+    what ``from_id`` gives (the batch ways read the parent's database before)."""
     _, _, p_cls = ELSEWHERE[base]
     db, _, rid = await _elsewhere(make_db, base)
     got = await _observe(db, p_cls, rid, way, p_cls.__tablename__)
-    assert got == ELSEWHERE_EXPECTED[(base, way)]
+    assert got == ELSEWHERE_EXPECTED[(base, "from_id")]
 
 
 @pytest.mark.asyncio
@@ -1495,22 +1453,13 @@ async def test_a_child_bound_elsewhere_saves_and_deletes_in_its_own_database(mak
     db, other_db, rid = await _elsewhere(make_db, base)
     ot = o_cls.__tablename__
     child = (await load(p_cls, rid, way)).other
-    if way in ("from_id", "refresh"):
-        # the per-row ways read the child from its own class's database: its row there
-        assert (child._id, child.name) == (1, "in-child-db")
-        child.name = "saved"
-        await child.save()
-        assert [r[1]["name"] for r in await rows_of(other_db, ot)] == ["saved"]
-        await child.delete()
-        assert await rows_of(other_db, ot) == []
-    else:
-        # the batch read the parent's database: the child is not given that row's id
-        assert (child._id, child.name) == (None, "in-parent-db")
-        with pytest.raises(ValueError, match="Cannot delete unsaved model"):
-            await child.delete()
-        await child.save()  # a new row in its own database
-        names = [r[1]["name"] for r in await rows_of(other_db, ot)]
-        assert names == ["in-child-db", "in-parent-db"]
+    # every way reads the child from its own class's database: its row there
+    assert (child._id, child.name) == (1, "in-child-db")
+    child.name = "saved"
+    await child.save()
+    assert [r[1]["name"] for r in await rows_of(other_db, ot)] == ["saved"]
+    await child.delete()
+    assert await rows_of(other_db, ot) == []
     assert [r[1]["name"] for r in await rows_of(db, ot)] == ["in-parent-db"]
 
 
@@ -1709,60 +1658,19 @@ async def test_a_child_of_a_class_never_bound_holds_its_column_version(make_db, 
 
 
 @pytest.mark.asyncio
-async def test_a_queryset_built_by_hand_without_a_database_builds_no_child(make_db):
+async def test_a_queryset_built_by_hand_without_a_database_reads_a_child_from_its_class_database(make_db):
+    """Without a database handed over, the child of a bound class is read from its class's
+    database and knows its row (it was built without its ``_id`` before)."""
     db, (_, _, p_cls, _), pid = await _typed_world(make_db, "pydantic")
     qs = AsyncSQLerQuerySet(p_cls, AsyncSQLerQuery(table=p_cls.__tablename__, adapter=db.adapter))
     got = await qs.first()
-    assert (type(got.one).__name__, got.one._id, got.one.name) == ("ATyC", None, "c1b")
+    assert (type(got.one).__name__, got.one._id, got.one.name) == ("ATyC", 1, "c1b")
 
 
 # What each way gives, pinned. Where it differs from the base: a child built by the
 # batch gets its row's _id (and _version); the safe from_id / refresh resolve typed
 # references, so they give what AsyncSQLerModel.from_id gives (a ValidationError
 # where a typed field cannot take the row it names).
-# where each way cuts the cycle: at the second time a row is reached below the row
-# loaded; the cut reference is left to the class (an empty model on the pydantic
-# bases, the reference itself on the lite ones)
-CYCLE_CHAINS: dict = {('lite', 'all'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                   [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite', 'first'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                     [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite', 'from_id'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                       [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite', 'from_ids'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                        [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite', 'refresh'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                       [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'all'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                        [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'first'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                          [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'from_id'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                            [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'from_ids'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                             [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'refresh'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                            [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('pydantic', 'all'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                       [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('pydantic', 'first'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                         [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('pydantic', 'from_id'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                           [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('pydantic', 'from_ids'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                            [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('pydantic', 'refresh'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                           [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'all'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                   [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'first'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                     [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'from_id'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                       [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'from_ids'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                        [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'refresh'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                       [(3, 'n3'), (3, 'n3'), (None, '')])}
 REFUSED_EXPECTED: dict = {('lite', 'all'): 'TypeError',
  ('lite', 'first'): 'TypeError',
  ('lite', 'from_id'): 'TypeError',
@@ -2127,3 +2035,607 @@ async def test_a_before_validator_on_a_typed_field_receives_an_instance(make_db,
     got = await load(ABvP, 1, way)
     assert SEEN_BEFORE[-1] == "ABvC"
     assert (got.one._id, got.one.name) == (1, "c")
+
+
+# ---- one loader: a typed reference is the model of its row ----------------------------
+#
+# The async twin of the section of the same name in tests/test_relation_entry_points.py.
+
+
+class AGnBad(AsyncSQLerModel):
+    __tablename__ = "arep_gn_bad"
+    n: int
+
+
+class AGnNode(AsyncSQLerModel):
+    __tablename__ = "arep_gn_node"
+    name: str = ""
+    next: Optional[AGnNode] = None
+    kids: list[AGnNode] = PydField(default_factory=list)
+    bad: Optional[AGnBad] = None
+    bads: list[AGnBad] = PydField(default_factory=list)
+
+
+class AGsBad(AsyncSQLerSafeModel):
+    __tablename__ = "arep_gs_bad"
+    n: int
+
+
+class AGsNode(AsyncSQLerSafeModel):
+    __tablename__ = "arep_gs_node"
+    name: str = ""
+    next: Optional[AGsNode] = None
+    kids: list[AGsNode] = PydField(default_factory=list)
+    bad: Optional[AGsBad] = None
+    bads: list[AGsBad] = PydField(default_factory=list)
+
+
+@dataclass
+class AGlBad(AsyncSQLerLiteModel):
+    __tablename__ = "arep_gl_bad"
+    n: int
+
+
+@dataclass
+class AGlNode(AsyncSQLerLiteModel):
+    __tablename__ = "arep_gl_node"
+    name: str = ""
+    next: Optional[AGlNode] = None
+    kids: list[AGlNode] = field(default_factory=list)
+    bad: Optional[AGlBad] = None
+    bads: list[AGlBad] = field(default_factory=list)
+
+
+@dataclass
+class AGlsBad(AsyncSQLerLiteSafeModel):
+    __tablename__ = "arep_gls_bad"
+    n: int
+
+
+@dataclass
+class AGlsNode(AsyncSQLerLiteSafeModel):
+    __tablename__ = "arep_gls_node"
+    name: str = ""
+    next: Optional[AGlsNode] = None
+    kids: list[AGlsNode] = field(default_factory=list)
+    bad: Optional[AGlsBad] = None
+    bads: list[AGlsBad] = field(default_factory=list)
+
+
+AGnNode.model_rebuild()
+AGsNode.model_rebuild()
+
+AGRAPH = {
+    "pydantic": (AGnNode, AGnBad),
+    "safe": (AGsNode, AGsBad),
+    "lite": (AGlNode, AGlBad),
+    "lite-safe": (AGlsNode, AGlsBad),
+}
+
+
+async def _graph(make_db, base: str):
+    db = await make_db()
+    node, bad = AGRAPH[base]
+    await bind(db, bad, node)
+    return db, node, bad
+
+
+def _node(name: str, **fields: Any) -> dict:
+    return {"name": name, "next": None, "kids": [], "bad": None, "bads": [], **fields}
+
+
+def _selects(sent: list) -> int:
+    return sum(1 for q in sent if q.sql.lstrip().upper().startswith("SELECT"))
+
+
+async def _put(db: AsyncSQLerDB, node: type, doc: dict, rid: Optional[int] = None) -> int:
+    if rid is None:
+        return await db.insert_document(node.__tablename__, doc)
+    await db.upsert_document(node.__tablename__, rid, doc)
+    return rid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+@pytest.mark.parametrize("length", [9, 50, 2000])
+async def test_a_chain_is_followed_to_its_end_by_every_way(make_db, base, way, length):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    # a fresh table numbers its rows 1..length: row i references row i + 1
+    ids = await db.insert_many(t, [
+        _node(f"n{i}", next=ref(t, i + 1) if i < length else None) for i in range(1, length + 1)
+    ])
+    assert ids == list(range(1, length + 1))
+    with query_logger.capture() as sent:
+        got = await load(node, ids[0], way)
+    names, x = [], got
+    while x is not None:
+        assert x._id == ids[len(names)]
+        names.append(x.name)
+        x = x.next
+    assert names == [f"n{i}" for i in range(1, length + 1)]
+    assert _selects(sent) == length + (way == "refresh")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_a_cycle_closes_on_its_objects_and_saves_by_every_way(make_db, base, way):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    s = await _put(db, node, _node("s"))
+    await _put(db, node, _node("s", next=ref(t, s)), s)
+    a, b = await _put(db, node, _node("a")), await _put(db, node, _node("b"))
+    await _put(db, node, _node("a", next=ref(t, b)), a)
+    await _put(db, node, _node("b", next=ref(t, a)), b)
+    k1, k2 = await _put(db, node, _node("k1")), await _put(db, node, _node("k2"))
+    await _put(db, node, _node("k1", kids=[ref(t, k2)]), k1)
+    await _put(db, node, _node("k2", kids=[ref(t, k1)]), k2)
+    before = await rows_of(db, t)
+    me = await load(node, s, way)
+    assert me.next is me
+    got = await load(node, a, way)
+    assert (got.name, got.next.name, got.next.next is got) == ("a", "b", True)
+    k = await load(node, k1, way)
+    assert ([c.name for c in k.kids], k.kids[0].kids[0] is k) == (["k2"], True)
+    shown = repr(got)
+    assert (shown.count("name='a'"), shown.count("name='b'"), "..." in shown) == (1, 1, True)
+    for x in (me, got, got.next, k, k.kids[0]):
+        await x.save()
+    after = await rows_of(db, t)
+    for rows in (before, after):
+        for r in rows:
+            r[1].pop("_version", None)
+    assert after == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_two_rows_of_one_all_that_reference_each_other_are_the_result_objects(make_db, base):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    a, b = await _put(db, node, _node("a")), await _put(db, node, _node("b"))
+    await _put(db, node, _node("a", next=ref(t, b)), a)
+    await _put(db, node, _node("b", next=ref(t, a)), b)
+    got = await node.query().order_by("name").all()
+    assert [g.name for g in got] == ["a", "b"]
+    assert (got[0].next is got[1], got[1].next is got[0]) == (True, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_a_diamond_and_a_repeated_list_entry_are_one_object(make_db, base, way):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    d = await _put(db, node, _node("d"))
+    b = await _put(db, node, _node("b", next=ref(t, d)))
+    c = await _put(db, node, _node("c", next=ref(t, d)))
+    a = await _put(db, node, _node("a", kids=[ref(t, b), ref(t, c), ref(t, b)]))
+    with query_logger.capture() as sent:
+        got = await load(node, a, way)
+    assert [k.name for k in got.kids] == ["b", "c", "b"]
+    assert (got.kids[0] is got.kids[2], got.kids[0].next is got.kids[1].next) == (True, True)
+    assert _selects(sent) == 3 + (way == "refresh")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", ["safe", "lite-safe"])
+async def test_a_versioned_child_in_a_diamond_saves_through_both_parents(make_db, base, way):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    d = await _put(db, node, _node("d"))
+    b = await _put(db, node, _node("b", next=ref(t, d)))
+    c = await _put(db, node, _node("c", next=ref(t, d)))
+    a = await _put(db, node, _node("a", kids=[ref(t, b), ref(t, c)]))
+    got = await load(node, a, way)
+    got.kids[0].next.name = "d1"
+    await got.kids[0].next.save()
+    got.kids[1].next.name = "d2"
+    await got.kids[1].next.save()  # one object: it holds the version the first save wrote
+    assert await version_of(db, t, d) == 2
+    assert (await rows_of(db, t))[0][1]["name"] == "d2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+@pytest.mark.parametrize("where", ["field-depth-1", "list-depth-1", "field-depth-3", "list-depth-3"])
+async def test_a_referenced_row_its_class_refuses_raises_with_a_note(make_db, base, way, where):
+    db, node, bad = await _graph(make_db, base)
+    t, bt = node.__tablename__, bad.__tablename__
+    b = await db.insert_document(bt, {})  # no ``n``: the class refuses the row
+    in_list = where.startswith("list")
+    holder = _node("h3", **({"bads": [ref(bt, b)]} if in_list else {"bad": ref(bt, b)}))
+    top = await _put(db, node, holder)
+    if where.endswith("3"):
+        mid = await _put(db, node, _node("h2", next=ref(t, top)))
+        top = await _put(db, node, _node("h1", next=ref(t, mid)))
+    try:
+        await bad.from_id(b)
+    except Exception as exc:  # the type its own from_id raises is the expectation
+        want = type(exc)
+    with pytest.raises(want) as caught:
+        await load(node, top, way)
+    assert type(caught.value) is want
+    holder_id = top if where.endswith("1") else top - 2
+    assert caught.value.__notes__ == [
+        f"loading row {b} of {bt!r}, referenced by field {'bads' if in_list else 'bad'!r}"
+        f" of row {holder_id} of {t!r}"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_a_gone_row_inside_a_cycle_and_at_depth_three(make_db, base, way):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    gone = await _put(db, node, _node("gone"))
+    a, b = await _put(db, node, _node("a")), await _put(db, node, _node("b"))
+    await _put(db, node, _node("a", next=ref(t, b), kids=[ref(t, gone), ref(t, b)]), a)
+    await _put(db, node, _node("b", next=ref(t, a), kids=[ref(t, gone)]), b)
+    d3 = await _put(db, node, _node("d3", next=ref(t, gone)))
+    d2 = await _put(db, node, _node("d2", next=ref(t, d3)))
+    d1 = await _put(db, node, _node("d1", next=ref(t, d2)))
+    await db.delete_document(t, gone)
+    got = await load(node, a, way)
+    assert (got.next.next is got, [k.name for k in got.kids], got.kids[0] is got.next) == (
+        True, ["b"], True
+    )
+    assert got.next.kids == []
+    deep = await load(node, d1, way)
+    assert [deep.name, deep.next.name, deep.next.next.name] == ["d1", "d2", "d3"]
+    assert deep.next.next.next is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_a_reference_not_followed_is_the_stored_reference_and_saves_back(make_db, base):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    one, two = await _put(db, node, _node("one")), await _put(db, node, _node("two"))
+    await _put(db, node, _node("two", next=ref(t, one), kids=[ref(t, one), ref(t, two)]), two)
+    before = await rows_of(db, t)
+    got = await node.query().filter(F("_id") == two).resolve(False).first()
+    assert (got.next, got.kids) == (ref(t, one), [ref(t, one), ref(t, two)])
+    await got.save()
+    after = await rows_of(db, t)
+    for rows in (before, after):
+        for r in rows:
+            r[1].pop("_version", None)
+    assert after == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_statement_budget_of_a_hundred_children(make_db, base):
+    """100 parents each holding one of 100 children: 2 SELECTs by ``all()``; one parent
+    holding the 100 in a typed list: 2 by ``from_id``."""
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    kids = await db.insert_many(t, [_node(f"k{i}") for i in range(100)])
+    await db.insert_many(t, [_node(f"p{i}", next=ref(t, k)) for i, k in enumerate(kids)])
+    p = await _put(db, node, _node("q", kids=[ref(t, k) for k in kids]))
+    with query_logger.capture() as sent:
+        got = await node.query().filter(F("name").like("p%")).all()
+    assert ([g.next.name for g in got], _selects(sent)) == ([f"k{i}" for i in range(100)], 2)
+    with query_logger.capture() as sent:
+        one = await node.from_id(p)
+    assert ([k.name for k in one.kids], _selects(sent)) == ([f"k{i}" for i in range(100)], 2)
+
+
+# ---- the object a row in a cycle becomes ------------------------------------------------
+#
+# The async twin of the section of the same name in tests/test_relation_entry_points.py
+# (there is no async msgspec model).
+
+
+@dataclass(slots=True)
+class ACsSlots(AsyncSQLerLiteModel):
+    __tablename__ = "arep_cs_slots"
+    name: str
+    n: int = 0
+    next: Optional[ACsSlots] = None
+
+
+@dataclass(frozen=True)
+class ACsLiteFrozen(AsyncSQLerLiteModel):
+    __tablename__ = "arep_cs_lite_frozen"
+    name: str
+    n: int = 0
+    next: Optional[ACsLiteFrozen] = None
+
+
+@dataclass(frozen=True, slots=True)
+class ACsLiteFrozenSlots(AsyncSQLerLiteModel):
+    __tablename__ = "arep_cs_lite_frozen_slots"
+    name: str
+    n: int = 0
+    next: Optional[ACsLiteFrozenSlots] = None
+
+
+class ACsPydFrozen(AsyncSQLerModel):
+    __tablename__ = "arep_cs_pyd_frozen"
+    model_config = {"frozen": True}
+    name: str
+    n: int = 0
+    next: Optional[ACsPydFrozen] = None
+
+
+class ACsPydPrivate(AsyncSQLerModel):
+    __tablename__ = "arep_cs_pyd_private"
+    name: str
+    n: int = 0
+    next: Optional[ACsPydPrivate] = None
+    _tag: str = PrivateAttr(default="unset")
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        self._tag = f"tag-{self.name}"
+
+
+ACsPydFrozen.model_rebuild()
+ACsPydPrivate.model_rebuild()
+
+STATE_CLASSES = {
+    "lite-slots": ACsSlots,
+    "lite-frozen": ACsLiteFrozen,
+    "lite-frozen-slots": ACsLiteFrozenSlots,
+    "pydantic-frozen": ACsPydFrozen,
+    "pydantic-private": ACsPydPrivate,
+}
+# Left out: ``refresh()`` assigns the fields of the instance it refreshes, which a frozen
+# pydantic model refuses before any reference is loaded.
+STATE_LEFT_OUT = {("pydantic-frozen", "refresh")}
+STATE_WAYS = [
+    (kind, way)
+    for kind in STATE_CLASSES
+    for way in TYPED_WAYS
+    if (kind, way) not in STATE_LEFT_OUT
+]
+
+
+async def _two_cycle(make_db, cls: type) -> tuple:
+    """A database with ``cls`` bound, and its rows a (n=1) and b (n=2), each ``next`` the
+    other: ``(a, b)``."""
+    db = await make_db()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cls.set_db(db)
+    await db._ensure_table(cls.__tablename__)
+    t = cls.__tablename__
+    a = await _put(db, cls, {"name": "a", "n": 1})
+    b = await _put(db, cls, {"name": "b", "n": 2})
+    await _put(db, cls, {"name": "a", "n": 1, "next": ref(t, b)}, a)
+    await _put(db, cls, {"name": "b", "n": 2, "next": ref(t, a)}, b)
+    return a, b
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("kind", "way"), STATE_WAYS)
+async def test_a_row_in_a_cycle_holds_every_field_whatever_way_its_class_keeps_state(
+    make_db, kind, way
+):
+    cls = STATE_CLASSES[kind]
+    a, b = await _two_cycle(make_db, cls)
+    got = await load(cls, a, way)
+    assert (type(got.next), got.next.next is got) == (cls, True)
+    assert [(x._id, x.name, x.n) for x in (got, got.next)] == [(a, "a", 1), (b, "b", 2)]
+    if kind.startswith("lite"):  # the async pydantic base has no synchronous ``is_dirty``
+        assert [cls.is_dirty(x) for x in (got, got.next)] == [False, False]
+    if kind == "pydantic-private":
+        assert (got._tag, got.next._tag) == ("tag-a", "tag-b")
+
+
+HOOKED: list = []
+
+
+class AHkPydPost(AsyncSQLerModel):
+    __tablename__ = "arep_hk_pyd_post"
+    name: str
+    next: Optional[AHkPydPost] = None
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        HOOKED.append(self)
+
+
+class AHkPydAfter(AsyncSQLerModel):
+    __tablename__ = "arep_hk_pyd_after"
+    name: str
+    next: Optional[AHkPydAfter] = None
+
+    @model_validator(mode="after")
+    def _keep(self) -> AHkPydAfter:
+        HOOKED.append(self)
+        return self
+
+
+@dataclass
+class AHkLite(AsyncSQLerLiteModel):
+    __tablename__ = "arep_hk_lite"
+    name: str
+    next: Optional[AHkLite] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        HOOKED.append(self)
+
+
+AHkPydPost.model_rebuild()
+AHkPydAfter.model_rebuild()
+HOOK_CLASSES = {"pydantic-post-init": AHkPydPost, "pydantic-after": AHkPydAfter, "lite": AHkLite}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("kind", sorted(HOOK_CLASSES))
+async def test_a_hook_that_keeps_self_keeps_the_object_the_graph_holds(make_db, kind, way):
+    """Each row's hook runs on the object the loaded graph holds for the row: once per row,
+    except that pydantic runs a class's after-validators again on every instance of it that
+    it validates as a field value. ``refresh()`` reads its row's fields onto the instance: on
+    pydantic from a model it validates for that, which the hook of the row runs on; on lite
+    without building one, so no hook runs for the row."""
+    cls = HOOK_CLASSES[kind]
+    a, _ = await _two_cycle(make_db, cls)
+    after = kind == "pydantic-after"
+    if way == "refresh":
+        inst = await cls.query().filter(F("_id") == a).resolve(False).first()
+        HOOKED.clear()
+        got = await inst.refresh()
+        assert (got is inst, got.next.next is got) == (True, True)
+        graph_objects = [x for x in HOOKED if x is got or x is got.next]
+        assert [x is got.next for x in graph_objects] == ([False, True, True] if after else [True])
+        assert len(HOOKED) == (4 if after else 1 if kind == "lite" else 2)
+        return
+    HOOKED.clear()
+    got = await load(cls, a, way)
+    assert got.next.next is got
+    assert len(HOOKED) == (4 if after else 2)
+    assert {id(x) for x in HOOKED} == {id(got), id(got.next)}
+
+
+# ---- a class that builds its model its own way ------------------------------------------
+
+
+def _named_by_title(data: dict) -> dict:
+    """``data`` of the shape these classes read: a row written before ``title`` became
+    ``name`` is given its ``name``."""
+    return {**data, "name": data["title"]} if "title" in data else data
+
+
+class AOvPyd(AsyncSQLerModel):
+    __tablename__ = "arep_ov_pyd"
+    name: str
+    next: Optional[AOvPyd] = None
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> AOvPyd:
+        return super().model_validate(_named_by_title(obj), **kwargs)
+
+
+class AOvPydWrap(AsyncSQLerModel):
+    __tablename__ = "arep_ov_pyd_wrap"
+    name: str
+    next: Optional[AOvPydWrap] = None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _another(cls, data: Any, handler: Any) -> AOvPydWrap:
+        if not isinstance(data, dict):
+            return handler(data)  # a model in a field of another: itself
+        return handler(_named_by_title(data)).model_copy()  # a row: not the object given
+
+
+@dataclass
+class AOvLite(AsyncSQLerLiteModel):
+    __tablename__ = "arep_ov_lite"
+    name: str = ""
+    next: Optional[AOvLite] = None
+
+    @classmethod
+    def model_validate(cls, data: dict) -> AOvLite:
+        return AsyncSQLerLiteModel.model_validate.__func__(cls, _named_by_title(data))
+
+
+@dataclass(frozen=True, slots=True)
+class AOvLiteFrozenSlots(AsyncSQLerLiteModel):
+    __tablename__ = "arep_ov_lite_frozen_slots"
+    name: str = ""
+    next: Optional[AOvLiteFrozenSlots] = None
+
+    @classmethod
+    def model_validate(cls, data: dict) -> AOvLiteFrozenSlots:
+        return AsyncSQLerLiteModel.model_validate.__func__(cls, _named_by_title(data))
+
+
+AOvPyd.model_rebuild()
+AOvPydWrap.model_rebuild()
+OWN_WAY = {
+    "pydantic-model-validate": AOvPyd,
+    "pydantic-wrap-validator": AOvPydWrap,
+    "lite": AOvLite,
+    "lite-frozen-slots": AOvLiteFrozenSlots,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("kind", sorted(OWN_WAY))
+async def test_a_class_that_builds_its_model_its_own_way_builds_a_row_in_a_cycle_that_way(
+    make_db, kind, way
+):
+    """Rows stored with ``title`` load only through the class's own ``model_validate`` (or
+    its validator): outside a cycle and inside one."""
+    cls = OWN_WAY[kind]
+    db = await make_db()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cls.set_db(db)
+    t = cls.__tablename__
+    await db._ensure_table(t)
+    a, b = await _put(db, cls, {"title": "a"}), await _put(db, cls, {"title": "b"})
+    await _put(db, cls, {"title": "a", "next": ref(t, b)}, a)
+    await _put(db, cls, {"title": "b", "next": ref(t, a)}, b)
+    got = await load(cls, a, way)
+    assert (type(got.next), got.next.next is got) == (cls, True)
+    assert [(x._id, x.name) for x in (got, got.next)] == [(a, "a"), (b, "b")]
+
+
+# ---- a frozen class read by a queryset --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AFzLite(AsyncSQLerLiteModel):
+    __tablename__ = "arep_fz_lite"
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AFzLiteSlots(AsyncSQLerLiteModel):
+    __tablename__ = "arep_fz_lite_slots"
+    name: str = ""
+
+
+class AFzPyd(AsyncSQLerModel):
+    __tablename__ = "arep_fz_pyd"
+    model_config = {"frozen": True}
+    name: str
+
+
+FROZEN = {"lite": AFzLite, "lite-slots": AFzLiteSlots, "pydantic": AFzPyd}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["all", "first", "update_one", "update_n", "other-table"])
+@pytest.mark.parametrize("kind", sorted(FROZEN))
+async def test_a_frozen_class_read_by_a_queryset_knows_its_row(make_db, kind, how):
+    cls = FROZEN[kind]
+    db = await make_db()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cls.set_db(db)
+    await db._ensure_table(cls.__tablename__)
+    rid = await _put(db, cls, {"name": "n"})
+    rows = cls.query().filter(F("_id") == rid)
+    other = f"{cls.__tablename__}_copy"
+    if how == "all":
+        got = (await rows.all())[0]
+    elif how == "first":
+        got = await rows.first()
+    elif how == "update_one":
+        got = await rows.update_one(name="m")
+    elif how == "update_n":
+        got = (await rows.update_n(1, name="m"))[0]
+    else:
+        await db._ensure_table(other)
+        assert await db.insert_document(other, {"name": "n"}) == rid
+        got = (await cls.using(db, other).all())[0]
+    assert (type(got), got._id, got.name) == (cls, rid, "m" if how.startswith("update") else "n")
+    if kind.startswith("lite"):  # the async pydantic base has no synchronous ``is_dirty``
+        assert cls.is_dirty(got) is False
+    assert got._snapshot == {"name": got.name}
+    assert getattr(got, "_source_table", None) == (other if how == "other-table" else None)

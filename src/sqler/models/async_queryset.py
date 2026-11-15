@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, Optional, Type, TypeVar
 
-from sqler.models import _dirty, _refs
+from sqler.models import _refs
 from sqler.models._table_names import _unchecked_table_name
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
@@ -74,24 +74,7 @@ class AsyncSQLerQuerySet(Generic[T]):
     # execution
     async def all(self) -> list[T]:
         """Execute and return a list of model instances."""
-        rows = docs = await self._query.all_dicts()
-        if self._resolve:
-            try:
-                docs = await self._abatch_resolve(rows)
-            except RecursionError:
-                # As in the sync queryset: only this is tolerated, and any other error
-                # while the references are read reaches the caller.
-                logger.warning(
-                    f"Circular reference detected during async batch resolution for "
-                    f"{self._model_cls.__name__}. Returning partially resolved documents."
-                )
-        results: list[T] = []
-        other_table = self._reads_other_table()
-        for row, d in zip(rows, docs, strict=True):
-            inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
-            self._attach_metadata(inst, d, row, other_table)
-            results.append(inst)
-        return results
+        return await self._load(await self._query.all_dicts())
 
     async def as_dicts(self) -> list[dict[str, Any]]:
         """Execute and return raw dicts without Pydantic hydration.
@@ -103,50 +86,28 @@ class AsyncSQLerQuerySet(Generic[T]):
         return await self._query.all_dicts()
 
     async def first(self) -> Optional[T]:
-        row = d = await self._query.first_dict()
-        if d is None:
+        row = await self._query.first_dict()
+        if row is None:
             return None
-        if self._resolve:
-            try:
-                d = (await self._abatch_resolve([row]))[0]
-            except RecursionError:
-                logger.warning(
-                    f"Circular reference detected during async resolution for "
-                    f"{self._model_cls.__name__}. Returning partially resolved document."
-                )
-        inst = self._model_cls.model_validate(d)  # type: ignore[attr-defined]
-        self._attach_metadata(inst, d, row, self._reads_other_table())
-        return inst
+        return (await self._load([row]))[0]
 
     def _reads_other_table(self) -> bool:
         """True when this queryset reads a table other than its class's own.
 
-        Each run that makes instances asks once and hands the answer to ``_attach_metadata``:
+        Each run that makes instances asks once and hands the answer to ``_sourced``:
         the class lookup behind it is slow on a pydantic class, and the class may have been
         rebound since the queryset was built.
         """
         table = self._query._table
         return table is not None and table != _unchecked_table_name(self._model_cls)
 
-    def _attach_metadata(self, inst: T, doc: dict, row: dict, other_table: bool) -> None:
-        """Attach database metadata (_id, _version, _snapshot) to an instance.
-
-        Args:
-            inst: The model instance to attach metadata to.
-            doc: The document the instance was built from (``_id``, ``_version``).
-            row: The row as it was read, before its references were resolved: the snapshot
-                is taken from it. The same dict as ``doc`` when nothing was resolved.
-            other_table: The run's ``_reads_other_table()`` answer.
-        """
-        try:
-            inst._id = doc.get("_id")  # type: ignore[attr-defined]
-            if "_version" in doc:
-                inst._version = doc.get("_version")  # type: ignore[attr-defined]
-            inst._snapshot = _dirty.snapshot(row)  # type: ignore[attr-defined]
-            if other_table:
-                inst._source_table = self._query._table  # type: ignore[attr-defined]
-        except AttributeError as e:
-            logger.debug(f"Could not attach metadata to {self._model_cls.__name__}: {e}")
+    def _sourced(self, inst: T, other_table: bool) -> T:
+        """``inst``, a model of a row this queryset read, knowing the table it was read from
+        when that is not its class's own (``other_table``: the run's
+        ``_reads_other_table()`` answer)."""
+        if other_table:
+            _refs._set(inst, "_source_table", self._query._table)
+        return inst
 
     async def count(self) -> int:
         return await self._query.count()
@@ -202,8 +163,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         doc = await self._query.update_one(**fields)
         if doc is None:
             return None
-        inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-        self._attach_metadata(inst, doc, doc, self._reads_other_table())
+        inst = self._sourced(_refs.from_row(self._model_cls, doc, doc), self._reads_other_table())
         return inst
 
     async def update_n(self, n: int, **fields) -> list[T]:
@@ -220,8 +180,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         results: list[T] = []
         other_table = self._reads_other_table()
         for doc in docs:
-            inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
-            self._attach_metadata(inst, doc, doc, other_table)
+            inst = self._sourced(_refs.from_row(self._model_cls, doc, doc), other_table)
             results.append(inst)
         return results
 
@@ -267,15 +226,14 @@ class AsyncSQLerQuerySet(Generic[T]):
         await cur.close()
         return rows
 
-    async def _abatch_resolve(self, docs: list[dict], max_depth: int = 5) -> list[dict]:
-        """Resolve the references of ``docs`` into stored documents (see ``_refs.batch``)."""
+    async def _load(self, rows: list[dict]) -> list[T]:
+        """The models of ``rows``, references followed unless ``resolve(False)`` (see
+        ``_refs.load``)."""
+        other_table = self._reads_other_table()
+        if not self._resolve:
+            return [self._sourced(_refs.from_row(self._model_cls, row, row), other_table) for row in rows]
         adapter = self._query._adapter  # type: ignore[attr-defined]
         if adapter is None:
             raise RuntimeError("QuerySet has no adapter bound")
-        walk = _refs.batch(docs, max_depth, self._model_cls, self._db)
-        try:
-            want = next(walk)
-            while True:
-                want = walk.send(await _refs.aread_rows(adapter, *want, self._db))
-        except StopIteration as done:
-            return done.value
+        walk = _refs.load(self._model_cls, rows, self._db, self._query._table)
+        return [self._sourced(inst, other_table) for inst in await _refs.arun(walk, adapter)]
