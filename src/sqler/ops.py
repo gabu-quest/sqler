@@ -17,10 +17,17 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 
 from sqler.exceptions import QueryError
+from sqler.utils import SQLER_TABLES
 
 if TYPE_CHECKING:
     from sqler.db.async_db import AsyncSQLerDB
     from sqler.db.sqler_db import SQLerDB
+
+# The user's tables: not SQLite's own, not sqler's own (``SQLER_TABLES``).
+_TABLE_COUNT_SQL = (
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+    f"AND lower(name) NOT IN ({', '.join('?' * len(SQLER_TABLES))});"
+)
 
 
 @dataclass
@@ -243,9 +250,7 @@ def get_stats(db: "SQLerDB") -> DatabaseStats:
     freelist_count = cursor.fetchone()[0]
 
     # Count tables
-    cursor = db.adapter.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
-    )
+    cursor = db.adapter.execute(_TABLE_COUNT_SQL, sorted(SQLER_TABLES))
     table_count = cursor.fetchone()[0]
 
     # Count indexes
@@ -720,9 +725,7 @@ async def _read_stats(db: "AsyncSQLerDB") -> DatabaseStats:
     freelist_count = row[0]
 
     # Count tables
-    cursor = await db.adapter.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
-    )
+    cursor = await db.adapter.execute(_TABLE_COUNT_SQL, sorted(SQLER_TABLES))
     row = await cursor.fetchone()
     await cursor.close()
     table_count = row[0]

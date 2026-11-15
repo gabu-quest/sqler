@@ -34,6 +34,13 @@ class SQLerQuerySet(Generic[T]):
         clone._resolve = self._resolve
         return clone
 
+    def _checked(self) -> SQLerQuery:
+        """The query, once its database has checked the table (``SchemaError`` when a promoted
+        column the rows are read with would hide a value still in a document)."""
+        if self._query._promoted_fields and self._db is not None:
+            self._db._columns_of(self._query._table)
+        return self._query
+
     def resolve(self, flag: bool) -> "SQLerQuerySet[T]":
         """Toggle relation hydration on result materialization (default True)."""
         clone = self._copy(self._query)
@@ -83,7 +90,7 @@ class SQLerQuerySet(Generic[T]):
     # execution
     def all(self) -> list[T]:
         """Execute and return a list of model instances."""
-        rows = docs = self._query.all_dicts()
+        rows = docs = self._checked().all_dicts()
         if self._resolve:
             try:
                 docs = self._batch_resolve(rows)
@@ -112,7 +119,7 @@ class SQLerQuerySet(Generic[T]):
         limits, and ``.select()`` field projection — but skips model
         validation, type coercion, computed fields, and relation resolution.
         """
-        return self._query.all_dicts()
+        return self._checked().all_dicts()
 
     def iter(self) -> Iterator[T]:
         """Yield model instances one at a time (memory-efficient streaming).
@@ -126,14 +133,14 @@ class SQLerQuerySet(Generic[T]):
             T: Model instances.
         """
         other_table = self._reads_other_table()
-        for doc in self._query.iter_dicts():
+        for doc in self._checked().iter_dicts():
             inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
             self._attach_metadata(inst, doc, doc, other_table)
             yield inst
 
     def first(self) -> Optional[T]:
         """Execute with LIMIT 1 and return the first model instance, if any."""
-        row = d = self._query.first_dict()
+        row = d = self._checked().first_dict()
         if d is None:
             return None
         if self._resolve:
@@ -183,35 +190,35 @@ class SQLerQuerySet(Generic[T]):
 
     def count(self) -> int:
         """Return the count of matching rows."""
-        return self._query.count()
+        return self._checked().count()
 
     def sum(self, field: str) -> Optional[float]:
         """Return the sum of values for the specified field."""
-        return self._query.sum(field)
+        return self._checked().sum(field)
 
     def avg(self, field: str) -> Optional[float]:
         """Return the average of values for the specified field."""
-        return self._query.avg(field)
+        return self._checked().avg(field)
 
     def min(self, field: str) -> Optional[Any]:
         """Return the minimum value for the specified field."""
-        return self._query.min(field)
+        return self._checked().min(field)
 
     def max(self, field: str) -> Optional[Any]:
         """Return the maximum value for the specified field."""
-        return self._query.max(field)
+        return self._checked().max(field)
 
     def exists(self) -> bool:
         """Check if any rows match the query."""
-        return self._query.exists()
+        return self._checked().exists()
 
     def distinct_values(self, field: str) -> list[Any]:
         """Return distinct values for a JSON field."""
-        return self._query.distinct_values(field)
+        return self._checked().distinct_values(field)
 
     def paginate(self, page: int, per_page: int = 20):
         """Return a paginated result set."""
-        return self._query.paginate(page, per_page)
+        return self._checked().paginate(page, per_page)
 
     def update(self, **fields) -> int:
         """Update matching rows with the given field values.
@@ -222,7 +229,7 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             int: Number of rows updated.
         """
-        return self._query.update(**fields)
+        return self._checked().update(**fields)
 
     def update_one(self, **fields) -> Optional[T]:
         """Atomically update one matching row and return it as a model instance.
@@ -236,7 +243,7 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             Model instance or None if no row matched.
         """
-        doc = self._query.update_one(**fields)
+        doc = self._checked().update_one(**fields)
         if doc is None:
             return None
         inst = self._model_cls.model_validate(doc)  # type: ignore[attr-defined]
@@ -253,7 +260,7 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             list: Model instances, or empty list if no rows matched.
         """
-        docs = self._query.update_n(n, **fields)
+        docs = self._checked().update_n(n, **fields)
         results: list[T] = []
         other_table = self._reads_other_table()
         for doc in docs:
@@ -271,7 +278,7 @@ class SQLerQuerySet(Generic[T]):
         Returns:
             int: Number of rows deleted.
         """
-        return self._query.delete()
+        return self._checked().delete()
 
     def offset(self, n: int) -> "SQLerQuerySet[T]":
         """Return a new queryset with an OFFSET clause."""

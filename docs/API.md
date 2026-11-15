@@ -1020,6 +1020,74 @@ without it. Table names, column names, definitions and checks are checked before
 any SQL runs; the write methods with promoted columns check the table and the
 promoted field names the same way.
 
+**Promoting a field on a table that has rows.** A column added to an existing table
+(by `ensure_table`, by `set_db()` or the first save of a model class whose
+`__promoted__` names it) takes each row's value out of the row's document and puts it
+in the column, in one transaction with the `ALTER TABLE` (one pass over the table, once;
+inside an open `transaction()` it is part of it). The column then holds what a `save()`
+would have written there. A row whose document has no key for the field gets the default
+of the model's field, as it read before; without a model, or without a default, it gets
+the column's `DEFAULT` or NULL. A JSON `null` gives NULL, never the `DEFAULT`.
+
+Where that cannot keep what a row reads, the promotion raises `SchemaError` and changes
+nothing (no column, no document touched); `details` names the `table`, the `column`, how
+many `rows` and the `first_id`: a list, a dict or a reference under the key; an integer
+past 64 bits; `null`, or no key and a default the column cannot hold, in a `NOT NULL`
+column. SQLite cannot add a `NOT NULL` column without a `DEFAULT` to an existing table:
+that raises `SchemaError` too.
+
+**A table an earlier version promoted.** Earlier versions added the column and left the
+values in the documents, and a later write may have changed either. sqler records in a
+table of its own, `_sqler_promoted`, which columns hold their values (see
+[STORAGE.md](STORAGE.md)). A database object checks a table whose columns beside `data`
+are not all recorded there once, at whichever comes first: an ensure (`ensure_table`,
+`set_db()`, the first save of a model class) or a read (`find_document`,
+`find_documents`, `from_id`, `from_ids`, and a model query's `all()`, `first()`,
+`iter()`, `count()` and every other call that runs it, `update()` and `delete_all()`
+included). The check reads the table once for documents that still hold a column's key:
+none, and the object remembers the table as settled; some, and the call raises
+`SchemaError` (`details["columns"]` holds the rows and the first `_id` per column) and
+changes nothing, because a read sets the column over the document and would hide the
+document's value. That holds for a column added by other means too. Settle each column
+with `move_promoted(table, column, keep=...)`: `keep="document"` puts each document's
+value into the column, `keep="column"` keeps the column's values; both take the key out of
+the documents (under the refusals above) and record the column.
+
+A read writes no record. An ensure records what it found settled; when the database
+takes no write then (opened read-only, or another connection holds the write lock past
+the busy timeout) the table is used all the same and the next ensure writes the record. A
+column that has to be added, or values that have to move, still need the write lock.
+`execute_sql()` runs your own SQL and is not checked. A search index made with
+`content_sync` on the table gets its triggers made again, inside the promotion, so that it
+reads a moved field from its column and still finds the rows.
+
+```python
+import json
+import sqlite3
+import tempfile
+from pathlib import Path
+
+from sqler import SchemaError, SQLerDB
+
+path = str(Path(tempfile.mkdtemp()) / "old.db")
+conn = sqlite3.connect(path)  # a table as an earlier version left it
+conn.execute("CREATE TABLE tickets (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)")
+conn.execute("INSERT INTO tickets (data) VALUES (?)", [json.dumps({"name": "a", "status": "open"})])
+conn.execute("ALTER TABLE tickets ADD COLUMN status TEXT")
+conn.commit()
+conn.close()
+
+db = SQLerDB.on_disk(path)
+try:
+    db.ensure_table("tickets", promoted={"status": "TEXT"})
+except SchemaError as err:
+    assert err.details == {"table": "tickets", "columns": {"status": {"rows": 1, "first_id": 1}}}
+db.move_promoted("tickets", "status", keep="document")
+db.ensure_table("tickets", promoted={"status": "TEXT"})
+assert db.find_document("tickets", 1) == {"name": "a", "_id": 1, "status": "open"}
+db.close()
+```
+
 ### [D02] A unique index that refuses a row raises `UniqueConstraintError`
 
 ```python

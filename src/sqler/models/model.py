@@ -105,7 +105,7 @@ class SQLerModel(BaseModel):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            db._ensure_table_with_promoted(cls._table, promoted, checks)
+            db._ensure_table_with_promoted(cls._table, promoted, checks, model=cls)
         else:
             cls._db._ensure_table(cls._table)
         registry.register(cls._table, cls)
@@ -372,7 +372,7 @@ class SQLerModel(BaseModel):
 
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            db._ensure_promoted(table, promoted, checks)
+            db._ensure_promoted(table, promoted, checks, model=cls)
 
         payloads = [inst._dump_with_relations() for inst in instances]
 
@@ -404,7 +404,7 @@ class SQLerModel(BaseModel):
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
-            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
+            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
         if _partial:
             new_id = self._id
             changed = _dirty.changed_fields(self._snapshot or {}, payload)

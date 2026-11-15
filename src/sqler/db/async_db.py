@@ -12,13 +12,19 @@ from sqler.db.sqler_db import (
     _fields_update,
     _id_params,
     _in_order,
+    _keep_word,
     _Level,
+    _moved,
     _promoted_in,
+    _promotion,
+    _record,
     _refuse_unwritten,
     _row_columns,
     _row_documents,
     _rows_sql,
+    _settled,
     _split_promoted,
+    _unwritable,
 )
 from sqler.exceptions import StaleVersionError, TransactionStateError
 from sqler.query.query import is_missing_table
@@ -76,9 +82,12 @@ class AsyncSQLerDB:
 
     def __init__(self, adapter: AsyncSQLiteAdapter):
         self.adapter = adapter
-        # what is remembered about committed tables: versioned tables, promoted columns per table
+        # what is remembered about committed tables: versioned tables, and the promoted columns
+        # of each table this object has seen settled (``_settled``)
         self._versioned_tables: set[str] = set()
         self._promoted_columns: dict[str, list[str]] = {}
+        # tables seen settled whose record could not be written then: the next ensure writes it
+        self._unrecorded: set[str] = set()
         # what each open level of this object's own transactions learned, innermost last;
         # per task, like the adapter's depth (a task started inside a level shares it)
         self._open: ContextVar[tuple[_Level, ...]] = ContextVar(
@@ -130,20 +139,24 @@ class AsyncSQLerDB:
         table: str,
         promoted: dict[str, str],
         checks: Optional[dict[str, str]] = None,
+        *,
+        model: Any = None,
     ) -> None:
         """Ensure ``table`` for a promoted write; nothing is sent when it is remembered here
         with every column of ``promoted``."""
         known = self._promoted_of(table)
-        if known is None or any(col not in known for col in promoted):
-            await self._ensure_table_with_promoted(table, promoted, checks)
+        if known is None or any(col not in known for col in promoted) or table in self._unrecorded:
+            await self._ensure_table_with_promoted(table, promoted, checks, model=model)
 
     async def _ensure_table_with_promoted(
         self,
         table: str,
         promoted: dict[str, str],
         checks: Optional[dict[str, str]] = None,
+        *,
+        model: Any = None,
     ) -> None:
-        """Create or upgrade a table with promoted columns (async)."""
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._ensure_table_with_promoted`."""
         table = validate_table_name(table)
         checks = checks or {}
         for col_name, col_def in promoted.items():
@@ -152,38 +165,45 @@ class AsyncSQLerDB:
         for chk_expr in checks.values():
             validate_check_expression(chk_expr)
 
-        # Check if table exists
-        cur = await self.adapter.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
-            [table],
-        )
-        try:
-            row = await cur.fetchone()
-        finally:
-            await cur.close()
-        exists = row is not None
-
-        if not exists:
-            col_defs = ["_id INTEGER PRIMARY KEY AUTOINCREMENT", "data JSON NOT NULL"]
-            for col_name, col_def in promoted.items():
-                col_defs.append(f"{col_name} {col_def}")
-            for chk_name, chk_expr in checks.items():
-                col_defs.append(f"CHECK ({chk_expr})")
-            ddl = f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)});"
-            await self.adapter.execute(ddl)
-            await self.adapter.auto_commit()
-            columns = list(promoted)
+        names, unsettled = await self._run(_settled(table))
+        unrecorded = False
+        if not names or any(col not in names for col in promoted):
+            async with self:  # one transaction: the column, its values and the record, or nothing
+                columns = await self._run(_promotion(table, promoted, checks, model))
         else:
-            existing = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
-            added = [col for col in promoted if col not in existing]
-            for col_name in added:
-                await self.adapter.execute(
-                    f'ALTER TABLE "{table}" ADD COLUMN {col_name} {promoted[col_name]};'
-                )
-            await self.adapter.auto_commit()
-            columns = _promoted_in(existing) + added
-
+            columns = _promoted_in(names)
+            if unsettled:
+                try:
+                    async with self:
+                        await self._run(_record(table, unsettled))
+                except sqlite3.OperationalError as exc:
+                    if not _unwritable(exc):
+                        raise
+                    unrecorded = True  # settled all the same: there is nothing to add or move
         self._remember(table, promoted=columns)
+        (self._unrecorded.add if unrecorded else self._unrecorded.discard)(table)
+
+    async def move_promoted(self, table: str, column: str, *, keep: str) -> None:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB.move_promoted`."""
+        keep = _keep_word(keep)
+        table = validate_table_name(table)
+        validate_column_name(column)
+        async with self:
+            await self._run(_moved(table, column, keep))
+
+    async def _run(self, steps: Any) -> Any:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._run`."""
+        try:
+            step = next(steps)
+            while True:
+                try:
+                    rows = await _afetch_all(self.adapter, *step)
+                except sqlite3.OperationalError as exc:
+                    step = steps.throw(exc)
+                else:
+                    step = steps.send(rows)
+        except StopIteration as done:
+            return done.value
 
     def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]]]]:
         """Where an ensure call keeps what it learned about a table.
@@ -226,12 +246,14 @@ class AsyncSQLerDB:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._columns_of`."""
         promoted = self._promoted_of(table)
         if promoted is None:
-            names = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
+            names, unsettled = await self._run(_settled(table))
             promoted = _promoted_in(names)
             learned = self._learned() if names else None
             if learned is not None:
-                # an entry made since the statement above (another task's ensure) is newer
+                # an entry made since the statements above (another task's ensure) is newer
                 promoted = learned[1].setdefault(table, promoted)
+                if unsettled:
+                    self._unrecorded.add(table)
         return promoted
 
     async def upsert_document_promoted(
@@ -840,8 +862,8 @@ class AsyncSQLerDB:
         await self._ensure_table(table)
         cols = [row[1] for row in await _afetch_all(self.adapter, _columns_sql(table), [])]
         await self.adapter.auto_commit()
-        if self._promoted_of(table) is None:
-            self._remember(table, promoted=_promoted_in(cols))
+        if self._promoted_of(table) is None and not _promoted_in(cols):
+            self._remember(table, promoted=[])  # promoted columns are remembered once checked
         if "_version" not in cols:
             cur2 = await self.adapter.execute(
                 f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;'

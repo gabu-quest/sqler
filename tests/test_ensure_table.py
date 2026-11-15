@@ -158,7 +158,7 @@ def _api_database_blocks():
 
 def test_api_database_section_blocks_run():
     blocks = _api_database_blocks()
-    assert len(blocks) == 3
+    assert len(blocks) == 4
     for block in blocks:
         exec(compile(block.split("```", 1)[0], "docs/API.md#database", "exec"), {})
 

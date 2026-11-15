@@ -7,6 +7,7 @@ Demonstrates: health_check, get_stats, vacuum, checkpoint, schema
 from typing import Any
 
 from sqler.ops import checkpoint, get_stats, health_check, vacuum
+from sqler.utils import SQLER_TABLES
 
 from fastapi import APIRouter
 
@@ -81,11 +82,11 @@ def _get_schema() -> dict[str, Any]:
     """
     db = get_db()
 
-    # Get all tables (excluding sqlite internal tables)
+    # Get all tables (excluding SQLite's own and sqler's own)
     tables_result = db.execute_sql(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     )
-    table_names = [row["name"] for row in tables_result]
+    table_names = [row["name"] for row in tables_result if row["name"].lower() not in SQLER_TABLES]
 
     # Categorize tables and get column info
     tables = []

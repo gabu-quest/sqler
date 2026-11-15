@@ -348,7 +348,11 @@ async def test_a_table_is_learned_once_and_a_known_table_asks_nothing(db, fresh)
         await fresh.find_document("arbi_jobs", 1)
     with query_logger.capture() as second:
         await fresh.find_document("arbi_jobs", 1)
-    assert _reads(first) == ['PRAGMA table_info("arbi_jobs");', "SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?);"]
+    assert _reads(first) == [
+        'PRAGMA table_info("arbi_jobs");',
+        "SELECT col FROM _sqler_promoted WHERE tbl = ?;",  # its record of settled columns, read once
+        "SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?);",
+    ]
     assert _reads(second) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?);"]
 
 
@@ -519,7 +523,7 @@ async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_
         ),
         (
             "CREATE TABLE arbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, extra TEXT)",
-            ("""'{"name": "a", "extra": "json"}'""", "'col'"),
+            ("""'{"name": "a"}'""", "'col'"),  # a key "extra" in the document too is refused
             {"name": "a", "_id": 1, "extra": "col"},
         ),
         (

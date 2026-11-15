@@ -191,3 +191,21 @@ def test_with_version_writes_add_the_column_and_insert_zero(written):
         ('{"x":2}', 0),
     ]
     assert written.execute("SELECT data, s, _version FROM imvp").fetchall() == [('{"x":1}', "a", 0)]
+
+
+def test_record_of_settled_promoted_columns(written):
+    """Section "The record of settled promoted columns"."""
+    assert "`_sqler_promoted`" in DOC
+    assert "tbl TEXT NOT NULL COLLATE NOCASE, col TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY (tbl, col)) WITHOUT ROWID" in DOC
+    assert _cols(written, "_sqler_promoted") == [("tbl", "TEXT", 1, None, 1), ("col", "TEXT", 1, None, 2)]
+    (sql,) = written.execute("SELECT sql FROM sqlite_master WHERE name = '_sqler_promoted'").fetchone()
+    assert sql.endswith("PRIMARY KEY (tbl, col)) WITHOUT ROWID")
+    assert written.execute("SELECT tbl, col FROM _sqler_promoted ORDER BY tbl, col").fetchall() == [
+        ("imvp", "s"),
+        ("jobs", "priority"),
+        ("jobs", "status"),
+    ]
+    # no document of a recorded column's table holds the column's key
+    assert written.execute(
+        "SELECT COUNT(*) FROM jobs WHERE json_type(data, '$.status') IS NOT NULL OR json_type(data, '$.priority') IS NOT NULL"
+    ).fetchone() == (0,)

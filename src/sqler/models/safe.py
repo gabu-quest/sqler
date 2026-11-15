@@ -130,7 +130,7 @@ class SQLerSafeModel(SQLerModel):
 
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            db._ensure_promoted(table, promoted, checks)
+            db._ensure_promoted(table, promoted, checks, model=cls)
         db._ensure_versioned_table(table)
 
         payloads = [inst._dump_with_relations() for inst in instances]
@@ -189,7 +189,7 @@ class SQLerSafeModel(SQLerModel):
                 attempt_payload["_version"] = 0 if self._id is None else self._version + 1
                 promoted = getattr(cls, "__promoted__", None)
                 if promoted:
-                    db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
+                    db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
                 if _partial:
                     changed = _dirty.changed_fields(self._snapshot or {}, attempt_payload)
                     new_id, new_version = self._id, db._update_fields(

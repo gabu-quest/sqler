@@ -17,6 +17,11 @@ if TYPE_CHECKING:
 # Used with fullmatch: ``$`` alone would accept a name ending in a newline.
 _TABLE_NAME_PATTERN = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
+# The tables sqler keeps for itself, in lower case: the migrations table (``MigrationRunner``) and
+# the record of settled promoted columns. None is a user's table: ``validate_table_name`` refuses
+# their names, and the table counts and listings leave them out.
+SQLER_TABLES: frozenset[str] = frozenset({"_sqler_migrations", "_sqler_promoted"})
+
 # SQLite reserved words that produce invalid SQL when used as unquoted column names.
 # Source: https://www.sqlite.org/lang_keywords.html
 _SQL_RESERVED_WORDS: frozenset[str] = frozenset({
@@ -56,7 +61,8 @@ def validate_table_name(table: str) -> str:
         str: The validated table name.
 
     Raises:
-        InvalidTableNameError: If the table name contains invalid characters.
+        InvalidTableNameError: If the table name contains invalid characters, or is the
+            name of a table sqler keeps for itself (``SQLER_TABLES``).
     """
     from sqler.exceptions import InvalidTableNameError
 
@@ -70,6 +76,8 @@ def validate_table_name(table: str) -> str:
             f"Invalid table name: {table!r}. Must match [a-zA-Z_][a-zA-Z0-9_]*",
             table=table,
         )
+    if table[0] == "_" and table.lower() in SQLER_TABLES:
+        raise InvalidTableNameError(f"{table!r} is a table sqler keeps for itself", table=table)
     return table
 
 
