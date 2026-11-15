@@ -5,7 +5,6 @@ write through the async adapter.
 """
 
 import json
-import sqlite3
 from typing import TYPE_CHECKING
 
 from sqler import registry
@@ -32,12 +31,14 @@ _is_valid_table_name = integrity._is_valid_table_name
 async def _aread(db: "AsyncSQLerDB", read: Read) -> Rows:
     table, sql, params = read
     try:
-        cur = await db.adapter.execute(sql, params)
+        cur = await db.adapter._execute_judged(sql, params)
         try:
             return await cur.fetchall()  # SQLite reads the rows as they are fetched
         finally:
             await cur.close()
-    except sqlite3.OperationalError as exc:
+    except Exception as exc:
+        if not integrity.answers(exc, table):
+            await db.adapter._end_failed_statement(exc)
         return integrity.failed_read(exc, table)
 
 

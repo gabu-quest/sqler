@@ -275,23 +275,31 @@ def _nulled(target_table: str, target_id) -> Callable[[str, dict], dict]:
     return lambda table, doc: _swap_doc(doc, fields.get(table, {}), hit, [])
 
 
-def failed_read(exc: sqlite3.OperationalError, table: str) -> Rows:
-    """What a read of the look that raised ``exc`` gives: None for a table that is not
-    there; ``exc`` itself when it may be SQLite's JSON functions failing on a row they
-    cannot read (every message of theirs names JSON), for :func:`_look` to read the table
-    without them; any other error is raised on."""
-    if is_missing_table(exc, table):
-        return None
-    if "JSON" in str(exc):
-        return exc
-    raise exc
+def answers(exc: Exception, table: str) -> bool:
+    """True when ``exc``, the failure of a read of the look, is an answer to it: ``table`` is
+    not there, or it may be SQLite's JSON functions failing on a row they cannot read (every
+    message of theirs names JSON).
+
+    The look sends its reads with the adapter's ``_execute_judged``, so an answer ends
+    nothing that was pending on the connection; any other failure ends what a failed
+    statement ends (``_end_failed_statement``) and is raised."""
+    return is_missing_table(exc, table) or (isinstance(exc, sqlite3.OperationalError) and "JSON" in str(exc))
+
+
+def failed_read(exc: Exception, table: str) -> Rows:
+    """What a read of the look whose failure ``exc`` :func:`answers` it gives: None for a
+    table that is not there; ``exc`` itself for :func:`_look` to read the table without
+    SQLite's JSON functions."""
+    return None if is_missing_table(exc, table) else exc
 
 
 def _read(db: "SQLerDB", read: Read) -> Rows:
     table, sql, params = read
     try:
-        return db.adapter.execute(sql, params).fetchall()
-    except sqlite3.OperationalError as exc:
+        return db.adapter._execute_judged(sql, params).fetchall()
+    except Exception as exc:
+        if not answers(exc, table):
+            db.adapter._end_failed_statement(exc)
         return failed_read(exc, table)
 
 

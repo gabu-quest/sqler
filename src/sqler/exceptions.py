@@ -198,11 +198,19 @@ class LockTimeoutError(ConcurrencyError):
 class TransactionStateError(ConcurrencyError):
     """Raised when a transaction can no longer be trusted to commit what it was told to.
 
-    Two cases, sync and async alike where they apply; in both the transaction is rolled back:
+    The cases, sync and async alike where they apply:
 
     - the end of a nested transaction failed in SQLite: that end, every later statement in
       the transaction and the transaction's own end raise this error (``__cause__`` is
-      SQLite's error);
+      SQLite's error), and the transaction is rolled back;
+    - a statement ended the transaction behind the adapter (a raw ``COMMIT``, ``END`` or
+      ``ROLLBACK``, or a failure SQLite answers by rolling the whole transaction back, which
+      is then the ``__cause__``): that statement, every later one in the transaction and the
+      transaction's own end raise this error, and nothing more is sent for it; what was
+      written before the statement stays as the statement left it;
+    - a transaction is begun on a connection where SQLite holds a transaction the adapter
+      did not open (a raw ``BEGIN``, or a raw write not committed yet): nothing is sent, and
+      that work stays pending for ``adapter.commit()`` or a raw ``ROLLBACK``;
     - async only: a transaction ended while another task's nested transaction in it was
       open; the task that ended it and the task whose nested transaction was open both
       get this error.

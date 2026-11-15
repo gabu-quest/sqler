@@ -312,31 +312,102 @@ def test_three_levels_with_the_middle_end_failing(t):
 
 # ---- raw statements that end the whole transaction ----
 
+ENDED_BEHIND = (
+    "a statement ended the transaction behind the adapter (a raw COMMIT, END or ROLLBACK, or a failure "
+    "SQLite answers by rolling the transaction back): what was written in it before that statement was "
+    "committed or rolled back by it and cannot be put back, and the transaction sends nothing more; end a "
+    "transaction by leaving its db.transaction() block, and raise in the block to roll it back"
+)
+INSERT = "INSERT INTO t VALUES (?)"
+
+
+@pytest.mark.parametrize(
+    ("raw", "kept"),
+    [
+        ("COMMIT", ["a"]),
+        ("END", ["a"]),
+        ("ROLLBACK", []),
+        ("commit", ["a"]),
+        ("-- the caller's own end\nCOMMIT", ["a"]),
+        ("ROLLBACK;", []),
+    ],
+    ids=["commit", "end", "rollback", "lower-case", "comment-in-front", "trailing-semicolon"],
+)
+def test_a_raw_end_of_the_transaction_raises_at_the_statement_and_nothing_more_is_sent(t, raw, kept):
+    """SQLite's state after the statement decides, so every spelling reads the same. What was
+    written before it stays as the raw statement left it; a later statement in the block and
+    the block's end raise the same error, and nothing more reaches SQLite."""
+    with query_logger.capture() as logged:
+        with pytest.raises(TransactionStateError) as ended:
+            with t.db.transaction():
+                t.insert("a")
+                with pytest.raises(TransactionStateError) as at_raw:
+                    t.adapter.execute(raw)
+                with pytest.raises(TransactionStateError) as later:
+                    t.insert("b")
+    assert [q.sql for q in logged] == [INSERT, raw]
+    assert [(str(e.value), e.value.__cause__) for e in (at_raw, later, ended)] == [(ENDED_BEHIND, None)] * 3
+    _after_the_transaction(t)
+    assert t.rows() == sorted(["after", "before", *kept])
+
 
 @pytest.mark.parametrize("raw", ["COMMIT", "ROLLBACK"])
-def test_a_raw_end_of_the_transaction_inside_a_nested_block_raises_once(t, raw):
-    """The raw statement ends the transaction (a raw ``COMMIT`` keeps what was written
-    until then; that cannot be undone); the nested ``RELEASE`` then fails, and the error
-    leaves the outer block once, as it is, with nothing more sent."""
+@pytest.mark.parametrize("where", ["nested", "after-nested"])
+def test_a_raw_end_inside_or_after_a_nested_block_raises_at_the_statement(t, raw, where):
+    """The error leaves the nested block and the outer block once, as it is, with nothing
+    more sent (no ``RELEASE`` of the savepoint the raw statement ended)."""
     with pytest.raises(TransactionStateError) as raised:
         with t.db.transaction():
             t.insert("outer")
             with t.db.transaction():
                 t.insert("nested")
-                t.adapter.execute(raw)
-    assert str(raised.value) == COMMITTED
-    assert str(raised.value.__cause__) == NO_SP_1
+                if where == "nested":
+                    t.adapter.execute(raw)
+            t.adapter.execute(raw)
+    assert (str(raised.value), raised.value.__cause__) == (ENDED_BEHIND, None)
     assert getattr(raised.value, "__notes__", []) == []
-    assert t.steps() == [
-        "BEGIN IMMEDIATE",
-        "INSERT outer",
-        "SAVEPOINT sp_1",
-        "INSERT nested",
-        raw,
-        "RELEASE SAVEPOINT sp_1",
-    ]
+    released = [] if where == "nested" else ["RELEASE SAVEPOINT sp_1"]
+    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT outer", "SAVEPOINT sp_1", "INSERT nested", *released, raw]
     _after_the_transaction(t)
     assert t.rows() == (["after", "before", "nested", "outer"] if raw == "COMMIT" else ["after", "before"])
+
+
+@pytest.mark.parametrize("via", ["execute", "executemany"])
+def test_a_failure_sqlite_answers_with_a_rollback_breaks_the_transaction_with_its_error_as_cause(t, via):
+    t.adapter.execute("CREATE TABLE u (x UNIQUE ON CONFLICT ROLLBACK)")
+    t.adapter.auto_commit()
+    with pytest.raises(TransactionStateError) as raised:
+        with t.db.transaction():
+            t.insert("a")
+            if via == "execute":
+                t.adapter.execute("INSERT INTO u VALUES (1), (1)")
+            else:
+                t.adapter.executemany("INSERT INTO u VALUES (?)", [[1], [1]])
+    assert (str(raised.value), str(raised.value.__cause__)) == (ENDED_BEHIND, "UNIQUE constraint failed: u.x")
+    assert type(raised.value.__cause__) is sqlite3.IntegrityError
+    _after_the_transaction(t)
+    assert t.rows() == ["after", "before"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "refused"),
+    [("ROLLBACK TO SAVEPOINT sp_1", None), ("BEGIN", "cannot start a transaction within a transaction")],
+    ids=["rollback-to", "begin"],
+)
+def test_a_raw_statement_that_leaves_the_transaction_open_raises_no_false_alarm(t, raw, refused):
+    """Passes on base: a raw ``ROLLBACK TO`` undoes the nested rows only, and SQLite refuses
+    a raw ``BEGIN``; either way the transaction goes on."""
+    with t.db.transaction():
+        t.insert("outer")
+        with t.db.transaction():
+            t.insert("undone" if refused is None else "nested")
+            if refused is None:
+                t.adapter.execute(raw)
+            else:
+                with pytest.raises(sqlite3.OperationalError, match=refused):
+                    t.adapter.execute(raw)
+            t.insert("last")
+    assert t.rows() == (["before", "last", "outer"] if refused is None else ["before", "last", "nested", "outer"])
 
 
 # ---- the one ":memory:" connection: the other threads go on after the end ----

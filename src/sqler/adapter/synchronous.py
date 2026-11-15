@@ -7,7 +7,7 @@ import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from itertools import islice
-from typing import Any, ContextManager, Optional, Self
+from typing import Any, ContextManager, NoReturn, Optional, Self
 
 from sqler.logging import query_logger
 
@@ -21,6 +21,9 @@ _BROKEN = (
     "a nested transaction could not be {}, so the transaction it is part of ends rolled back: "
     "nothing written in it is committed"
 )
+# made once: an end that failed records its sentence with no call an interrupt could land in
+_COMMIT_FAILED = _BROKEN.format("committed")
+_ROLLBACK_FAILED = _BROKEN.format("rolled back")
 
 
 _INSIDE = (
@@ -29,9 +32,25 @@ _INSIDE = (
 )
 
 
-def _broken(failed: tuple[str, BaseException]) -> TransactionStateError:
-    """The error for a statement or an end in a transaction where a nested end failed ``(how, error)``."""
-    error = TransactionStateError(_BROKEN.format(failed[0]))
+_ENDED_BEHIND = (
+    "a statement ended the transaction behind the adapter (a raw COMMIT, END or ROLLBACK, or a failure "
+    "SQLite answers by rolling the transaction back): what was written in it before that statement was "
+    "committed or rolled back by it and cannot be put back, and the transaction sends nothing more; end a "
+    "transaction by leaving its db.transaction() block, and raise in the block to roll it back"
+)
+
+
+_PENDING = (
+    "a transaction cannot begin: SQLite holds a transaction on this connection that the adapter did not "
+    "open (a raw BEGIN, or a raw write not committed yet); nothing was sent and that work is still pending: "
+    'keep it with db.adapter.commit() or drop it with db.adapter.execute("ROLLBACK"), then begin again'
+)
+
+
+def _broken(failed: tuple[str, Optional[BaseException]]) -> TransactionStateError:
+    """The error for a statement or an end in a transaction that can no longer be trusted,
+    ``(sentence, cause)``: a nested end failed, or a statement ended the transaction."""
+    error = TransactionStateError(failed[0])
     error.__cause__ = failed[1]
     return error
 
@@ -174,7 +193,7 @@ class _ThreadConnection:
 
 class _ThreadState(threading.local):
     """One thread's connection (``None`` until it opens one), depth of explicit transactions,
-    and how a nested end in its transaction failed (``None``: none did).
+    and why its transaction can no longer be trusted (``None``: it can), as ``_broken`` reads it.
 
     On a plain ``":memory:"`` adapter (``shared`` given) each thread's state is made with
     the thread's end hook (``turn_end``) the first time the thread touches it, so the hook
@@ -184,7 +203,7 @@ class _ThreadState(threading.local):
     conn: Optional[sqlite3.Connection] = None
     owner: Optional[_ThreadConnection] = None
     txn_depth = 0
-    broken: Optional[tuple[str, BaseException]] = None
+    broken: Optional[tuple[str, Optional[BaseException]]] = None
     turn_end: Optional["_TurnEnd"] = None
     me: Optional["weakref.ref[_TurnEnd]"] = None
 
@@ -458,11 +477,16 @@ class SQLiteAdapter(AdapterABC):
         - Optional slow query logging
         - Transaction-aware auto-commit (respects explicit transactions)
         - A statement or commit that fails outside an explicit transaction
-          rolls back the transaction Python's ``sqlite3`` opened for it, so the
-          thread's connection keeps no lock
-        - A nested transaction whose end fails in SQLite ends its transaction
-          rolled back: that end, every later statement of the thread in the
-          transaction and the transaction's own end raise ``TransactionStateError``
+          rolls back what was sent since the last commit (one unit: the
+          transaction Python's ``sqlite3`` opened for it), so the thread's
+          connection keeps no lock
+        - A nested transaction whose end fails in SQLite, or a statement that
+          ends the transaction behind the adapter (a raw ``COMMIT``), leaves the
+          transaction broken: that end or statement, every later statement of the
+          thread in the transaction and the transaction's own end raise
+          ``TransactionStateError``, and it ends rolled back
+        - ``begin_transaction`` on a connection SQLite holds in a transaction the
+          adapter did not open raises ``TransactionStateError`` and sends nothing
 
     Args:
         path: Path to the database file, or ":memory:" for in-memory.
@@ -523,15 +547,33 @@ class SQLiteAdapter(AdapterABC):
     def _txn_depth(self, value: int) -> None:
         self._local.txn_depth = value
 
-    def _end_failed_implicit_transaction(self, conn: sqlite3.Connection) -> None:
-        """A statement or commit on ``conn`` failed: outside an explicit transaction, roll back.
+    def _still_open(self, conn: sqlite3.Connection, exc: Optional[BaseException] = None) -> None:
+        """After a statement in this thread's transaction (``exc``: the statement failed with it):
+        if SQLite no longer counts the transaction open, the statement ended it behind the
+        adapter, and from here the transaction is broken. Raises ``TransactionStateError``
+        then (from ``exc``), unless ``exc`` is an interrupt, which is raised on by the caller."""
+        if conn.in_transaction:
+            return
+        local = self._local
+        local.broken = (_ENDED_BEHIND, exc)
+        if exc is None or isinstance(exc, Exception):
+            raise _broken(local.broken)
+
+    def _end_failed_implicit_transaction(
+        self, conn: sqlite3.Connection, exc: Optional[BaseException] = None, judged: bool = False
+    ) -> None:
+        """A statement or commit on ``conn`` failed (with ``exc``): outside an explicit
+        transaction, roll back what was sent since the last commit.
 
         Python's ``sqlite3`` opens a transaction before a write and keeps it open
         when the write fails; left open it holds the write lock (or a shared-cache
-        table lock) until this thread's next commit. Inside an explicit
-        transaction nothing changes: the caller ends the transaction.
+        table lock) until this thread's next commit, and the next commit would make
+        part of the unit durable. Inside an explicit transaction nothing changes: the
+        caller ends the transaction. ``judged``: the statement was sent with
+        ``_execute_judged``, whose caller reads an ``Exception`` as an answer: it ends
+        nothing (an interrupt ends the unit as any failure does).
         """
-        if self._txn_depth > 0 or not conn.in_transaction:
+        if self._txn_depth > 0 or not conn.in_transaction or (judged and isinstance(exc, Exception)):
             return
         _roll_back(conn, self._shared, self._local)  # the caller sees the original error
 
@@ -673,17 +715,44 @@ class SQLiteAdapter(AdapterABC):
         """
         shared = self._shared  # not None: the one ":memory:" connection, which waits for its turn
         if shared is None:
-            return self._execute(self._conn(), query, params, False)
+            return self._execute(self._conn(), query, params, False, False)
         local = self._local
         with shared.lock:
             conn = shared.take(local)
             try:
-                return self._execute(conn, query, params, True)
+                return self._execute(conn, query, params, True, False)
             finally:
                 shared.give(local)
 
-    def _execute(self, conn: sqlite3.Connection, query: str, params: Optional[list[Any]], read_all: bool) -> CursorLike:
-        cursor = conn.cursor()
+    def _execute_judged(self, query: str, params: Optional[list[Any]] = None) -> CursorLike:
+        """``execute`` for a library caller that reads the statement's failure as an answer
+        (the look for referrers in ``sqler.models.integrity``): outside a transaction an
+        ``Exception`` of the statement ends nothing and is raised as it is. A failure the
+        caller does not read as an answer goes to ``_end_failed_statement``. Inside a
+        transaction, and for an interrupt, it is ``execute``. Not for code outside sqler."""
+        shared = self._shared
+        if shared is None:
+            return self._execute(self._conn(), query, params, False, True)
+        local = self._local
+        with shared.lock:
+            conn = shared.take(local)
+            try:
+                return self._execute(conn, query, params, True, True)
+            finally:
+                shared.give(local)
+
+    def _end_failed_statement(self, exc: Exception) -> NoReturn:
+        """After ``_execute_judged`` raised ``exc`` and its caller found it no answer: end what
+        ``execute`` ends for a failed statement (outside a transaction, all that was sent
+        since the last commit; inside one, nothing) and raise ``exc``. Not for code outside sqler."""
+        self._roll_back_left_open(self._local)
+        raise exc
+
+    def _execute(
+        self, conn: sqlite3.Connection, query: str, params: Optional[list[Any]], read_all: bool, judged: bool
+    ) -> CursorLike:
+        inside = self._local.txn_depth > 0
+        cursor: Any = conn.cursor()
         _logging = query_logger.enabled
         if _logging:
             start = time.perf_counter()
@@ -696,11 +765,13 @@ class SQLiteAdapter(AdapterABC):
             else:
                 cursor.execute(query)
             if read_all and cursor.description is not None:
-                return _ReadRows(cursor)  # a read that fails is a failed statement
+                cursor = _ReadRows(cursor)  # a read that fails is a failed statement
         except BaseException as exc:  # an interrupt counts as a failure
             error_msg = str(exc) or type(exc).__name__
-            if not _read_hit_missing_table(query, exc):
-                self._end_failed_implicit_transaction(conn)
+            if inside:
+                self._still_open(conn, exc)
+            elif not _read_hit_missing_table(query, exc):
+                self._end_failed_implicit_transaction(conn, exc, judged)
             converted = unique_violation_from(exc)
             if converted is not None:
                 raise converted from exc
@@ -715,6 +786,8 @@ class SQLiteAdapter(AdapterABC):
                     rows_affected=cursor.rowcount if cursor.rowcount >= 0 else None,
                     error=error_msg,
                 )
+        if inside and not conn.in_transaction:
+            self._still_open(conn)
         return cursor
 
     def executemany(self, query: str, param_list: Optional[list[Any]]) -> sqlite3.Cursor:
@@ -736,17 +809,23 @@ class SQLiteAdapter(AdapterABC):
                 shared.give(local)
 
     def _executemany(self, conn: sqlite3.Connection, query: str, param_list: Optional[list[Any]]) -> sqlite3.Cursor:
+        inside = self._local.txn_depth > 0
         try:
             cursor = conn.cursor()
             cursor.executemany(query, param_list or [])
-            if self._txn_depth == 0:
+            if not inside:
                 conn.commit()
         except BaseException as exc:
-            self._end_failed_implicit_transaction(conn)
+            if inside:
+                self._still_open(conn, exc)
+            else:
+                self._end_failed_implicit_transaction(conn)
             converted = unique_violation_from(exc)
             if converted is not None:
                 raise converted from exc
             raise
+        if inside and not conn.in_transaction:
+            self._still_open(conn)
         return cursor
 
     def executescript(self, script: str) -> sqlite3.Cursor:
@@ -852,6 +931,8 @@ class SQLiteAdapter(AdapterABC):
 
     def _begin(self, conn: sqlite3.Connection) -> None:
         depth = self._txn_depth  # nested: a savepoint
+        if depth == 0 and conn.in_transaction:
+            raise TransactionStateError(_PENDING)
         conn.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT sp_{depth}")
         self._txn_depth = depth + 1
 
@@ -916,7 +997,7 @@ class SQLiteAdapter(AdapterABC):
             except BaseException as exc:
                 # a RELEASE after a failed ROLLBACK TO would keep the rows it was to undo
                 local.txn_depth = depth
-                local.broken = failed = ("committed" if commit else "rolled back", exc)
+                local.broken = failed = (_COMMIT_FAILED if commit else _ROLLBACK_FAILED, exc)
                 if not isinstance(exc, Exception):
                     raise
         else:
