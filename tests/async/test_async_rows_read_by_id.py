@@ -602,8 +602,7 @@ class ArbiLitePlain(AsyncSQLerLiteModel):
 
 
 async def _save_many(cls, instances):
-    many = getattr(cls, "asave_many", None) or cls.save_many
-    await many(instances)
+    await cls.save_many(instances)
 
 
 @pytest.mark.parametrize("cls", [ArbiPlain, ArbiSafe, ArbiLitePlain, ArbiLiteSafe], ids=lambda c: c.__name__)

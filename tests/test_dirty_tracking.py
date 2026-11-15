@@ -538,7 +538,7 @@ def test_async_pydantic_snapshot_is_the_row_and_shares_nothing(cls):
     assert asyncio.run(scenario()) == {"title": "a", "tags": ["x"], "meta": {"k": {"d": 1}}}
 
 
-@pytest.mark.parametrize("way", ("save", "asave_many"))
+@pytest.mark.parametrize("way", ("save", "save_many"))
 @pytest.mark.parametrize("cls", [DtAsyncPlain, DtAsyncSafePlain])
 def test_async_pydantic_snapshot_after_a_save_is_what_was_written(cls, way):
     async def scenario():
@@ -551,7 +551,7 @@ def test_async_pydantic_snapshot_after_a_save_is_what_was_written(cls, way):
         if way == "save":
             await row.save()
         else:
-            await cls.asave_many([row])
+            await cls.save_many([row])
         row.tags.append("y")
         snap = row._snapshot
         await db.close()

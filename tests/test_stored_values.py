@@ -259,8 +259,7 @@ def test_save_many_stores_the_same_form(base, kind):
     async def steps(rows):
         cls = spec.make(spec.cls, kind.ann)
         cls.set_db(rows.db, "t")
-        many = cls.asave_many if spec.is_async else cls.save_many
-        await _aw(many([cls(v=kind.value), cls(v=kind.value)]))
+        await _aw(cls.save_many([cls(v=kind.value), cls(v=kind.value)]))
         return await rows.stored("t")
 
     assert _run(steps, spec.is_async) == [_text(kind.plain)] * 2

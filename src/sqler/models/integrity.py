@@ -152,7 +152,7 @@ def set_null_referrers(
         new_obj = replace(obj)
         payload = json.dumps(new_obj)
         db.adapter.execute(f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, row_id])
-        db.adapter.commit()
+        db.adapter.auto_commit()
 
 
 def cascade_delete(

@@ -24,7 +24,7 @@ async def db():
 
 
 async def seed_employees():
-    await Employee.asave_many([
+    await Employee.save_many([
         Employee(name="Alice", department="eng", role="senior", salary=150000),
         Employee(name="Bob", department="eng", role="junior", salary=90000),
         Employee(name="Charlie", department="eng", role="senior", salary=140000),

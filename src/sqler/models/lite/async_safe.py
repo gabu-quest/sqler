@@ -113,29 +113,9 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         return (await _refs.arun(_refs.load(cls, [doc], db, table)))[0]
 
     @classmethod
-    async def asave_many(cls: Type[TASafe], instances: list[TASafe], *, db=None) -> list[TASafe]:  # type: ignore[override]
-        """Insert multiple new instances with ``_version=0``.
-
-        Uses multi-row INSERT for significantly better throughput. Only
-        supports new (unsaved) instances. All instances get ``_version=0``.
-
-        Args:
-            instances: List of model instances with ``_id is None``.
-            db: Optional database (overrides class-level binding).
-
-        Returns:
-            list: The same instances with ``_id`` and ``_version`` populated.
-
-        Raises:
-            ValueError: If any instance already has an ``_id``.
-        """
-        if not instances:
-            return instances
-        for inst in instances:
-            if inst._id is not None:
-                raise ValueError("asave_many() only accepts new instances (_id must be None)")
-
-        db, table = cls._resolve_binding(db)
+    async def _insert_rows(cls, db, table: str, instances: list) -> None:
+        """Write new instances in one batch at ``_version=0``; each takes its ``_id``,
+        ``_version`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
 
         if promoted:
@@ -155,30 +135,19 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
             object.__setattr__(inst, "_id", id_)
             object.__setattr__(inst, "_version", version)
             object.__setattr__(inst, "_snapshot", _dirty.snapshot(payload))
-        return instances
 
-    async def save(self: TASafe, *, db=None, _partial: bool = False) -> TASafe:
-        """Insert or update with optimistic locking and intent rebasing.
+    async def _write(self, db, table: str, _partial: bool):
+        """Write this instance's row with optimistic locking and intent rebasing (``save()``).
 
         If the save fails due to a stale version (another process updated
         the row), and the changes qualify for rebasing (based on ``_rebase_config``),
         the library will automatically fetch the latest version and reapply
         your changes on top of it.
 
-        Args:
-            db: Optional database to write to (overrides class-level binding).
-            _partial: Write only the fields that differ from the row as this model last
-                loaded or saved it, and leave the row's other fields as they are
-                (``save_partial()``). The row must exist.
-
-        Returns:
-            Self: The saved instance with updated ``_id`` and ``_version``.
-
         Raises:
             StaleVersionError: If the version is stale and cannot be rebased.
         """
         cls = self.__class__
-        db, table = _instance_binding(self, db)
 
         # Get the rebase configuration for this model class
         rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)

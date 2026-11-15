@@ -803,7 +803,7 @@ ASYNC_READS = {
 ASYNC_WRITES = {
     "save": lambda run, cls: run.go(cls(name="new", status="x").save(db=run.adb)),
     "update": lambda run, cls: run.go(cls.using(run.adb).filter(F("name") == "a").update(status="y")),
-    "save_many": lambda run, cls: run.go(cls.asave_many([cls(name="m", status="m")], db=run.adb)),
+    "save_many": lambda run, cls: run.go(cls.save_many([cls(name="m", status="m")], db=run.adb)),
     "delete": lambda run, cls: run.go(cls.using(run.adb).filter(F("status") == "open").delete_all()),
 }
 

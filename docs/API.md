@@ -961,6 +961,10 @@ db.create_index("xs", "name", where="json_extract(data,'$.name') IS NOT NULL")
 
 ### [C16] Delete policies in action
 
+The delete and what its policy does to referring rows are one unit (a savepoint inside your
+transaction, if one is open): if the delete of the row is refused, the referring rows are as
+they were, also when you catch the error inside your transaction and commit.
+
 ```python
 from sqler import SQLerDB, SQLerModel, ReferentialIntegrityError
 
@@ -1243,6 +1247,35 @@ then raises `NotImplementedError`.
 ---
 
 ## Mixins
+
+### Which writes meet the mixins
+
+Every way of writing an instance meets the rules of its class, sync and async, on every
+base: `save()`, `save_partial()`, `save_many()`, `delete()`, `delete_with_policy()`,
+`soft_delete()`, `restore()` and `first_or_create()` (when it creates).
+
+| Mixin | What each of those writes does |
+|-------|--------------------------------|
+| `TimestampMixin` | sets `created_at` (first write) and `updated_at` on each instance written |
+| `AuditMixin` | the same times, and `created_by` / `updated_by` from the current user |
+| `AuditLogMixin` | one audit row per row written (`create`, `update` where the stored document changed, `delete`), in one unit with the row: both are there or neither is. Inside your transaction the unit is a savepoint: both follow your commit or rollback, and a write that fails leaves neither, also when you catch the error and commit |
+| `HooksMixin` | `before_save` / `after_save` around each instance saved, `before_delete` / `after_delete` around each delete |
+
+Order: `before_save()` runs first, then the timestamps are set, then the row is written; a
+`before_save()` that returns False leaves the instance as it was. `after_save()` and
+`after_delete()` run once the write is committed (or, inside your transaction, once it is
+written). `save_many()` calls `before_save()` on every instance, in order, before anything is
+stamped or written (one that returns False raises `RuntimeError` naming its index, and
+nothing is written), then `after_save()` on each once the batch is written.
+`delete_with_policy()` is the delete: `delete()` is the same call with
+`on_delete="restrict"`, and the delete with what its policy does to referring rows is one
+unit. An unsaved instance or an unknown policy raises `ValueError` before any hook.
+
+A write that fails leaves the instance as it was before the call (`_id`, the stored snapshot
+and, on a safe model, `_version`), so it can be made again once the cause is gone.
+
+A write made with `db.*` directly (`db.bulk_upsert`, `db.insert_document`, `db.execute`) is
+below the model and meets no rule of any class.
 
 ### [C26] Timestamps
 

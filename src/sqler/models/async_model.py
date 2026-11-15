@@ -11,7 +11,7 @@ from sqler import registry
 from sqler._stored import stored
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _dirty, _refs
+from sqler.models import _dirty, _refs, _write_rules
 from sqler.models._table_names import (
     _aread_document,
     _aread_documents,
@@ -312,11 +312,14 @@ class AsyncSQLerModel(BaseModel):
             await db._ensure_table(table)
 
     @classmethod
-    async def asave_many(cls: Type[TAModel], instances: list[TAModel], *, db=None) -> list[TAModel]:
+    async def save_many(cls: Type[TAModel], instances: list[TAModel], *, db=None) -> list[TAModel]:
         """Insert multiple new instances in a single batch operation.
 
         Uses multi-row INSERT for significantly better throughput than
         calling ``save()`` in a loop. Only supports new (unsaved) instances.
+        Each instance meets the rules of its class as ``save()`` does: hooks,
+        timestamps and audit rows (see the mixins); with an audit log the batch
+        and its audit rows are one transaction.
 
         Args:
             instances: List of model instances with ``_id is None``.
@@ -328,13 +331,22 @@ class AsyncSQLerModel(BaseModel):
         Raises:
             ValueError: If any instance already has an ``_id``.
         """
-        if not instances:
-            return instances
-        for inst in instances:
-            if inst._id is not None:
-                raise ValueError("asave_many() only accepts new instances (_id must be None)")
+        return await _write_rules.asave_many(cls, instances, db, cls._insert_rows)
 
-        db, table = cls._resolve_binding(db)
+    @classmethod
+    async def asave_many(cls: Type[TAModel], instances: list[TAModel], *, db=None) -> list[TAModel]:
+        """Deprecated name of :meth:`save_many`: it warns and calls it."""
+        warnings.warn(
+            f"{cls.__name__}.asave_many() is deprecated. Use save_many(); "
+            "asave_many() will be removed in a future version.",
+            DeprecationWarning,
+            skip_file_prefixes=_SQLER_PREFIXES,
+        )
+        return await cls.save_many(instances, db=db)
+
+    @classmethod
+    async def _insert_rows(cls, db, table: str, instances: list) -> None:
+        """Write new instances in one batch; each takes its ``_id`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
 
         if promoted:
@@ -352,11 +364,27 @@ class AsyncSQLerModel(BaseModel):
         for inst, id_, payload in zip(instances, ids, payloads):
             inst._id = id_
             inst._snapshot = _dirty.snapshot(payload)
-        return instances
 
     async def save(self: TAModel, *, db=None, _partial: bool = False) -> TAModel:
-        cls = self.__class__
+        """Insert or update this instance.
+
+        Args:
+            db: Optional database to write to (overrides class-level binding).
+            _partial: Write only the fields that differ from the row as this model last
+                loaded or saved it, and leave the row's other fields as they are
+                (``save_partial()``). The row must exist.
+
+        Returns:
+            self: The same instance (for chaining).
+        """
         db, table = _instance_binding(self, db)
+        return await _write_rules.asave(
+            self, db, table, _partial, lambda: self._write(db, table, _partial)
+        )
+
+    async def _write(self: TAModel, db, table: str, _partial: bool) -> TAModel:
+        """Write this instance's row (``save()`` without the rules of its class)."""
+        cls = self.__class__
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             checks = getattr(cls, "__checks__", None)
@@ -388,6 +416,10 @@ class AsyncSQLerModel(BaseModel):
     async def delete_with_policy(self, *, db=None, on_delete: str = "restrict") -> None:
         """Delete this instance with a specified integrity policy.
 
+        The delete and what the policy does to referring rows are one transaction
+        (the caller's, if one is open), and the instance meets the rules of its class
+        as ``delete()`` does: hooks and the audit row.
+
         Args:
             db: Optional database to delete from (overrides class-level binding).
             on_delete: One of "restrict", "set_null", or "cascade".
@@ -395,17 +427,19 @@ class AsyncSQLerModel(BaseModel):
                 - "set_null": Nullifies all references to this row before deleting.
                 - "cascade": Recursively deletes all rows that reference this row.
         """
+        db, table = _instance_binding(self, db)
+        await _write_rules.adelete(
+            self, db, table, on_delete, lambda: self._delete_row(db, table, on_delete)
+        )
+
+    async def _delete_row(self, db, table: str, on_delete: str) -> None:
+        """Delete this instance's row under ``on_delete`` (``delete_with_policy()`` without
+        the rules of its class)."""
         from .async_integrity import (
             async_cascade_delete,
             async_find_referrers,
             async_set_null_referrers,
         )
-
-        db, table = _instance_binding(self, db)
-        if self._id is None:
-            raise ValueError("Cannot delete unsaved model (missing _id)")
-        if on_delete not in {"restrict", "set_null", "cascade"}:
-            raise ValueError("on_delete must be 'restrict', 'set_null', or 'cascade'")
 
         if on_delete == "set_null":
             referrers = await async_find_referrers(db, table, self._id)
