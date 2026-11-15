@@ -120,6 +120,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **A table whose promoted columns an earlier version left with values in the documents raises instead of reading wrong values.** It is checked once per database object, at its first ensure or its first read (`find_document`, `find_documents`, `from_id`, `from_ids`, every queryset method, the searches; sync and async), and raises `SchemaError` naming the columns and rows. Settle it with the new `db.move_promoted(table, column, keep="document")` (the document's value goes into the column) or `keep="column"`.
 - **A `content_sync` search index made before a field was promoted keeps finding rows by that field**: the promotion remakes its triggers and refills it, in the same transaction.
 - **`search_ranked()` gives the models `search()` gives.** It built its hits from the stored document alone: a promoted field read as its default, and a hit had no row version and no change tracking. It now reads ids and scores from the index and loads the rows by id (two statements where it sent one).
+- **`save_many()` meets the rules of its class, as `save()` does**, on every base, sync and async. `TimestampMixin` and `AuditMixin` set the times and users on each row, `AuditLogMixin` writes one `create` audit row per instance in one unit with the batch, and `HooksMixin` calls `before_save()` on every instance before anything is written and `after_save()` on each once the batch is written. Before, a batch was written with none of them.
+- **`delete_with_policy()` called directly writes the `delete` audit row and calls `before_delete()` / `after_delete()`**, as `delete()` does.
+- **A delete with `on_delete="set_null"` or `"cascade"` is one unit with what it does to the rows that refer to it.** A refused delete leaves those rows as they were. Sync `set_null` no longer commits the caller's open transaction half way.
+- **A write with an audit log that fails half way keeps nothing.** The row and its audit row are one unit: a transaction of its own, or a savepoint inside yours. Before, a row saved inside your transaction whose audit row failed stayed in it with no audit row, and was committed if you caught the error. The instance keeps the `_id`, snapshot and `_version` it had before the call, so the write can be made again.
 
 ### Changed
 
@@ -186,6 +190,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`repr()` of a pydantic model in a cycle prints the model met again as `...`** instead of raising `RecursionError`; lite `model_dump()` of a cycle raises `ValueError`, as pydantic's does.
 - **An ensure on a table that needs no change no longer fails when another connection holds the write lock or the database is read-only**; what it would have recorded is written by a later ensure.
 - **An error from the end of a transaction is named on the exception that was leaving.** When a block's own exception leaves and ending the transaction raises something other than `TransactionStateError`, the block's exception now carries the note "ending the transaction failed: <Type>: <message>", once; the error was dropped. A failed outermost `ROLLBACK` is still handled inside the adapters and does not reach this note.
+- **`before_save()` runs before the timestamps are set**, so a `before_save()` that returns False leaves the instance unchanged. `delete()` of an instance that was never saved raises `ValueError` before `before_delete()` is called.
+- **The async models have `save_many()`.** `asave_many()` still works, warns with `DeprecationWarning` and calls it.
 
 ### Removed
 
