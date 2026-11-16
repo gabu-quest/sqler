@@ -1335,7 +1335,7 @@ async def test_delete_all_of_nothing_sends_only_its_own_statement(base, referabl
         statements = await sent(lambda: settle(q.delete_all()))
 
         version = ["_version"] if "Safe" in base.__name__ else []
-        returning = " RETURNING " + ", ".join(["_id", "data", *["IFNULL(_version, 0)"] * len(version)])
+        returning = " RETURNING " + ", ".join(["_id", "data", *["_version"] * len(version)])
         t = Target.__tablename__
         row = ", ".join(f"`{name}`" for name in ["_id", "data", *version])
         guard = f"CASE WHEN 1 THEN 1 ELSE (SELECT ({row}) IN (SELECT * FROM {t}) FROM {t}) END"  # never runs

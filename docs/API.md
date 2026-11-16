@@ -657,8 +657,7 @@ raises `StaleVersionError`; an instance loaded after them, or returned by `updat
 such a table is not stored and sets nothing, and `update(_version=...)` on it is refused.
 Every read of such a table through a database object or a model (`find_document`, the
 dicts of `db.query(table)` or of a model's query set, a model) gives `_version` from the
-column; a NULL in a column made by other means is 0, and the next write of the
-row leaves 1. A statement sent by hand with `db.adapter.execute()` moves it only if it
+column. A statement sent by hand with `db.adapter.execute()` moves it only if it
 says so, as above.
 
 A table made before versioning (by a plain model, by SQL, or copied without its `_version`

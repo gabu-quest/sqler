@@ -21,7 +21,7 @@ from sqler.exceptions import (
     UnstorableValueError,
 )
 from sqler.query import SQLerQuery
-from sqler.query.query import _MOVE_VERSION, _VERSION, _has_version, end_failed, is_missing_table
+from sqler.query.query import _MOVE_VERSION, _has_version, end_failed, is_missing_table
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -265,11 +265,10 @@ _MAX_VARIABLES = 999
 def _rows_sql(table: str, columns: tuple[str, ...], n: int, names: Optional[tuple[str, ...]] = None) -> str:
     """The statement that reads ``n`` ids of the validated ``table`` with ``columns``, one
     variable per id; for ``n == 0`` the ids come as one JSON array in one variable; with the
-    guard of the remembered ``names`` (:func:`_guard`) when given; ``_version`` read as every
-    read takes it (``_VERSION``). Built once per shape, so a one-id read builds no text."""
+    guard of the remembered ``names`` (:func:`_guard`) when given. Built once per shape, so a
+    one-id read builds no text."""
     ids = "SELECT value FROM json_each(?)" if n == 0 else ",".join("?" * n)
-    picks = ", ".join(_VERSION if c == "_version" else c for c in columns)
-    return f"SELECT {picks} FROM {table} WHERE _id IN ({ids}){_and_guard(table, names)};"
+    return f"SELECT {', '.join(columns)} FROM {table} WHERE _id IN ({ids}){_and_guard(table, names)};"
 
 
 def _row_documents(rows: Any, columns: list[str]) -> list[dict[str, Any]]:
@@ -324,7 +323,7 @@ def _select_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) 
 
 
 # a checked write of a versioned row is made only while its column is at the version its writer read
-_AT_VERSION = f"_id = ? AND {_VERSION} = ?"
+_AT_VERSION = "_id = ? AND _version = ?"
 
 
 def _unversioned(doc: dict[str, Any]) -> dict[str, Any]:
@@ -695,7 +694,7 @@ def _move_sql(table: str, fills: dict[str, Any], versioned: bool = False) -> tup
     moved = [col for col, fill in fills.items() if fill is _NO_FILL] if versioned else []
     if moved:
         same = " AND ".join(f"(json_type(data, ?) IS NULL OR {col} IS json_extract(data, ?))" for col in moved)
-        sets.append(f"_version = CASE WHEN {same} THEN _version ELSE {_VERSION} + 1 END")
+        sets.append(f"_version = CASE WHEN {same} THEN _version ELSE _version + 1 END")
         params += [_json_path(col) for col in moved for _ in range(2)]
     paths = [_json_path(col) for col in fills]
     sets.append(f"data = json_remove(data{', ?' * len(paths)})")

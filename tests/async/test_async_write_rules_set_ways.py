@@ -163,21 +163,21 @@ PINS = [
     (
         Safe,
         lambda q: q.filter(F("_id") == 1).update_one(k=6),
-        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = IFNULL(_version, 0) + 1 WHERE "
-        "_id = (SELECT _id FROM asw_pin_safe WHERE _id = ? AND " + _g("asw_pin_safe", "_id", "data", "_version") + " LIMIT 1) RETURNING _id, data, IFNULL(_version, 0)",
+        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
+        "_id = (SELECT _id FROM asw_pin_safe WHERE _id = ? AND " + _g("asw_pin_safe", "_id", "data", "_version") + " LIMIT 1) RETURNING _id, data, _version",
         [6, 1],
     ),
     (
         Safe,
         lambda q: q.filter(F("_id") >= 1).update_n(3, k=7),
-        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = IFNULL(_version, 0) + 1 WHERE "
-        "_id IN (SELECT _id FROM asw_pin_safe WHERE _id >= ? AND " + _g("asw_pin_safe", "_id", "data", "_version") + " LIMIT 3) RETURNING _id, data, IFNULL(_version, 0)",
+        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
+        "_id IN (SELECT _id FROM asw_pin_safe WHERE _id >= ? AND " + _g("asw_pin_safe", "_id", "data", "_version") + " LIMIT 3) RETURNING _id, data, _version",
         [7, 1],
     ),
     (
         Safe,
         lambda q: q.filter(F("_id") == 1).update(k=5),
-        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = IFNULL(_version, 0) + 1 "
+        "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 "
         "WHERE _id = ? AND " + _g("asw_pin_safe", "_id", "data", "_version"),
         [5, 1],
     ),
@@ -636,7 +636,7 @@ async def test_delete_all_of_one_row_and_of_ten_thousand_send_the_same_statement
         assert [(e.sql, list(e.params or [])) for e in got] == [
             (
                 f"DELETE FROM {Item.__tablename__} WHERE JSON_EXTRACT(data, '$.name') = ? AND "
-                f"{_g(Item.__tablename__, '_id', 'data', *version[2:].split())} RETURNING _id, data{', IFNULL(_version, 0)' if version else ''}",
+                f"{_g(Item.__tablename__, '_id', 'data', *version[2:].split())} RETURNING _id, data{', _version' if version else ''}",
                 [name],
             ),
             look(ids),
