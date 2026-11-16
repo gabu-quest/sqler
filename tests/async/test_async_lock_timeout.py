@@ -58,7 +58,7 @@ async def _busy_timeouts(adapter: AsyncSQLiteAdapter) -> list[int]:
 
 
 @pytest.mark.asyncio
-async def test_timeout_ms_is_the_wait_for_another_connections_lock(tmp_path):
+async def test_timeout_ms_is_the_wait_for_another_connections_lock(tmp_path, clock_tick):
     path = str(tmp_path / "wait.db")
     adapter = await _file_adapter(path, timeout_ms=200)
     other = _locked_by_another_connection(path)
@@ -67,7 +67,7 @@ async def test_timeout_ms_is_the_wait_for_another_connections_lock(tmp_path):
     finally:
         other.close()
         await adapter.close()
-    assert 0.2 <= elapsed < 2.5
+    assert 0.2 - clock_tick <= elapsed < 2.5
 
 
 @pytest.mark.asyncio
@@ -105,7 +105,7 @@ async def test_the_adapter_made_with_a_path_only_waits_five_seconds(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_lock_held_by_a_second_async_adapter_is_waited_for_timeout_ms(tmp_path):
+async def test_the_lock_held_by_a_second_async_adapter_is_waited_for_timeout_ms(tmp_path, clock_tick):
     path = str(tmp_path / "two.db")
     holder = await _file_adapter(path)
     waiter = await _file_adapter(path, timeout_ms=200)
@@ -118,7 +118,7 @@ async def test_the_lock_held_by_a_second_async_adapter_is_waited_for_timeout_ms(
     finally:
         await waiter.close()
         await holder.close()
-    assert 0.2 <= elapsed < 2.5
+    assert 0.2 - clock_tick <= elapsed < 2.5
 
 
 @pytest.mark.asyncio
@@ -224,7 +224,7 @@ PRAGMA_FORMS = ["PRAGMA busy_timeout=250;", "pragma BUSY_TIMEOUT = 250"]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pragma", PRAGMA_FORMS)
-async def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(pragma, tmp_path):
+async def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(pragma, tmp_path, clock_tick):
     path = str(tmp_path / "pragma.db")
     adapter = await _file_adapter(path, pragmas=[pragma], pool_size=2)
     other = _locked_by_another_connection(path)
@@ -234,7 +234,7 @@ async def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(
     finally:
         other.close()
         await adapter.close()
-    assert 0.25 <= elapsed < 2.5
+    assert 0.25 - clock_tick <= elapsed < 2.5
 
 
 @pytest.mark.asyncio

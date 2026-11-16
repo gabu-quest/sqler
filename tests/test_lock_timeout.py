@@ -52,7 +52,7 @@ def _busy_timeouts(adapter: SQLiteAdapter) -> list[int]:
 # ---- the wait on a file database ----
 
 
-def test_timeout_ms_is_the_wait_for_another_connections_lock(tmp_path):
+def test_timeout_ms_is_the_wait_for_another_connections_lock(tmp_path, clock_tick):
     path = str(tmp_path / "wait.db")
     adapter = _file_adapter(path, timeout_ms=200)
     other = _locked_by_another_connection(path)
@@ -61,7 +61,7 @@ def test_timeout_ms_is_the_wait_for_another_connections_lock(tmp_path):
     finally:
         other.close()
         adapter.close()
-    assert 0.2 <= elapsed < 2.5
+    assert 0.2 - clock_tick <= elapsed < 2.5
 
 
 def test_timeout_ms_zero_raises_at_once(tmp_path):
@@ -153,7 +153,7 @@ PRAGMA_FORMS = ["PRAGMA busy_timeout=250;", "pragma BUSY_TIMEOUT = 250"]
 
 
 @pytest.mark.parametrize("pragma", PRAGMA_FORMS)
-def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(pragma, tmp_path):
+def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(pragma, tmp_path, clock_tick):
     path = str(tmp_path / "pragma.db")
     adapter = _file_adapter(path, pragmas=[pragma])
     other = _locked_by_another_connection(path)
@@ -163,10 +163,10 @@ def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(pragma
     finally:
         other.close()
         adapter.close()
-    assert 0.25 <= elapsed < 2.5
+    assert 0.25 - clock_tick <= elapsed < 2.5
 
 
-def test_a_busy_timeout_pragma_is_the_wait_for_another_thread_on_the_memory_connection():
+def test_a_busy_timeout_pragma_is_the_wait_for_another_thread_on_the_memory_connection(clock_tick):
     adapter = SQLiteAdapter(":memory:", pragmas=["PRAGMA busy_timeout = 250"])
     adapter.connect()
     held, done = threading.Event(), threading.Event()
@@ -189,7 +189,7 @@ def test_a_busy_timeout_pragma_is_the_wait_for_another_thread_on_the_memory_conn
         done.set()
         thread.join(10)
     assert (adapter.timeout_ms, adapter.pragma_report()["busy_timeout"]) == (250, 250)
-    assert 0.25 <= elapsed < 2.5
+    assert 0.25 - clock_tick <= elapsed < 2.5
     adapter.close()
 
 

@@ -1,6 +1,7 @@
 """Fixtures every suite under ``tests/`` can ask for."""
 
 import itertools
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,3 +24,13 @@ def ticking_clock(monkeypatch):
             return start + timedelta(milliseconds=next(readings))
 
     monkeypatch.setattr(mixins, "datetime", Ticking)
+
+
+@pytest.fixture
+def clock_tick():
+    """The step, in seconds, of the clock a wait is measured with (``time.monotonic``, which is
+    also an event loop's ``time()``). A test that says a wait lasted at least its bound allows
+    one step: two readings a wait apart can show up to a step less than the wait, and an event
+    loop runs a timer up to a step before its time. The step is about 15.6 ms on Windows before
+    Python 3.13 and under a microsecond everywhere else."""
+    return time.get_clock_info("monotonic").resolution

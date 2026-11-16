@@ -2235,14 +2235,16 @@ async def test_a_plain_statement_that_waits_again_keeps_its_place_before_one_ask
 
 
 @pytest.mark.asyncio
-async def test_a_plain_statement_that_waits_again_times_out_at_the_deadline_of_its_first_ask(make_db):
+async def test_a_plain_statement_that_waits_again_times_out_at_the_deadline_of_its_first_ask(
+    make_db, clock_tick
+):
     """X asks with a 1 s bound and has its turn after half of it; the place it waits again
     for is held longer than the rest. X raises 1 s after it asked, not 1 s after its turn
     (1.5 s); Z, asked after it, writes."""
     t = await make_db()
     got = await x_waits_again(t, x_timeout=1.0, hold_s=0.5)
     assert got["x"] == "timed out"
-    assert 1.0 <= got["x_done_at"] - got["asked_at"] < 1.4
+    assert 1.0 - clock_tick <= got["x_done_at"] - got["asked_at"] < 1.4
     assert t.steps() == [
         "BEGIN IMMEDIATE",
         "SAVEPOINT sp_1",
