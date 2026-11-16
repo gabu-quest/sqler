@@ -112,6 +112,7 @@ TWINS = [
     ("SQLerSafeModel", "AsyncSQLerSafeModel"),
     ("SQLerLiteModel", "AsyncSQLerLiteModel"),
     ("SQLerLiteSafeModel", "AsyncSQLerLiteSafeModel"),
+    ("SQLerMsgspecModel", "AsyncSQLerMsgspecModel"),
     ("MigrationRunner", "AsyncMigrationRunner"),
     ("Migration", "AsyncMigration"),
     ("TrackedModel", "AsyncTrackedModel"),

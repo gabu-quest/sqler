@@ -1096,7 +1096,7 @@ ROUND_TRIPS = [
         {"created_at": datetime, "updated_at": datetime, "created_by": str, "updated_by": str},
     ),
     ("hooks", (Recorded,), {}),
-    ("tracking", (TrackedModel,), {}),  # not on msgspec (docs/API.md, change tracking)
+    ("tracking", (TrackedModel,), {}),
     ("full", (FullMixin,), {"created_at": datetime, "updated_at": datetime, "deleted_at": datetime}),
     ("audit_log", (AuditLogMixin,), {}),
 ]
@@ -1104,7 +1104,6 @@ ROUND_TRIP_CASES = [
     pytest.param(mixins, held, kind, id=f"{name}-{kind}")
     for name, mixins, held in ROUND_TRIPS
     for kind in KINDS
-    if not (name == "tracking" and kind == "msgspec")
 ]
 
 

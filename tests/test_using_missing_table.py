@@ -20,6 +20,7 @@ from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     SQLerDB,
     SQLerLiteModel,
     SQLerModel,
@@ -51,6 +52,10 @@ class MtALite(AsyncSQLerLiteModel):
     name: str = ""
 
 
+class MtAMs(AsyncSQLerMsgspecModel):
+    name: str = ""
+
+
 class MtPyPromoted(SQLerModel):
     __promoted__ = {"status": "TEXT NOT NULL DEFAULT 'new'"}
     name: str = ""
@@ -65,8 +70,8 @@ class MtAsPromoted(AsyncSQLerModel):
 
 SYNC = [MtPy, MtLite, MtMs, MtPyPromoted]
 SYNC_IDS = ["pydantic", "lite", "msgspec", "pydantic-promoted"]
-ASYNC = [MtAs, MtALite, MtAsPromoted]
-ASYNC_IDS = ["async-pydantic", "async-lite", "async-pydantic-promoted"]
+ASYNC = [MtAs, MtALite, MtAMs, MtAsPromoted]
+ASYNC_IDS = ["async-pydantic", "async-lite", "async-msgspec", "async-pydantic-promoted"]
 
 
 @pytest.fixture

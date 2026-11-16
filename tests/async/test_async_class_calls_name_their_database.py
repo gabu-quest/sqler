@@ -52,7 +52,13 @@ async def two_dbs(tmp_path):
 def test_the_async_bases_are_exercised():
     """Every async base has its rows of the table run here."""
     names = sorted({c.values[0].__name__ for c in subject_cases(want_async=True)})
-    assert names == ["AsyncSQLerLiteModel", "AsyncSQLerLiteSafeModel", "AsyncSQLerModel", "AsyncSQLerSafeModel"]
+    assert names == [
+        "AsyncSQLerLiteModel",
+        "AsyncSQLerLiteSafeModel",
+        "AsyncSQLerModel",
+        "AsyncSQLerMsgspecModel",
+        "AsyncSQLerSafeModel",
+    ]
 
 
 @pytest.mark.asyncio
@@ -119,9 +125,9 @@ def test_an_unbound_soft_delete_queryset_without_db_raises_the_unbound_error(nam
 
 
 def test_every_async_base_is_given_every_call_of_the_other_kind():
-    """Four async bases; ``validate_references`` is on the two pydantic ones, ``bind`` on the
-    two lite ones: 4 * 14 + 2 + 2 cases."""
-    assert len(wrong_kind_cases(want_async=True)) == 60
+    """Five async bases; ``validate_references`` is on the two pydantic ones, ``bind`` on the
+    two lite ones and the msgspec one: 5 * 14 + 2 + 3 cases."""
+    assert len(wrong_kind_cases(want_async=True)) == 75
 
 
 @pytest.mark.asyncio

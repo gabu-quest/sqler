@@ -63,7 +63,7 @@ from .mixins import (
 )
 
 # Msgspec models (optional - requires msgspec)
-from .msgspec import SQLerMsgspecModel, SQLerMsgspecModelBase
+from .msgspec import AsyncSQLerMsgspecModel, SQLerMsgspecModel, SQLerMsgspecModelBase
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     NO_REBASE_CONFIG,
@@ -187,6 +187,7 @@ __all__ = [
     # Msgspec models (optional - requires msgspec)
     "SQLerMsgspecModel",
     "SQLerMsgspecModelBase",
+    "AsyncSQLerMsgspecModel",
     # Exceptions
     "StaleVersionError",
     "ReferentialIntegrityError",

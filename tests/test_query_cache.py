@@ -26,6 +26,7 @@ from sqler import (
     AsyncSQLerLiteModel,
     AsyncSQLerLiteSafeModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     AsyncSQLerSafeModel,
     QueryCache,
     SQLerDB,
@@ -218,6 +219,7 @@ ASYNC_BASES = {
     "pydantic_safe": AsyncSQLerSafeModel,
     "lite": AsyncSQLerLiteModel,
     "lite_safe": AsyncSQLerLiteSafeModel,
+    "msgspec": AsyncSQLerMsgspecModel,
 }
 
 _tables = itertools.count()
@@ -231,7 +233,7 @@ def make(base, *mixins, table=None, alias=None):
     table of its own; ``alias``: its ``Meta.cache_table``."""
     table = table or f"qc_{base.__name__.lower()}_{next(_tables)}"
     ns = {"__module__": __name__, "__tablename__": table, "name": "", "__annotations__": {"name": str}}
-    kwds = {"tag": False} if base is SQLerMsgspecModel else {}
+    kwds = {"tag": False} if base in (SQLerMsgspecModel, AsyncSQLerMsgspecModel) else {}
     cls = types.new_class(f"Item_{table}", (CacheAwareModel, *mixins, base), kwds, lambda body: body.update(ns))
     if alias is not None:
         cls.Meta = type("Meta", (), {"cache_table": alias})
@@ -280,7 +282,7 @@ def _plain(base, *mixins):
     """A class of ``base`` with the ``mixins`` and no cache mixin."""
     table = f"qc_plain_{next(_tables)}"
     ns = {"__tablename__": table, "name": "", "__annotations__": {"name": str}}
-    kwds = {"tag": False} if base is SQLerMsgspecModel else {}
+    kwds = {"tag": False} if base in (SQLerMsgspecModel, AsyncSQLerMsgspecModel) else {}
     cls = types.new_class(f"Plain_{table}", (*mixins, base), kwds, lambda body: body.update(ns))
     return dataclass(cls) if base in LITE else cls
 
@@ -410,8 +412,6 @@ def _renamed(m):
 def _sync_cells():
     for way in SYNC_WAYS:
         for kind, base in SYNC_BASES.items():
-            if way == "save_partial" and base is SQLerMsgspecModel:
-                continue  # the change tracker does not support msgspec models
             yield pytest.param(way, kind, id=f"{way}-{kind}")
 
 

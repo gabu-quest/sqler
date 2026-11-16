@@ -21,6 +21,7 @@ from sqler import (
     AsyncSQLerLiteModel,
     AsyncSQLerLiteSafeModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     AsyncSQLerSafeModel,
 )
 from sqler.exceptions import NotFoundError, StaleVersionError, UniqueConstraintError
@@ -43,11 +44,17 @@ BASES = {
     "pydantic_safe": AsyncSQLerSafeModel,
     "lite": AsyncSQLerLiteModel,
     "lite_safe": AsyncSQLerLiteSafeModel,
+    "msgspec": AsyncSQLerMsgspecModel,
 }
 KINDS = list(BASES)
 SAFE = {"pydantic_safe", "lite_safe"}
 
 _tables = itertools.count()
+
+
+def _kwds(kind):
+    """The class keywords a class of ``kind`` is made with: a msgspec class has no tag."""
+    return {"tag": False} if kind == "msgspec" else {}
 
 CALLS: list = []
 PLAN: dict = {}
@@ -85,7 +92,7 @@ def make(kind, *mixins, fields=None):
     for field, (hint, default) in (fields or {}).items():
         ns["__annotations__"][field] = hint
         ns[field] = default
-    cls = types.new_class(f"Item_{table}", (*mixins, BASES[kind]), {}, lambda body: body.update(ns))
+    cls = types.new_class(f"Item_{table}", (*mixins, BASES[kind]), _kwds(kind), lambda body: body.update(ns))
     return dataclass(cls) if kind.startswith("lite") else cls
 
 
@@ -164,7 +171,9 @@ async def test_save_many_sets_the_audit_users(db, kind):
     assert (doc["created_by"], doc["updated_by"]) == ("alice", "alice")
 
 
-@pytest.mark.parametrize("kind", KINDS)
+# ``asave_many`` is the old name on the bases that had it; the msgspec base came after it and
+# never had the name
+@pytest.mark.parametrize("kind", [k for k in KINDS if k != "msgspec"])
 async def test_asave_many_warns_and_does_what_save_many_does(db, kind):
     Item = make(kind, TimestampMixin)
     batch = [Item(name="a"), Item(name="b")]
@@ -922,6 +931,10 @@ async def test_a_field_loads_as_the_type_it_declares(db, kind):
     assert got == want
     assert {n: type(v) for n, v in got.items()} == {n: type(v) for n, v in want.items()}
     assert loaded.is_dirty() is False
+
+
+def test_the_msgspec_base_has_no_asave_many():
+    assert hasattr(AsyncSQLerMsgspecModel, "asave_many") is False
 
 
 # ----- a field holding a plain dataclass: stored as its fields, loaded as its type ----------

@@ -365,6 +365,7 @@ def test_the_table_holds_every_public_base():
         "AsyncSQLerLiteModel",
         "AsyncSQLerLiteSafeModel",
         "AsyncSQLerModel",
+        "AsyncSQLerMsgspecModel",
         "AsyncSQLerSafeModel",
         "SQLerLiteModel",
         "SQLerLiteSafeModel",

@@ -590,22 +590,48 @@ def test_a_gone_row_in_a_tuple_with_one_entry_per_place_keeps_the_places(key, qu
 # ---- a msgspec class whose annotation names a class that is not there yet ------------
 
 
-def test_a_msgspec_class_naming_a_class_not_defined_yet_follows_nothing_until_it_is():
-    """As for the pydantic and the lite bases: no answer is kept while a name is not found."""
-    from sqler.models import _refs
+def _msgspec_base(kind: str):
+    from sqler.models.msgspec.async_model import AsyncSQLerMsgspecModel
     from sqler.models.msgspec.model import SQLerMsgspecModel
 
-    class RpMsHolder(SQLerMsgspecModel, kw_only=True):
+    return AsyncSQLerMsgspecModel if kind == "async" else SQLerMsgspecModel
+
+
+async def _msgspec_db(kind: str):
+    if kind == "async":
+        db = AsyncSQLerDB.in_memory(shared=False)
+        await db.connect()
+        return db
+    return SQLerDB.in_memory(shared=False)
+
+
+async def _aw(value):
+    return await value if inspect.isawaitable(value) else value
+
+
+@pytest.mark.parametrize("kind", ["sync", "async"])
+def test_a_msgspec_class_naming_a_class_not_defined_yet_follows_nothing_until_it_is(kind):
+    """As for the pydantic and the lite bases: no answer is kept while a name is not found."""
+    from sqler.models import _refs
+
+    base = _msgspec_base(kind)
+
+    class RpMsHolder(base, kw_only=True):
         name: str = ""
         child: Optional["RpMsLater"] = None  # noqa: F821 - defined below, after the first read
 
-    db = SQLerDB.in_memory()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        RpMsHolder.set_db(db, "rp_ms_holder")
-    before = (_refs.typed_fields(RpMsHolder), RpMsHolder.query().all())
+    async def scenario():
+        db = await _msgspec_db(kind)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            RpMsHolder.set_db(db, "rp_ms_holder")
+        before = (_refs.typed_fields(RpMsHolder), await _aw(RpMsHolder.query().all()))
+        await _aw(db.close())
+        return before
 
-    class RpMsLater(SQLerMsgspecModel, kw_only=True):
+    before = asyncio.run(scenario())
+
+    class RpMsLater(base, kw_only=True):
         name: str = ""
 
     globals()["RpMsLater"] = RpMsLater
@@ -613,7 +639,6 @@ def test_a_msgspec_class_naming_a_class_not_defined_yet_follows_nothing_until_it
         after = _refs.typed_fields(RpMsHolder)
     finally:
         del globals()["RpMsLater"]
-    db.close()
 
     assert before == ({}, [])
     assert after == {"child": _refs.Position((RpMsLater,), None, None)}
@@ -962,34 +987,40 @@ def test_a_reference_to_no_row_costs_what_a_found_one_costs(key, way):
     assert run(key, scenario) == (STATEMENTS_OF_A_HOLDER[way], True)
 
 
-def test_a_msgspec_query_reads_a_typed_reference_to_no_row_by_the_same_rule():
-    from sqler.models.msgspec.model import SQLerMsgspecModel
+@pytest.mark.parametrize("kind", ["sync", "async"])
+def test_a_msgspec_query_reads_a_typed_reference_to_no_row_by_the_same_rule(kind):
+    base = _msgspec_base(kind)
 
-    class RpMsUser(SQLerMsgspecModel, kw_only=True):
+    class RpMsUser(base, kw_only=True):
         name: str = ""
 
-    class RpMsOwner(SQLerMsgspecModel, kw_only=True):
+    class RpMsOwner(base, kw_only=True):
         one: Optional[RpMsUser] = None
         many: list[RpMsUser] = []
         by_key: dict[str, RpMsUser] = {}
 
+    async def scenario():
+        db = await _msgspec_db(kind)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                RpMsUser.set_db(db, "rp_ms_user")
+                RpMsOwner.set_db(db, "rp_ms_owner")
+            await _aw(db.insert_document("rp_ms_user", {"name": "u1"}))
+            ref, gone = {"_table": "rp_ms_user", "_id": 1}, {"_table": "rp_ms_user", "_id": 99}
+            await _aw(db.insert_document("rp_ms_owner", {"one": gone, "many": [ref, gone], "by_key": {"a": ref, "b": gone}}))
+            got = [(await _aw(RpMsOwner.query().all()))[0], await _aw(RpMsOwner.query().first())]
+            return [
+                (g.one, [(type(m).__name__, m._id, m.name) for m in g.many], sorted(g.by_key)) for g in got
+            ]
+        finally:
+            await _aw(db.close())
+
     globals()["RpMsUser"] = RpMsUser
-    db = SQLerDB.in_memory()
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            RpMsUser.set_db(db, "rp_ms_user")
-            RpMsOwner.set_db(db, "rp_ms_owner")
-        db.insert_document("rp_ms_user", {"name": "u1"})
-        ref, gone = {"_table": "rp_ms_user", "_id": 1}, {"_table": "rp_ms_user", "_id": 99}
-        db.insert_document("rp_ms_owner", {"one": gone, "many": [ref, gone], "by_key": {"a": ref, "b": gone}})
-        got = [RpMsOwner.query().all()[0], RpMsOwner.query().first()]
-        out = [
-            (g.one, [(type(m).__name__, m._id, m.name) for m in g.many], sorted(g.by_key)) for g in got
-        ]
+        out = asyncio.run(scenario())
     finally:
         del globals()["RpMsUser"]
-        db.close()
 
     assert out == [(None, [("RpMsUser", 1, "u1")], ["a"])] * 2
 

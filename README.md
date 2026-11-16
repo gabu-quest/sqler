@@ -183,7 +183,7 @@ Run `uv run python -m benchmarks run --scale medium --storage both` to generate 
 - Three model backends — all with the same API:
   - **Pydantic** (`SQLerModel`) — full validation, rich serialization
   - **Dataclass** (`SQLerLiteModel`) — zero dependencies, WASM/Pyodide compatible
-  - **msgspec** (`SQLerMsgspecModel`) — C-level JSON performance, Struct-based
+  - **msgspec** (`SQLerMsgspecModel`, `AsyncSQLerMsgspecModel`) — C-level JSON performance, Struct-based
 - Fluent query builder: `filter`, `exclude`, `order_by`, `paginate`, `contains`, `isin`, `between`
 - `F()` operator for nested fields: `F("x")["y"]`, `F(["items"]).any().where(...)`
 - Sync and async APIs with matching semantics

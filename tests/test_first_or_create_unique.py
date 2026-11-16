@@ -17,6 +17,7 @@ from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     SQLerDB,
     SQLerLiteModel,
     SQLerModel,
@@ -58,10 +59,16 @@ class FuALite(AsyncSQLerLiteModel):
     name: str = ""
 
 
+class FuAMs(AsyncSQLerMsgspecModel):
+    email: str = ""
+    handle: str = ""
+    name: str = ""
+
+
 SYNC = [FuPy, FuLite, FuMs]
 SYNC_IDS = ["pydantic", "lite", "msgspec"]
-ASYNC = [FuAs, FuALite]
-ASYNC_IDS = ["async-pydantic", "async-lite"]
+ASYNC = [FuAs, FuALite, FuAMs]
+ASYNC_IDS = ["async-pydantic", "async-lite", "async-msgspec"]
 
 
 def _sync_db(tmp_path, cls, *fields):

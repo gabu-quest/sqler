@@ -30,6 +30,7 @@ from sqler.models import (
     AsyncSQLerLiteModel,
     AsyncSQLerLiteSafeModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     AsyncSQLerSafeModel,
     SQLerLiteModel,
     SQLerLiteSafeModel,
@@ -114,14 +115,20 @@ def _lite(base):
     return make
 
 
-def _msgspec(promoted, default):
-    class Ticket(SQLerMsgspecModel):
-        __tablename__ = TABLE
-        __promoted__ = promoted
-        name: str = ""
-        status: Optional[str] = default
+def _msgspec_on(base):
+    def make(promoted, default):
+        class Ticket(base):
+            __tablename__ = TABLE
+            __promoted__ = promoted
+            name: str = ""
+            status: Optional[str] = default
 
-    return Ticket
+        return Ticket
+
+    return make
+
+
+_msgspec = _msgspec_on(SQLerMsgspecModel)
 
 
 class Run:
@@ -249,6 +256,7 @@ WAYS = [
     Way("async_safe.save", _pydantic(AsyncSQLerSafeModel), True, _asave),
     Way("async_lite.save", _lite(AsyncSQLerLiteModel), True, _asave),
     Way("async_lite_safe.save", _lite(AsyncSQLerLiteSafeModel), True, _asave),
+    Way("async_msgspec.save", _msgspec_on(AsyncSQLerMsgspecModel), True, _asave),
 ]
 MODEL_WAYS = [w for w in WAYS if w.model is not None]
 

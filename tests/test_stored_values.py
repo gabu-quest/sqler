@@ -33,6 +33,7 @@ from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
+from sqler.models.msgspec.async_model import AsyncSQLerMsgspecModel
 from sqler.models.msgspec.model import SQLerMsgspecModel
 from sqler.query import SQLerField as F
 
@@ -181,6 +182,7 @@ BASES = {
     "async-safe": Base(AsyncSQLerSafeModel, _pydantic, True, True),
     "async-lite": Base(AsyncSQLerLiteModel, _lite, True, False),
     "async-lite-safe": Base(AsyncSQLerLiteSafeModel, _lite, True, False),
+    "async-msgspec": Base(AsyncSQLerMsgspecModel, _msgspec, True, False),
 }
 # the bases that have is_dirty() (the async pydantic bases have none)
 DIRTY_BASES = [name for name in BASES if name not in {"async", "async-safe"}]
@@ -343,6 +345,8 @@ _FAMILIES = {
     "lite": (SQLerLiteModel, SQLerLiteModel, _lite, False),
     "async-lite": (AsyncSQLerLiteModel, AsyncSQLerLiteModel, _lite, True),
     "msgspec": (SQLerMsgspecModel, SQLerMsgspecModel, _msgspec, False),
+    "async-msgspec": (AsyncSQLerMsgspecModel, AsyncSQLerMsgspecModel, _msgspec, True),
+    "async-msgspec-holds-sync": (AsyncSQLerMsgspecModel, SQLerMsgspecModel, _msgspec, True),
 }
 
 
@@ -352,7 +356,7 @@ def test_a_reference_and_a_stored_reference_beside_a_date(family):
 
     async def steps(rows):
         parent, child = _family(parent_base, child_base, make)
-        if family == "async-holds-sync":
+        if family.endswith("holds-sync"):
             child.set_db(SQLerDB.in_memory(shared=False), "sv_kids")
         else:
             child.set_db(rows.db, "sv_kids")
@@ -1040,11 +1044,11 @@ def test_a_decimal_sum_is_found_by_the_decimal_it_equals():
 
 
 def _typed(base_cls, **ann):
-    kw = {"kw_only": True} if base_cls is SQLerMsgspecModel else {}
+    kw = {"kw_only": True} if base_cls in (SQLerMsgspecModel, AsyncSQLerMsgspecModel) else {}
     return type("SvTyped", (base_cls,), {"__annotations__": ann, **{k: None for k in ann}}, **kw)
 
 
-@pytest.mark.parametrize("base", ["pydantic", "safe", "msgspec", "async", "async-safe"])
+@pytest.mark.parametrize("base", ["pydantic", "safe", "msgspec", "async", "async-safe", "async-msgspec"])
 def test_a_decimal_field_loads_as_the_decimal_saved(base):
     spec = BASES[base]
 
@@ -1493,6 +1497,12 @@ class _MsgspecBlob(SQLerMsgspecModel, kw_only=True):
     blob: Optional[bytes] = None
 
 
+class _MsgspecAsyncBlob(AsyncSQLerMsgspecModel, kw_only=True):
+    __promoted__ = {"blob": "BLOB"}
+    name: str = ""
+    blob: Optional[bytes] = None
+
+
 class BlobRow(SQLerModel):
     __promoted__ = {"blob": "BLOB"}
     name: str = ""
@@ -1525,6 +1535,7 @@ _BLOB_MODELS = {
     "lite": (_LiteBlob, False),
     "async-lite": (_LiteAsyncBlob, True),
     "msgspec": (_MsgspecBlob, False),
+    "async-msgspec": (_MsgspecAsyncBlob, True),
 }
 
 
@@ -1559,7 +1570,7 @@ def test_a_promoted_blob_column_takes_bytes_in_a_document_write(is_async):
 def _promoted(spec):
     """A model of the base with ``v`` in the document and ``col`` as a promoted column."""
     attrs = {"__annotations__": {"v": Any, "col": Any}, "v": None, "col": None, "__promoted__": {"col": "TEXT"}}
-    if spec.cls is SQLerMsgspecModel:
+    if spec.cls in (SQLerMsgspecModel, AsyncSQLerMsgspecModel):
         return type("SvP", (spec.cls,), attrs, kw_only=True)
     cls = type("SvP", (spec.cls,), attrs)
     return cls if spec.validates else dataclass(cls)

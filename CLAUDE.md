@@ -38,7 +38,8 @@ public name its sync twin has):
   does besides the row), `_compat.py` (which optional backends are installed, and the type each field
   declares), `_host.py` (what a mixin may call on its model class, for the type checker).
   - `models/lite/`: the dataclass models, no pydantic needed.
-  - `models/msgspec/`: the msgspec model.
+  - `models/msgspec/`: the msgspec models: `base.py` (the bodies both share), `model.py`
+    (`SQLerMsgspecModel`) and `async_model.py` (`AsyncSQLerMsgspecModel`).
 - `query/`: `SQLerQuery` (`query.py`), `AsyncSQLerQuery` (`async_query.py`), `SQLerField`/`F`
   (`field.py`) and `SQLerExpression` (`expression.py`).
 - Top-level modules: `cache.py` (query cache), `export.py` (CSV, JSON and JSONL import and
@@ -53,7 +54,7 @@ public name its sync twin has):
 |---------|-------------|------------|--------------|-------------|
 | pydantic | `SQLerModel` | `SQLerSafeModel` | `AsyncSQLerModel` | `AsyncSQLerSafeModel` |
 | lite | `SQLerLiteModel` | `SQLerLiteSafeModel` | `AsyncSQLerLiteModel` | `AsyncSQLerLiteSafeModel` |
-| msgspec | `SQLerMsgspecModel` | | | |
+| msgspec | `SQLerMsgspecModel` | | `AsyncSQLerMsgspecModel` | |
 
 A safe model checks and bumps a row version on every save. `SQLerLiteModelBase` and
 `SQLerMsgspecModelBase` are the shared parents of the lite and msgspec models.

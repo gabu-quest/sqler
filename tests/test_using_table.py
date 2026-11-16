@@ -17,6 +17,7 @@ from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     SQLerDB,
     SQLerLiteModel,
     SQLerModel,
@@ -60,10 +61,16 @@ class UtALiteJob(AsyncSQLerLiteModel):
     status: str = "new"
 
 
+class UtAMsJob(AsyncSQLerMsgspecModel):
+    __tablename__ = "ut_ams_jobs"
+    name: str = ""
+    status: str = "new"
+
+
 SYNC = [UtPyJob, UtLiteJob, UtMsJob]
 SYNC_IDS = ["pydantic", "lite", "msgspec"]
-ASYNC = [UtAsJob, UtALiteJob]
-ASYNC_IDS = ["async-pydantic", "async-lite"]
+ASYNC = [UtAsJob, UtALiteJob, UtAMsJob]
+ASYNC_IDS = ["async-pydantic", "async-lite", "async-msgspec"]
 
 
 def _binding(cls):

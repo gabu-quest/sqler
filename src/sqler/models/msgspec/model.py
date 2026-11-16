@@ -7,8 +7,6 @@ It maintains full API compatibility with SQLerLiteModel.
 
 from __future__ import annotations
 
-import os
-import warnings
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -18,7 +16,6 @@ from typing import (
 )
 
 from sqler import registry
-from sqler._stored import stored
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import UniqueConstraintError
 from sqler.models import _dirty, _refs, _table_names, _write_rules
@@ -30,15 +27,10 @@ from sqler.models._table_names import (  # noqa: F401
     _read_document,
     _read_documents,
 )
-from sqler.models.msgspec.base import SQLerMsgspecModelBase, _mixin_field_names, _public_fields
-from sqler.utils import validate_field_name, validate_table_name
+from sqler.models.msgspec.base import SQLerMsgspecModelBase
 
 if TYPE_CHECKING:
     from sqler.models.queryset import SQLerQuerySet
-
-# The deprecation warning is attributed to the first caller outside the sqler package, so a
-# subclass's ``super().set_db()`` does not hide it behind sqler's own file.
-_SQLER_PREFIXES = (os.path.dirname(os.path.abspath(registry.__file__)) + os.sep,)
 
 T = TypeVar("T", bound="SQLerMsgspecModel")
 
@@ -46,7 +38,8 @@ T = TypeVar("T", bound="SQLerMsgspecModel")
 class SQLerMsgspecModel(SQLerMsgspecModelBase):
     """Msgspec Struct-based SQLer model with persistence helpers.
 
-    Instances persist as JSON into SQLite.
+    Instances persist as JSON into SQLite. Its async twin is ``AsyncSQLerMsgspecModel``;
+    the checks and conversions both make are in ``SQLerMsgspecModelBase``.
 
     Usage::
 
@@ -93,43 +86,14 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         Raises:
             TypeError: ``db`` is neither ``None`` nor a ``SQLerDB``; the class is left as it was.
         """
-        _table_names._check_given(cls, db)
-        warnings.warn(
-            f"{cls.__name__}.set_db() is deprecated. "
-            f"{_table_names.DATABASE_RULE} "
-            "set_db() will be removed in a future version.",
-            DeprecationWarning,
-            skip_file_prefixes=_SQLER_PREFIXES,
-        )
-        explicit = getattr(cls, "__tablename__", None)
-        chosen = validate_table_name(
-            table or explicit or _default_table_name(cls.__name__)
-        )
-        cls._db = db
-        cls._table = chosen
-        cls.__tablename__ = chosen  # type: ignore[attr-defined]
+        chosen = cls._bind_class(db, table)
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            cls._db._ensure_table_with_promoted(cls._table, promoted, checks, model=cls)
+            db._ensure_table_with_promoted(chosen, promoted, checks, model=cls)
         else:
-            cls._db._ensure_table(cls._table)
-        registry.register(cls._table, cls)
-
-    @classmethod
-    def bind(cls: Type[T], db: "SQLerDB", table: Optional[str] = None) -> None:
-        """Alias for set_db() (deprecated)."""
-        warnings.warn(
-            f"{cls.__name__}.bind() is deprecated. "
-            f"{_table_names.DATABASE_RULE} "
-            "bind() will be removed in a future version.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        with warnings.catch_warnings():
-            # bind() already emitted its own deprecation; suppress the inner set_db() one
-            warnings.simplefilter("ignore", DeprecationWarning)
-            cls.set_db(db, table)
+            db._ensure_table(chosen)
+        registry.register(chosen, cls)
 
     @classmethod
     def using(cls: Type[T], db: "SQLerDB", table: Optional[str] = None) -> "SQLerQuerySet[T]":
@@ -145,9 +109,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         A read creates no table: on a table nobody created, ``all()`` is empty,
         ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
         """
-        _table_names._check_database(cls, db)
-        table = validate_table_name(table) if table is not None else _model_table_name(cls)
-        return cls._queryset(db, table)
+        return cls._queryset(db, cls._using_table(db, table))
 
     @classmethod
     def _queryset(cls: Type[T], db: "SQLerDB", table: str) -> "SQLerQuerySet[T]":
@@ -156,13 +118,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         from sqler.models.queryset import SQLerQuerySet
         from sqler.query import SQLerQuery
 
-        q = SQLerQuery(table=table, adapter=db.adapter)
-        if cls._versioned_rows:
-            q = q.with_version()
-        promoted = getattr(cls, "__promoted__", None)
-        if promoted:
-            q = q._clone(promoted_fields=list(promoted.keys()))
-        return SQLerQuerySet[T](cls, q, db)
+        return SQLerQuerySet[T](cls, cls._shaped(SQLerQuery(table=table, adapter=db.adapter)), db)
 
     @classmethod
     def db(cls: Type[T]) -> "SQLerDB":
@@ -206,8 +162,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             List of model instances (in same order as input ids).
             Missing ids are silently omitted from result.
         """
-        if not ids:
-            _table_names._check_given(cls, db)
+        if cls._no_ids(ids, db):
             return []
         db, table = cls._resolve_binding(db)
         return _refs.models(cls, _read_documents(db, table, ids), db, table)
@@ -255,21 +210,11 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         Returns:
             tuple[Model, bool]: (instance, created) where created is True if new.
         """
-        from sqler.query.field import SQLerField as F
-
-        for key in lookup:
-            validate_field_name(key)
-        if db is not None:
-            qs = cls.using(db)
-        else:
-            qs = cls.query()
-        for key, value in lookup.items():
-            qs = qs.filter(F(key) == value)
+        qs = cls._lookup(lookup, db)
         existing = qs.first()
         if existing is not None:
             return existing, False
-        merged = {**lookup, **(defaults or {})}
-        inst = cls(**merged)
+        inst = cls(**{**lookup, **(defaults or {})})
         try:
             inst.save(db=db)
         except UniqueConstraintError:
@@ -335,22 +280,14 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
     def _insert_rows(cls, db, table: str, instances: list) -> None:
         """Write new instances in one batch; each takes its ``_id`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
-
         if promoted:
-            checks = getattr(cls, "__checks__", None)
-            db._ensure_promoted(table, promoted, checks, model=cls)
-
+            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
         payloads = [inst._dump_with_relations() for inst in instances]
-
         if promoted:
-            promoted_fields = list(promoted.keys())
-            ids = db.insert_many_promoted(table, payloads, promoted_fields)
+            ids = db.insert_many_promoted(table, payloads, list(promoted.keys()))
         else:
             ids = db.insert_many(table, payloads)
-
-        for inst, id_, payload in zip(instances, ids, payloads):
-            inst._id = id_
-            inst._snapshot = _dirty.snapshot(payload)
+        cls._inserted(instances, ids, payloads)
 
     def save(self: T, *, db=None, _partial: bool = False) -> T:
         """Insert or update this instance and update ``_id``.
@@ -381,13 +318,10 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             changed = _dirty.changed_fields(self._snapshot or {}, payload)
             db._update_fields(table, new_id, payload, changed, promoted or ())
         elif promoted:
-            promoted_fields = list(promoted.keys())
-            new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
+            new_id = db.upsert_document_promoted(table, self._id, payload, list(promoted.keys()))
         else:
             new_id = db.upsert_document(table, self._id, payload)
-        self._id = new_id
-        self._snapshot = _dirty.snapshot(payload)
-        return self
+        return self._wrote(new_id, payload)
 
     def delete(self, *, db=None) -> None:
         """Delete this instance by ``_id`` and unset it.
@@ -426,36 +360,10 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
             self: The same instance (for chaining).
         """
         db, table = _instance_binding(self, db)
-        if self._id is None:
-            raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = _read_document(db, table, self._id)
-        if doc is None:
-            raise LookupError(f"Row {self._id} not found for refresh")
-        own = {(table, self._id): self}
-        return _refs.run(_refs.load(type(self), [doc], db, table, self._refreshed, own))[0]
+        doc = _read_document(db, table, self._saved_id())
+        return _refs.run(self._reload(doc, db, table))[0]
 
-    def _refreshed(self: T, doc: dict, row: dict) -> T:
-        """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
-        cls = type(self)
-        fresh = _refs.validate(cls, doc)  # typed, as a load gives it
-        for name in (*(f.name for f in _public_fields(cls)), *_mixin_field_names(cls)):
-            if name in doc:
-                setattr(self, name, getattr(fresh, name))
-        self._snapshot = _dirty.snapshot(row)
-        return self
 
-    def _dump_with_relations(self) -> dict:
-        """The document ``save()`` writes: each field in stored form, a related model as the
-        reference to its row."""
-        cls = type(self)
-        payload = {
-            f.name: stored(getattr(self, f.name), SQLerMsgspecModel, f.name) for f in _public_fields(cls)
-        }
-        # Include mixin fields (not visible to msgspec.structs.fields)
-        for name in _mixin_field_names(cls):
-            payload[name] = stored(getattr(self, name, None), SQLerMsgspecModel, name)
-        return payload
-
-    # ----- dirty tracking -----
-    is_dirty = _dirty.is_dirty
-    get_dirty_fields = _dirty.get_dirty_fields
+# a msgspec model is stored as the reference to its row (an async one is refused: its row
+# is read and written through an AsyncSQLerDB)
+SQLerMsgspecModel._reference_bases = (SQLerMsgspecModel,)

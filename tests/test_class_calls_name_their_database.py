@@ -433,7 +433,7 @@ def test_the_subjects_are_every_base_and_mixin():
             "SQLerModel", "SQLerSafeModel", "AsyncSQLerModel", "AsyncSQLerSafeModel",
             "SQLerLiteModel", "SQLerLiteModelBase", "SQLerLiteSafeModel",
             "AsyncSQLerLiteModel", "AsyncSQLerLiteSafeModel",
-            "SQLerMsgspecModel", "SQLerMsgspecModelBase",
+            "SQLerMsgspecModel", "SQLerMsgspecModelBase", "AsyncSQLerMsgspecModel",
             "TimestampMixin", "SoftDeleteMixin", "AsyncSoftDeleteMixin", "HooksMixin",
             "AsyncHooksMixin", "FullMixin", "AsyncFullMixin", "AuditMixin", "AsyncAuditMixin",
             "AuditLogMixin", "AsyncAuditLogMixin", "SearchableMixin",
