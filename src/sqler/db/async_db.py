@@ -268,7 +268,7 @@ class AsyncSQLerDB(_TableMemory):
                     now = (await self._learn(table))[0]
                 except sqlite3.OperationalError:
                     return False
-        return bool(now) and now != names
+        return now != names
 
     async def _sent_all(self, table: str, make: Any) -> Any:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._sent_all` (``make`` is awaited)."""
@@ -341,6 +341,8 @@ class AsyncSQLerDB(_TableMemory):
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._upsert`."""
 
         async def make() -> tuple[str, list[Any], Any]:
+            if _id is None and not fields and self._layout_of(table) is None:
+                await self._ensure_table(table)
             columns, layout, has = await self._shape_of(table, fields)
             return _upsert_sql(table, _id, doc, columns, layout, has)
 
@@ -385,10 +387,11 @@ class AsyncSQLerDB(_TableMemory):
             raise ValueError("expected_version required for update")
 
         async def make() -> tuple[str, list[Any], Any]:
-            await self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
-            if not self._is_versioned(table) and (_id is None or await self._has_version_column(table) is not None):
-                await self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
+            # one look at what is remembered; an unsettled table is refused here, before it is given ``_version``
             columns, layout, has = await self._shape_of(table, fields)
+            if not has and (_id is None or await self._has_version_column(table) is not None):
+                await self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
+                columns, layout, has = await self._shape_of(table, fields)
             return _upsert_sql(table, _id, doc, columns, layout, has, expected_version)
 
         try:
@@ -415,17 +418,11 @@ class AsyncSQLerDB(_TableMemory):
 
     async def insert_document(self, table: str, doc: dict[str, Any]) -> int:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB.insert_document`."""
-        table = validate_table_name(table)
-        await self._ensure_table(table)
-        return await self._upsert(table, None, doc)
+        return await self._upsert(validate_table_name(table), None, doc)
 
     async def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB.upsert_document`."""
-        table = validate_table_name(table)
-        if _id is None:
-            await self._ensure_table(table)
-            return await self.insert_document(table, doc)
-        return await self._upsert(table, _id, doc)
+        return await self._upsert(validate_table_name(table), _id, doc)
 
     async def _update_fields(
         self,

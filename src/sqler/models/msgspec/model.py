@@ -183,7 +183,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         doc = _read_document(db, table, id_)
         if doc is None:
             return None
-        return _refs.run(_refs.load(cls, [doc], db, table))[0]
+        return _refs.models(cls, [doc], db, table)[0]
 
     @classmethod
     def from_ids(cls: Type[T], ids: list[int], *, db=None) -> list[T]:
@@ -202,7 +202,7 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         if not ids:
             return []
         db, table = cls._resolve_binding(db)
-        return _refs.run(_refs.load(cls, _read_documents(db, table, ids), db, table))
+        return _refs.models(cls, _read_documents(db, table, ids), db, table)
 
     @classmethod
     def count(cls: Type[T]) -> int:

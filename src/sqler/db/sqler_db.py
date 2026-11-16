@@ -1142,9 +1142,11 @@ class SQLerDB(_TableMemory):
     def _has_moved(self, table: str, names: Optional[tuple[str, ...]]) -> bool:
         """Whether ``table`` has other names now than ``names``, those a refused statement was
         built from: the names remembered now when they are others (another statement learned
-        the table since), else the names read now (:meth:`_learn`). A statement built from
-        nothing remembered, or a table that is gone or cannot be read now, has nothing to
-        build again from."""
+        the table since), else the names read now (:meth:`_learn`). A remembered table that is
+        gone has none now and is forgotten: the statement built again is built from nothing
+        remembered, so a plain insert makes its table again (:meth:`_upsert`) and anything else
+        is refused for the missing table. A statement built from nothing remembered, or a
+        table that cannot be read now, has nothing to build again from."""
         if names is None:
             return False  # SQLite refused it for itself
         now = self._layout_of(table)
@@ -1153,7 +1155,7 @@ class SQLerDB(_TableMemory):
                 now = self._learn(table)[0]
             except sqlite3.OperationalError:
                 return False
-        return bool(now) and now != names
+        return now != names
 
     def _memory_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]]]:
         """The promoted columns and remembered names of :meth:`_shape_of`."""
@@ -1244,9 +1246,12 @@ class SQLerDB(_TableMemory):
     def _upsert(self, table: str, _id: Optional[int], doc: dict[str, Any], fields: Any = ()) -> int:
         """Write ``doc`` as a new row, or into row ``_id``, each key of the table's columns in
         its column (:meth:`_memory_of`, with the caller's ``fields``), with the guard of what is
-        remembered of it (:meth:`_sent`). A write by ``_id`` makes no table."""
+        remembered of it (:meth:`_sent`). A new row with no ``fields`` makes its table, for
+        which nothing is sent once the table is remembered; a write by ``_id`` makes no table."""
 
         def make() -> tuple[str, list[Any], Any]:
+            if _id is None and not fields and self._layout_of(table) is None:
+                self._ensure_table(table)
             columns, layout, has = self._shape_of(table, fields)
             return _upsert_sql(table, _id, doc, columns, layout, has)
 
@@ -1301,10 +1306,11 @@ class SQLerDB(_TableMemory):
             raise ValueError("expected_version required for update")
 
         def make() -> tuple[str, list[Any], Any]:
-            self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
-            if not self._is_versioned(table) and (_id is None or self._has_version_column(table) is not None):
-                self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
+            # one look at what is remembered; an unsettled table is refused here, before it is given ``_version``
             columns, layout, has = self._shape_of(table, fields)
+            if not has and (_id is None or self._has_version_column(table) is not None):
+                self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
+                columns, layout, has = self._shape_of(table, fields)
             return _upsert_sql(table, _id, doc, columns, layout, has, expected_version)
 
         if _id is None:
@@ -1332,9 +1338,7 @@ class SQLerDB(_TableMemory):
         Returns:
             int: Newly assigned ``_id``.
         """
-        table = validate_table_name(table)
-        self._ensure_table(table)
-        return self._upsert(table, None, doc)
+        return self._upsert(validate_table_name(table), None, doc)
 
     def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
         """Insert or update a document, as :meth:`insert_document` writes it; an update leaves a
@@ -1352,11 +1356,7 @@ class SQLerDB(_TableMemory):
             NotFoundError: The table has no row ``_id``, or there is no such table; nothing is
                 written and no table is made.
         """
-        table = validate_table_name(table)
-        if _id is None:
-            self._ensure_table(table)
-            return self.insert_document(table, doc)
-        return self._upsert(table, _id, doc)
+        return self._upsert(validate_table_name(table), _id, doc)
 
     def _update_fields(
         self,

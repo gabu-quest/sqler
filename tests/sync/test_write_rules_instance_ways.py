@@ -727,8 +727,9 @@ def test_a_refused_target_delete_leaves_the_referrers_as_they_were(
 # statement: a new row, a changed row, a batch of two, and a delete (the same for delete() and
 # each policy). A delete also looks through every registered table for rows that refer to
 # the target; those reads depend on what else is registered and are left out.
-# a write by _id makes no table; a batch of several rows sends the check of the columns first (a ``SELECT``)
-UNVERSIONED = (["CREATE", "CREATE", "INSERT"], ["UPDATE"], ["CREATE", "SELECT", "INSERT"])
+# a write by _id makes no table; a new row makes none once its table is remembered; a batch of
+# several rows sends the check of the columns first (a ``SELECT``)
+UNVERSIONED = (["INSERT"], ["UPDATE"], ["CREATE", "SELECT", "INSERT"])
 VERSIONED = (["INSERT"], ["BEGIN", "UPDATE"], ["CREATE", "PRAGMA", "CREATE", "PRAGMA", "SELECT", "INSERT"])
 A_DELETE = ["CREATE", "DELETE"]
 

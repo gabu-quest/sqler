@@ -164,7 +164,7 @@ class SQLerModel(BaseModel):
         doc = _read_document(db, table, id_, cls._versioned_rows)
         if doc is None:
             return None
-        return _refs.run(_refs.load(cls, [doc], db, table))[0]
+        return _refs.models(cls, [doc], db, table)[0]
 
     @classmethod
     def from_ids(cls: Type[TModel], ids: list[int], *, db=None) -> list[TModel]:
@@ -186,7 +186,7 @@ class SQLerModel(BaseModel):
             return []
         db, table = cls._resolve_binding(db)
         read = _refs.read_versioned if cls._versioned_rows else _read_documents
-        return _refs.run(_refs.load(cls, read(db, table, ids), db, table))
+        return _refs.models(cls, read(db, table, ids), db, table)
 
     @classmethod
     def count(cls: Type[TModel]) -> int:
