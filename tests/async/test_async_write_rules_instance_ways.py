@@ -9,7 +9,7 @@ import re
 import types
 import warnings
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import ClassVar, Optional
 
 import pytest
@@ -30,8 +30,10 @@ from sqler.models.mixins import (
     AsyncAuditMixin,
     AsyncFullMixin,
     AsyncHooksMixin,
+    AsyncSoftDeleteMixin,
     TimestampMixin,
 )
+from sqler.tracking import AsyncTrackedModel
 
 pytestmark = pytest.mark.asyncio
 
@@ -74,9 +76,14 @@ class Unhooked(Recorded):
     _hooks_enabled: ClassVar[bool] = False
 
 
-def make(kind, *mixins):
+def make(kind, *mixins, fields=None):
+    """A model class of ``kind`` with the mixins, a ``name`` field, the ``fields``
+    (``{name: (type, default)}``) and its own table."""
     table = f"awr_{kind}_{next(_tables)}"
     ns = {"__tablename__": table, "name": "", "__annotations__": {"name": str}}
+    for field, (hint, default) in (fields or {}).items():
+        ns["__annotations__"][field] = hint
+        ns[field] = default
     cls = types.new_class(f"Item_{table}", (*mixins, BASES[kind]), {}, lambda body: body.update(ns))
     return dataclass(cls) if kind.startswith("lite") else cls
 
@@ -802,3 +809,115 @@ async def test_a_set_null_on_a_safe_table_another_object_remade_without_its_vers
     [(data,)] = _raw(path, "SELECT data FROM awr_safe_books")
     assert json.loads(data) == {"title": "b", "author": None}
     assert _raw(path, "SELECT count(*) FROM awr_nulled_authors") == [(0,)]
+
+
+# ----- a loaded instance saves again, on every async base -----------------------------------
+
+T_SET = datetime(2026, 1, 2, 3, 4, 5, 123456, tzinfo=timezone.utc)
+
+# (name, mixins, the fields the mixins give and the type each holds once set)
+ROUND_TRIPS = [
+    ("timestamp", (TimestampMixin,), {"created_at": datetime, "updated_at": datetime}),
+    ("soft_delete", (AsyncSoftDeleteMixin,), {"deleted_at": datetime}),
+    (
+        "audit",
+        (AsyncAuditMixin,),
+        {"created_at": datetime, "updated_at": datetime, "created_by": str, "updated_by": str},
+    ),
+    ("hooks", (Recorded,), {}),
+    ("tracking", (AsyncTrackedModel,), {}),
+    ("full", (AsyncFullMixin,), {"created_at": datetime, "updated_at": datetime, "deleted_at": datetime}),
+    ("audit_log", (AsyncAuditLogMixin,), {}),
+]
+ROUND_TRIP_CASES = [
+    pytest.param(mixins, held, kind, id=f"{name}-{kind}")
+    for name, mixins, held in ROUND_TRIPS
+    for kind in KINDS
+]
+
+
+@pytest.mark.parametrize("mixins, held, kind", ROUND_TRIP_CASES)
+async def test_a_loaded_instance_holds_its_mixin_fields_as_typed_and_saves_again(db, mixins, held, kind):
+    AsyncAuditMixin.set_current_user("alice")
+    Item = make(kind, *mixins)
+    fresh = Item(name="a")
+    if "deleted_at" in held:
+        fresh.deleted_at = T_SET
+    await fresh.save(db=db)
+
+    loaded = await Item.from_id(fresh._id, db=db)
+    assert {f: type(getattr(loaded, f)) for f in held} == held
+    assert {f: getattr(loaded, f) for f in held} == {f: getattr(fresh, f) for f in held}
+
+    loaded.name = "b"
+    await loaded.save(db=db)
+
+    again = await Item.from_id(fresh._id, db=db)
+    assert again.name == "b"
+    assert [doc["name"] for _, doc in await _docs(db, Item)] == ["b"]
+    if "created_at" in held:
+        assert again.created_at == fresh.created_at
+        assert again.updated_at > fresh.updated_at
+    if "deleted_at" in held:
+        assert again.deleted_at == T_SET
+    if "created_by" in held:
+        assert (again.created_by, again.updated_by) == ("alice", "alice")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_refresh_holds_the_row_as_a_load_does_and_saves_again(db, kind):
+    Item = make(kind, TimestampMixin, fields={"when": (Optional[datetime], None)})
+    mine = await Item(name="a", when=T_SET).save(db=db)
+    other = await Item.from_id(mine._id, db=db)
+    other.name = "b"
+    await other.save(db=db)
+
+    assert await mine.refresh(db=db) is mine
+
+    held = ("name", "when", "created_at", "updated_at")
+    assert (mine.name, mine.when) == ("b", T_SET)
+    assert {f: getattr(mine, f) for f in held} == {f: getattr(other, f) for f in held}
+    assert [type(getattr(mine, f)) for f in held] == [str, datetime, datetime, datetime]
+
+    mine.name = "c"
+    await mine.save(db=db)
+
+    assert [doc["name"] for _, doc in await _docs(db, Item)] == ["c"]
+
+
+@pytest.mark.parametrize("mixin", [TimestampMixin, AsyncAuditMixin])
+@pytest.mark.parametrize("kind", KINDS)
+async def test_save_with_a_naive_created_at_raises_and_writes_nothing(db, kind, mixin):
+    Item = make(kind, mixin)
+    naive = Item(name="naive")
+    naive.created_at = datetime(2020, 1, 1)
+
+    with pytest.raises(TypeError, match="offset-naive and offset-aware"):
+        await naive.save(db=db)
+
+    assert await _docs(db, Item) == []
+
+
+# (field, its type, the value saved); each loads back as that value, of that type
+TYPED_FIELDS = {
+    "when": (Optional[datetime], T_SET),
+    "day": (date, date(2026, 11, 14)),
+    "wait": (timedelta, timedelta(minutes=90)),
+    "steps": (tuple[date, ...], (date(2026, 1, 1), date(2026, 1, 2))),
+    "stamps": (list[datetime], [T_SET, T_SET + timedelta(days=1)]),
+}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_field_loads_as_the_type_it_declares(db, kind):
+    Item = make(kind, fields={name: (hint, None) for name, (hint, _) in TYPED_FIELDS.items()})
+    saved = await Item(name="a", **{name: value for name, (_, value) in TYPED_FIELDS.items()}).save(db=db)
+
+    loaded = await Item.from_id(saved._id, db=db)
+
+    got = {name: getattr(loaded, name) for name in TYPED_FIELDS}
+    want = {name: value for name, (_, value) in TYPED_FIELDS.items()}
+    assert len(got) == 5
+    assert got == want
+    assert {n: type(v) for n, v in got.items()} == {n: type(v) for n, v in want.items()}
+    assert loaded.is_dirty() is False

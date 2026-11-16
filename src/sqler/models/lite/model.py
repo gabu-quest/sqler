@@ -438,9 +438,8 @@ class SQLerLiteModel(SQLerLiteModelBase):
 
     def _refreshed(self: T, doc: dict, row: dict) -> T:
         """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
-        for f in fields(self):
-            if not f.name.startswith("_") and f.name in doc:
-                object.__setattr__(self, f.name, doc[f.name])
+        for name, value in type(self)._init_fields(doc).items():  # typed, as a load gives it
+            object.__setattr__(self, name, value)
         object.__setattr__(self, "_snapshot", _dirty.snapshot(row))
         return self
 

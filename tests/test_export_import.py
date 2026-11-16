@@ -1,9 +1,14 @@
 """Export to and import from CSV, JSON and JSONL files and strings."""
 
 import csv
+import itertools
 import json
 import os
 import tempfile
+import types
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import pytest
 
@@ -11,7 +16,11 @@ from sqler import (
     ExportResult,
     ImportResult,
     SQLerDB,
+    SQLerLiteModel,
+    SQLerLiteSafeModel,
     SQLerModel,
+    SQLerMsgspecModel,
+    SQLerSafeModel,
     export_csv,
     export_csv_string,
     export_json,
@@ -22,7 +31,13 @@ from sqler import (
     import_jsonl,
     stream_jsonl,
 )
-from sqler.export import export_jsonl_string
+from sqler.export import (
+    export_jsonl_string,
+    import_csv_string,
+    import_json_string,
+    import_jsonl_string,
+)
+from sqler.models.mixins import TimestampMixin
 
 
 class TestExportCSV:
@@ -424,3 +439,126 @@ def test_export_of_a_dropped_table_gives_what_an_empty_table_gives(name, kwargs_
         assert "gone_table" not in _export_tables(db)
     finally:
         db.close()
+
+
+# ----- every import works on every base ---------------------------------------------------
+
+IMPORT_BASES = {
+    "pydantic": SQLerModel,
+    "pydantic_safe": SQLerSafeModel,
+    "lite": SQLerLiteModel,
+    "lite_safe": SQLerLiteSafeModel,
+    "msgspec": SQLerMsgspecModel,
+}
+_import_tables = itertools.count()
+
+WHEN = datetime(2026, 3, 4, 5, 6, 7, 890000, tzinfo=timezone.utc)
+# the rows every base exports and imports: one field of each type a document holds
+ROWS = [
+    dict(name="Kyoto", count=1400000, ratio=0.5, active=True, when=WHEN,
+         tags=["old", "temple"], meta={"rank": 2}),
+    dict(name="=Osaka", count=0, ratio=-1.25, active=False, when=WHEN + timedelta(days=1),
+         tags=[], meta={}),
+]
+FIELDS = {
+    "name": (str, ""),
+    "count": (int, 0),
+    "ratio": (float, 0.0),
+    "active": (bool, False),
+    "when": (Optional[datetime], None),
+    "tags": (list[str], None),
+    "meta": (dict[str, int], None),
+}
+
+
+def _import_model(kind, *mixins, fields=FIELDS):
+    """A model class of ``kind`` with the mixins, the ``fields`` and its own table."""
+    table = f"imp_{kind}_{next(_import_tables)}"
+    ns = {"__tablename__": table, "__annotations__": {n: h for n, (h, _) in fields.items()}}
+    ns.update({n: d for n, (_, d) in fields.items()})
+    kwds = {"tag": False} if kind == "msgspec" else {}
+    cls = types.new_class(f"Imp_{table}", (*mixins, IMPORT_BASES[kind]), kwds, lambda body: body.update(ns))
+    return dataclass(cls) if kind.startswith("lite") else cls
+
+
+def _via_file(export, imp, suffix):
+    def run(model, src, dst, tmp_path, **kw):
+        path = tmp_path / f"rows.{suffix}"
+        export(model.using(src), str(path))
+        return imp(model, str(path), db=dst, **kw)
+
+    return run
+
+
+def _via_string(export, imp):
+    return lambda model, src, dst, tmp_path, **kw: imp(model, export(model.using(src)), db=dst, **kw)
+
+
+IMPORTS = {
+    "import_csv": _via_file(export_csv, import_csv, "csv"),
+    "import_csv_string": _via_string(export_csv_string, import_csv_string),
+    "import_json": _via_file(export_json, import_json, "json"),
+    "import_json_string": _via_string(export_json_string, import_json_string),
+    "import_jsonl": _via_file(export_jsonl, import_jsonl, "jsonl"),
+    "import_jsonl_string": _via_string(export_jsonl_string, import_jsonl_string),
+}
+
+
+@pytest.fixture
+def two_dbs():
+    src, dst = SQLerDB.in_memory(shared=False), SQLerDB.in_memory(shared=False)
+    yield src, dst
+    src.close()
+    dst.close()
+
+
+def _values(model, db, names):
+    return [{n: getattr(row, n) for n in names} for row in model.using(db).order_by("_id").all()]
+
+
+@pytest.mark.parametrize("kind", list(IMPORT_BASES))
+@pytest.mark.parametrize("how", list(IMPORTS))
+def test_rows_exported_from_a_base_import_with_equal_values(two_dbs, tmp_path, how, kind):
+    src, dst = two_dbs
+    Model = _import_model(kind)
+    for row in ROWS:
+        Model(**row).save(db=src)
+
+    result = IMPORTS[how](Model, src, dst, tmp_path)
+
+    assert (result.count, result.succeeded, result.failed, result.errors) == (2, 2, 0, [])
+    got = _values(Model, dst, FIELDS)
+    assert got == ROWS
+    assert [type(r["when"]) for r in got] == [datetime, datetime]
+
+
+@pytest.mark.parametrize("update_existing", [False, True])
+@pytest.mark.parametrize("kind", list(IMPORT_BASES))
+@pytest.mark.parametrize("how", list(IMPORTS))
+def test_an_import_keeps_the_created_at_a_mixin_gave_the_row(two_dbs, tmp_path, how, kind, update_existing):
+    src, dst = two_dbs
+    Model = _import_model(kind, TimestampMixin, fields={"name": (str, "")})
+    made = Model(name="a").save(db=src)
+    if update_existing:  # the row the import updates
+        Model(name="before").save(db=dst)
+
+    result = IMPORTS[how](Model, src, dst, tmp_path, update_existing=update_existing)
+
+    assert (result.count, result.succeeded, result.errors) == (1, 1, [])
+    [row] = Model.using(dst).all()
+    assert (row._id, row.name, row.created_at) == (1, "a", made.created_at)
+    assert type(row.created_at) is datetime
+
+
+@pytest.mark.parametrize("kind", list(IMPORT_BASES))
+def test_an_empty_csv_cell_is_the_default_of_a_field_that_cannot_hold_none(two_dbs, kind):
+    _, dst = two_dbs
+    Model = _import_model(kind, fields={"name": (str, ""), "pop": (int, 7), "rank": (Optional[int], 5)})
+
+    result = import_csv_string(Model, "name,pop,rank\nKyoto,,\nOsaka,2700000,3\n", db=dst)
+
+    assert (result.count, result.succeeded, result.errors) == (2, 2, [])
+    assert _values(Model, dst, ["name", "pop", "rank"]) == [
+        {"name": "Kyoto", "pop": 7, "rank": None},
+        {"name": "Osaka", "pop": 2700000, "rank": 3},
+    ]

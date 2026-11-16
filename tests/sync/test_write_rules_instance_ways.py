@@ -8,8 +8,12 @@ import re
 import threading
 import types
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
+from enum import Enum
+from pathlib import PurePosixPath
 from typing import ClassVar, Optional
+from uuid import UUID
 
 import pytest
 
@@ -30,8 +34,10 @@ from sqler.models.mixins import (
     AuditMixin,
     FullMixin,
     HooksMixin,
+    SoftDeleteMixin,
     TimestampMixin,
 )
+from sqler.tracking import TrackedModel
 
 BASES = {
     "pydantic": SQLerModel,
@@ -75,11 +81,15 @@ class Unhooked(Recorded):
     _hooks_enabled: ClassVar[bool] = False
 
 
-def make(kind, *mixins, promoted=None):
-    """A model class of ``kind`` with the mixins, a ``name`` field and its own table."""
+def make(kind, *mixins, promoted=None, fields=None):
+    """A model class of ``kind`` with the mixins, a ``name`` field, the ``fields``
+    (``{name: (type, default)}``) and its own table."""
     table = f"wr_{kind}_{next(_tables)}"
     annotations = {"name": str}
     ns = {"__tablename__": table, "name": ""}
+    for field, (hint, default) in (fields or {}).items():
+        annotations[field] = hint
+        ns[field] = default
     if promoted:
         annotations["status"] = Optional[str]
         ns["status"] = None
@@ -1068,3 +1078,160 @@ def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_wr
     [(data,)] = _raw(path, "SELECT data FROM wr_safe_books")
     assert json.loads(data) == {"title": "b", "author": None}
     assert _raw(path, "SELECT count(*) FROM wr_nulled_authors") == [(0,)]
+
+
+# ----- a loaded instance saves again, on every base -----------------------------------------
+
+T_SET = datetime(2026, 1, 2, 3, 4, 5, 123456, tzinfo=timezone.utc)
+
+# (name, mixins, the fields the mixins give and the type each holds once set)
+ROUND_TRIPS = [
+    ("timestamp", (TimestampMixin,), {"created_at": datetime, "updated_at": datetime}),
+    ("soft_delete", (SoftDeleteMixin,), {"deleted_at": datetime}),
+    (
+        "audit",
+        (AuditMixin,),
+        {"created_at": datetime, "updated_at": datetime, "created_by": str, "updated_by": str},
+    ),
+    ("hooks", (Recorded,), {}),
+    ("tracking", (TrackedModel,), {}),  # not on msgspec (docs/API.md, change tracking)
+    ("full", (FullMixin,), {"created_at": datetime, "updated_at": datetime, "deleted_at": datetime}),
+    ("audit_log", (AuditLogMixin,), {}),
+]
+ROUND_TRIP_CASES = [
+    pytest.param(mixins, held, kind, id=f"{name}-{kind}")
+    for name, mixins, held in ROUND_TRIPS
+    for kind in KINDS
+    if not (name == "tracking" and kind == "msgspec")
+]
+
+
+@pytest.mark.parametrize("mixins, held, kind", ROUND_TRIP_CASES)
+def test_a_loaded_instance_holds_its_mixin_fields_as_typed_and_saves_again(db, mixins, held, kind):
+    Item = make(kind, *mixins)
+    fresh = Item(name="a")
+    if "deleted_at" in held:
+        fresh.deleted_at = T_SET
+    fresh.save(db=db)
+
+    loaded = Item.from_id(fresh._id, db=db)
+    assert {f: type(getattr(loaded, f)) for f in held} == held
+    assert {f: getattr(loaded, f) for f in held} == {f: getattr(fresh, f) for f in held}
+
+    loaded.name = "b"
+    loaded.save(db=db)
+
+    again = Item.from_id(fresh._id, db=db)
+    assert again.name == "b"
+    assert [doc["name"] for _, doc in _docs(db, Item)] == ["b"]
+    if "created_at" in held:
+        assert again.created_at == fresh.created_at
+        assert again.updated_at > fresh.updated_at
+    if "deleted_at" in held:
+        assert again.deleted_at == T_SET
+    if "created_by" in held:
+        assert (again.created_by, again.updated_by) == ("alice", "alice")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_refresh_holds_the_row_as_a_load_does_and_saves_again(db, kind):
+    Item = make(kind, TimestampMixin, fields={"when": (Optional[datetime], None)})
+    mine = Item(name="a", when=T_SET).save(db=db)
+    other = Item.from_id(mine._id, db=db)
+    other.name = "b"
+    other.save(db=db)
+
+    assert mine.refresh(db=db) is mine
+
+    held = ("name", "when", "created_at", "updated_at")
+    assert (mine.name, mine.when) == ("b", T_SET)
+    assert {f: getattr(mine, f) for f in held} == {f: getattr(other, f) for f in held}
+    assert [type(getattr(mine, f)) for f in held] == [str, datetime, datetime, datetime]
+
+    mine.name = "c"
+    mine.save(db=db)
+
+    assert [doc["name"] for _, doc in _docs(db, Item)] == ["c"]
+
+
+@pytest.mark.parametrize("mixin", [TimestampMixin, AuditMixin])
+@pytest.mark.parametrize("kind", KINDS)
+def test_save_with_a_naive_created_at_raises_and_writes_nothing(db, kind, mixin):
+    Item = make(kind, mixin)
+    naive = Item(name="naive")
+    naive.created_at = datetime(2020, 1, 1)
+
+    with pytest.raises(TypeError, match="offset-naive and offset-aware"):
+        naive.save(db=db)
+
+    assert _docs(db, Item) == []
+
+
+class Color(Enum):
+    RED = "red"
+    BLUE = "blue"
+
+
+class Size(Enum):
+    S = 1
+    L = 3
+
+
+# (field, its type, the value saved); each loads back as that value, of that type
+TYPED_FIELDS = {
+    "when": (Optional[datetime], T_SET),
+    "naive": (datetime, datetime(2026, 1, 2, 3, 4)),
+    "day": (date, date(2026, 11, 14)),
+    "at": (time, time(9, 30, 1)),
+    "ticket": (UUID, UUID(int=7)),
+    "where": (PurePosixPath, PurePosixPath("/srv/data")),
+    "color": (Color, Color.BLUE),
+    "size": (Size | None, Size.L),
+    "price": (Decimal, Decimal("12.25")),
+    "wait": (timedelta, timedelta(minutes=90, microseconds=500000)),
+    "pair": (tuple[int, str], (1, "a")),
+    "steps": (tuple[date, ...], (date(2026, 1, 1), date(2026, 1, 2))),
+    "labels": (set[str], {"b", "a"}),
+    "stamps": (list[datetime], [T_SET, T_SET + timedelta(days=1)]),
+    "due": (dict[str, date], {"x": date(2026, 2, 3)}),
+}
+# the types a msgspec Struct field cannot be loaded as: msgspec converts a Struct's own fields
+# itself, and refuses the stored form of these (sqler converts only the fields a mixin gives)
+MSGSPEC_CANNOT = {"where"}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_field_loads_as_the_type_it_declares(db, kind):
+    typed = {n: hv for n, hv in TYPED_FIELDS.items() if kind != "msgspec" or n not in MSGSPEC_CANNOT}
+    Item = make(kind, fields={name: (hint, None) for name, (hint, _) in typed.items()})
+    saved = Item(name="a", **{name: value for name, (_, value) in typed.items()}).save(db=db)
+
+    loaded = Item.from_id(saved._id, db=db)
+
+    got = {name: getattr(loaded, name) for name in typed}
+    want = {name: value for name, (_, value) in typed.items()}
+    assert len(got) == (14 if kind == "msgspec" else 15)
+    assert got == want
+    assert {n: type(v) for n, v in got.items()} == {n: type(v) for n, v in want.items()}
+    assert loaded.is_dirty() is False
+
+
+@pytest.mark.parametrize("kind", ["lite", "lite_safe"])
+def test_a_string_that_is_no_date_in_a_date_field_loads_as_it_was_saved(db, kind):
+    # a lite model checks no type on save, so its datetime field can hold any string; the
+    # pydantic and msgspec bases refuse one that is no date
+    Item = make(kind, fields={"when": (Optional[datetime], None)})
+    saved = Item(name="a", when="tomorrow").save(db=db)
+    assert Item.from_id(saved._id, db=db).when == "tomorrow"
+
+
+@pytest.mark.parametrize("base", [SQLerLiteModel, SQLerLiteSafeModel])
+def test_a_lite_field_typed_in_quotes_loads_as_its_type(db, base):
+    @dataclass
+    class Visit(base):
+        __tablename__ = f"wr_quoted_{base.__name__}"
+        when: "Optional[datetime]" = None
+
+    saved = Visit(when=T_SET).save(db=db)
+
+    assert Visit.from_id(saved._id, db=db).when == T_SET

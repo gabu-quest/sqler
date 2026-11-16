@@ -14,6 +14,12 @@ cannot be installed.
 
 from __future__ import annotations
 
+import sys
+import types
+import typing
+import weakref
+from typing import Any
+
 # Detect if Pydantic is available
 PYDANTIC_VERSION: str | None
 try:
@@ -128,3 +134,55 @@ def is_lite_model(cls: type) -> bool:
     from sqler.models.lite.base import SQLerLiteModelBase
 
     return isinstance(cls, type) and issubclass(cls, SQLerLiteModelBase)
+
+
+# {class: {field: its declared type}} (see ``field_types``); a class's fields are fixed once
+# made, and the entry goes when the class does
+_FIELD_TYPES: weakref.WeakKeyDictionary[type, dict[str, Any]] = weakref.WeakKeyDictionary()
+
+
+def field_types(cls: type) -> dict[str, Any]:
+    """The type each public field of the model class ``cls`` declares, on every base: a
+    pydantic field's annotation, a lite (dataclass) field's type, and a msgspec field's type,
+    the fields a mixin gives a lite or msgspec class among them. A type written as a string
+    is resolved where it was written; one that names nothing there is ``Any``.
+
+    Found at the first ask, once the class and the classes it names are defined.
+    """
+    found = _FIELD_TYPES.get(cls)
+    if found is None:
+        found = _FIELD_TYPES[cls] = _declared(cls)
+    return found
+
+
+def _declared(cls: type) -> dict[str, Any]:
+    if hasattr(cls, "__pydantic_validator__"):  # a pydantic class: its fields know their types
+        fields = getattr(cls, "model_fields")
+        return {n: f.annotation for n, f in fields.items() if not n.startswith("_")}
+    names = [n for n in getattr(cls, "model_fields", {}) if not n.startswith("_")]
+    try:
+        hints = typing.get_type_hints(cls)
+    except (NameError, AttributeError, SyntaxError, TypeError):  # one field names nothing there
+        return {n: _hint_of(cls, n) for n in names}
+    return {n: hints.get(n, Any) for n in names}
+
+
+def _hint_of(cls: type, name: str) -> Any:
+    """The type the field ``name`` of ``cls`` declares, read alone, in the module of the class
+    that declares it (``Any`` when it names nothing there)."""
+    for klass in cls.__mro__:
+        written = vars(klass).get("__annotations__", {})
+        if name not in written:
+            continue
+        hint = written[name]
+        if not isinstance(hint, str):
+            return hint
+        module = sys.modules.get(klass.__module__)
+        alone = types.SimpleNamespace(__annotations__={name: hint})
+        try:
+            return typing.get_type_hints(
+                alone, globalns=vars(module) if module else {}, localns={klass.__name__: klass}
+            )[name]
+        except (NameError, AttributeError, SyntaxError, TypeError):  # it names nothing there
+            return Any
+    return Any

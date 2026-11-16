@@ -5,7 +5,7 @@ Pydantic-based models while using standard library dataclasses.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import pytest
@@ -166,6 +166,24 @@ class TestSQLerLiteModelBase:
 
         names = User.get_field_names()
         assert names == {"name", "age"}
+
+    def test_model_validate_gives_a_field_typed_in_quotes_its_type(self):
+        """A quoted type is read in the module that wrote it; one that names nothing there
+        leaves its field as stored."""
+
+        @dataclass
+        class Event(SQLerLiteModelBase):
+            when: "Optional[datetime]" = None
+            later: "Optional[NotDefinedAnywhere]" = None  # noqa: F821 - names nothing: as stored
+
+        event = Event.model_validate(
+            {"when": "2024-01-15T10:30:00+00:00", "later": "2024-01-15T10:30:00+00:00"}
+        )
+
+        assert (event.when, event.later) == (
+            datetime(2024, 1, 15, 10, 30, tzinfo=timezone.utc),
+            "2024-01-15T10:30:00+00:00",
+        )
 
     def test_datetime_serialization(self):
         """model_dump should serialize datetime to ISO format."""
