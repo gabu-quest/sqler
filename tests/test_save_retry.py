@@ -15,12 +15,19 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import pytest
 
-from sqler import DEFAULT_REBASE_CONFIG, PERMISSIVE_REBASE_CONFIG, AsyncSQLerDB, SQLerDB
+from sqler import (
+    DEFAULT_REBASE_CONFIG,
+    PERMISSIVE_REBASE_CONFIG,
+    AsyncPartialUpdateMixin,
+    AsyncSQLerDB,
+    AsyncTrackedModel,
+    SQLerDB,
+)
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.adapter.synchronous import SQLiteAdapter
 from sqler.exceptions import LockTimeoutError, StaleVersionError
@@ -31,6 +38,7 @@ from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
+from sqler.models.mixins import TimestampMixin
 from sqler.models.model import SQLerModel
 from sqler.models.safe import SQLerSafeModel
 from sqler.models.utils import (
@@ -40,6 +48,7 @@ from sqler.models.utils import (
     can_rebase_deltas,
     compute_numeric_scalar_deltas,
 )
+from sqler.tracking import PartialUpdateMixin, TrackedModel
 
 KINDS = ["sync", "async", "lite_sync", "lite_async"]
 LOCKED = "database is locked"
@@ -1240,6 +1249,161 @@ def test_lock_on_the_reference_read_of_the_merged_row_writes_it_once(kind, sleep
         return row["count"], row["_version"], row["child"]["_id"], mine.child._id, locked[0], writes[0]
 
     assert _rebase(kind, steps) == (11, 2, 2, 2, 0, 2)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_lock_on_reading_the_reference_of_the_merged_row_is_waited_out(kind, sleeps):
+    # the re-read passes; the first read of the child the merged row names finds a lock
+    async def steps(rows, mine, theirs):
+        db = rows.db
+        real = db._read_rows
+        locked = [1]
+
+        def pick(table):
+            if table == "rb_child" and locked[0]:
+                locked[0] -= 1
+                raise sqlite3.OperationalError(TABLE_LOCKED)
+
+        if kind in ("async", "lite_async"):
+
+            async def wrapped(table, *args, **kwargs):
+                pick(table)
+                return await real(table, *args, **kwargs)
+
+        else:
+
+            def wrapped(table, *args, **kwargs):
+                pick(table)
+                return real(table, *args, **kwargs)
+
+        theirs.child = rows.c2
+        await _aw(theirs.save())
+        db._read_rows = wrapped
+        mine.count += 1
+        await _aw(mine.save())
+        del db._read_rows
+        row = await rows.row()
+        return row["count"], row["_version"], row["child"]["_id"], mine.child._id, locked[0], len(sleeps)
+
+    # two sleeps: one after the conflict, one after the lock
+    assert _rebase(kind, steps) == (11, 2, 2, 2, 0, 2)
+
+
+class TsDoc(TimestampMixin, SQLerSafeModel):
+    __tablename__ = "ts_doc"
+    title: str = ""
+    count: int = 0
+
+
+class ATsDoc(TimestampMixin, AsyncSQLerSafeModel):
+    __tablename__ = "ts_doc"
+    title: str = ""
+    count: int = 0
+
+
+@dataclass
+class LTsDoc(TimestampMixin, SQLerLiteSafeModel):
+    __tablename__ = "ts_doc"
+    title: str = ""
+    count: int = 0
+
+
+@dataclass
+class ALTsDoc(TimestampMixin, AsyncSQLerLiteSafeModel):
+    __tablename__ = "ts_doc"
+    title: str = ""
+    count: int = 0
+
+
+TIMESTAMPED = {"sync": TsDoc, "async": ATsDoc, "lite_sync": LTsDoc, "lite_async": ALTsDoc}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebase_of_a_timestamped_model_keeps_its_own_stamp(kind, ticking_clock):
+    # both saves move updated_at, to two different values; the stamp is no conflict
+    cls = TIMESTAMPED[kind]
+    start = datetime(2026, 1, 1, 12, 0, 0, 1, tzinfo=timezone.utc)
+
+    async def scenario():
+        db = AsyncSQLerDB.in_memory() if kind in ("async", "lite_async") else SQLerDB.in_memory()
+        await _aw(db.connect()) if hasattr(db, "connect") else None
+        try:
+            first = await _aw(cls(title="first").save(db=db))
+            mine, theirs = await _aw(cls.from_id(first._id, db=db)), await _aw(cls.from_id(first._id, db=db))
+            theirs.title = "theirs"
+            await _aw(theirs.save(db=db))
+            mine.count += 1
+            await _aw(mine.save(db=db))
+            fresh = await _aw(cls.from_id(first._id, db=db))
+            return (
+                (fresh.title, fresh.count, fresh._version, fresh.updated_at),
+                (mine.title, mine.count, mine._version, mine.updated_at),
+                theirs.updated_at,
+            )
+        finally:
+            await _aw(db.close())
+
+    mine_stamp = start + timedelta(milliseconds=2)
+    assert asyncio.run(scenario()) == (
+        ("theirs", 1, 2, mine_stamp),
+        ("theirs", 1, 2, mine_stamp),
+        start + timedelta(milliseconds=1),
+    )
+
+
+class PsCounter(PartialUpdateMixin, TrackedModel, SQLerSafeModel):
+    __tablename__ = "ps_counter"
+    _rebase_config = RebaseConfig(allowed_fields={"hits"}, max_delta=5)
+    hits: int = 0
+    label: str = ""
+
+
+class APsCounter(AsyncPartialUpdateMixin, AsyncTrackedModel, AsyncSQLerSafeModel):
+    __tablename__ = "ps_counter"
+    _rebase_config = RebaseConfig(allowed_fields={"hits"}, max_delta=5)
+    hits: int = 0
+    label: str = ""
+
+
+@dataclass
+class LPsCounter(PartialUpdateMixin, TrackedModel, SQLerLiteSafeModel):
+    __tablename__ = "ps_counter"
+    _rebase_config = RebaseConfig(allowed_fields={"hits"}, max_delta=5)
+    hits: int = 0
+    label: str = ""
+
+
+@dataclass
+class ALPsCounter(AsyncPartialUpdateMixin, AsyncTrackedModel, AsyncSQLerLiteSafeModel):
+    __tablename__ = "ps_counter"
+    _rebase_config = RebaseConfig(allowed_fields={"hits"}, max_delta=5)
+    hits: int = 0
+    label: str = ""
+
+
+PARTIAL = {"sync": PsCounter, "async": APsCounter, "lite_sync": LPsCounter, "lite_async": ALPsCounter}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebased_partial_save_writes_onto_the_newer_row(kind):
+    cls = PARTIAL[kind]
+
+    async def scenario():
+        db = AsyncSQLerDB.in_memory() if kind in ("async", "lite_async") else SQLerDB.in_memory()
+        await _aw(db.connect()) if hasattr(db, "connect") else None
+        try:
+            mine = await _aw(cls(label="first").save(db=db))
+            theirs = await _aw(cls.from_id(mine._id, db=db))
+            theirs.hits, theirs.label = 10, "theirs"
+            await _aw(theirs.save(db=db))
+            mine.hits += 2
+            await _aw(mine.save_partial(db=db))
+            row = await _aw(db.find_document_with_version("ps_counter", mine._id))
+            return (row["hits"], row["label"], row["_version"]), (mine.hits, mine.label, mine._version)
+        finally:
+            await _aw(db.close())
+
+    assert asyncio.run(scenario()) == ((12, "theirs", 2), (12, "theirs", 2))
 
 
 class TestRebaseConfig:
