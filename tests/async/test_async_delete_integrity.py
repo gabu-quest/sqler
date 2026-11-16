@@ -696,6 +696,34 @@ async def test_a_dict_shaped_as_a_reference_in_an_untyped_field_is_data(base, po
         await settle(db.close())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", [SQLerDB, AsyncSQLerDB], ids=["sync", "async"])
+async def test_the_orphan_scan_reports_a_reference_and_never_a_dict_with_more_keys(base):
+    """Both rows name a row that is not there; only the one holding a reference is reported."""
+    db = await open_db(AsyncSQLerModel if base is AsyncSQLerDB else models.SQLerModel)
+    try:
+        Target, Referrer = pair(AsyncSQLerModel if base is AsyncSQLerDB else models.SQLerModel)
+        target = await settle(Target(name="t").save(db=db))
+        await settle(Referrer(title="ref", target=target).save(db=db))
+        data = {**ref(Target.__tablename__, 1), "note": "data"}
+        await settle(db.insert_document(Referrer.__tablename__, {"title": "data", "blob": [{"in": data}]}))
+        await settle(db.delete_document(Target.__tablename__, 1))
+
+        if base is AsyncSQLerDB:
+            broken = await async_validate_references(db)
+        else:
+            from sqler.models.integrity import validate_references
+
+            broken = validate_references(db)
+        assert broken == [
+            BrokenRef(
+                table=Referrer.__tablename__, row_id=1, path="target", target_table=Target.__tablename__, target_id=1
+            )
+        ]
+    finally:
+        await settle(db.close())
+
+
 async def _trace(db, callback) -> None:
     if isinstance(db, AsyncSQLerDB):
         for conn in db.adapter._all_conns:

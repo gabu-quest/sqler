@@ -486,10 +486,6 @@ class SQLerModel(BaseModel):
         return validate_references(db)
 
     # ----- relationship encoding/decoding -----
-    @classmethod
-    def _is_ref_dict(cls, value: object) -> bool:
-        return isinstance(value, dict) and "_table" in value and "_id" in value
-
     def _dump_with_relations(self) -> dict:
         """The document ``save()`` writes: each field in stored form, a related model as the
         reference to its row."""

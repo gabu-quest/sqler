@@ -435,11 +435,6 @@ class SQLerLiteModel(SQLerLiteModelBase):
 
     # ----- relationship encoding/decoding -----
     @classmethod
-    def _is_ref_dict(cls, value: object) -> bool:
-        """Check if value is a reference dict."""
-        return isinstance(value, dict) and "_table" in value and "_id" in value
-
-    @classmethod
     def _resolve_relations(cls, data: dict, db=None) -> dict:
         """``data`` with the model of its row in place of each typed reference, loaded from
         ``db`` or the class's database (see ``_refs.resolve``)."""

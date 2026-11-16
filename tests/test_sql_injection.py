@@ -724,7 +724,11 @@ class TestLoaderRejectsHostileRefs:
 
     @pytest.mark.parametrize("bad", BAD_IDS, ids=repr)
     def test_bad_id_left_out(self, rdb, bad):
-        assert self._load(rdb, {"k": {"_table": "hr_users", "_id": bad}}) == ({}, 0)
+        # an ``_id`` that is no int (a bool neither) makes the dict data, kept as it is; an
+        # int no row can have makes a reference to no row, left out
+        held = {"_table": "hr_users", "_id": bad}
+        kept = {} if type(bad) is int else {"k": held}
+        assert self._load(rdb, {"k": held}) == (kept, 0)
 
     @pytest.mark.parametrize("edge", EDGE_IDS, ids=repr)
     def test_edge_id_without_row_left_out(self, rdb, edge):

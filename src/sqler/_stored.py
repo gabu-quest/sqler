@@ -57,9 +57,7 @@ def stored(value: Any, models: Any = (), field: str = "") -> Any:
 def _stored(value: Any, models: Any) -> Any:
     if type(value) in _AS_IS:
         return value
-    if isinstance(value, dict):
-        if "_table" in value and "_id" in value:  # a stored reference holds nothing else
-            return {"_table": value["_table"], "_id": value["_id"]}
+    if isinstance(value, dict):  # a stored reference too: its stored form is itself
         return {k: _stored(v, models) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_stored(v, models) for v in value]

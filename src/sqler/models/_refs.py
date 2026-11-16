@@ -36,7 +36,7 @@ from sqler.db.sqler_db import _in_order, _row_columns, _row_documents, _select_r
 from sqler.exceptions import InvalidTableNameError
 from sqler.models import _dirty
 from sqler.models._table_names import _default_table_name, _Home, _set_home, _unchecked_table_name
-from sqler.utils import validate_table_name
+from sqler.utils import is_ref_dict, validate_table_name
 
 # What a row its class refuses raises, on every base (pydantic's ``ValidationError`` is a
 # ``ValueError``; a lite class missing a field raises ``TypeError``; msgspec's
@@ -57,16 +57,12 @@ Key = tuple[str, int]
 
 
 def ref_key(value: dict) -> Optional[Key]:
-    """``(table, id)`` of a dict holding ``_table`` and ``_id``, or None if it is not usable.
-
-    Only the shape is decided here: ``_table`` a string, ``_id`` an integer (not a bool,
-    float, string or list) that fits SQLite's 64-bit INTEGER. A dict that is not usable is
-    left as it is, and not walked into. The name is not checked: it is data we did not
+    """``(table, id)`` of a reference (:func:`sqler.utils.is_ref_dict`), or None if it is not
+    usable: its ``_id`` does not fit SQLite's 64-bit INTEGER. A reference that is not usable
+    is left as it is, and not walked into. The name is not checked: it is data we did not
     write, and :func:`load` checks it once per table where it puts it into SQL.
     """
     table, rid = value["_table"], value["_id"]
-    if not isinstance(table, str) or isinstance(rid, bool) or not isinstance(rid, int):
-        return None
     if not _SQLITE_INT_MIN <= rid <= _SQLITE_INT_MAX:
         return None  # sqlite3 raises OverflowError when binding it
     return table, rid
@@ -120,7 +116,7 @@ def _collect(value: Any, at: Position, out: dict[Key, None]) -> bool:
     admits, item, inner, _ = at
     held = False
     if isinstance(value, dict):
-        if "_table" in value and "_id" in value:
+        if is_ref_dict(value):
             if not admits:
                 return False
             key = ref_key(value)
@@ -162,7 +158,7 @@ def replace(doc: dict, typed: dict, get: Callable[[Key], Any]) -> dict:
 def _replace(value: Any, at: Position, get: Callable[[Key], Any]) -> Any:
     admits, item, inner, fixed = at
     if isinstance(value, dict):
-        if "_table" in value and "_id" in value:
+        if is_ref_dict(value):
             if not admits:
                 return value  # data where the annotation puts no model: its validation decides
             key = ref_key(value)
@@ -567,7 +563,7 @@ def _stand_in(value: Any, at: Position, kept: dict) -> Any:
     admits, item, inner, _ = at
     before = len(kept)
     if isinstance(value, dict):
-        if "_table" in value and "_id" in value:
+        if is_ref_dict(value):
             if not admits:
                 return value
             blank = _blank(admits[0])

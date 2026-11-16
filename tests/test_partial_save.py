@@ -160,6 +160,18 @@ def test_a_partial_save_stores_each_kind_of_value_as_save_does(db, cls, name, va
     assert json.loads(_row(db, cls.__tablename__, partial._id)["data"])[name] == in_json
 
 
+@pytest.mark.parametrize("cls", BASES, ids=lambda c: c.__name__)
+def test_a_partial_save_stores_a_dict_with_the_reference_keys_and_more_whole(db, cls):
+    held = [{"_table": cls.__tablename__, "_id": 1, "label": "data, not a reference"}]
+    partial, full = _twins(cls, db)
+    partial.tags = [dict(d) for d in held]
+    full.tags = [dict(d) for d in held]
+    partial.save_partial(db=db)
+    full.save(db=db)
+    _assert_twins_equal(cls, db, partial, full)
+    assert json.loads(_row(db, cls.__tablename__, partial._id)["data"])["tags"] == held
+
+
 @pytest.mark.parametrize("cls", [PsDoc, PsSafeDoc], ids=lambda c: c.__name__)
 @pytest.mark.parametrize("kind", ["reference", "list of references", "nested model"])
 def test_a_partial_save_stores_references_and_nested_models_as_save_does(db, cls, kind):
