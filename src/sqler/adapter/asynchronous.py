@@ -525,7 +525,13 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         self._waiting = 0  # tasks waiting for a free connection right now (private, for tests)
 
     async def _open(self) -> aiosqlite.Connection:
-        conn = await aiosqlite.connect(self.path, uri=True)
+        conn = aiosqlite.connect(self.path, uri=True)
+        # A program ends when its main thread ends, a database left open or not: the
+        # connection's thread does not hold the process (the connection is that thread
+        # before aiosqlite 0.22, and holds it as ``_thread`` from 0.22). What was committed
+        # is in the file; a transaction still open is rolled back by SQLite at the next open.
+        getattr(conn, "_thread", conn).daemon = True
+        conn = await conn
         try:
             # not connect(timeout=): Python truncates the seconds to milliseconds (1.001 s waits 1000 ms)
             await conn.execute(f"PRAGMA busy_timeout = {self.timeout_ms}")
