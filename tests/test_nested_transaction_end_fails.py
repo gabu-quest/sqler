@@ -17,6 +17,7 @@ No statement is sent into a transaction the adapter counts as ended.
 
 import asyncio
 import functools
+import itertools
 import logging
 import signal
 import sqlite3
@@ -710,15 +711,42 @@ def test_a_rollback_interrupted_once_succeeds_at_the_second_try(scene, caplog):
 REPLACED_AFTER_AN_INTERRUPT = "rollback of a reclaimed connection failed (KeyboardInterrupt: ); replacing it"
 
 
+def _interrupts_in_the_first_try():
+    """A progress handler that stops each statement and sends this process SIGINT."""
+    return functools.partial(max, [int(signal.SIGINT)], key=LIBC_RAISE)
+
+
+def _interrupts_in_the_second_try():
+    """A progress handler that stops each statement and sends this process SIGINT the second
+    time it is asked, and only then."""
+    interrupt = functools.partial(max, key=LIBC_RAISE)
+    return functools.partial(next, itertools.chain([1], map(interrupt, [[int(signal.SIGINT)]])), 1)
+
+
+# What the log says of a thread's own connection, by where CPython raises the interrupt. It is
+# pending from the try the handler sent it in, and no Python frame is entered between the tries.
+# CPython 3.12 raises it as the failed try returns: the interrupt is what left the tries. From
+# 3.13 on it is raised later, after both tries failed, as the connection is closed: SQLite's
+# error is what left them.
+REPLACED_WITH_AN_INTERRUPT_PENDING = REPLACED_AFTER_AN_INTERRUPT if sys.version_info < (3, 13) else REPLACED
+
+
 @needs_libc_raise
 @pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="needs a real signal to the main thread")
+@pytest.mark.parametrize("sent_in", ["first try", "second try"])
 @pytest.mark.parametrize("end", ["with-db", "transaction", "adapter"])
-def test_an_interrupt_between_the_two_tries_of_a_rollback_leaves_no_transaction_to_join(scene, caplog, end):
+def test_an_interrupt_during_the_two_tries_of_a_rollback_is_raised_and_leaves_no_transaction_to_join(
+    scene, caplog, end, sent_in
+):
     """The handler that stops the rollback also sends this process SIGINT, through libc and
-    with no Python frame of its own, so Python raises ``KeyboardInterrupt`` in the adapter
-    as the first try returns, before the second. (Not the nested end: its own statement
-    would be the one stopped.)"""
-    scene.stops = functools.partial(max, [int(signal.SIGINT)], key=LIBC_RAISE)
+    with no Python frame of its own, so the interrupt is pending as a try fails. Wherever
+    Python then raises it, it leaves the block (it is not lost in the ``__del__`` of the
+    connection's owner, where Python would ignore it), and no later statement joins the
+    block's rows. (Not the nested end: its own statement would be the one stopped.)"""
+    if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
+        pytest.skip("this process does not turn SIGINT into KeyboardInterrupt")
+    stops = {"first try": _interrupts_in_the_first_try, "second try": _interrupts_in_the_second_try}
+    scene.stops = stops[sent_in]()
     caplog.set_level(logging.WARNING, logger="sqler.adapter.synchronous")
     left = _a_block_whose_rollback_fails(scene, end)
     messages = [r.getMessage() for r in caplog.records]
@@ -727,7 +755,7 @@ def test_an_interrupt_between_the_two_tries_of_a_rollback_leaves_no_transaction_
         assert (messages, scene.adapter._shared._holder, scene.conn.in_transaction) == ([], scene.adapter._local.me, True)
         scene.let_statements_run()
     else:
-        assert (messages, scene.adapter._local.conn) == ([REPLACED_AFTER_AN_INTERRUPT], None)
+        assert (messages, scene.adapter._local.conn) == ([REPLACED_WITH_AN_INTERRUPT_PENDING], None)
     assert scene.committed() == ["before"]
     scene.insert("after")
     scene.adapter.auto_commit()

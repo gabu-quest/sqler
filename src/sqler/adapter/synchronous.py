@@ -95,10 +95,18 @@ def _roll_back(conn: sqlite3.Connection, shared: Optional["_SharedConnection"], 
     if shared is not None:
         shared.unended = left if kept else None
     elif kept and local is not None:
+        # Held to the end of this branch. Dropped by the assignment below, its ``__del__``
+        # would be the first Python code to run after two tries that failed in SQLite, and
+        # Python ignores what is raised in a ``__del__``: an interrupt pending since the
+        # tries would be lost there.
+        owner = local.owner
         if local.conn is conn:
             local.conn = local.owner = None
-        conn.close()  # SQLite rolls back what a closing connection leaves open
-        logger.warning("rollback of a reclaimed connection failed (%s: %s); replacing it", type(left).__name__, left)
+        try:
+            conn.close()  # SQLite rolls back what a closing connection leaves open
+        finally:  # an interrupt raised as the close returns goes on after the report
+            logger.warning("rollback of a reclaimed connection failed (%s: %s); replacing it", type(left).__name__, left)
+        del owner
     if left is not None and not isinstance(left, sqlite3.Error):
         raise left
 
