@@ -17,6 +17,7 @@ from typing import (
 )
 
 from sqler import registry
+from sqler.db._statements import IndexFields
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import UniqueConstraintError
 from sqler.models import _dirty, _refs, _table_names, _write_rules
@@ -214,28 +215,28 @@ class AsyncSQLerMsgspecModel(SQLerMsgspecModelBase):
     @classmethod
     async def add_index(
         cls,
-        field: str,
+        field: IndexFields,
         *,
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
         db=None,
     ) -> None:
-        """Create an index on a JSON field via the model class, in ``db`` when given, else the class's database."""
+        """Create an index on one field or several (as ``create_index`` takes them) via the model class, in ``db`` when given, else the class's database."""
         db, table = cls._resolve_binding(db)
         await db.create_index(table, field, unique=unique, name=name, where=where)
 
     @classmethod
     async def ensure_index(
         cls,
-        field: str,
+        field: IndexFields,
         *,
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
         db=None,
     ) -> None:
-        """Ensure an index on a JSON path or literal column exists (idempotent), in ``db``
+        """Ensure an index on one field or several exists (idempotent), in ``db``
         when given, else the class's database."""
         await cls.add_index(field, unique=unique, name=name, where=where, db=db)
 

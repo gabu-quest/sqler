@@ -1428,6 +1428,48 @@ db.create_index("indexedusers", "address._id")
 db.create_index("indexedusers", "address.city")
 ```
 
+`create_index(table, field, unique=False, name=None, where=None)` takes one field, or a list
+whose entries are a field or `(field, "asc" | "desc")` (either word in any case), and makes one
+index over them in that order. Each field is indexed where the table stores it: a promoted
+column, `_id` and `_version` as their column, any other field as
+`json_extract(data, '$.<path>')`, so a query that filters on a promoted field searches the
+index. Without `name=` the name is `idx_<table>_<field>` for one ascending field (dots as
+`_`), else each field so, with `_desc` after a descending one, joined by `__`
+(`idx_jobs_queue__priority_desc__eta`): two lists that differ in order or in a direction make
+two indexes. An empty list, a field named twice or an entry of another shape raises
+`ValueError`, a name that is no identifier the `Invalid...Error` of that name, before anything
+is sent; a list given to `add_index()` and `ensure_index()` of every model base works the same.
+
+`where=` is SQL, written as it is: name a promoted field by its column (`status = 'pending'`)
+and a field in `data` by its path (`json_extract(data, '$.kind') = 'x'`).
+
+When a field is promoted after an index over it was made (`ensure_table(promoted=...)`, the
+first save of a class with `__promoted__`, `move_promoted()`), the index is made again on the
+column in the same transaction, under its name, with its `unique` and its `where` as written.
+Only an index whose text is, byte for byte, one `create_index` makes is made again; an index
+written by hand is left as it is.
+
+```python
+from sqler import F, SQLerDB
+
+db = SQLerDB.in_memory()
+db.ensure_table("jobs", promoted={"status": "TEXT", "priority": "INTEGER"})
+for p in range(3):
+    db.insert_document("jobs", {"queue": "a", "status": "pending", "priority": p, "eta": p})
+
+db.create_index(
+    "jobs",
+    ["queue", ("priority", "desc"), "eta"],
+    where="status = 'pending' AND json_extract(data, '$.eta') >= 0",
+)
+(index,) = db.list_indexes("jobs")
+assert index["name"] == "idx_jobs_queue__priority_desc__eta"
+assert "(json_extract(data, '$.queue'), priority DESC, json_extract(data, '$.eta'))" in index["sql"]
+
+q = db.query("jobs").filter((F("queue") == "a") & (F("status") == "pending")).order_by("priority", desc=True)
+assert [d["priority"] for d in q.all_dicts()] == [2, 1, 0]
+```
+
 ### [C35] list_indexes and index_exists
 
 ```python

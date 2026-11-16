@@ -6,6 +6,7 @@ from typing import Any
 
 from sqler._stored import stored
 from sqler.db._rows import _columns_sql, _layout, _promoted_in
+from sqler.db._statements import _follow_indexes
 from sqler.db._writes import _json_path
 from sqler.exceptions import (
     SchemaError,
@@ -179,7 +180,7 @@ def _record(table: str, columns: list[str], *, made: bool = False) -> Any:
 def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], model: Any) -> Any:
     """Under the write lock: create ``table`` with its ``promoted`` columns, or add the missing
     ones to it and move each row's value from its document into its column (a row without the
-    key gets what it read through ``model``), and follow its search indexes.
+    key gets what it read through ``model``), and follow its search indexes and the indexes sqler made on it.
     Returns its promoted columns and the names ``SELECT *`` gives for it then.
 
     Nothing is changed when a row's value cannot be kept (``SchemaError``)."""
@@ -220,6 +221,7 @@ def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], mod
         from sqler.fts import _follow_promotion  # fts imports this package
 
         yield from _follow_promotion(table, list(added), columns)
+        yield from _follow_indexes(table, list(added), columns)
     return columns, (*layout, *added)
 
 
@@ -253,6 +255,7 @@ def _moved(table: str, column: str, keep: str) -> Any:
     from sqler.fts import _follow_promotion  # fts imports this package
 
     yield from _follow_promotion(table, [column], _promoted_in(info))
+    yield from _follow_indexes(table, [column], _promoted_in(info))
 
 
 def _unwritable(exc: sqlite3.OperationalError) -> bool:

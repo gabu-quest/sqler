@@ -183,6 +183,12 @@ CALLS = [
     ("bulk_upsert", "bulk_upsert", _call("bulk_upsert", "us", [{"_id": 1, "name": "an"}, {"name": "g"}])),
     ("create_index", "create_index", _call("create_index", "us", "name", unique=True)),
     ("create_index-duplicate-values", "create_index", _call("create_index", "us", "age", unique=True)),
+    ("create_index-several-fields", "create_index", _call("create_index", "us", ["name", ("age", "desc")], where="_id > 0")),
+    ("create_index-promoted-field", "create_index", _call("create_index", "pt", ["x", ("n", "desc")], before=_promoted_table)),
+    ("create_index-empty-list", "create_index", _call("create_index", "us", [])),
+    ("create_index-bad-direction", "create_index", _call("create_index", "us", [("age", "down")])),
+    ("create_index-follows-promotion", "create_index",
+     _call("ensure_table", "us", promoted={"age": "INTEGER"}, before=_call("create_index", "us", ["name", ("age", "desc")]))),
     ("drop_index", "drop_index", _call("drop_index", "idx_us_name", before=_call("create_index", "us", "name"))),
     ("list_indexes", "list_indexes", _call("list_indexes", "us", before=_call("create_index", "us", "age"))),
     ("list_indexes-all", "list_indexes", _call("list_indexes", before=_call("create_index", "us", "age"))),
@@ -282,6 +288,16 @@ def test_a_group_by_reads_every_column_literally(tmp_path):
     sync, asynchronous = _both(recipe, tmp_path)
     expected = ("result", [{"age": 30, "n": 2}, {"age": 41, "n": 1}])
     assert (sync[0], asynchronous[0]) == (expected, expected)
+
+
+def test_an_index_over_several_fields_is_made_where_each_is_stored_literally(tmp_path):
+    recipe = _call("ensure_table", "us", promoted={"age": "INTEGER"}, before=_call("create_index", "us", ["name", ("age", "desc")]))
+    sync, asynchronous = _both(recipe, tmp_path)
+    expected = [
+        ("index", "idx_us_name__age_desc", "us",
+         "CREATE INDEX idx_us_name__age_desc ON us (json_extract(data, '$.name'), age DESC) "),
+    ]
+    assert ([r for r in sync[1][0] if r[0] == "index"], [r for r in asynchronous[1][0] if r[0] == "index"]) == (expected, expected)
 
 
 def test_documents_read_by_data_and_id_in_any_order_literally(tmp_path):
