@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Iterator, NoReturn, Optional, Self
 from sqler._stored import column_arg, json_arg
 from sqler.exceptions import NoAdapterError
 from sqler.query import SQLerExpression
-from sqler.utils import validate_field_name
+from sqler.utils import validate_field_name, validate_table_name
 
 if TYPE_CHECKING:
     from sqler.adapter.synchronous import SQLiteAdapter
@@ -38,6 +38,40 @@ def _squeezed(sql: str, guard: str) -> str:
     """:meth:`_Statements._squeezed` of ``sql`` with ``guard``, done once per text."""
     head, guard, tail = sql.partition(guard) if guard else (sql, "", "")
     return " ".join([*head.split(), guard, *tail.split()] if guard else head.split())
+
+
+# A read of a document as a statement on its own table writes it: what the rewrite of promoted
+# columns (:func:`_rewrite_promoted_refs`) reads as the row of the statement's table.
+_OWN_DATA = re.compile(r"json_extract\(data,", re.IGNORECASE)
+
+# What stands for a related table that does not exist: no rows, read with the same condition.
+_NO_ROWS = "(SELECT NULL AS _id, NULL AS data WHERE 0)"
+
+
+def related_rows(table: str, where: str, *, missing: bool = False) -> str:
+    """The ids of the rows of ``table`` a filter through a reference reads, as a subquery
+    ``(SELECT _id AS rid FROM <table> rt <where>)``: ``where`` is the ``WHERE`` a query on
+    ``table`` builds (``_Statements._where``), laid out as its database remembers the table
+    or as a query with none behind it builds it. Each ``json_extract`` of ``data`` in it is
+    written as one of ``rt.data``, so a rewrite of the outer statement by the promoted
+    columns of its own table leaves it alone; a promoted column it reads by its name is
+    found in ``rt`` first. ``missing``: ``table`` does not exist, and no row is read."""
+    return f"(SELECT _id AS rid FROM {_NO_ROWS if missing else table} rt {_OWN_DATA.sub('json_extract(rt.data,', where)})"
+
+
+def related_tables(expression: Optional[SQLerExpression]) -> tuple[str, ...]:
+    """The tables, once each, whose rows the filter ``expression`` reads through a reference."""
+    related = getattr(expression, "related", ())  # a filter may be any object with ``sql`` and ``params``
+    return tuple(dict.fromkeys(r.table for r in related)) if related else ()
+
+
+def with_related(expression: SQLerExpression, laid: dict[Any, tuple[str, bool]]) -> SQLerExpression:
+    """``expression`` with each of its related parts (:class:`sqler.query.expression.Related`)
+    read as ``laid`` gives it: ``{part: (where, missing)}`` (:func:`related_rows`)."""
+    sql = expression.sql
+    for part, (where, missing) in laid.items():
+        sql = sql.replace(part.text, related_rows(part.table, where, missing=missing))
+    return SQLerExpression(sql, expression.params)
 
 
 # Built-in columns that live on the SQLite row, not inside the JSON blob.
@@ -134,12 +168,15 @@ class _Statements:
     _distinct: bool
     _group_by_fields: list[str]
     _having: Optional[SQLerExpression]
+    _select_fields: Optional[list[str]]
 
     _db: Any = None
     _use = ""
     _guard = ""
     _names: Optional[tuple[str, ...]] = None
     _laid: Optional[tuple[Any, Any]] = None  # the last query :meth:`_laid_out` made, by what it was made from
+    # the related tables a statement built from this query reads, with the names each was laid out from
+    _others: tuple[tuple[str, Optional[tuple[str, ...]]], ...] = ()
 
     def _filter_sql(self) -> str:
         """The ``WHERE`` of a statement on the query's rows: its filter, and the guard of a
@@ -459,6 +496,38 @@ class _Statements:
             sql += f" RETURNING {self._returning()}"
         return self._squeezed(sql), params
 
+    def _whole_rows(self, call: str) -> None:
+        """Refuse, for ``call`` (``copy_to``, ``delete``), a query with a limit or an offset,
+        before any statement: a copy and a delete of one query must touch the same rows, and
+        a delete takes every row the filter matches (an order changes neither)."""
+        if self._limit is not None or self._offset is not None:
+            raise ValueError(
+                f"{call}: a query with a limit or an offset is refused: copy_to() and delete() "
+                "take every row the filter matches, so that a copy and a delete of one query "
+                "touch the same rows; narrow the rows with filter()"
+            )
+
+    def _copy_target(self, table: str) -> str:
+        """The checked target of :meth:`_copy_sql`, refused before any statement: a name
+        sqler does not take for a table, the query's own table, and a query whose rows are not
+        whole rows or not every row its filter matches (:meth:`_whole_rows`)."""
+        target = validate_table_name(table)
+        if target.lower() == self._table.lower():
+            raise ValueError(f"copy_to: {target} is the table the query reads; copy to another table")
+        self._whole_rows("copy_to")
+        for name, used in (("select()", self._select_fields), ("group_by()", self._group_by_fields or self._having)):
+            if used:
+                raise ValueError(f"copy_to: a query with {name} is refused: it copies whole rows")
+        return target
+
+    def _copy_sql(self, target: str) -> tuple[str, list[Any]]:
+        """The one ``INSERT ... SELECT`` that copies the rows the query matches into the
+        checked ``target`` as they are stored: ``_id``, ``data``, ``_version`` where the
+        table has it, and every promoted column (:meth:`_returning`)."""
+        where, params = self._where()
+        columns = self._returning()
+        return self._squeezed(f"INSERT INTO {target} ({columns}) SELECT {columns} FROM {self._table} {where}"), params
+
 
 class SQLerQuery(_Statements):
     """Build and execute chainable queries against a table.
@@ -532,7 +601,9 @@ class SQLerQuery(_Statements):
         (``SQLerDB._shape_of``), whatever class reads or writes it; a versioned query
         (``with_version()``) for ``_use`` ``"update"`` gives the table the column first. Each
         statement built from it carries the guard of the remembered names
-        (``sqler.db._guard._guard``). Made once for each memory of the table, and kept.
+        (``sqler.db._guard._guard``). A filter through a reference reads each related
+        table as a query of that table is laid out (:meth:`_related_laid_out`), with its
+        guard. Made once for each memory of the table and of each related table, and kept.
 
         Raises:
             SchemaError: A document still holds the key of a promoted column.
@@ -542,14 +613,37 @@ class SQLerQuery(_Statements):
         if not version and self._include_version and self._use == "update" and db._has_version_column(table) is False:
             db._ensure_versioned_table(table)
             promoted, names, version = db._shape_of(table)
-        key = (names, promoted, version)
+        key: Any = (names, promoted, version)
+        others = related_tables(self._expression)
+        if others:  # the filter reads other tables: each is laid out as it is remembered too
+            key = (key, tuple(db._shape_of(other)[:2] for other in others))
         laid = self._laid
         if laid is None or laid[0] != key:
             made = self._clone(
                 promoted_fields=promoted, include_version=version, db=None, guard=db._guard_of(table, names), names=names
             )
+            if others:
+                made._expression, made._others = self._related_laid_out()
             laid = self._laid = (key, made)
         return laid[1]
+
+    def _related_laid_out(self) -> tuple[SQLerExpression, tuple]:
+        """The query's filter with the rows of each related table it reads read as a query
+        of that table on this database is laid out (:meth:`_laid_out`, the one owner of
+        which fields are columns, and of the guard), and the names each table was laid out
+        from, for the database to send the statement again once one has moved."""
+        expression, db = self._expression, self._db
+        assert expression is not None  # only a filter reads other tables
+        laid: dict[Any, tuple[str, bool]] = {}
+        names: dict[str, Any] = {}
+        for part in dict.fromkeys(expression.related):
+            used = SQLerQuery(part.table, expression=SQLerExpression(part.where))
+            used._db = db
+            used = used._laid_out()
+            if part.table not in names:  # a table not remembered may be missing: it is read once
+                names[part.table] = (used._names, used._names is None and not db._names(part.table)[0])
+            laid[part] = (used._where()[0], names[part.table][1])
+        return with_related(expression, laid), tuple((table, n) for table, (n, _) in names.items())
 
     def _execute(self, build) -> tuple[Self, Any]:
         """Send the statement ``build(query)`` makes; return the query it was built from and
@@ -565,7 +659,7 @@ class SQLerQuery(_Statements):
         def make() -> tuple[str, list[Any], Any]:
             nonlocal used
             used = self._laid_out()
-            return (*build(used), used._names)
+            return (*build(used), used._names, used._others)
 
         try:
             if self._db is not None:
@@ -1208,6 +1302,15 @@ class SQLerQuery(_Statements):
             raise NoAdapterError("No adapter set for query")
         query, cur = self._execute(lambda q: q._delete_sql(returning=True))
         return [] if cur is None else [query._returned(row) for row in cur.fetchall()]
+
+    def _copied(self, target: str) -> int:
+        """Copy the matching rows into the checked ``target`` (:meth:`_copy_sql`) and return
+        how many; 0 when the query's table is missing. It commits nothing: run it inside a
+        transaction."""
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        _, cur = self._execute(lambda q: q._copy_sql(target))
+        return 0 if cur is None else cur.rowcount
 
 
 class PaginatedResult:

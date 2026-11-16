@@ -245,7 +245,7 @@ async def r_filter(cls, db, table):
 
 async def r_ref(cls, db, table):
     built = cls.ref("home").field("city") == "Kyoto"
-    return (re.search(r"FROM (\w+) r ", built.sql).group(1), built.params)
+    return (re.search(r"SELECT _id AS rid FROM (\w+) rt ", built.sql).group(1), built.params)
 
 
 async def r_model_validate(cls, db, table):

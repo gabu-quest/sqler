@@ -3,7 +3,8 @@ class stores in: the outer table is the one of the model filtered, the related t
 of the class the field's annotation admits, both by ``_model_table_name``.
 
 ``ROWS`` is the one table of shapes; each runs on ``SQLerModel`` and on ``AsyncSQLerModel``.
-A row builds the filter, checks that its SQL names both tables, runs it on a database with
+A row builds the filter, checks that its SQL names the related table (and the outer row's
+``data`` by no table name), runs it on a database with
 one matching and one other row, and checks the one row it returns. The classes are made per
 base with names of their own, so the two bases never share a table.
 """
@@ -15,6 +16,7 @@ import pytest
 
 from sqler import AsyncSQLerDB, SQLerDB
 from sqler.models import AsyncSQLerModel, SQLerModel
+from sqler.query import F
 
 
 def _model(base: type, name: str, fields: dict[str, Any], tablename: Optional[str] = None) -> type:
@@ -164,11 +166,15 @@ ROWS = list(SYNC)
 
 
 def _check_sql(sql: str, outer: str, related: str, any_: bool) -> None:
+    """The filter reads the related table, and the outer row's ``data`` by no table name: it
+    is the row of whatever table the query reads (``outer`` is the class's own)."""
+    related_rows = f"(SELECT _id AS rid FROM {related} rt WHERE json_extract(rt.data, '$.name') = ?) r"
     if any_:
-        expected = f"FROM json_each({outer}.data, '$.items') a JOIN {related} r ON "
+        expected = f"FROM json_each(data, '$.items') a JOIN {related_rows} ON "
     else:
-        expected = f"FROM {related} r WHERE r._id = json_extract({outer}.data, "
+        expected = f"FROM {related_rows} WHERE r.rid = json_extract(data, "
     assert expected in sql, sql
+    assert f"{outer}.data" not in sql, sql
 
 
 def _rows(outer: type, field: str, related_rows: list, any_: bool) -> list:
@@ -227,8 +233,8 @@ def test_a_field_that_admits_no_model_class_keeps_the_table_of_its_name(base, p)
     holder = _model(base, f"Dn{p}Blobbed", {"blob": dict}, f"dn_{p.lower()}_blobbed")
     expr = holder.ref("blob").field("name") == "red"
     assert expr.sql == (
-        "EXISTS (SELECT 1 FROM blobs r WHERE r._id = json_extract("
-        f"dn_{p.lower()}_blobbed.data, '$.blob._id') AND json_extract(r.data, '$.name') = ?)"
+        "EXISTS (SELECT 1 FROM (SELECT _id AS rid FROM blobs rt WHERE json_extract(rt.data, "
+        "'$.name') = ?) r WHERE r.rid = json_extract(data, '$.blob._id'))"
     )
 
 
@@ -243,3 +249,100 @@ def test_a_field_that_admits_classes_of_two_tables_is_refused(base, p):
         ValueError, match=rf"^Dn{p}UnionHolder\.pick: its annotation admits classes"
     ):
         holder.ref("pick").field("name") == "red"  # noqa: B015 - the build under test
+
+
+# ----- a reference filter on a queryset of another table (``using(db, table)``) ----------
+#
+# The outer rows are copied by plain SQL into ``<outer table>_arch``; the filter on a
+# queryset of that table finds the copy of the one matching row there, whatever table the
+# outer class stores in, and the rows of the class's own table are not read.
+
+
+def _archived(outer_table: str) -> tuple[str, str]:
+    arch = f"{outer_table}_arch"
+    return arch, f"CREATE TABLE {arch} AS SELECT * FROM {outer_table}"
+
+
+@pytest.mark.parametrize("row", ROWS)
+def test_a_reference_filter_on_a_queryset_of_another_table(row):
+    outer, field, related, any_, bind, outer_table, related_table = SYNC[row]
+    db = SQLerDB.in_memory(shared=False)
+    try:
+        if bind:
+            related.set_db(db, related_table)
+            outer.set_db(db, outer_table)
+        reds = [related(name=n).save(db=db) for n in ("red", "blue")]
+        for o in _rows(outer, field, reds, any_):
+            o.save(db=db)
+        arch, copy = _archived(outer_table)
+        db.adapter.execute(copy)
+        db.adapter.execute(f"UPDATE {arch} SET data = json_set(data, '$.name', 'a-' || json_extract(data, '$.name'))")
+        db.adapter.commit()
+        ref = outer.ref(field)
+        expr = (ref.any() if any_ else ref).field("name") == "red"
+        found = outer.using(db, arch).filter(expr).all()
+        assert [o.name for o in found] == ["a-p-red"]
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("row", ROWS)
+@pytest.mark.asyncio
+async def test_a_reference_filter_on_a_queryset_of_another_table_async(row):
+    outer, field, related, any_, bind, outer_table, related_table = ASYNC[row]
+    db = AsyncSQLerDB.in_memory(shared=False)
+    await db.connect()
+    try:
+        if bind:
+            related.set_db(db, related_table)
+            outer.set_db(db, outer_table)
+        reds = [await related(name=n).save(db=db) for n in ("red", "blue")]
+        for o in _rows(outer, field, reds, any_):
+            await o.save(db=db)
+        arch, copy = _archived(outer_table)
+        async with db.transaction():
+            await db.adapter.execute(copy)
+            await db.adapter.execute(
+                f"UPDATE {arch} SET data = json_set(data, '$.name', 'a-' || json_extract(data, '$.name'))"
+            )
+        ref = outer.ref(field)
+        expr = (ref.any() if any_ else ref).field("name") == "red"
+        found = await outer.using(db, arch).filter(expr).all()
+        assert [o.name for o in found] == ["a-p-red"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.parametrize(
+    "base,p", [(SQLerModel, "S"), (AsyncSQLerModel, "A")], ids=["sync", "async"]
+)
+@pytest.mark.asyncio
+async def test_a_reference_filter_beside_a_promoted_field_of_the_queryset_table(base, p):
+    """The outer class keeps ``name`` in a column of its own; a filter on it and through the
+    reference, on the class's table and on another table in its layout, finds one row."""
+    t = p.lower()
+    team = _model(base, f"Dn{p}PrTeam", {}, f"dn_{t}_pr_teams")
+    player = _model(base, f"Dn{p}PrPlayer", {"team": Optional[team]}, f"dn_{t}_pr_players")
+    player.__promoted__ = {"name": "TEXT NOT NULL DEFAULT ''"}
+    is_async = base is AsyncSQLerModel
+    db = AsyncSQLerDB.in_memory(shared=False) if is_async else SQLerDB.in_memory(shared=False)
+
+    async def v(x):
+        return await x if is_async else x
+
+    if is_async:
+        await db.connect()
+    try:
+        red = await v(team(name="red").save(db=db))
+        blue = await v(team(name="blue").save(db=db))
+        for name, t_ in (("ann", red), ("bob", blue), ("cid", red)):
+            await v(player(name=name, team=t_).save(db=db))
+        await v(db.ensure_table(f"dn_{t}_pr_arch", promoted={"name": "TEXT NOT NULL DEFAULT ''"}))
+        await v(db.adapter.execute(f"INSERT INTO dn_{t}_pr_arch SELECT * FROM dn_{t}_pr_players"))
+        await v(db.adapter.commit())
+        expr = (player.ref("team").field("name") == "red") & (F("name") == "cid")
+        own = await v(player.using(db).filter(expr).all())
+        arch = await v(player.using(db, f"dn_{t}_pr_arch").filter(expr).all())
+        assert ([(o._id, o.name) for o in own], [(o._id, o.name) for o in arch]) == ([(3, "cid")], [(3, "cid")])
+    finally:
+        await v(db.close())

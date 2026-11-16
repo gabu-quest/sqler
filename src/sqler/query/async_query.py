@@ -12,6 +12,8 @@ from sqler.query.query import (
     _Statements,
     aend_failed,
     is_missing_table,
+    related_tables,
+    with_related,
 )
 from sqler.utils import validate_field_name
 
@@ -84,14 +86,34 @@ class AsyncSQLerQuery(_Statements):
         if not version and self._include_version and self._use == "update" and await db._has_version_column(table) is False:
             await db._ensure_versioned_table(table)
             promoted, names, version = await db._shape_of(table)
-        key = (names, promoted, version)
+        key: Any = (names, promoted, version)
+        others = related_tables(self._expression)
+        if others:
+            key = (key, tuple([(await db._shape_of(other))[:2] for other in others]))
         laid = self._laid
         if laid is None or laid[0] != key:
             made = self._clone(
                 promoted_fields=promoted, include_version=version, db=None, guard=db._guard_of(table, names), names=names
             )
+            if others:
+                made._expression, made._others = await self._related_laid_out()
             laid = self._laid = (key, made)
         return laid[1]
+
+    async def _related_laid_out(self) -> tuple[SQLerExpression, tuple]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._related_laid_out`."""
+        expression, db = self._expression, self._db
+        assert expression is not None  # only a filter reads other tables
+        laid: dict[Any, tuple[str, bool]] = {}
+        names: dict[str, Any] = {}
+        for part in dict.fromkeys(expression.related):
+            used = AsyncSQLerQuery(part.table, expression=SQLerExpression(part.where))
+            used._db = db
+            used = await used._laid_out()
+            if part.table not in names:  # a table not remembered may be missing: it is read once
+                names[part.table] = (used._names, used._names is None and not (await db._names(part.table))[0])
+            laid[part] = (used._where()[0], names[part.table][1])
+        return with_related(expression, laid), tuple((table, n) for table, (n, _) in names.items())
 
     async def _execute(self, build) -> tuple[Self, Any]:
         """Async twin of :meth:`sqler.query.query.SQLerQuery._execute`."""
@@ -100,7 +122,7 @@ class AsyncSQLerQuery(_Statements):
         async def make() -> tuple[str, list[Any], Any]:
             nonlocal used
             used = await self._laid_out()
-            return (*build(used), used._names)
+            return (*build(used), used._names, used._others)
 
         try:
             if self._db is not None:
@@ -599,3 +621,14 @@ class AsyncSQLerQuery(_Statements):
         rows = await cur.fetchall()
         await cur.close()
         return [query._returned(row) for row in rows]
+
+    async def _copied(self, target: str) -> int:
+        """Async twin of :meth:`SQLerQuery._copied`."""
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        _, cur = await self._execute(lambda q: q._copy_sql(target))
+        if cur is None:
+            return 0
+        rowcount = cur.rowcount
+        await cur.close()
+        return rowcount

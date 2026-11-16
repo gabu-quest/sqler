@@ -31,7 +31,7 @@ from sqler import registry
 from sqler._stored import stored
 from sqler.exceptions import ReferentialIntegrityError
 from sqler.models import _dirty, _refs, async_integrity, integrity
-from sqler.models._table_names import _check_given, _Home, _home_of, _set_home
+from sqler.models._table_names import _check_given, _Home, _home_of, _model_table_name, _set_home
 
 Row = tuple[str, Any, Optional[dict], Optional[dict]]
 
@@ -430,6 +430,53 @@ def told(cls, db, table: str, result):
     if issubclass(cls, WriteRules):
         cls._table_written(db, table)
     return result
+
+
+def refuse_self_copy(cls, source: str) -> None:
+    """Refuse, before any statement, a ``copy_to()`` of rows of ``cls`` from ``source`` when a
+    field of ``cls`` can refer to rows of ``source``: a class admitted at any position of the
+    field (:func:`sqler.models._refs.typed_fields`: the field, an ``Optional``, each entry of
+    a list, each value of a dict) is stored in ``source``, or the class that owns ``source``
+    is one of them or a subclass. A copied row keeps its references, so its copies would
+    still refer to the rows of ``source``, and a delete of those rows would count the copies
+    as referrers.
+
+    Raises:
+        ValueError: Such a field, the first one found.
+    """
+    for field, at in _refs.typed_fields(cls).items():
+        admits = _admitted(at)
+        if admits and (
+            any(_model_table_name(c) == source for c in admits) or _refs._admits(source, admits)
+        ):
+            raise ValueError(
+                f"copy_to: {cls.__name__}.{field} can refer to rows of {source}: its copies would "
+                f"still refer to the rows of {source}, and a delete of those rows would count the "
+                "copies as referrers"
+            )
+
+
+def _admitted(at: Any) -> tuple:
+    """Every class a :class:`sqler.models._refs.Position` admits, at it or anywhere in it."""
+    found = tuple(at.admits)
+    for inner in (at.item, at.value):
+        if inner is not None:
+            found += _admitted(inner)
+    return found
+
+
+def copied(cls, db, table: str, count: int) -> int:
+    """``count``, the rows of ``cls`` a queryset's ``copy_to()`` copied into ``table``, once
+    the class and the class registered for ``table`` have been told that it was written (a
+    cache drops its entries). It writes no audit row and calls no hook: the copy is one
+    statement inside the database, and no row passes through Python. Rows of ``cls`` are
+    now kept in ``table`` (``registry.note``)."""
+    told(cls, db, table, None)
+    other = _class_of(table)
+    if other is not None and other is not cls:
+        other._table_written(db, table)
+    registry.note(table, cls)
+    return count
 
 
 def set_write(cls, db, table: str, write: Callable[[], list], on_delete: Optional[str] = None) -> list:

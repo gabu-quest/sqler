@@ -217,6 +217,27 @@ class AsyncSQLerQuerySet(Generic[T]):
             return self._told(await self._checked().delete())
         return len(await self._written("rows", self._deleted_rows, on_delete))
 
+    async def delete(self, on_delete: str = "restrict") -> int:
+        """Async twin of :meth:`SQLerQuerySet.delete`: :meth:`delete_all` under the name a
+        query's ``delete()`` has; a limit or an offset is refused."""
+        self._query._whole_rows("delete")
+        return await self.delete_all(on_delete)
+
+    async def copy_to(self, table: str) -> int:
+        """Async twin of :meth:`SQLerQuerySet.copy_to`: the same rows, target rules, refusals
+        and unit."""
+        target = self._query._copy_target(table)
+        _write_rules.refuse_self_copy(self._model_cls, self._query._table)
+        db = self._db
+        if db is None:
+            raise RuntimeError(f"{self._model_cls.__name__}: copy_to() needs the queryset's database")
+        source = self._query._table
+        async with db.transaction():
+            if not await db._copy_target(source, target, getattr(self._model_cls, "__checks__", None)):
+                return 0
+            count = await self._checked("rows")._copied(target)
+            return _write_rules.copied(self._model_cls, db, target, count)
+
     @staticmethod
     async def _deleted_rows(query: AsyncSQLerQuery) -> list:
         return [(doc, None) for doc in await query._deleted()]

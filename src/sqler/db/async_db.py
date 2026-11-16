@@ -6,7 +6,15 @@ from typing import Any, Optional
 
 from sqler import cache
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter, PoolStats
-from sqler.db._promotion import _moved, _promotion, _record, _settled, _unwritable, _versioning
+from sqler.db._promotion import (
+    _copy_layout,
+    _moved,
+    _promotion,
+    _record,
+    _settled,
+    _unwritable,
+    _versioning,
+)
 from sqler.db._raw_read import _read_only, _sql_results
 from sqler.db._rows import (
     _columns_sql,
@@ -154,6 +162,18 @@ class AsyncSQLerDB(_TableMemory):
         if versioned:
             await self._ensure_versioned_table(table)
 
+    async def _copy_target(self, source: str, target: str, checks: Optional[dict[str, str]] = None) -> bool:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._copy_target`."""
+        layout = await self._run(_copy_layout(source, target))
+        if layout is None:
+            return False
+        made, promoted, versioned = layout
+        if made:
+            await self.ensure_table(target, promoted=promoted, checks=checks, versioned=versioned)
+        elif promoted:
+            await self.ensure_table(target, promoted=promoted)
+        return True
+
     async def _ensure_table(self, table: str) -> None:
         table = validate_table_name(table)
         await self.adapter.execute(_create_sql(table))
@@ -246,13 +266,22 @@ class AsyncSQLerDB(_TableMemory):
             step = await make()
             if step is None:
                 return None
-            sql, params, names = step
+            sql, params, names, *others = step
             try:
                 return await adapter._execute_judged(sql, params)
             except Exception as exc:
-                if isinstance(exc, sqlite3.OperationalError) and await self._has_moved(table, names):
+                if isinstance(exc, sqlite3.OperationalError) and (
+                    await self._has_moved(table, names) or await self._others_moved(others)
+                ):
                     continue
                 await aend_failed(adapter, exc, table, sql)
+
+    async def _others_moved(self, others: list) -> bool:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._others_moved`."""
+        for other, names in others[0] if others else ():
+            if await self._has_moved(other, names):
+                return True
+        return False
 
     async def _has_moved(self, table: str, names: Optional[tuple[str, ...]]) -> bool:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._has_moved`. Outside a transaction

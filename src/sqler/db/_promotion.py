@@ -263,3 +263,45 @@ def _unwritable(exc: sqlite3.OperationalError) -> bool:
     or another connection holds the write lock past the busy timeout."""
     code = getattr(exc, "sqlite_errorcode", None)  # an error sqler raised itself carries none
     return code is not None and (code & 0xFF) in (sqlite3.SQLITE_READONLY, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
+def _definition(row: Any) -> str:
+    """The definition of a stored column, from its row of :func:`_columns_sql`, as
+    ``ensure_table`` takes it: its type, ``NOT NULL``, ``DEFAULT`` as SQLite keeps it."""
+    _, _, kind, not_null, default = row[:5]
+    return f"{kind}{' NOT NULL' if not_null else ''}{'' if default is None else f' DEFAULT {default}'}"
+
+
+def _copy_layout(source: str, target: str) -> Any:
+    """What ``copy_to`` must make of ``target`` for the rows of ``source``, both validated, to
+    go into it as they are stored: ``None`` when ``source`` is missing (there is nothing to
+    copy and nothing is made), else ``(made, promoted, versioned)``: whether ``target`` is to
+    be made, the promoted columns of ``source`` it lacks (``{column: definition}``, every one
+    for a new target), and whether ``source`` has ``_version``.
+
+    Raises:
+        ValueError: ``target`` has a promoted column ``source`` has not, or has ``_version``
+            where ``source`` has not, or the reverse; nothing is written.
+    """
+    src = [row for row in (yield _columns_sql(source), []) if row[6] == 0]
+    if not src:
+        return None
+    names = [row[1] for row in src]
+    promoted = {row[1]: _definition(row) for row in src if row[1] in _promoted_in(names)}
+    versioned = _has_version(tuple(names))
+    dst = [row[1] for row in (yield _columns_sql(target), []) if row[6] == 0]
+    if not dst:
+        return True, promoted, versioned
+    have = {name.lower() for name in _promoted_in(dst)}
+    extra = [name for name in _promoted_in(dst) if name.lower() not in {c.lower() for c in promoted}]
+    if extra:
+        what = f"the column {extra[0]}" if len(extra) == 1 else f"the columns {', '.join(extra)}"
+        raise ValueError(f"copy_to: {target} has {what}, which {source} has not: a copied row would leave it empty")
+    if _has_version(tuple(dst)) != versioned:
+        said = (
+            f"has no _version column and {source} has: the copied rows would lose their versions"
+            if versioned
+            else f"has a _version column and {source} has not: the copied rows have no version to keep"
+        )
+        raise ValueError(f"copy_to: {target} {said}")
+    return False, {c: d for c, d in promoted.items() if c.lower() not in have}, versioned

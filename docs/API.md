@@ -691,6 +691,92 @@ assert isinstance(qs, SQLerQuerySet)
 print([u.name for u in qs.all()])  # ['Ada']
 ```
 
+#### Copy rows to another table, and delete them: `copy_to()` and `delete()`
+
+`queryset.copy_to(table)` copies the rows `all()` would return into `table` as they are
+stored (the same `_id`, document, `_version` and promoted columns) in one
+`INSERT ... SELECT` inside the database, and returns how many it copied; the rows it read
+are unchanged. `queryset.delete(on_delete="restrict")` deletes every matching row and
+returns the count: it is `delete_all()` under this name, with the same policy ([C09]) and
+unit. Together they move rows to an archive; inside `with db.transaction():` (`async with`
+on an `AsyncSQLerDB`) the copy and the delete both happen or, after an exception or a
+rollback, neither. Outside one, each is its own unit. The async querysets have both, awaited.
+
+The target table:
+
+- a missing one is made in the layout of the queryset's table: its promoted columns, the
+  class's `__checks__`, and `_version` where that table has it;
+- an existing one gets the promoted columns it lacks, as `ensure_table` adds them;
+- refused with `ValueError` before anything is written: the queryset's own table, a table
+  with a promoted column the queryset's table has not, and one with `_version` where the
+  queryset's table has none, or the reverse; a name sqler does not take for a table raises
+  `InvalidTableNameError`;
+- a row whose `_id` is in the target already fails the statement with
+  `UniqueConstraintError`, and nothing is copied; so does a row a unique index on the target
+  refuses. A copy of a table that does not exist copies 0 rows and makes nothing.
+
+`copy_to()` and `delete()` refuse a query with a limit or an offset (`ValueError`, before any
+statement): both take every row the filter matches, so a copy and a delete of one query take
+the same rows. An `order_by()` changes nothing. `copy_to()` also refuses `select()` and
+`group_by()`: it copies whole rows. A cached query of the target's table drops its entries,
+and a search index made with `content_sync=True` on the target finds the copied rows (one
+made with `content_sync=False` finds them after its `rebuild()`); `copy_to()` writes no audit
+row, sets no timestamp and calls no hook.
+
+A copied row refers to what the original referred to: its references name the rows they
+named, in their tables. A later delete of a referenced row counts the copy as a referrer
+under each policy, as it counts any row of that class in any table: `restrict` refuses,
+`cascade` deletes the copy, `set_null` clears its field. So `copy_to()` refuses, with a
+`ValueError` beginning `copy_to:` before any statement, a class with a field that can refer
+to rows of the table it copies from (its own kind, or another class stored in that table,
+through the field, an `Optional`, each entry of a list or each value of a dict): its copies
+would still refer to the rows the delete that follows removes, and would block it, be
+deleted with it, or lose the reference. A class that refers only to other tables copies as
+above.
+
+A filter through a reference field works on a queryset of any table, also one read with
+`using(db, table)`, and finds the same rows whichever class keeps the field in a promoted
+column: the condition on the related row is laid out as the database remembers the related
+table, as a query on that table is, also when a field of it is promoted after the queryset
+ran:
+
+```python
+from typing import Optional
+
+from sqler import SQLerDB, SQLerModel
+from sqler.query import F
+
+class Crew(SQLerModel):
+    name: str
+
+class Job(SQLerModel):
+    title: str
+    done: bool = False
+    crew: Optional[Crew] = None
+
+db = SQLerDB.in_memory()
+ada = Crew(name="Ada").save(db=db)
+bob = Crew(name="Bob").save(db=db)
+Job(title="paint", done=True, crew=ada).save(db=db)
+Job(title="sand", done=False, crew=ada).save(db=db)
+Job(title="weld", done=True, crew=bob).save(db=db)
+
+finished = Job.using(db).filter(F("done") == True)
+with db.transaction():  # the copy and the delete: both, or neither
+    print(finished.copy_to("jobs_archive"))  # 2
+    print(finished.delete())  # 2
+
+archive = Job.using(db, "jobs_archive")
+print([(j._id, j.title) for j in archive.order_by("title").all()])  # [(1, 'paint'), (3, 'weld')]
+print([j.title for j in archive.filter(Job.ref("crew").field("name") == "Ada").all()])  # ['paint']
+print([j.title for j in Job.using(db).all()])  # ['sand']
+
+try:
+    Job.using(db).order_by("title").limit(1).delete()
+except ValueError as exc:
+    print(str(exc).split(":")[0])  # delete
+```
+
 ---
 
 ## Relationships
@@ -1728,7 +1814,7 @@ its `delete()` logs the stored values, not its edits.
 
 ### The set-based ways and the rows a delete's policy changes
 
-A queryset's `update()`, `update_one()`, `update_n()` and `delete_all()`, and the rows that
+A queryset's `update()`, `update_one()`, `update_n()`, `delete_all()` and `delete()`, and the rows that
 `delete_with_policy(on_delete="set_null")` nulls or `on_delete="cascade"` deletes (each by
 the rules of its own table's registered class), meet the same rules but the hooks:
 
@@ -1738,13 +1824,15 @@ the rules of its own table's registered class), meet the same rules but the hook
 | `TimestampMixin` / `AuditMixin` | each updated (or nulled) row gets `updated_at` (and `updated_by`) in the same statement, stored as `save()` stores it; one time for all rows of the statement (the strictly-later promise of `save()` is per instance). A field you name in the update is yours: `update(updated_at=x)` writes `x` |
 | `AuditLogMixin` | one `update` row per row changed (`changes` holds the old and new of each key that differs; the new value is what the row holds afterwards, F-expressions included) and one `delete` row per row deleted, in one unit with the write; each row is read and written inside that unit, so no other connection writes it in between |
 | `HooksMixin` | calls no hook; use a loop of `save()` where a hook must run |
+| a queryset's `copy_to()` | copies each row as it is stored, `_version` and stamps included, in one statement inside the database: it writes no audit row, sets no stamp, moves no version and calls no hook; a cache of the target table drops its entries |
 
 A class with no rule sends the one statement it sent before. `delete_all(on_delete=...)`
 meets the delete policy as `delete()` does ([C09]): the default `restrict` refuses while a
 row outside the set refers to a row in it, and nothing is deleted. A class with no rule that
 no class can refer to sends its one `DELETE`; otherwise the `DELETE` returns the rows it
 deleted, and the look, the policy and the audit rows join it in one unit. A queryset's
-order and limit do not narrow the `DELETE`: it deletes every row the filter matches.
+order and limit do not narrow the `DELETE` of `delete_all()`: it deletes every row the filter
+matches. `delete()` and `copy_to()` refuse a query with a limit or an offset.
 
 A write made with `db.*` directly (`db.bulk_upsert`, `db.insert_document`, `db.execute`) is
 below the model and meets no rule of any class.
