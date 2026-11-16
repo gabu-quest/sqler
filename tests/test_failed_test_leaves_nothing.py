@@ -1,13 +1,19 @@
-"""A test that fails while it holds an async database must not keep the pytest process alive.
+"""A test that fails while it holds an async database must not keep the pytest process alive,
+and a program that ends with one open ends.
 
-Each case runs a small pytest of its own: the thing under test is how that process ends."""
+Each case runs a small pytest, or a small program, of its own: the thing under test is how
+that process ends."""
 
+import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+
+import pytest
 
 TESTS = Path(__file__).parent
 HEADER = "import asyncio\nfrom sqler.db.async_db import AsyncSQLerDB\n"
@@ -134,3 +140,39 @@ def test_a_connection_in_a_statement_that_never_ends_fails_its_test_and_the_run_
         re.search(r"^1 passed, 1 error in ", done.stdout, re.M) is not None,
     ) == (1, True), shown
     assert "was left in a statement that did not end" in done.stdout, shown
+
+
+# ---- a program that ends with the database open -------------------------------------
+
+PROGRAM = """
+    import asyncio, sys
+    from sqler import AsyncSQLerDB
+
+    async def main():
+        db = AsyncSQLerDB.on_disk(sys.argv[1])
+        await db.connect()
+        await db.insert_document("notes", {"text": "kept"})
+        ENDING
+
+    asyncio.run(main())
+"""
+ENDINGS = {
+    "raises": ('raise RuntimeError("the program failed")', 1, "RuntimeError: the program failed"),
+    "returns": ("return", 0, ""),
+    "exits": ("sys.exit(3)", 3, ""),
+}
+
+
+@pytest.mark.parametrize("ending", list(ENDINGS))
+def test_a_program_that_ends_with_an_async_database_open_ends_and_keeps_what_it_wrote(tmp_path, ending):
+    line, code, last = ENDINGS[ending]
+    path = tmp_path / "notes.db"
+    argv = [sys.executable, "-c", textwrap.dedent(PROGRAM).replace("ENDING", line), str(path)]
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=20, cwd=tmp_path)
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(f"the program did not end within 20 s:\n{exc.stdout}\n{exc.stderr}") from exc
+    assert (done.returncode, (done.stderr.strip().splitlines() or [""])[-1]) == (code, last)
+    with sqlite3.connect(path) as conn:
+        rows = conn.execute("SELECT _id, data FROM notes").fetchall()
+    assert [(i, json.loads(d)) for i, d in rows] == [(1, {"text": "kept"})]
