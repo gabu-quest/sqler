@@ -6,44 +6,41 @@ from typing import Any, Optional
 
 from sqler import cache
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter, PoolStats
-from sqler.db.sqler_db import (
-    _INDEX_EXISTS_SQL,
-    _and_fields,
-    _bulk_upserts,
-    _checked_promotion,
+from sqler.db._promotion import _moved, _promotion, _record, _settled, _unwritable, _versioning
+from sqler.db._raw_read import _read_only, _sql_results
+from sqler.db._rows import (
     _columns_sql,
-    _create_index_sql,
-    _create_sql,
-    _delete_sql,
-    _drop_index_sql,
-    _ended_while_leaving,
-    _fields_update,
-    _hand_ids,
     _id_params,
     _in_order,
-    _index_rows,
-    _indexes_sql,
-    _inserts,
-    _keep_word,
     _layout,
-    _Level,
-    _moved,
     _promoted_in,
-    _promotion,
-    _read_only,
-    _record,
-    _refuse_unwritten,
     _row_columns,
     _row_documents,
-    _row_there_sql,
     _rows_sql,
-    _settled,
-    _sql_results,
-    _TableMemory,
-    _unwritable,
-    _upsert_sql,
-    _versioning,
 )
+from sqler.db._statements import (
+    _INDEX_EXISTS_SQL,
+    _checked_promotion,
+    _create_index_sql,
+    _delete_sql,
+    _drop_index_sql,
+    _index_rows,
+    _indexes_sql,
+    _keep_word,
+    _row_there_sql,
+)
+from sqler.db._table_memory import _Level, _TableMemory
+from sqler.db._writes import (
+    _and_fields,
+    _bulk_upserts,
+    _create_sql,
+    _fields_update,
+    _hand_ids,
+    _inserts,
+    _refuse_unwritten,
+    _upsert_sql,
+)
+from sqler.db.sqler_db import _ended_while_leaving
 from sqler.exceptions import StaleVersionError
 from sqler.query.query import _has_version, aend_failed, is_missing_table
 from sqler.utils import (
@@ -63,7 +60,7 @@ async def _afetch_all(adapter: Any, sql: str, params: list, send: Any = None) ->
 
 
 async def _aselect_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) -> Optional[list]:
-    """Async twin of :func:`sqler.db.sqler_db._select_rows`."""
+    """Async twin of :func:`sqler.db._rows._select_rows`."""
     n, params = _id_params(ids)
     sql = _rows_sql(table, columns, n)
     try:
@@ -674,7 +671,7 @@ class AsyncSQLerDB(_TableMemory):
 
         Only read-only statements (SELECT, EXPLAIN, PRAGMA, WITH) are allowed.
 
-        Each row is read by its column names (:func:`sqler.db.sqler_db._sql_results`): with a
+        Each row is read by its column names (:func:`sqler.db._raw_read._sql_results`): with a
         ``data`` column, its JSON document, with ``_id`` set from an ``_id`` column; with
         ``_id`` the only column, ``{"_id": id}``, so callers can hydrate with
         :meth:`AsyncSQLerModel.from_id`; else a dict of every column by its name.

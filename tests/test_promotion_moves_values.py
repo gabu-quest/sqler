@@ -1044,7 +1044,7 @@ def test_a_table_of_sqlers_own_is_not_a_user_table_name(name):
 
 
 def test_sqlers_own_tables_are_one_set():
-    from sqler.db.sqler_db import _SETTLED
+    from sqler.db._promotion import _SETTLED
     from sqler.migrations import MIGRATIONS_TABLE
     from sqler.utils import SQLER_TABLES
 
@@ -1189,7 +1189,7 @@ def test_a_ranked_hit_is_ordered_by_its_score(run):
 def test_a_default_worked_out_by_a_pydantic_without_the_flag_is_a_plain_default(run):
     """pydantic before 2.10 has no ``default_factory_takes_validated_data`` on a field: its
     factories take no argument, and the fill is what the factory gives."""
-    from sqler.db import sqler_db
+    from sqler.db import _promotion as promotion
 
     class Field:
         default_factory = staticmethod(lambda: "made")
@@ -1203,16 +1203,16 @@ def test_a_default_worked_out_by_a_pydantic_without_the_flag_is_a_plain_default(
     class Model:
         model_fields = {"status": Field()}
 
-    assert sqler_db._fill_of(Model, "status") == "made"
+    assert promotion._fill_of(Model, "status") == "made"
 
 
 def test_an_error_without_an_sqlite_code_is_not_a_database_that_takes_no_write():
-    from sqler.db import sqler_db
+    from sqler.db import _promotion as promotion
 
-    assert sqler_db._unwritable(sqlite3.OperationalError("another thread's transaction holds the connection")) is False
+    assert promotion._unwritable(sqlite3.OperationalError("another thread's transaction holds the connection")) is False
     busy = sqlite3.OperationalError("database is locked")
     busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
-    assert sqler_db._unwritable(busy) is True
+    assert promotion._unwritable(busy) is True
 
 
 # ---------------------------------------------------------------- sqler's own tables are not the user's

@@ -23,7 +23,13 @@ public name its sync twin has):
 - `adapter/`: the SQLite adapters, `synchronous.py` (`SQLiteAdapter`) and `asynchronous.py`
   (`AsyncSQLiteAdapter`, with its connection pool), and the interfaces in `abstract.py`.
 - `db/`: `SQLerDB` (`sqler_db.py`) and `AsyncSQLerDB` (`async_db.py`), the document and table
-  calls on top of an adapter.
+  calls on top of an adapter. What both share is in files by subject: `_table_memory.py` (what a
+  database object remembers of a table), `_guard.py` (the guard a statement carries against a
+  changed table), `_rows.py` (the column list and the row-to-document rule for a read by id),
+  `_writes.py` (the write of one row, the version check, a write of some fields), `_promotion.py`
+  (the statements that make a promoted column, move values into it and record it),
+  `_raw_read.py` (`execute_sql`: which statements it takes and how its rows become results),
+  `_statements.py` (the indexes, a delete by id, the checks of an ensure).
 - `models/`: the model bases (pydantic ones here), the querysets, the mixins (`mixins.py`),
   references and delete policies (`_refs.py`, `integrity.py`), optimistic-lock retry
   (`save_retry.py`, `utils.py`).
