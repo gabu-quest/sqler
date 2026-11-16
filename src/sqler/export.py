@@ -40,6 +40,8 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from sqler.db.async_db import AsyncSQLerDB
+    from sqler.db.sqler_db import SQLerDB
     from sqler.models import AsyncSQLerModel, SQLerModel
     from sqler.models.async_queryset import AsyncSQLerQuerySet
     from sqler.models.queryset import SQLerQuerySet
@@ -321,8 +323,10 @@ def _import_csv_row(
     row: dict,
     transform: Optional[Callable[[dict], dict]],
     update_existing: bool,
+    db: Optional["SQLerDB"] = None,
 ) -> None:
-    """Save one CSV row: transform, ``_id``, deserialize, create or update."""
+    """Save one CSV row: transform, ``_id``, deserialize, create or update, in ``db`` when
+    given, else in the class's database."""
     if transform:
         row = transform(row)
 
@@ -336,17 +340,17 @@ def _import_csv_row(
             row[field_name] = _deserialize_value(value, field_info.annotation)
 
     if update_existing and record_id:
-        existing = model_class.from_id(record_id)
+        existing = model_class.from_id(record_id, db=db)
         if existing:
             for key, value in row.items():
                 setattr(existing, key, value)
-            existing.save()
+            existing.save(db=db)
         else:
             instance = model_class(**row)
-            instance.save()
+            instance.save(db=db)
     else:
         instance = model_class(**row)
-        instance.save()
+        instance.save(db=db)
 
 
 def import_csv(
@@ -358,6 +362,7 @@ def import_csv(
     update_existing: bool = False,
     batch_size: Optional[int] = None,
     transform: Optional[Callable[[dict], dict]] = None,
+    db: Optional["SQLerDB"] = None,
 ) -> ImportResult:
     """Import CSV data into model table.
 
@@ -376,6 +381,8 @@ def import_csv(
             of its batch is kept. Inside a transaction of the caller the batches
             are nested in it and commit with it.
         transform: Optional function to transform each row before import
+        db: Optional database to import into (overrides class-level binding); the
+            rows updated with ``update_existing`` are read from it too.
 
     Returns:
         ImportResult with import statistics
@@ -388,7 +395,8 @@ def import_csv(
     succeeded = 0
     total = 0
 
-    db = model_class.db() if batch_size is not None else None
+    # the batches are transactions of the database the rows go to; none without batch_size
+    batch_db = model_class._resolve_binding(db)[0] if batch_size is not None else None
     batch = None  # the open transaction of the current batch
     in_batch = 0  # rows seen in it
     ok_in_batch = 0  # rows of it that were saved
@@ -399,18 +407,18 @@ def import_csv(
 
             for row_num, row in enumerate(reader, start=2):  # Start at 2 (after header)
                 total += 1
-                if db is not None and batch is None:
-                    batch = db.transaction()
+                if batch_db is not None and batch is None:
+                    batch = batch_db.transaction()
                     batch.__enter__()
                     in_batch = ok_in_batch = 0
 
                 try:
-                    if db is not None:
+                    if batch_db is not None:
                         # a failed row undoes itself and leaves the batch usable
-                        with db.transaction():
-                            _import_csv_row(model_class, row, transform, update_existing)
+                        with batch_db.transaction():
+                            _import_csv_row(model_class, row, transform, update_existing, batch_db)
                     else:
-                        _import_csv_row(model_class, row, transform, update_existing)
+                        _import_csv_row(model_class, row, transform, update_existing, db)
                     succeeded += 1
                     ok_in_batch += 1
 
@@ -552,6 +560,7 @@ def import_json(
     skip_errors: bool = False,
     update_existing: bool = False,
     transform: Optional[Callable[[dict], dict]] = None,
+    db: Optional["SQLerDB"] = None,
 ) -> ImportResult:
     """Import JSON data into model table.
 
@@ -561,6 +570,8 @@ def import_json(
         skip_errors: Continue on validation errors
         update_existing: Update records with matching _id
         transform: Optional function to transform each record
+        db: Optional database to import into (overrides class-level binding); the
+            rows updated with ``update_existing`` are read from it too.
 
     Returns:
         ImportResult with import statistics
@@ -585,17 +596,17 @@ def import_json(
             record_id = record.pop("_id", None)
 
             if update_existing and record_id:
-                existing = model_class.from_id(record_id)
+                existing = model_class.from_id(record_id, db=db)
                 if existing:
                     for key, value in record.items():
                         setattr(existing, key, value)
-                    existing.save()
+                    existing.save(db=db)
                 else:
                     instance = model_class(**record)
-                    instance.save()
+                    instance.save(db=db)
             else:
                 instance = model_class(**record)
-                instance.save()
+                instance.save(db=db)
 
             succeeded += 1
 
@@ -824,6 +835,7 @@ def import_jsonl(
     skip_errors: bool = False,
     update_existing: bool = False,
     transform: Optional[Callable[[dict], dict]] = None,
+    db: Optional["SQLerDB"] = None,
 ) -> ImportResult:
     """Import JSONL data into model table.
 
@@ -833,6 +845,8 @@ def import_jsonl(
         skip_errors: Continue on validation errors
         update_existing: Update records with matching _id
         transform: Optional function to transform each record
+        db: Optional database to import into (overrides class-level binding); the
+            rows updated with ``update_existing`` are read from it too.
 
     Returns:
         ImportResult with import statistics
@@ -854,16 +868,16 @@ def import_jsonl(
                 record_id, record = _jsonl_parse_record(line, transform)
 
                 if update_existing and record_id:
-                    existing = model_class.from_id(record_id)
+                    existing = model_class.from_id(record_id, db=db)
                     if existing:
                         _jsonl_apply_record(existing, record)
-                        existing.save()
+                        existing.save(db=db)
                     else:
                         instance = model_class(**record)
-                        instance.save()
+                        instance.save(db=db)
                 else:
                     instance = model_class(**record)
-                    instance.save()
+                    instance.save(db=db)
 
                 succeeded += 1
 
@@ -889,6 +903,7 @@ def import_csv_string(
     skip_errors: bool = False,
     update_existing: bool = False,
     transform: Optional[Callable[[dict], dict]] = None,
+    db: Optional["SQLerDB"] = None,
 ) -> ImportResult:
     """Import CSV data from a string.
 
@@ -899,6 +914,8 @@ def import_csv_string(
         skip_errors: Continue on validation errors
         update_existing: Update records with matching _id
         transform: Optional function to transform each row
+        db: Optional database to import into (overrides class-level binding); the
+            rows updated with ``update_existing`` are read from it too.
 
     Returns:
         ImportResult with import statistics
@@ -913,7 +930,7 @@ def import_csv_string(
         total += 1
 
         try:
-            _import_csv_row(model_class, row, transform, update_existing)
+            _import_csv_row(model_class, row, transform, update_existing, db)
 
             succeeded += 1
 
@@ -949,6 +966,7 @@ def import_json_string(
     skip_errors: bool = False,
     update_existing: bool = False,
     transform: Optional[Callable[[dict], dict]] = None,
+    db: Optional["SQLerDB"] = None,
 ) -> ImportResult:
     """Import JSON data from a string.
 
@@ -958,6 +976,8 @@ def import_json_string(
         skip_errors: Continue on validation errors
         update_existing: Update records with matching _id
         transform: Optional function to transform each record
+        db: Optional database to import into (overrides class-level binding); the
+            rows updated with ``update_existing`` are read from it too.
 
     Returns:
         ImportResult with import statistics
@@ -980,17 +1000,17 @@ def import_json_string(
             record_id = record.pop("_id", None)
 
             if update_existing and record_id:
-                existing = model_class.from_id(record_id)
+                existing = model_class.from_id(record_id, db=db)
                 if existing:
                     for key, value in record.items():
                         setattr(existing, key, value)
-                    existing.save()
+                    existing.save(db=db)
                 else:
                     instance = model_class(**record)
-                    instance.save()
+                    instance.save(db=db)
             else:
                 instance = model_class(**record)
-                instance.save()
+                instance.save(db=db)
 
             succeeded += 1
 
@@ -1021,6 +1041,7 @@ def import_jsonl_string(
     skip_errors: bool = False,
     update_existing: bool = False,
     transform: Optional[Callable[[dict], dict]] = None,
+    db: Optional["SQLerDB"] = None,
 ) -> ImportResult:
     """Import JSONL data from a string.
 
@@ -1030,6 +1051,8 @@ def import_jsonl_string(
         skip_errors: Continue on validation errors
         update_existing: Update records with matching _id
         transform: Optional function to transform each record
+        db: Optional database to import into (overrides class-level binding); the
+            rows updated with ``update_existing`` are read from it too.
 
     Returns:
         ImportResult with import statistics
@@ -1054,17 +1077,17 @@ def import_jsonl_string(
             record_id = record.pop("_id", None)
 
             if update_existing and record_id:
-                existing = model_class.from_id(record_id)
+                existing = model_class.from_id(record_id, db=db)
                 if existing:
                     for key, value in record.items():
                         setattr(existing, key, value)
-                    existing.save()
+                    existing.save(db=db)
                 else:
                     instance = model_class(**record)
-                    instance.save()
+                    instance.save(db=db)
             else:
                 instance = model_class(**record)
-                instance.save()
+                instance.save(db=db)
 
             succeeded += 1
 
@@ -1141,10 +1164,12 @@ async def async_import_jsonl(
     skip_errors: bool = False,
     update_existing: bool = False,
     transform: Optional[Callable[[dict], dict]] = None,
+    db: Optional["AsyncSQLerDB"] = None,
 ) -> ImportResult:
     """Async import JSONL data (same rule per line as :func:`import_jsonl`).
 
-    Lines are read in a worker thread; the model's ``from_id`` and ``save`` are awaited.
+    Lines are read in a worker thread; the model's ``from_id`` and ``save`` are awaited,
+    with ``db`` when given (overrides class-level binding).
     """
     path = Path(path)
     errors: list[dict[str, Any]] = []
@@ -1169,16 +1194,16 @@ async def async_import_jsonl(
                 record_id, record = _jsonl_parse_record(line, transform)
 
                 if update_existing and record_id:
-                    existing = await model_class.from_id(record_id)
+                    existing = await model_class.from_id(record_id, db=db)
                     if existing:
                         _jsonl_apply_record(existing, record)
-                        await existing.save()
+                        await existing.save(db=db)
                     else:
                         instance = model_class(**record)
-                        await instance.save()
+                        await instance.save(db=db)
                 else:
                     instance = model_class(**record)
-                    await instance.save()
+                    await instance.save(db=db)
 
                 succeeded += 1
 

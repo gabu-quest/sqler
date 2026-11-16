@@ -66,8 +66,8 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         c2.save(db=db)  # _version = 1
 
     .. note::
-        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
-        ``.save(db=db)`` / ``.delete(db=db)`` for writes.
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and ``db=`` for
+        every other call (``.save(db=db)``, ``Model.from_id(id, db=db)``).
 
     Attributes:
         _version: The current version number for optimistic locking.

@@ -68,8 +68,8 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         users = await User.using(db).filter(F("age") > 30).all()
 
     .. note::
-        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
-        ``await .save(db=db)`` / ``await .delete(db=db)`` for writes.
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and ``db=`` for
+        every other call (``await .save(db=db)``, ``Model.from_id(id, db=db)``).
     """
 
     # Class-level database binding (not dataclass fields)
@@ -83,8 +83,8 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """Bind this model class to an async database and table.
 
         .. deprecated::
-            Use :meth:`using` for queries and ``save(db=db)``/``delete(db=db)``
-            for writes.
+            Use :meth:`using` for queries and ``db=`` for every other call
+            (``save(db=db)``, ``from_id(id, db=db)``, ``add_index(field, db=db)``).
 
         Args:
             db: AsyncSQLerDB instance to use for persistence.
@@ -92,7 +92,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """
         warnings.warn(
             f"{cls.__name__}.set_db() is deprecated. "
-            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            f"{_table_names.DATABASE_RULE} "
             "set_db() will be removed in a future version.",
             DeprecationWarning,
             skip_file_prefixes=_SQLER_PREFIXES,
@@ -111,7 +111,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         """Alias for set_db() (deprecated)."""
         warnings.warn(
             f"{cls.__name__}.bind() is deprecated. "
-            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            f"{_table_names.DATABASE_RULE} "
             "bind() will be removed in a future version.",
             DeprecationWarning,
             stacklevel=2,
@@ -272,9 +272,10 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
+        db=None,
     ) -> None:
-        """Create an index on a JSON field."""
-        db, table = cls._require_binding()
+        """Create an index on a JSON field, in ``db`` when given, else the class's database."""
+        db, table = cls._resolve_binding(db)
         await db.create_index(table, field, unique=unique, name=name, where=where)
 
     @classmethod
@@ -285,9 +286,11 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
+        db=None,
     ) -> None:
-        """Ensure an index exists (idempotent)."""
-        await cls.add_index(field, unique=unique, name=name, where=where)
+        """Ensure an index exists (idempotent), in ``db`` when given, else the class's
+        database."""
+        await cls.add_index(field, unique=unique, name=name, where=where, db=db)
 
     @classmethod
     async def save_many(cls: Type[TAModel], instances: list[TAModel], *, db=None) -> list[TAModel]:

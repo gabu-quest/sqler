@@ -117,6 +117,14 @@ def _register_defined_class(cls: type) -> None:
     registry.register(table, cls)
 
 
+# How every class call names its database without ``set_db()``: the deprecation warning of
+# ``set_db()`` and ``bind()`` on every base and the error of an unbound class all say it.
+DATABASE_RULE = (
+    "Use .using(db) for queries and db= for every other call "
+    "(.save(db=db), .delete(db=db), Model.from_id(id, db=db), Model.add_index(field, db=db))."
+)
+
+
 def _require_binding(cls) -> tuple[Any, str]:
     """The database and table bound to ``cls`` with ``set_db()``.
 
@@ -125,15 +133,22 @@ def _require_binding(cls) -> tuple[Any, str]:
     """
     if cls._db is None or cls._table is None:
         raise NotBoundError(
-            f"Model {cls.__name__} is not bound. "
-            "Use .using(db) for queries or .save(db=db) for writes.",
+            f"Model {cls.__name__} is not bound. {DATABASE_RULE}",
             details={"model": cls.__name__},
         )
     return cls._db, cls._table
 
 
 def _resolve_binding(cls, db=None) -> tuple[Any, str]:
-    """``(db, the class's table)`` when ``db`` is given, else the class binding."""
+    """``(db, the class's table)`` when ``db`` is given, else the class binding.
+
+    The one resolver of every class call that takes ``db=`` and is not a query:
+    ``from_id``, ``from_ids``, ``save_many``, ``add_index``, ``ensure_index``,
+    ``validate_references`` and the batched CSV import (the other imports pass ``db`` to
+    ``from_id`` and ``save``). A query goes through ``using(db)``; the search calls give
+    ``db`` to their ``FTSIndex``. A given ``db`` is the only database the call touches, with
+    the class's table (``_model_table_name``); a database bound with ``set_db()`` is not
+    used."""
     if db is not None:
         return db, _model_table_name(cls)
     return _require_binding(cls)
