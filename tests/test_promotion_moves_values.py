@@ -542,12 +542,12 @@ def test_move_promoted_refuses_what_it_cannot_do(run, is_async):
 def test_two_database_objects_promote_at_once(run):
     _legacy(run.path, [{"n": i, "status": f"s{i}"} for i in range(200)])
     dbs = [SQLerDB.on_disk(run.path), SQLerDB.on_disk(run.path)]
-    barrier = threading.Barrier(2)
+    barrier = threading.Barrier(2, timeout=30)
     errors = []
 
     def work(db):
-        barrier.wait()
         try:
+            barrier.wait()
             db.ensure_table(TABLE, promoted={"status": "TEXT"})
         except Exception as exc:  # collected for the assertion below
             errors.append(exc)
@@ -556,10 +556,11 @@ def test_two_database_objects_promote_at_once(run):
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        t.join(30)
+    assert not any(t.is_alive() for t in threads), "a thread was still running after 30 s"
     for db in dbs:
         db.close()
-    assert errors == []
+    assert errors == [], "a thread failed (a BrokenBarrierError means the barrier timed out after 30 s)"
     cols, rows = _raw(run.path)
     assert cols == ["_id", "data", "status"]
     assert rows == [(i + 1, f'{{"n":{i}}}', f"s{i}") for i in range(200)]
@@ -568,12 +569,12 @@ def test_two_database_objects_promote_at_once(run):
 def test_two_threads_on_one_database_promote_at_once(run):
     _legacy(run.path, [{"n": i, "status": f"s{i}"} for i in range(200)])
     db = run.db
-    barrier = threading.Barrier(2)
+    barrier = threading.Barrier(2, timeout=30)
     errors = []
 
     def work():
-        barrier.wait()
         try:
+            barrier.wait()
             db.ensure_table(TABLE, promoted={"status": "TEXT"})
         except Exception as exc:  # collected for the assertion below
             errors.append(exc)
@@ -582,8 +583,9 @@ def test_two_threads_on_one_database_promote_at_once(run):
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
-    assert errors == []
+        t.join(30)
+    assert not any(t.is_alive() for t in threads), "a thread was still running after 30 s"
+    assert errors == [], "a thread failed (a BrokenBarrierError means the barrier timed out after 30 s)"
     assert _raw(run.path) == (["_id", "data", "status"], [(i + 1, f'{{"n":{i}}}', f"s{i}") for i in range(200)])
 
 

@@ -245,7 +245,7 @@ def test_two_threads_that_use_a_class_first_at_once_read_one_answer(db):
         name: str = ""
 
     db.insert_document("k_threads", {"name": "a"})
-    start = threading.Barrier(2)
+    start = threading.Barrier(2, timeout=30)
     kinds, read, failed = [], [], []
 
     def use():
@@ -260,8 +260,9 @@ def test_two_threads_that_use_a_class_first_at_once_read_one_answer(db):
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
-    assert failed == []
+        t.join(30)
+    assert not any(t.is_alive() for t in threads), "a thread was still running after 30 s"
+    assert failed == [], "a thread failed (a BrokenBarrierError means the barrier timed out after 30 s)"
     assert read == [[("a", 1)], [("a", 1)]]
     assert len(kinds) == 2 and kinds[0] is kinds[1] is _refs._kind(KThreads)
 
