@@ -264,7 +264,7 @@ async def test_a_write_in_a_rolled_back_transaction_leaves_rows_version_and_audi
 
 @pytest.mark.parametrize("way", ["update", "update_one", "update_n"])
 @pytest.mark.parametrize("kind", KINDS)
-async def test_a_set_based_update_stamps_updated_at_as_save_stores_it(db, kind, way):
+async def test_a_set_based_update_stamps_updated_at_as_save_stores_it(db, kind, way, ticking_clock):
     Item = make(kind, TimestampMixin)
     for i in range(2):
         await Item(name=f"r{i}", count=i).save(db=db)
@@ -506,7 +506,7 @@ class Page(AsyncSQLerModel):
     volume: Optional[Volume] = None
 
 
-async def test_set_null_writes_the_referrers_update_row_and_moves_its_updated_at(db):
+async def test_set_null_writes_the_referrers_update_row_and_moves_its_updated_at(db, ticking_clock):
     shelf = await Shelf(name="s").save(db=db)
     shelf_id = shelf._id
     vol = await Volume(title="v", shelf=shelf).save(db=db)

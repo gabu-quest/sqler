@@ -795,7 +795,7 @@ class Note(AuditLogMixin, SQLerModel):
     page: Optional[Page] = None
 
 
-def test_set_null_writes_the_referrers_update_row_and_moves_its_updated_at(db):
+def test_set_null_writes_the_referrers_update_row_and_moves_its_updated_at(db, ticking_clock):
     shelf = Shelf(name="s").save(db=db)
     shelf_id = shelf._id
     vol = Volume(title="v", shelf=shelf).save(db=db)

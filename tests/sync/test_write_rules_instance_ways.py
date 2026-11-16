@@ -1017,7 +1017,7 @@ def _raw(path, sql):
         conn.close()
 
 
-def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(tmp_path):
+def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(tmp_path, ticking_clock):
     """``updated_at`` became a column after ``db`` learned the table: the nulled row's new
     stamp goes into the column, and the document holds no copy the column would hide."""
     path = str(tmp_path / "stamped.db")

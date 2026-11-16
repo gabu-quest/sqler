@@ -751,7 +751,7 @@ def _raw(path, sql):
         conn.close()
 
 
-async def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(tmp_path):
+async def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(tmp_path, ticking_clock):
     from sqler import SQLerDB
 
     path = str(tmp_path / "stamped.db")

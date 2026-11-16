@@ -274,7 +274,7 @@ class APsStamped(TimestampMixin, AsyncAuditLogMixin, AsyncPartialUpdateMixin, As
     body: str = ""
 
 
-async def test_timestamps_and_the_async_audit_log_hold_for_a_partial_save(db):
+async def test_timestamps_and_the_async_audit_log_hold_for_a_partial_save(db, ticking_clock):
     m = await APsStamped(title="t", body="b").save(db=db)
     stamped = m.updated_at
     other = await _load(APsStamped, db, m._id)

@@ -12,9 +12,10 @@ def ticking_clock(monkeypatch):
     """The clock the stamps read (``created_at``, ``updated_at``) is a millisecond later at
     every reading, whatever the machine's clock does. A test whose subject is what a second
     write stamps asks for it: Windows before Python 3.13 reads the same time for about 15 ms,
-    so two writes a moment apart get one stamp there."""
+    so two writes a moment apart get one stamp there. Every reading has a fraction of a
+    second, so every stamp is written in the one form a real reading almost always has."""
     readings = itertools.count()
-    start = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, 12, 0, 0, 1, tzinfo=timezone.utc)
 
     class Ticking(datetime):
         @classmethod
