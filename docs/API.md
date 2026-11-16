@@ -321,6 +321,14 @@ they hold the pydantic-like part of a model (`_id`, the stored snapshot, `model_
 `SQLerLiteModel` or `SQLerMsgspecModel` for a model you store; `is_lite_model()` and
 `is_msgspec_model()` test against the base, so any subclass of it counts.
 
+Every base loads a field as the type it declares. A lite model, which checks no type itself,
+turns a stored value back by the rules a save stores it by: a `datetime`, `date` or `time`
+from its ISO text, a `UUID`, a path, an `Enum` member, a `Decimal`, a `timedelta`, a `tuple`,
+`set` or `frozenset` from its list, and the same inside a `list`, `tuple`, `set` or the values
+of a `dict`. A value that is not in its type's stored form loads as it was saved, and a field
+typed as a union of two or more types besides `None` loads as stored. A load is `from_id()`,
+`from_ids()`, a query, a followed reference, `refresh()` and an import.
+
 `PYDANTIC_AVAILABLE` and `MSGSPEC_AVAILABLE` are `True` when the package imports, and
 `PYDANTIC_VERSION` and `MSGSPEC_VERSION` hold its version string (`None` when it is missing).
 `get_model_backend()` returns `"pydantic"` when pydantic is installed and `"dataclass"` when it
@@ -1731,11 +1739,8 @@ class AuditedUser(HooksMixin, SQLerModel):
 
 db = SQLerDB.in_memory()
 
-# Hooks are called manually by caller
-u = AuditedUser(email="  ALICE@Example.COM  ")
-if u.before_save():
-    u = u.save(db=db)
-    u.after_save()
+# save() calls before_save() and, once the row is written, after_save()
+u = AuditedUser(email="  ALICE@Example.COM  ").save(db=db)
 
 assert u.email == "alice@example.com"
 assert u.normalized == True
@@ -2128,6 +2133,10 @@ and `failed` (also `success_count` and `error_count`), `success_rate`, and `erro
 one dict per failed row (`row`, `data`, `error`, `error_type`). By default the first
 row that fails ends the import; with `skip_errors=True` the import goes on and `errors` holds
 every failed row.
+
+An empty CSV cell is a missing value: `None` in a field that can hold `None`, the field's
+default in any other (with `update_existing`, the row's value stays). The empty string is
+not an empty cell: an export writes it as one apostrophe and an import reads it back.
 
 ```python
 from sqler import export_csv, import_csv
@@ -2572,7 +2581,8 @@ base's answer.
 `SQLerLiteModel`, `SQLerLiteSafeModel`). An async model uses `AsyncTrackedModel` (with
 `AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite twins); `TrackedModel` on an async
 model raises `TypeError` when the class is defined. A msgspec model cannot take either:
-msgspec refuses the mixin when the class is defined.
+the class is defined, and making the first instance raises
+`AttributeError: 'super' object has no attribute '__post_init__'`.
 
 Under the model is a `ChangeTracker`, kept on the instance as `_tracker`: it holds the values
 from the last snapshot and a list of `FieldChange` records, one per assignment that changed a

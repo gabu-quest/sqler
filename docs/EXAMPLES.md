@@ -194,10 +194,7 @@ class User(HooksMixin, SQLerModel):
 
 db = SQLerDB.in_memory()
 
-u = User(email="  ADMIN@EXAMPLE.COM  ")
-if u.before_save():
-    u = u.save(db=db)
-    u.after_save()
+u = User(email="  ADMIN@EXAMPLE.COM  ").save(db=db)  # save() calls both hooks
 # Output: Saved user: admin@example.com
 ```
 
