@@ -1798,9 +1798,16 @@ for record_json in stream_jsonl(User):
     process(record_json)
 ```
 
-On a plain `":memory:"` database (`SQLerDB.in_memory(shared=False)`), whose one connection
-every thread shares, a statement's rows are read whole before another thread may use the
-connection, so `stream_jsonl()`, `iter_dicts()` and `iter()` hold the whole result there.
+`stream_jsonl()`, `iter_dicts()` and `iter()` read their rows as they give them. Writing
+inside the loop (a `save()` of each model, say) is safe: the first statement the thread
+sends on its connection, a read as much as a write, reads the rows not given yet first, so each row comes once with the
+values its statement saw, and the rest of the result is held in memory from then on. A
+statement another thread sends on its own connection reads nothing of this one. A rollback
+reads nothing either: a cursor or iterator left part-read when its transaction (or nested
+transaction) is rolled back raises `sqlite3.OperationalError` at its next read. On a plain
+`":memory:"` database (`SQLerDB.in_memory(shared=False)`), whose one connection every thread
+shares, a statement's rows are read whole before another thread may use the connection, so
+the three hold the whole result there.
 
 The async query and query set stream with `async for`:
 
