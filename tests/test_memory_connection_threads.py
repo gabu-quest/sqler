@@ -7,7 +7,6 @@ thread's transaction keeps or loses only its own rows, as on a file database, wh
 thread has its own connection.
 """
 
-import ctypes
 import json
 import signal
 import sqlite3
@@ -20,6 +19,7 @@ import pytest
 from exception_points import (
     RAISED,
     Skipped,
+    needs_libc_raise,
     raising_at,
     set_skipped_once_it_waits_in,
     stop_once_and_interrupt,
@@ -912,7 +912,7 @@ PLACES_AND_WAYS = [
 ]
 
 
-@pytest.mark.skipif(not hasattr(ctypes.CDLL(None), "raise"), reason="needs libc's raise()")
+@needs_libc_raise
 @pytest.mark.parametrize(("place", "how"), PLACES_AND_WAYS)
 def test_an_interrupt_pending_as_sqlite_fails_leaves_the_turn_free_and_nothing_half_done(tmp_path, place, how):
     if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
@@ -932,7 +932,7 @@ def test_an_interrupt_pending_as_sqlite_fails_leaves_the_turn_free_and_nothing_h
         database.close()
 
 
-@pytest.mark.skipif(not hasattr(ctypes.CDLL(None), "raise"), reason="needs libc's raise()")
+@needs_libc_raise
 @pytest.mark.parametrize(
     "how", ["nested-rollback-to", "nested-release", "execute-in-a-transaction", "outermost-commit", "outermost-rollback"]
 )

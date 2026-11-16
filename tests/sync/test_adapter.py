@@ -1,5 +1,4 @@
 import contextlib
-import ctypes
 import os
 import signal
 import threading
@@ -7,7 +6,7 @@ from sqlite3 import IntegrityError, OperationalError, ProgrammingError
 from typing import Optional
 
 import pytest
-from exception_points import stop_once_and_interrupt
+from exception_points import needs_libc_raise, stop_once_and_interrupt
 from sqler import SQLerDB, SQLerModel
 from sqler.adapter import AdapterABC, NotConnectedError, SQLiteAdapter
 from sqler.exceptions import TransactionStateError
@@ -670,7 +669,7 @@ def test_the_second_call_on_the_memory_connection_hands_the_turn_on():
         adapter.close()
 
 
-@pytest.mark.skipif(not hasattr(ctypes.CDLL(None), "raise"), reason="needs libc's raise()")
+@needs_libc_raise
 def test_an_interrupt_in_a_judged_statement_ends_the_unit(table):
     """An interrupt is never the caller's to judge: it ends the unit as in ``execute``."""
     if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:

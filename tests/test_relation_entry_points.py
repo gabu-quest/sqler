@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import gc
 import json
+import sys
 import typing
 import warnings
 from dataclasses import dataclass, field
@@ -2842,8 +2843,10 @@ def test_msgspec_offers_no_way_to_build_on_an_object_that_exists():
     first = msgspec.convert({"name": "x"}, Lib)
     second = Lib("x")
     assert (first is second, seen[0] is first, seen[1] is second) == (False, True, True)
+    # CPython's wording of the refusal, which 3.13 changed
+    refused = "is not safe" if sys.version_info < (3, 13) else "cannot create 'Lib' instances"
     for new in (object.__new__, Lib.__new__):
-        with pytest.raises(TypeError, match="is not safe"):
+        with pytest.raises(TypeError, match=refused):
             new(Lib)
     assert len(seen) == 2
 

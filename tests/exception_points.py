@@ -15,7 +15,22 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
+import pytest
+
 ADAPTER = "sqler.adapter.synchronous"
+
+
+def _libc_raise():
+    """libc's ``raise()``, or None where ``CDLL(None)`` cannot open the C library of this
+    process (Windows)."""
+    try:
+        return getattr(ctypes.CDLL(None), "raise", None)
+    except TypeError:
+        return None
+
+
+LIBC_RAISE = _libc_raise()
+needs_libc_raise = pytest.mark.skipif(LIBC_RAISE is None, reason="needs libc's raise()")
 
 
 class Skipped(Exception):
@@ -27,7 +42,7 @@ def stop_once_and_interrupt(conn) -> None:
     process SIGINT through libc with no Python frame of its own, so the interrupt is pending
     as the statement fails (``signal.raise_signal`` or ``os.kill`` would check signals
     themselves, and sqlite3 would turn the interrupt into ``OperationalError``)."""
-    stop = functools.partial(max, key=getattr(ctypes.CDLL(None), "raise"))
+    stop = functools.partial(max, key=LIBC_RAISE)
     conn.set_progress_handler(functools.partial(next, map(stop, [[int(signal.SIGINT)]]), 0), 1)
 
 

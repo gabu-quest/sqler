@@ -16,7 +16,6 @@ No statement is sent into a transaction the adapter counts as ended.
 """
 
 import asyncio
-import ctypes
 import functools
 import logging
 import signal
@@ -27,7 +26,7 @@ import time
 import uuid
 
 import pytest
-from exception_points import stop_once_and_interrupt
+from exception_points import LIBC_RAISE, needs_libc_raise, stop_once_and_interrupt
 from sqler import AsyncSQLerDB, SQLerDB
 from sqler.adapter import SQLiteAdapter
 from sqler.exceptions import TransactionStateError
@@ -711,6 +710,7 @@ def test_a_rollback_interrupted_once_succeeds_at_the_second_try(scene, caplog):
 REPLACED_AFTER_AN_INTERRUPT = "rollback of a reclaimed connection failed (KeyboardInterrupt: ); replacing it"
 
 
+@needs_libc_raise
 @pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="needs a real signal to the main thread")
 @pytest.mark.parametrize("end", ["with-db", "transaction", "adapter"])
 def test_an_interrupt_between_the_two_tries_of_a_rollback_leaves_no_transaction_to_join(scene, caplog, end):
@@ -718,7 +718,7 @@ def test_an_interrupt_between_the_two_tries_of_a_rollback_leaves_no_transaction_
     with no Python frame of its own, so Python raises ``KeyboardInterrupt`` in the adapter
     as the first try returns, before the second. (Not the nested end: its own statement
     would be the one stopped.)"""
-    scene.stops = functools.partial(max, [int(signal.SIGINT)], key=getattr(ctypes.CDLL(None), "raise"))
+    scene.stops = functools.partial(max, [int(signal.SIGINT)], key=LIBC_RAISE)
     caplog.set_level(logging.WARNING, logger="sqler.adapter.synchronous")
     left = _a_block_whose_rollback_fails(scene, end)
     messages = [r.getMessage() for r in caplog.records]
@@ -891,7 +891,7 @@ def test_a_half_read_cursor_of_the_closed_connection_holds_the_lock_and_commits_
 # ---- an outermost end left by an interrupt: the count and SQLite agree ----
 
 
-@pytest.mark.skipif(not hasattr(ctypes.CDLL(None), "raise"), reason="needs libc's raise()")
+@needs_libc_raise
 @pytest.mark.parametrize("end", ["transaction", "adapter"])
 def test_a_commit_that_fails_with_an_interrupt_pending_leaves_no_transaction_to_join(scene, end):
     """The interrupt is raised by the first call after the failed ``COMMIT``: the count is

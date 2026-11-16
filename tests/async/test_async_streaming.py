@@ -207,6 +207,7 @@ async def test_an_iteration_gives_the_loaders_models_and_its_end_leaves_the_pool
         qs = cls.using(db).filter(SQLerExpression("gate(_id)"))  # rows in rowid order, stepped as fetched
         expected = qs._models(await qs.as_dicts())
         end, given = WAYS[way]
+        gc.collect()  # what earlier tests left to collect warns here, not in the iteration's own block
         with warnings.catch_warnings(record=True) as warned:
             warnings.simplefilter("always")
             got, at_once = await end(qs, gate)
@@ -219,7 +220,8 @@ async def test_an_iteration_gives_the_loaders_models_and_its_end_leaves_the_pool
         await db.close()
     assert (len(got), got == expected[: len(got)], _seen(got)) == (given, True, _seen(expected[:given]))
     assert (at_once, whole, count) == (True if way in ("rows run out", "aclose()") else None, True, ROWS)
-    assert [w for w in warned if issubclass(w.category, (RuntimeWarning, ResourceWarning))] == []
+    leaks = [w for w in warned if issubclass(w.category, (RuntimeWarning, ResourceWarning))]
+    assert [(w.category.__name__, str(w.message)) for w in leaks] == []
     assert [r.getMessage() for r in caplog.records if r.name == "asyncio"] == []
 
 
