@@ -17,6 +17,7 @@ from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     FTSIndex,
     SQLerDB,
     SQLerLiteModel,
@@ -78,6 +79,15 @@ class UrALiteUser(AsyncSQLerLiteModel):
     address: Optional[UrALiteAddress] = None
 
 
+class UrAMsAddress(AsyncSQLerMsgspecModel):
+    city: str = ""
+
+
+class UrAMsUser(AsyncSQLerMsgspecModel):
+    name: str = ""
+    address: Optional[UrAMsAddress] = None
+
+
 class UrArticle(SQLerModel):
     title: str = ""
     body: str = ""
@@ -132,8 +142,9 @@ def test_unbound_model_holding_another_round_trips_through_using(db, user_cls, a
     [
         (UrAsUser, UrAsAddress, "urasaddress"),
         (UrALiteUser, UrALiteAddress, "uraliteaddress"),
+        (UrAMsUser, UrAMsAddress, "uramsaddress"),
     ],
-    ids=["async-pydantic", "async-lite"],
+    ids=["async-pydantic", "async-lite", "async-msgspec"],
 )
 async def test_async_unbound_model_holding_another_round_trips_through_using(
     adb, user_cls, addr_cls, addr_table

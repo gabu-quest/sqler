@@ -21,6 +21,7 @@ from sqler import (
     AsyncSQLerLiteModel,
     AsyncSQLerLiteSafeModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     AsyncSQLerSafeModel,
 )
 from sqler.exceptions import StaleVersionError
@@ -35,11 +36,17 @@ BASES = {
     "pydantic_safe": AsyncSQLerSafeModel,
     "lite": AsyncSQLerLiteModel,
     "lite_safe": AsyncSQLerLiteSafeModel,
+    "msgspec": AsyncSQLerMsgspecModel,
 }
 KINDS = list(BASES)
 SAFE_KINDS = ["pydantic_safe", "lite_safe"]
 
 _tables = itertools.count()
+
+
+def _kwds(kind):
+    """The class keywords a class of ``kind`` is made with: a msgspec class has no tag."""
+    return {"tag": False} if kind == "msgspec" else {}
 
 
 def make(kind, *mixins, promoted=False):
@@ -51,7 +58,7 @@ def make(kind, *mixins, promoted=False):
         ns["status"] = None
         ns["__promoted__"] = {"status": "TEXT"}
     ns["__annotations__"] = annotations
-    cls = types.new_class(f"Item_{table}", (*mixins, BASES[kind]), {}, lambda body: body.update(ns))
+    cls = types.new_class(f"Item_{table}", (*mixins, BASES[kind]), _kwds(kind), lambda body: body.update(ns))
     return dataclass(cls) if kind.startswith("lite") else cls
 
 
@@ -606,7 +613,7 @@ def holder_of(kind, target):
     """A class of ``kind`` whose ``target`` field holds a row of ``target``."""
     table = f"asw_holder_{kind}_{next(_tables)}"
     ns = {"__tablename__": table, "target": None, "__annotations__": {"target": Optional[target]}}
-    cls = types.new_class(f"Holder_{table}", (BASES[kind],), {}, lambda body: body.update(ns))
+    cls = types.new_class(f"Holder_{table}", (BASES[kind],), _kwds(kind), lambda body: body.update(ns))
     return dataclass(cls) if kind.startswith("lite") else cls
 
 

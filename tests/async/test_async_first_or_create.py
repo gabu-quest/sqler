@@ -77,3 +77,30 @@ async def test_with_db_parameter(db):
     )
     assert created is True
     assert user.name == "Dan"
+
+
+@pytest.mark.asyncio
+async def test_msgspec_model():
+    """As ``TestFirstOrCreateMsgspec`` of the sync file, on the async msgspec base."""
+    from sqler import AsyncSQLerMsgspecModel
+
+    class MsgUser(AsyncSQLerMsgspecModel, tag=False):
+        __tablename__ = "msg_users"
+        name: str = ""
+        email: str = ""
+        role: str = "user"
+
+    db = AsyncSQLerDB.in_memory(shared=False)
+    await db.connect()
+    try:
+        user, created = await MsgUser.first_or_create(
+            lookup={"email": "alice@msg.com"}, defaults={"name": "Alice"}, db=db
+        )
+        user2, created2 = await MsgUser.first_or_create(
+            lookup={"email": "alice@msg.com"}, defaults={"name": "Different"}, db=db
+        )
+        count = await MsgUser.using(db).count()
+    finally:
+        await db.close()
+    assert (created, user._id, user.email, user.name, user.role) == (True, 1, "alice@msg.com", "Alice", "user")
+    assert (created2, user2._id, user2.name, count) == (False, 1, "Alice", 1)

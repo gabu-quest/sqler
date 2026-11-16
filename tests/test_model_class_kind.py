@@ -8,6 +8,7 @@ import gc
 import inspect
 import sys
 import threading
+import types
 import weakref
 from dataclasses import FrozenInstanceError, dataclass
 from typing import Optional
@@ -25,7 +26,8 @@ from sqler import (
     SQLerSafeModel,
 )
 from sqler.models import _refs
-from sqler.models.msgspec import SQLerMsgspecModel
+from sqler.models._compat import is_lite_model, is_msgspec_model
+from sqler.models.msgspec import AsyncSQLerMsgspecModel, SQLerMsgspecModel
 
 
 @pytest.fixture
@@ -247,6 +249,17 @@ def test_each_shape_of_class_reads_its_rows_twice_the_same(db, make):
     first = [(m.name, m._id) for m in rows.all()]
     second = [(m.name, m._id) for m in rows.all()]
     assert first == second == [("a", 1), ("b", 2)]
+
+
+@pytest.mark.parametrize("base", [SQLerMsgspecModel, AsyncSQLerMsgspecModel], ids=["sync", "async"])
+@pytest.mark.parametrize("frozen", [False, True], ids=["plain", "frozen"])
+def test_a_msgspec_class_is_a_msgspec_model_on_the_sync_and_the_async_base(base, frozen):
+    cls = types.new_class(
+        "KMsKind", (base,), {"frozen": frozen}, lambda ns: ns.update({"__annotations__": {"name": str}, "name": ""})
+    )
+    kind = _refs._kind(cls)
+    assert (is_msgspec_model(cls), is_lite_model(cls)) == (True, False)
+    assert (kind.struct, kind.model, kind.lite, kind.pydantic, kind.forbids) == (True, True, False, False, False)
 
 
 # ---- two threads use a class for the first time at once -------------------------------

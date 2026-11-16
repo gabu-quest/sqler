@@ -158,7 +158,8 @@ hits = Post.search("python", db=db)       # SearchableMixin
 import_jsonl(User, "users.jsonl", db=db)  # every import that takes a model class
 
 # Works with all model variants: SQLerModel, AsyncSQLerModel,
-# SQLerLiteModel, AsyncSQLerLiteModel, SQLerMsgspecModel, SafeModel, AsyncSafeModel
+# SQLerLiteModel, AsyncSQLerLiteModel, SQLerMsgspecModel, AsyncSQLerMsgspecModel,
+# SafeModel, AsyncSafeModel
 ```
 
 Both patterns keep the database in the call, so they are safe for multi-DB scenarios.
@@ -311,15 +312,21 @@ that base does not exist.
 |-----------------|-------------|------------|--------------|-------------|
 | pydantic | `SQLerModel` | `SQLerSafeModel` | `AsyncSQLerModel` | `AsyncSQLerSafeModel` |
 | lite (nothing) | `SQLerLiteModel` | `SQLerLiteSafeModel` | `AsyncSQLerLiteModel` | `AsyncSQLerLiteSafeModel` |
-| msgspec | `SQLerMsgspecModel` | | | |
+| msgspec | `SQLerMsgspecModel` | | `AsyncSQLerMsgspecModel` | |
 
 A safe model keeps a version for [optimistic locking](#c06-optimistic-versioning). Lite models
 are dataclasses and need neither pydantic nor msgspec (for Pyodide, say). `SQLerLiteModelBase`
 and `SQLerMsgspecModelBase` are the classes the lite and msgspec models above are built on:
 they hold the pydantic-like part of a model (`_id`, the stored snapshot, `model_validate()`,
 `model_dump()`, `get_field_names()`) and no database methods (`save()`, `query()`, ...). Subclass
-`SQLerLiteModel` or `SQLerMsgspecModel` for a model you store; `is_lite_model()` and
-`is_msgspec_model()` test against the base, so any subclass of it counts.
+`SQLerLiteModel` or `SQLerMsgspecModel` (or their async twins) for a model you store;
+`is_lite_model()` and `is_msgspec_model()` test against the base, so any subclass of it counts.
+`AsyncSQLerMsgspecModel` has every call of `SQLerMsgspecModel` under the same name, awaited
+where it reads or writes, on an `AsyncSQLerDB`; it takes the async mixins (`AsyncTrackedModel`,
+`AsyncPartialUpdateMixin`, `AsyncHooksMixin`, `AsyncFullMixin`, `AsyncAuditMixin`,
+`AsyncAuditLogMixin`, `TimestampMixin`, `CacheAwareModel`). A field of an async msgspec model
+can hold a sync msgspec model, stored as a reference and loaded as that model; a sync model
+refuses an async one, as the lite pair does.
 
 Every base loads a field as the type it declares. A lite model, which checks no type itself,
 turns a stored value back by the rules a save stores it by: a `datetime`, `date` or `time`
@@ -2589,12 +2596,11 @@ On a tracked model `is_dirty` is a property (the tracker's answer), where the mo
 have an `is_dirty()` method: write `user.is_dirty`, and `SQLerModel.is_dirty(user)` for the
 base's answer.
 
-`TrackedModel` works with the sync pydantic and lite bases (`SQLerModel`, `SQLerSafeModel`,
-`SQLerLiteModel`, `SQLerLiteSafeModel`). An async model uses `AsyncTrackedModel` (with
-`AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite twins); `TrackedModel` on an async
-model raises `TypeError` when the class is defined. A msgspec model cannot take either:
-the class is defined, and making the first instance raises
-`AttributeError: 'super' object has no attribute '__post_init__'`.
+`TrackedModel` works with the sync bases (`SQLerModel`, `SQLerSafeModel`, `SQLerLiteModel`,
+`SQLerLiteSafeModel`, `SQLerMsgspecModel`). An async model uses `AsyncTrackedModel` (with
+`AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite and msgspec twins); `TrackedModel` on
+an async model raises `TypeError` when the class is defined. On a frozen msgspec model an
+assignment raises `AttributeError: immutable type: '<class>'`, as without the tracker.
 
 Under the model is a `ChangeTracker`, kept on the instance as `_tracker`: it holds the values
 from the last snapshot and a list of `FieldChange` records, one per assignment that changed a

@@ -68,6 +68,7 @@ from .models import (
     PERMISSIVE_REBASE_CONFIG,
     AsyncSQLerLiteModel,
     AsyncSQLerLiteSafeModel,
+    AsyncSQLerMsgspecModel,
     RebaseConfig,
     ReferentialIntegrityError,
     # Lite models (Pydantic-free for Pyodide)
@@ -195,6 +196,7 @@ __all__ = [
     # Msgspec models (optional)
     "SQLerMsgspecModel",
     "SQLerMsgspecModelBase",
+    "AsyncSQLerMsgspecModel",
     "MSGSPEC_AVAILABLE",
     "MSGSPEC_VERSION",
     "require_msgspec",

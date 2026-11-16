@@ -16,17 +16,21 @@ Usage::
     db = SQLerDB(":memory:")
     user = User(name="Alice", email="alice@example.com")
     user.save(db=db)
+
+``AsyncSQLerMsgspecModel`` is its async twin, on an ``AsyncSQLerDB``.
 """
 
 from sqler.models._compat import MSGSPEC_AVAILABLE
 
 if MSGSPEC_AVAILABLE:
+    from sqler.models.msgspec.async_model import AsyncSQLerMsgspecModel
     from sqler.models.msgspec.base import SQLerMsgspecModelBase
     from sqler.models.msgspec.model import SQLerMsgspecModel
 
     __all__ = [
         "SQLerMsgspecModelBase",
         "SQLerMsgspecModel",
+        "AsyncSQLerMsgspecModel",
     ]
 else:
     from sqler.models._compat import require_msgspec
@@ -45,8 +49,10 @@ else:
 
     SQLerMsgspecModelBase = _msgspec_required_class("SQLerMsgspecModelBase")  # type: ignore[misc]  # stub used when msgspec is not installed
     SQLerMsgspecModel = _msgspec_required_class("SQLerMsgspecModel")  # type: ignore[misc]  # stub used when msgspec is not installed
+    AsyncSQLerMsgspecModel = _msgspec_required_class("AsyncSQLerMsgspecModel")  # type: ignore[misc]  # stub used when msgspec is not installed
 
     __all__ = [
         "SQLerMsgspecModelBase",
         "SQLerMsgspecModel",
+        "AsyncSQLerMsgspecModel",
     ]

@@ -28,6 +28,7 @@ from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
+from sqler.models.msgspec.async_model import AsyncSQLerMsgspecModel
 from sqler.models.msgspec.model import SQLerMsgspecModel
 
 # ---- one set of classes per base: a child, a parent without and one with a reference field
@@ -224,6 +225,17 @@ class DtMsgPlain(SQLerMsgspecModel, kw_only=True):
     opt: Optional[str] = None
 
 
+class DtAMsgPlain(AsyncSQLerMsgspecModel, kw_only=True):
+    title: str = ""
+    n: int = 0
+    tags: list = msgspec.field(default_factory=list)
+    meta: dict = msgspec.field(default_factory=dict)
+    grid: list = msgspec.field(default_factory=list)
+    x: float = 0.0
+    big: int = 0
+    opt: Optional[str] = None
+
+
 # kind: (child, plain, linked, async)
 KINDS = {
     "pyd": (DtPydChild, DtPydPlain, DtPydLinked, False),
@@ -235,6 +247,7 @@ KINDS = {
     "alite": (DtALiteChild, DtALitePlain, DtALiteLinked, True),
     "alitesafe": (DtALiteSafeChild, DtALiteSafePlain, DtALiteSafeLinked, True),
     "msgspec": (None, DtMsgPlain, None, False),
+    "amsgspec": (None, DtAMsgPlain, None, True),
 }
 LINKED_KINDS = [k for k, v in KINDS.items() if v[2] is not None]
 WAYS = ("new+save", "from_id", "from_ids", "all", "first", "refresh", "load+save")

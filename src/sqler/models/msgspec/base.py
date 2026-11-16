@@ -6,17 +6,25 @@ C-level JSON decode+validate speed.
 """
 
 import copy
+import os
 import typing
+import warnings
 from datetime import date, datetime
 from typing import Any, ClassVar, Optional, Type, TypeVar
 
 import msgspec
 import msgspec.structs
 
-from sqler import _stored
+from sqler import _stored, registry
+from sqler.models import _dirty, _refs, _table_names
 from sqler.models._compat import field_types
+from sqler.utils import validate_field_name, validate_table_name
 
 T = TypeVar("T", bound="SQLerMsgspecModelBase")
+
+# The deprecation warning is attributed to the first caller outside the sqler package, so a
+# subclass's ``super().set_db()`` does not hide it behind sqler's own file.
+_SQLER_PREFIXES = (os.path.dirname(os.path.abspath(registry.__file__)) + os.sep,)
 
 # Per-class caches for field introspection — msgspec.structs.fields() does
 # uncached reflection (~70µs/call), which dominates model_dump() at scale.
@@ -231,6 +239,153 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
     def get_field_names(cls) -> set[str]:
         """Return set of public field names."""
         return _public_field_names(cls) | _mixin_field_names(cls)
+
+    # ----- what the sync and the async model share -----
+    # ``SQLerMsgspecModel`` and ``AsyncSQLerMsgspecModel`` each hold only their order of calls
+    # (the sync one calls, the async one awaits); every check, conversion and decision of a
+    # call that both make is here.
+
+    # the model classes whose instances ``save()`` stores as the reference to their row; each
+    # model base sets its own once it is made
+    _reference_bases: ClassVar[tuple[type, ...]] = ()
+
+    @classmethod
+    def _bind_class(cls, db: Any, table: Optional[str]) -> str:
+        """What ``set_db()`` does before the table is made and the class registered: check
+        ``db``, warn that ``set_db()`` is deprecated, and bind the class to ``db`` and the
+        chosen table (``table``, else ``__tablename__``, else the default plural), which it
+        returns."""
+        _table_names._check_given(cls, db)
+        warnings.warn(
+            f"{cls.__name__}.set_db() is deprecated. "
+            f"{_table_names.DATABASE_RULE} "
+            "set_db() will be removed in a future version.",
+            DeprecationWarning,
+            skip_file_prefixes=_SQLER_PREFIXES,
+        )
+        explicit = getattr(cls, "__tablename__", None)
+        chosen = validate_table_name(
+            table or explicit or _table_names._default_table_name(cls.__name__)
+        )
+        cls._db = db  # type: ignore[attr-defined]
+        cls._table = chosen  # type: ignore[attr-defined]
+        cls.__tablename__ = chosen  # type: ignore[attr-defined]
+        return chosen
+
+    @classmethod
+    def bind(cls, db: Any, table: Optional[str] = None) -> None:
+        """Alias for set_db() (deprecated)."""
+        warnings.warn(
+            f"{cls.__name__}.bind() is deprecated. "
+            f"{_table_names.DATABASE_RULE} "
+            "bind() will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        with warnings.catch_warnings():
+            # bind() already emitted its own deprecation; suppress the inner set_db() one
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cls.set_db(db, table)  # type: ignore[attr-defined]
+
+    @classmethod
+    def _using_table(cls, db: Any, table: Optional[str]) -> str:
+        """The table ``using(db, table)`` reads, once ``db`` is checked: ``table``, else the
+        class's own."""
+        _table_names._check_database(cls, db)
+        return validate_table_name(table) if table is not None else _table_names._model_table_name(cls)
+
+    @classmethod
+    def _shaped(cls, q: Any) -> Any:
+        """The query ``q`` of the class's table as its queryset reads it: with each row's
+        version where the class's rows are versioned, and its promoted columns."""
+        if cls._versioned_rows:  # type: ignore[attr-defined]
+            q = q.with_version()
+        promoted = getattr(cls, "__promoted__", None)
+        if promoted:
+            q = q._clone(promoted_fields=list(promoted.keys()))
+        return q
+
+    @classmethod
+    def _no_ids(cls, ids: list, db: Any) -> bool:
+        """Whether ``from_ids(ids, db=db)`` has nothing to read; a given ``db`` is checked
+        even then."""
+        if ids:
+            return False
+        _table_names._check_given(cls, db)
+        return True
+
+    @classmethod
+    def _lookup(cls, lookup: dict, db: Any) -> Any:
+        """The queryset ``first_or_create(lookup, db=db)`` looks in: the rows whose fields
+        equal ``lookup``, in ``db`` when given, else the class's database."""
+        from sqler.query.field import SQLerField as F
+
+        for key in lookup:
+            validate_field_name(key)
+        qs = cls.using(db) if db is not None else cls.query()  # type: ignore[attr-defined]
+        for key, value in lookup.items():
+            qs = qs.filter(F(key) == value)
+        return qs
+
+    @staticmethod
+    def _inserted(instances: list, ids: list, payloads: list) -> None:
+        """Each of ``instances``, written in one batch, takes its ``_id`` and snapshot."""
+        for inst, id_, payload in zip(instances, ids, payloads):
+            inst._id = id_
+            inst._snapshot = _dirty.snapshot(payload)
+
+    def _wrote(self: T, new_id: Any, payload: dict) -> T:
+        """This instance once its row ``payload`` is written as ``new_id``."""
+        self._id = new_id
+        self._snapshot = _dirty.snapshot(payload)
+        return self
+
+    def _saved_id(self) -> int:
+        """The ``_id`` ``refresh()`` reads.
+
+        Raises:
+            ValueError: The instance has not been saved.
+        """
+        if self._id is None:
+            raise ValueError("Cannot refresh unsaved model (missing _id)")
+        return self._id
+
+    def _reload(self, doc: Optional[dict], db: Any, table: str) -> Any:
+        """The load ``refresh()`` runs on ``doc``, the row of this instance read from
+        ``table`` of ``db``: it reads the row onto this instance (``_refreshed``).
+
+        Raises:
+            LookupError: The row no longer exists (``doc`` is ``None``).
+        """
+        if doc is None:
+            raise LookupError(f"Row {self._id} not found for refresh")
+        own = {(table, self._id): self}
+        return _refs.load(type(self), [doc], db, table, self._refreshed, own)
+
+    def _refreshed(self: T, doc: dict, row: dict) -> T:
+        """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
+        cls = type(self)
+        fresh = _refs.validate(cls, doc)  # typed, as a load gives it
+        for name in (*(f.name for f in _public_fields(cls)), *_mixin_field_names(cls)):
+            if name in doc:
+                setattr(self, name, getattr(fresh, name))
+        self._snapshot = _dirty.snapshot(row)
+        return self
+
+    def _dump_with_relations(self) -> dict:
+        """The document ``save()`` writes: each field in stored form, a model of the class's
+        ``_reference_bases`` as the reference to its row. It awaits nothing."""
+        cls = type(self)
+        bases = cls._reference_bases
+        payload = {f.name: _stored.stored(getattr(self, f.name), bases, f.name) for f in _public_fields(cls)}
+        # Include mixin fields (not visible to msgspec.structs.fields)
+        for name in _mixin_field_names(cls):
+            payload[name] = _stored.stored(getattr(self, name, None), bases, name)
+        return payload
+
+    # ----- dirty tracking -----
+    is_dirty = _dirty.is_dirty
+    get_dirty_fields = _dirty.get_dirty_fields
 
     def __repr__(self) -> str:
         """Return string representation."""

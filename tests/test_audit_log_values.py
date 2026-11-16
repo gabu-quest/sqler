@@ -25,6 +25,7 @@ from sqler.exceptions import NotFoundError
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.mixins import AsyncAuditLogMixin, AuditLogMixin, TimestampMixin
+from sqler.models.msgspec.async_model import AsyncSQLerMsgspecModel
 from sqler.models.msgspec.model import SQLerMsgspecModel
 
 DAY = date(2026, 11, 14)
@@ -57,6 +58,7 @@ BASES = {
     "msgspec": Base(SQLerMsgspecModel, AuditLogMixin, False, False),
     "async": Base(AsyncSQLerModel, AsyncAuditLogMixin, True, True),
     "async-lite": Base(AsyncSQLerLiteModel, AsyncAuditLogMixin, True, False),
+    "async-msgspec": Base(AsyncSQLerMsgspecModel, AsyncAuditLogMixin, True, False),
 }
 BASE_IDS = list(BASES)
 
@@ -69,7 +71,7 @@ def make(spec: Base, name: str, **fields):
         ann[key] = annotation if spec.typed else Any
         body[key] = default
     body["__annotations__"] = ann
-    kwargs = {"kw_only": True, "tag": False} if spec.cls is SQLerMsgspecModel else {}
+    kwargs = {"kw_only": True, "tag": False} if spec.cls in (SQLerMsgspecModel, AsyncSQLerMsgspecModel) else {}
     cls = type(name, (spec.mixin, spec.cls), body, **kwargs)
     return dataclass(cls) if spec.cls is AsyncSQLerLiteModel else cls
 

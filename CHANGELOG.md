@@ -282,6 +282,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`AsyncSQLerMsgspecModel`**, the async twin of `SQLerMsgspecModel`, exported from `sqler` and `sqler.models`. Every call of the sync base is there with the same name, arguments and result, awaited where it reads or writes, on an `AsyncSQLerDB` (a `SQLerDB` is refused with the `TypeError` every async base raises). It takes the async mixins, `AsyncTrackedModel` and `AsyncPartialUpdateMixin` included, and a field of it can hold a sync msgspec model, stored as a reference. `TrackedModel` and `PartialUpdateMixin` now work on `SQLerMsgspecModel` too, where making an instance raised `AttributeError: 'super' object has no attribute '__post_init__'`.
 - **The async classes have every public name of their sync twins.** `AsyncSQLerModel` and `AsyncSQLerSafeModel` gain `is_dirty()`, `get_dirty_fields()`, `all()`, `first()` and `validate_references()`; `AsyncMigrationRunner` gains `reset()`; `AsyncSQLerQuery` can be imported from `sqler`.
 - **`AsyncSQLiteAdapter.pool_stats()` and `AsyncSQLerDB.pool_stats()`** return `PoolStats`: pool size, free and in-use connections, checkouts, timeouts, average and longest wait.
 - **`AsyncMigrationRunner.applied_migrations()`**, and `status()` returns `applied_count` and `applied` as the sync runner does.
