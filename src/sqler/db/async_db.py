@@ -268,7 +268,7 @@ class AsyncSQLerDB(_TableMemory):
                     now = (await self._learn(table))[0]
                 except sqlite3.OperationalError:
                     return False
-        return bool(now) and now != names
+        return now != names
 
     async def _sent_all(self, table: str, make: Any) -> Any:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._sent_all` (``make`` is awaited)."""
@@ -341,6 +341,8 @@ class AsyncSQLerDB(_TableMemory):
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._upsert`."""
 
         async def make() -> tuple[str, list[Any], Any]:
+            if _id is None and not fields and self._layout_of(table) is None:
+                await self._ensure_table(table)
             columns, layout, has = await self._shape_of(table, fields)
             return _upsert_sql(table, _id, doc, columns, layout, has)
 
@@ -415,17 +417,11 @@ class AsyncSQLerDB(_TableMemory):
 
     async def insert_document(self, table: str, doc: dict[str, Any]) -> int:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB.insert_document`."""
-        table = validate_table_name(table)
-        await self._ensure_table(table)
-        return await self._upsert(table, None, doc)
+        return await self._upsert(validate_table_name(table), None, doc)
 
     async def upsert_document(self, table: str, _id: Optional[int], doc: dict[str, Any]) -> int:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB.upsert_document`."""
-        table = validate_table_name(table)
-        if _id is None:
-            await self._ensure_table(table)
-            return await self.insert_document(table, doc)
-        return await self._upsert(table, _id, doc)
+        return await self._upsert(validate_table_name(table), _id, doc)
 
     async def _update_fields(
         self,

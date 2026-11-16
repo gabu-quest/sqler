@@ -50,6 +50,10 @@ _SQL_RESERVED_WORDS: frozenset[str] = frozenset({
 
 logger = logging.getLogger("sqler.utils")
 
+# names validate_table_name() has passed: a name is checked once, then found here
+_VALID_TABLE_NAMES: set[str] = set()
+_VALID_TABLE_NAMES_KEPT = 4096
+
 
 def validate_table_name(table: str) -> str:
     """Validate and sanitize table name to prevent SQL injection.
@@ -64,6 +68,8 @@ def validate_table_name(table: str) -> str:
         InvalidTableNameError: If the table name contains invalid characters, or is the
             name of a table sqler keeps for itself (``SQLER_TABLES``).
     """
+    if table.__class__ is str and table in _VALID_TABLE_NAMES:
+        return table
     from sqler.exceptions import InvalidTableNameError
 
     if not isinstance(table, str) or not table:
@@ -78,6 +84,8 @@ def validate_table_name(table: str) -> str:
         )
     if table[0] == "_" and table.lower() in SQLER_TABLES:
         raise InvalidTableNameError(f"{table!r} is a table sqler keeps for itself", table=table)
+    if len(_VALID_TABLE_NAMES) < _VALID_TABLE_NAMES_KEPT:
+        _VALID_TABLE_NAMES.add(table)
     return table
 
 

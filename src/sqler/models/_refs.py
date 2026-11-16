@@ -384,6 +384,24 @@ def _resolved(data: dict, db: Any, own: Any, cls: Any) -> Generator[Read, Any, d
     return replace(data, typed, lambda k: built[k] if k in built else own.get(k))
 
 
+def models(cls: Any, rows: list[dict], db: Any, table: str) -> list:
+    """The models of ``rows`` as :func:`load` gives them, its reads made with sync reads.
+    A class with no typed field has no reference to follow, so its rows are built here,
+    with no walk to start."""
+    if typed_fields(cls):
+        return run(load(cls, rows, db, table))
+    home = _Home(db, table)
+    return [from_row(cls, row, row, home) for row in rows]
+
+
+async def amodels(cls: Any, rows: list[dict], db: Any, table: str) -> list:
+    """Async twin of :func:`models`."""
+    if typed_fields(cls):
+        return await arun(load(cls, rows, db, table))
+    home = _Home(db, table)
+    return [from_row(cls, row, row, home) for row in rows]
+
+
 def run(walk: Generator[Read, Any, Any], adapter: Any = None) -> Any:
     """What the loader ``walk`` returns, its reads made with sync reads (:func:`read_rows`);
     ``adapter`` reads a row whose database is not known."""

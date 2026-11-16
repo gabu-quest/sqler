@@ -571,6 +571,33 @@ def test_a_table_dropped_by_another_object_is_not_written_by_its_old_layout(tmp_
     assert _stored(path, _id, "data") == ({"name": "y", "status": "v"}, '{"name":"y","status":"v"}')
 
 
+def test_a_new_row_in_a_remembered_table_sends_its_insert_alone(tmp_path):
+    a, b, path = _two(tmp_path)
+    try:
+        with query_logger.capture() as sent:
+            a.insert_document("t", {"name": "y"})
+            SceneRow(name="z").save(db=a)
+    finally:
+        a.close(), b.close()
+    assert [q.sql.split()[0] for q in sent] == ["INSERT", "INSERT"]
+    assert (_stored(path, 2, "data")[0], _stored(path, 3, "data")[0]["name"]) == ({"name": "y"}, "z")
+
+
+def test_a_new_row_in_a_remembered_table_another_object_dropped_makes_the_table_again(tmp_path):
+    """The insert is sent with no ``CREATE TABLE`` before it and SQLite refuses it; the table
+    is found gone and forgotten, and the insert built again makes it."""
+    a, b, path = _two(tmp_path)
+    b.adapter.execute("DROP TABLE t;")
+    b.adapter.auto_commit()
+    try:
+        with query_logger.capture() as sent:
+            _id = a.insert_document("t", {"name": "y"})
+    finally:
+        a.close(), b.close()
+    assert [q.sql.split()[0] for q in sent] == ["INSERT", "PRAGMA", "CREATE", "PRAGMA", "INSERT"]
+    assert (_id, _stored(path, _id, "data")) == (1, ({"name": "y"}, '{"name":"y"}'))
+
+
 @pytest.mark.parametrize("memory", ["named", "one adapter"])
 def test_two_objects_on_one_in_memory_database_see_each_others_change(memory):
     if memory == "named":
@@ -600,10 +627,10 @@ def test_a_promotion_by_the_object_itself_in_its_transaction_asks_nothing_again(
             with query_logger.capture() as sent:
                 _id = a.insert_document("t", {"name": "y", "status": "v"})
                 a.find_document("t", _id)
-        assert [q.sql.split()[0] for q in sent] == ["CREATE", "INSERT", "SELECT"]
+        assert [q.sql.split()[0] for q in sent] == ["INSERT", "SELECT"]
         with query_logger.capture() as sent:
             a.insert_document("t", {"name": "z", "status": "w"})
-        assert [q.sql.split()[0] for q in sent] == ["CREATE", "INSERT"]
+        assert [q.sql.split()[0] for q in sent] == ["INSERT"]
     finally:
         a.close()
     assert _stored(path, _id, "status") == ({"name": "y"}, "v")

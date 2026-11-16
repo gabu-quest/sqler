@@ -176,7 +176,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         doc = await _aread_document(db, table, id_, cls._versioned_rows)
         if doc is None:
             return None
-        return (await _refs.arun(_refs.load(cls, [doc], db, table)))[0]
+        return (await _refs.amodels(cls, [doc], db, table))[0]
 
     @classmethod
     async def from_ids(cls: Type[TAModel], ids: list[int], *, db=None) -> list[TAModel]:
@@ -193,7 +193,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
             return []
         db, table = cls._resolve_binding(db)
         read = _refs.aread_versioned if cls._versioned_rows else _aread_documents
-        return await _refs.arun(_refs.load(cls, await read(db, table, ids), db, table))
+        return await _refs.amodels(cls, await read(db, table, ids), db, table)
 
     @classmethod
     async def count(cls: Type[TAModel]) -> int:

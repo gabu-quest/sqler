@@ -1670,7 +1670,8 @@ def test_a_table_made_in_a_rolled_back_transaction_is_not_remembered(run):
 
 
 # what each writer sends on a table with no column beside ``data``: the first call learns the
-# columns (one statement), every later call sends what it sent before columns were written
+# columns (one statement), and a new row makes sure of its table once (``PLAIN_FIRST``); every
+# later call sends what it sent before columns were written
 PLAIN_COSTS = {
     "insert_document": lambda c: c("insert_document", {"n": 1}),
     "upsert_document insert": lambda c: c("upsert_document", None, {"n": 1}),
@@ -1697,15 +1698,16 @@ def test_a_table_without_columns_costs_one_statement_once(run, is_async, name):
         write(c)
     first, second = _cost(first), _cost(second)
     assert first.count("columns") == 1
-    assert [s for s in first if s != "columns"] == second
+    assert [s for s in first if s != "columns"] == PLAIN_FIRST.get(name, []) + second
     assert second == PLAIN_STATEMENTS[name]
 
 
 # what each sent on the base, before columns were written: on a table remembered, the same,
 # and a bulk write of several rows sends the check of the columns it remembers first (a ``SELECT``)
+PLAIN_FIRST = {"insert_document": ["CREATE"], "upsert_document insert": ["CREATE"]}
 PLAIN_STATEMENTS = {
-    "insert_document": ["CREATE", "INSERT"],
-    "upsert_document insert": ["CREATE", "CREATE", "INSERT"],
+    "insert_document": ["INSERT"],
+    "upsert_document insert": ["INSERT"],
     "upsert_document update": ["UPDATE"],  # a write by _id makes no table
     "insert_many": ["CREATE", "SELECT", "INSERT"],
     "bulk_upsert": ["CREATE", "INSERT", "INSERT"],

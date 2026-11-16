@@ -199,8 +199,8 @@ async def test_the_check_sends_no_statement_of_its_own(tmp_path):
             await a.insert_document("t", {"name": "y", "status": "s"})
     finally:
         await a.close()
-    assert [q.sql.split()[0] for q in steady] == ["CREATE", "INSERT"]
-    assert [q.sql.split()[0] for q in moved] == ["CREATE", "INSERT"]
+    assert [q.sql.split()[0] for q in steady] == ["INSERT"]
+    assert [q.sql.split()[0] for q in moved] == ["INSERT"]
     assert _stored(path, 2, "status") == ({"name": "y"}, "s")
 
 
@@ -450,3 +450,32 @@ async def test_the_callers_own_mistake_after_a_pending_statement_ends_the_unit(t
         await a.close()
     assert [q.sql.split()[0] for q in sent] == ["SELECT", "PRAGMA"]
     assert (in_use, sqlite3.connect(path).execute("SELECT count(*) FROM t").fetchone()) == (0, (1,))
+
+
+@pytest.mark.asyncio
+async def test_a_new_row_in_a_remembered_table_sends_its_insert_alone(tmp_path):
+    path = str(tmp_path / "steady.db")
+    a = await _learned(path)
+    try:
+        with query_logger.capture() as sent:
+            await a.insert_document("t", {"name": "y"})
+            await SceneRow(name="z").save(db=a)
+    finally:
+        await a.close()
+    assert [q.sql.split()[0] for q in sent] == ["INSERT", "INSERT"]
+    assert (_stored(path, 2, "data")[0], _stored(path, 3, "data")[0]["name"]) == ({"name": "y"}, "z")
+
+
+@pytest.mark.asyncio
+async def test_a_new_row_in_a_remembered_table_another_object_dropped_makes_the_table_again(tmp_path):
+    """The insert is sent with no ``CREATE TABLE`` before it and SQLite refuses it; the table
+    is found gone and forgotten, and the insert built again makes it."""
+    path = str(tmp_path / "gone.db")
+    a = await _learned(path, lambda b: (b.adapter.execute("DROP TABLE t;"), b.adapter.auto_commit()))
+    try:
+        with query_logger.capture() as sent:
+            _id = await a.insert_document("t", {"name": "y"})
+    finally:
+        await a.close()
+    assert [q.sql.split()[0] for q in sent] == ["INSERT", "PRAGMA", "CREATE", "PRAGMA", "INSERT"]
+    assert (_id, _stored(path, _id, "data")) == (1, ({"name": "y"}, '{"name":"y"}'))

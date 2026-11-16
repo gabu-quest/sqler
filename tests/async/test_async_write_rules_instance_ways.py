@@ -565,8 +565,9 @@ async def test_a_failed_write_the_caller_catches_and_commits_past_keeps_nothing(
 # delete() and each policy). A delete with a policy that touches referrers also looks through
 # the registered tables for them; those reads depend on what else is registered and are left
 # out.
-# a write by _id makes no table; a batch of several rows sends the check of the columns first (a ``SELECT``)
-UNVERSIONED = (["CREATE", "CREATE", "INSERT"], ["UPDATE"], ["CREATE", "SELECT", "INSERT"])
+# a write by _id makes no table; a new row makes none once its table is remembered; a batch of
+# several rows sends the check of the columns first (a ``SELECT``)
+UNVERSIONED = (["INSERT"], ["UPDATE"], ["CREATE", "SELECT", "INSERT"])
 VERSIONED = (["INSERT"], ["UPDATE"], ["SELECT", "INSERT"])
 A_DELETE = ["CREATE", "DELETE"]
 
