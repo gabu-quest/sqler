@@ -16,6 +16,7 @@ from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
     AsyncSQLerLiteSafeModel,
+    AsyncSQLerMsgspecModel,
     AsyncSQLerSafeModel,
     F,
     FTSIndex,
@@ -1977,6 +1978,7 @@ SEARCH_BASES = [
     (AsyncSQLerLiteModel, True, True),
     (AsyncSQLerLiteSafeModel, True, True),
     (SQLerMsgspecModel, False, False),
+    (AsyncSQLerMsgspecModel, True, False),
 ]
 BASE_IDS = [b.__name__ for b, _, _ in SEARCH_BASES]
 
