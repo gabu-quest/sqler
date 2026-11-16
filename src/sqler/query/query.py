@@ -532,7 +532,7 @@ class SQLerQuery(_Statements):
         (``SQLerDB._shape_of``), whatever class reads or writes it; a versioned query
         (``with_version()``) for ``_use`` ``"update"`` gives the table the column first. Each
         statement built from it carries the guard of the remembered names
-        (``sqler.db.sqler_db._guard``). Made once for each memory of the table, and kept.
+        (``sqler.db._guard._guard``). Made once for each memory of the table, and kept.
 
         Raises:
             SchemaError: A document still holds the key of a promoted column.

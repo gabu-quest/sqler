@@ -31,8 +31,8 @@ import weakref
 from typing import Any, Callable, Generator, Optional
 
 from sqler import registry
+from sqler.db._rows import _in_order, _row_columns, _row_documents, _select_rows
 from sqler.db.async_db import _aselect_rows
-from sqler.db.sqler_db import _in_order, _row_columns, _row_documents, _select_rows
 from sqler.exceptions import InvalidTableNameError
 from sqler.models import _dirty
 from sqler.models._table_names import _Home, _set_home, _unchecked_table_name

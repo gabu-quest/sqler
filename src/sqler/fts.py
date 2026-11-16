@@ -34,8 +34,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, Union
 
+from sqler.db._guard import _check_sql, _guard
 from sqler.db.async_db import AsyncSQLerDB
-from sqler.db.sqler_db import _check_sql, _guard
 from sqler.exceptions import SchemaError, SearchQueryError
 from sqler.models._table_names import _instance_binding
 from sqler.utils import validate_field_name, validate_identifier
@@ -158,7 +158,7 @@ def _follow_promotion(table: str, moved: list[str], promoted: list[str]) -> Any:
     fields from their columns, and is filled again from the table. ``promoted``: every promoted
     column of the table now.
 
-    A run of statements the database classes send (see ``sqler.db.sqler_db._promotion``), in
+    A run of statements the database classes send (see ``sqler.db._promotion._promotion``), in
     the transaction of the promotion: an index made before it would index NULL for a moved field.
     """
     rows = yield (
