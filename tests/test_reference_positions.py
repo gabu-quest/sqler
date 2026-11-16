@@ -616,6 +616,74 @@ def test_a_msgspec_class_naming_a_class_not_defined_yet_follows_nothing_until_it
     assert after == {"child": _refs.Position((RpMsLater,), None, None)}
 
 
+# ---- a pydantic class whose annotation names a class that is not there yet -----------
+
+
+@pytest.mark.parametrize("base", [SQLerModel, SQLerSafeModel, AsyncSQLerModel, AsyncSQLerSafeModel])
+def test_a_pydantic_class_naming_a_class_not_defined_yet_is_asked_once_until_a_class_is_defined(
+    base, monkeypatch
+):
+    """pydantic resolves such a class at its first use. Before that it is asked here: once,
+    then again only after a model class was defined, and never once it has resolved."""
+    from sqler.models import _refs
+
+    class RpPdHolder(base):
+        name: str = ""
+        child: Optional["RpPdLater"] = None  # noqa: F821 - defined below, after the first read
+
+    asked = []
+    rebuild = RpPdHolder.model_rebuild
+
+    def counted(**kwargs):
+        asked.append(kwargs)
+        return rebuild(**kwargs)
+
+    monkeypatch.setattr(RpPdHolder, "model_rebuild", counted)
+    before = [_refs.known_typed_fields(RpPdHolder) for _ in range(3)]
+    asks_before = len(asked)
+
+    class RpPdOther(base):  # a class it does not name
+        name: str = ""
+
+    between = [_refs.known_typed_fields(RpPdHolder) for _ in range(3)]
+    asks_between = len(asked)
+
+    class RpPdLater(base):
+        name: str = ""
+
+    globals()["RpPdLater"] = RpPdLater
+    try:
+        after = [_refs.known_typed_fields(RpPdHolder) for _ in range(3)]
+    finally:
+        del globals()["RpPdLater"]
+
+    assert (before, asks_before) == ([None] * 3, 1)
+    assert (between, asks_between) == ([None] * 3, 2)
+    assert after == [{"child": _refs.Position((RpPdLater,), None, None)}] * 3
+    assert len(asked) == 3
+    # asked with the names of its own module and of the place it was defined, no others
+    assert asked == [{"raise_errors": False, "_parent_namespace_depth": 0}] * 3
+
+
+@pytest.mark.parametrize(
+    "base", [SQLerLiteModel, SQLerLiteSafeModel, AsyncSQLerLiteModel, AsyncSQLerLiteSafeModel]
+)
+def test_a_lite_class_left_without_dataclass_has_no_typed_field(base):
+    """It has no field to read, and asking is no error: a delete of any class asks every
+    class that is defined."""
+    from sqler.models import _refs
+
+    class RpNoDataclass(base):  # no ``@dataclass``
+        child: Optional[RpLiteChild] = None
+
+    assert _refs.known_typed_fields(RpNoDataclass) == {}
+
+
+@dataclasses.dataclass
+class RpLiteChild(SQLerLiteModel):
+    name: str = ""
+
+
 # ---- a typed reference that leads to no row of the field's class ----------------------
 #
 # One answer on every base and every way in: ``None`` where the reference is the field's

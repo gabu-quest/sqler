@@ -889,6 +889,84 @@ async def test_a_class_whose_annotation_resolves_after_the_first_delete(base):
         await settle(db.close())
 
 
+def define_after(module: str, name: str, base, fields: dict):
+    """A class called ``name`` defined in ``module`` and bound there, as a ``class``
+    statement of that module does it: nothing is rebuilt and no class is used."""
+    cls = declare(base, name, fields, module=module)
+    setattr(sys.modules[module], name, cls)
+    return cls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", ["delete()", "delete_all()"])
+@pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
+async def test_a_class_never_used_that_names_a_class_defined_after_it_costs_a_delete_no_read(base, way):
+    """A module that defines ``Early`` before the ``Later`` it names, and uses neither: the
+    delete of a row of a class nothing can refer to sends its own statement and no other."""
+    db = await open_db(base)
+    try:
+        module = forward_module()
+        later = f"Later{next(_tables)}"
+        Early = declare(base, "Early", {"later": (Optional[later], None)}, module=module)
+        define_after(module, later, base, {"n": (int, 0)})
+        Alone = declare(base, "Alone", {"name": (str, "")})
+        alone = await settle(Alone(name="a").save(db=db))
+        await settle(db.insert_document(Early.__tablename__, {"later": None}))
+
+        if way == "delete()":
+            statements = await sent(lambda: settle(alone.delete(db=db)))
+        else:
+            statements = await sent(lambda: settle(Alone.using(db).delete_all()))
+
+        assert [s for s in statements if Alone.__tablename__ not in s] == []
+        assert [s.split()[0] for s in statements if s.split()[0] != "CREATE"] == ["DELETE"]
+    finally:
+        await settle(db.close())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
+async def test_a_class_never_used_that_names_a_class_defined_after_it_refers_where_it_declares(base):
+    """The positions such a class declares are known with no use of it: a reference in an
+    untyped field of its row is data, one in its typed field refuses the delete."""
+    db = await open_db(base)
+    try:
+        module = forward_module()
+        Target = declare(base, "Target", {"name": (str, "")})
+        later = f"Later{next(_tables)}"
+        Holder = declare(
+            base,
+            "Holder",
+            {
+                "target": (Optional[Target], None),
+                "blob": (Optional[dict], None),
+                "later": (Optional[later], None),
+            },
+            module=module,
+        )
+        Later = define_after(module, later, base, {"n": (int, 0)})
+        first = await settle(Target(name="first").save(db=db))
+        second = await settle(Target(name="second").save(db=db))
+        there = await settle(Later(n=1).save(db=db))
+        for doc in (
+            {"blob": ref(Target.__tablename__, 1)},
+            {"target": ref(Target.__tablename__, 2)},
+            {"later": ref(Later.__tablename__, 1)},
+        ):
+            await settle(db.insert_document(Holder.__tablename__, doc))
+
+        await settle(first.delete(db=db))
+        with pytest.raises(ReferentialIntegrityError, match=r"referenced by 1 row\(s\)$"):
+            await settle(second.delete(db=db))
+        with pytest.raises(ReferentialIntegrityError, match=r"referenced by 1 row\(s\)$"):
+            await settle(there.delete(db=db))
+
+        assert await holds(db, Target.__tablename__, "$.name") == [(2, "second")]
+        assert await holds(db, Later.__tablename__, "$.n") == [(1, 1)]
+    finally:
+        await settle(db.close())
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
 async def test_a_class_registered_after_the_first_delete_is_looked_at(base):

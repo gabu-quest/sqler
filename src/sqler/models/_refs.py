@@ -727,6 +727,8 @@ _TYPED: "weakref.WeakKeyDictionary[type, dict[str, Position]]" = weakref.WeakKey
 
 # the annotation of a field of a pydantic or msgspec class whose annotations are not resolved yet
 _NOT_YET = object()
+# {pydantic class whose annotations did not resolve: ``registry.state()`` when it was last asked}
+_UNRESOLVED: "weakref.WeakKeyDictionary[type, int]" = weakref.WeakKeyDictionary()
 
 # ``Literal[...]`` in a string annotation: what it holds are values, never names
 _LITERALS = re.compile(r"Literal\[[^\]]*\]")
@@ -809,9 +811,30 @@ def _annotations(cls: Any) -> list:
         return [(n, hints[n], cls) for n in names]
     if not isinstance(getattr(cls, "__pydantic_fields__", None), dict):
         return []  # a lite class left without ``@dataclass``: no field to read
-    if not getattr(cls, "__pydantic_complete__", True):
+    if not getattr(cls, "__pydantic_complete__", True) and not _resolves(cls):
         return [(n, _NOT_YET, cls) for n in cls.model_fields]
     return [(n, f.annotation, cls) for n, f in cls.model_fields.items()]
+
+
+def _resolves(cls: Any) -> bool:
+    """Whether the annotations of the pydantic class ``cls``, which named a class that was
+    not defined yet when it was, resolve now.
+
+    pydantic resolves them when the class is first used. A class nothing has used yet is
+    asked here, as pydantic asks it then, with the names of its own module and of the place
+    it was defined and no others: until it resolves, any field of it may hold a model, and
+    every delete reads its whole table. Asked again only after a model class was defined
+    (a name can also turn up in another way; the class's first use finds it then).
+    """
+    state = registry.state()
+    if _UNRESOLVED.get(cls) == state:
+        return False
+    cls.model_rebuild(raise_errors=False, _parent_namespace_depth=0)
+    if cls.__pydantic_complete__:
+        _UNRESOLVED.pop(cls, None)
+        return True
+    _UNRESOLVED[cls] = state
+    return False
 
 
 def _declarer(cls: Any, name: str) -> Any:
