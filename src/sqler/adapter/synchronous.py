@@ -4,9 +4,9 @@ import threading
 import time
 import uuid
 import weakref
+from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
-from itertools import islice
 from typing import Any, ContextManager, NoReturn, Optional, Self
 
 from sqler.logging import query_logger
@@ -79,9 +79,15 @@ def _roll_back(conn: sqlite3.Connection, shared: Optional["_SharedConnection"], 
     be closed without losing the database: it keeps the transaction and its holder, and
     ``shared.unended`` names what left until a rollback that ``take`` tries succeeds.
     SQLite's error ends here; anything else is raised on.
+
+    A rollback reads nothing on: the thread's cursors with rows left are closed first
+    (``_ThreadState.give_up_unread``), so the statement of none of them keeps a closed
+    connection, and its lock, alive.
     """
     left: Optional[BaseException] = None
     try:
+        if local is not None:
+            local.give_up_unread()
         try:
             conn.rollback()
         except sqlite3.Error:
@@ -116,6 +122,7 @@ def _end_outermost(
 ) -> None:
     """Commit or roll back the thread's outermost transaction on ``conn``."""
     if commit:
+        local.read_ahead()
         conn.commit()
         return
     _roll_back(conn, shared, local)
@@ -123,9 +130,12 @@ def _end_outermost(
         raise _kept(shared.unended)
 
 
-def _end_savepoint(conn: sqlite3.Connection, depth: int, commit: bool) -> None:
-    """Release the savepoint of nesting ``depth``, rolled back to first unless ``commit``."""
-    if not commit:
+def _end_savepoint(conn: sqlite3.Connection, depth: int, commit: bool, local: "_ThreadState") -> None:
+    """Release the savepoint of nesting ``depth`` of ``local``'s thread, rolled back to first unless ``commit``."""
+    if commit:
+        local.read_ahead()
+    else:
+        local.give_up_unread()
         conn.execute(f"ROLLBACK TO SAVEPOINT sp_{depth}")
     conn.execute(f"RELEASE SAVEPOINT sp_{depth}")
 
@@ -188,7 +198,8 @@ class _ThreadConnection:
 
 class _ThreadState(threading.local):
     """One thread's connection (``None`` until it opens one), depth of explicit transactions,
-    and why its transaction can no longer be trusted (``None``: it can), as ``_broken`` reads it.
+    why its transaction can no longer be trusted (``None``: it can), as ``_broken`` reads it,
+    and the cursors of its statements that may have rows left (``unread``, held weakly).
 
     On a plain ``":memory:"`` adapter (``shared`` given) each thread's state is made with
     the thread's end hook (``turn_end``) the first time the thread touches it, so the hook
@@ -203,9 +214,37 @@ class _ThreadState(threading.local):
     me: Optional["weakref.ref[_TurnEnd]"] = None
 
     def __init__(self, shared: Optional["_SharedConnection"] = None):
+        self.unread: list[weakref.ref[_ReadRows]] = []
         if shared is not None:
             self.turn_end = end = _TurnEnd(shared)
             self.me = end.token
+
+    def read_ahead(self) -> None:
+        """Before a statement is sent on the thread's connection: each cursor in ``unread``
+        reads the rows it has not returned yet, and serves them from memory from here."""
+        unread = self.unread
+        for ref in unread:
+            cursor = ref()
+            if cursor is not None:
+                cursor.hold()
+        unread.clear()  # not reached past an interrupt: the next statement reads the rest
+
+    def give_up_unread(self) -> None:
+        """Before the thread's transaction or savepoint is rolled back: each cursor in
+        ``unread`` is closed with its rows not read, and says so at its next read.
+
+        Every such cursor was opened inside what is rolled back (its begin was a statement,
+        which read the earlier ones ahead). Reading the rest of them would hold a result of
+        any size in memory on the way out of a failed block, for rows of a transaction
+        that is undone; left to SQLite they would go on after the rollback with other
+        values than their statement saw.
+        """
+        unread = self.unread
+        for ref in unread:
+            cursor = ref()
+            if cursor is not None:
+                cursor.give_up()
+        unread.clear()
 
 
 class _Block:
@@ -414,48 +453,115 @@ class _TurnEnd:
             shared.end_of(self.token)
 
 
-class _ReadRows:
-    """The rows of one statement on the shared ``":memory:"`` connection, all read inside
-    the statement's turn, served as its ``sqlite3.Cursor`` would serve them.
+_CLOSED: deque = deque()  # ``_ReadRows._rows`` of a closed cursor; nothing is read into it
+_ROLLED_BACK_UNREAD = "the transaction was rolled back before the rest of this cursor's rows were read"
+_ONE_STATEMENT = "a cursor the adapter returned runs no other statement; send it with the adapter's execute()"
+_SEND = sqlite3.Cursor.execute  # how the adapter itself sends on its cursor
 
-    SQLite reads a statement's rows as they are fetched; on a connection another thread
-    writes on once the turn is given back, a later fetch would see that thread's
-    uncommitted rows.
+
+class _ReadRows(sqlite3.Cursor):
+    """The cursor of every statement the adapter sends: it returns the rows as its statement
+    saw them.
+
+    SQLite reads a statement's rows as they are fetched, so a statement sent on the same
+    connection meanwhile (a write that moves a row on in the order walked, a commit) changes
+    what a later fetch returns. The cursor reads lazily, as ``sqlite3.Cursor`` does, until
+    ``hold()``: then it reads the rows it has not returned yet and becomes a ``_HeldRows``,
+    which serves them from memory and raises the error that stopped them at the read that
+    runs out of them, as the lazy read would raise it. The adapter calls ``hold()`` before
+    the next statement on a thread's connection (``_ThreadState.read_ahead``), and on the one
+    ``":memory:"`` connection before the statement's turn is given back: another thread
+    writes there after that. A rollback reads nothing: it calls ``give_up()``, and the
+    cursor's next read raises.
     """
 
-    __slots__ = ("description", "rowcount", "lastrowid", "arraysize", "_rows")
+    __slots__ = ("_rows", "_error")
 
-    def __init__(self, cursor: sqlite3.Cursor):
-        self._rows: Optional[Iterator[Any]] = iter(cursor.fetchall())
-        self.description = cursor.description
-        self.rowcount = cursor.rowcount
-        self.lastrowid = cursor.lastrowid
-        self.arraysize = cursor.arraysize
-        cursor.close()
+    def execute(self, *args: Any, **kwargs: Any) -> NoReturn:
+        """Refused: sent from here, a statement would skip the reading ahead of the thread's
+        other cursors, and a cursor that holds its rows would go on serving the old ones."""
+        raise sqlite3.ProgrammingError(_ONE_STATEMENT)
 
-    def _left(self) -> Iterator[Any]:
-        rows = self._rows
-        if rows is None:
-            raise sqlite3.ProgrammingError("Cannot operate on a closed cursor.")
-        return rows
+    executemany = executescript = execute
 
-    def fetchone(self) -> Any:
-        return next(self._left(), None)
+    def hold(self) -> None:
+        """Read the rows not returned yet; from here they are served from memory."""
+        rows: deque = deque()
+        self._rows, self._error = rows, None
+        try:
+            rows.extend(self)
+        except Exception as exc:
+            self._error = exc
+        except BaseException:
+            self._error = sqlite3.OperationalError("interrupted")  # as SQLite says it of a statement cut short
+            try:
+                sqlite3.Cursor.close(self)  # cut short, its statement keeps no snapshot open
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            self.__class__ = _HeldRows  # one store, straight after the reading: no call between them
 
-    def fetchmany(self, size: Optional[int] = None) -> list[Any]:
-        return list(islice(self._left(), self.arraysize if size is None else size))
-
-    def fetchall(self) -> list[Any]:
-        return list(self._left())
-
-    def __iter__(self) -> Self:
-        return self
-
-    def __next__(self) -> Any:
-        return next(self._left())
+    def _end(self, rows: deque, error: Optional[Exception]) -> None:
+        """Finish the statement unread; from here the cursor serves ``rows``, then ``error``."""
+        try:
+            sqlite3.Cursor.close(self)
+        finally:
+            self._rows, self._error = rows, error
+            self.__class__ = _HeldRows
 
     def close(self) -> None:
-        self._rows = None
+        self._end(_CLOSED, None)
+
+    def give_up(self) -> None:
+        """Its transaction is being rolled back: the rows not returned stay unread, and the next read raises."""
+        self._end(deque(), sqlite3.OperationalError(_ROLLED_BACK_UNREAD))
+
+
+class _HeldRows(_ReadRows):
+    """A ``_ReadRows`` whose rows not returned are read (``_rows``), or that is closed."""
+
+    __slots__ = ()
+
+    def hold(self) -> None:
+        pass
+
+    def give_up(self) -> None:
+        pass  # the rows it holds were read before the rollback, as their statement saw them
+
+    def _served(self, size: Optional[int]) -> list[Any]:
+        """Up to ``size`` (None: all) of the rows held; the read that runs out of them raises their error."""
+        rows = self._rows
+        if rows is _CLOSED:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed cursor.")
+        if self._error is not None and (size is None or size > len(rows)):
+            error, self._error = self._error, None
+            rows.clear()  # a lazy read that raises drops the rows it had read, too
+            raise error
+        return [rows.popleft() for _ in range(len(rows) if size is None else min(size, len(rows)))]
+
+    def fetchone(self) -> Any:
+        rows = self._rows
+        if rows:
+            return rows.popleft()
+        self._served(1)  # closed, or the error that stopped the rows
+        return None
+
+    def fetchmany(self, size: Optional[int] = None) -> list[Any]:
+        return self._served(self.arraysize if size is None else size)
+
+    def fetchall(self) -> list[Any]:
+        return self._served(None)
+
+    def __next__(self) -> Any:
+        rows = self._rows
+        if rows:
+            return rows.popleft()
+        self._served(1)
+        raise StopIteration
+
+    def close(self) -> None:
+        self._rows, self._error = _CLOSED, None  # its statement, read to its end, holds nothing
 
 
 class SQLiteAdapter(AdapterABC):
@@ -666,6 +772,8 @@ class SQLiteAdapter(AdapterABC):
             raise _broken(local.broken)
         conn = local.conn
         if conn is not None:
+            if local.unread:
+                local.read_ahead()
             return conn
         if self._memory_singleton:
             shared = self._shared
@@ -702,9 +810,11 @@ class SQLiteAdapter(AdapterABC):
     def execute(self, query: str, params: Optional[list[Any]] = None) -> CursorLike:
         """Execute a SQL query with optional parameters and return cursor.
 
-        On the one connection of a plain ``":memory:"`` adapter, a statement that returns
-        rows has every row read before its turn is given back, and returns them in a
-        ``_ReadRows``; everywhere else the ``sqlite3.Cursor`` is returned unread.
+        The cursor (a ``sqlite3.Cursor``) returns the rows as the statement saw them: it
+        reads them as they are fetched until the thread sends another statement on its
+        connection, which first reads the rows the cursor has not returned. On the one
+        connection of a plain ``":memory:"`` adapter every row is read before the
+        statement's turn is given back.
 
         Automatically logs the query if query_logger is enabled.
         """
@@ -746,8 +856,9 @@ class SQLiteAdapter(AdapterABC):
     def _execute(
         self, conn: sqlite3.Connection, query: str, params: Optional[list[Any]], read_all: bool, judged: bool
     ) -> CursorLike:
-        inside = self._local.txn_depth > 0
-        cursor: Any = conn.cursor()
+        local = self._local
+        inside = local.txn_depth > 0
+        cursor = conn.cursor(_ReadRows)
         _logging = query_logger.enabled
         if _logging:
             start = time.perf_counter()
@@ -756,11 +867,16 @@ class SQLiteAdapter(AdapterABC):
             if params is not None:
                 if isinstance(params, list):
                     params = tuple(params)
-                cursor.execute(query, params)
+                _SEND(cursor, query, params)
             else:
-                cursor.execute(query)
-            if read_all and cursor.description is not None:
-                cursor = _ReadRows(cursor)  # a read that fails is a failed statement
+                _SEND(cursor, query)
+            if cursor.description is not None:
+                if not read_all:
+                    local.unread.append(weakref.ref(cursor))
+                else:
+                    cursor.hold()
+                    if cursor._error is not None:
+                        raise cursor._error  # a read that fails is a failed statement
         except BaseException as exc:  # an interrupt counts as a failure
             error_msg = str(exc) or type(exc).__name__
             if inside:
@@ -981,12 +1097,12 @@ class SQLiteAdapter(AdapterABC):
             try:
                 local.txn_depth = depth
                 if shared is None:
-                    _end_savepoint(local.conn, depth, commit)
+                    _end_savepoint(local.conn, depth, commit, local)
                 else:
                     with shared.lock:
                         conn = shared.take(local)
                         try:
-                            _end_savepoint(conn, depth, commit)
+                            _end_savepoint(conn, depth, commit, local)
                         finally:
                             shared.give(local)
             except BaseException as exc:

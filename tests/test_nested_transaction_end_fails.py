@@ -890,10 +890,11 @@ def test_the_write_lock_of_a_file_is_free_right_after_the_block(tmp_path):
         s.db.close()
 
 
-def test_a_half_read_cursor_of_the_closed_connection_holds_the_lock_and_commits_nothing(tmp_path):
+def test_a_half_read_cursor_keeps_no_lock_once_its_connection_is_closed_and_replaced(tmp_path):
     """SQLite keeps a closed connection, and its transaction, while one of its statements
-    is not finished: writers are refused until the cursor goes, then the block's row is
-    rolled back."""
+    is not finished. The rollback closes the cursor with its rows unread first, so the
+    connection closed after the two failed tries goes at once: a writer is let in, the
+    block's rows are rolled back, and the cursor's next read says its rows were not read."""
     s = Scene("file", tmp_path)
     try:
         with pytest.raises(ValueError, match=OWN_ERROR):
@@ -905,13 +906,13 @@ def test_a_half_read_cursor_of_the_closed_connection_holds_the_lock_and_commits_
                 s.stop_every_statement()
                 raise ValueError(OWN_ERROR)
         assert s.adapter._local.conn is None
-        with pytest.raises(sqlite3.OperationalError, match="^database is locked$"):
-            s.insert("refused")
+        s.insert("let in")
         assert s.committed() == ["before"]
-        del cursor
-        s.insert("after the cursor went")
+        with pytest.raises(sqlite3.OperationalError) as unread:
+            cursor.fetchone()
+        assert str(unread.value) == "the transaction was rolled back before the rest of this cursor's rows were read"
         s.adapter.auto_commit()
-        assert s.committed() == ["after the cursor went", "before"]
+        assert s.committed() == ["before", "let in"]
     finally:
         s.db.close()
 

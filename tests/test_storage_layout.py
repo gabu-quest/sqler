@@ -501,10 +501,10 @@ def test_no_change_lands_between_the_check_and_a_write_inside_an_open_unit(tmp_p
     assert _stored(path, _id, "status") == ({"name": "after"}, "v")
 
 
-def test_a_change_while_a_cursor_is_half_read_is_refused_then_seen(tmp_path):
+def test_a_change_while_a_cursor_is_half_read_is_seen_by_the_next_write(tmp_path):
     """``b`` promotes while ``a`` holds a half-read cursor (a read snapshot from before the
-    change): ``a``'s write cannot take the write lock from that snapshot and raises, writing
-    nothing; once the cursor is read, the write sees the column."""
+    change). ``a``'s write first reads the rest of the cursor, which ends that snapshot: the
+    write sees the column, and the cursor gives the rows its statement saw."""
     a, b, path = _two(tmp_path, timeout_ms=50)
     for n in range(3):
         a.insert_document("t", {"name": f"r{n}"})
@@ -512,10 +512,8 @@ def test_a_change_while_a_cursor_is_half_read_is_refused_then_seen(tmp_path):
         cursor = a.adapter.execute("SELECT _id FROM t ORDER BY _id;")
         assert tuple(cursor.fetchone()) == (1,)
         b.ensure_table("t", promoted={"status": "TEXT"})
-        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
-            a.insert_document("t", {"name": "refused", "status": "v"})
-        assert [r[0] for r in cursor.fetchall()] == [2, 3, 4]
         _id = a.insert_document("t", {"name": "y", "status": "v"})
+        assert [r[0] for r in cursor.fetchall()] == [2, 3, 4]
     finally:
         a.close(), b.close()
     assert (_id, _stored(path, _id, "status")) == (5, ({"name": "y"}, "v"))

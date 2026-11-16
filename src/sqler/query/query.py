@@ -1023,9 +1023,11 @@ class SQLerQuery(_WriteStatements):
         """Yield parsed dicts one at a time (memory-efficient streaming).
 
         Unlike ``all_dicts()`` which loads all rows into memory, this method
-        iterates over the cursor row by row. On a plain ``":memory:"`` database, whose one
-        connection every thread shares, the statement's rows are all read before the first
-        is yielded, so the whole result is held while it yields.
+        iterates over the cursor row by row, each row as the statement saw it: a statement
+        the thread sends on its connection meanwhile (a write in the loop) first reads the
+        rows not yielded yet, which are held from then on. On a plain ``":memory:"``
+        database, whose one connection every thread shares, the statement's rows are all
+        read before the first is yielded, so the whole result is held while it yields.
 
         Raises:
             NoAdapterError: If the query has no adapter.
