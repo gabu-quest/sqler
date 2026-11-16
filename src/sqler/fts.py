@@ -275,10 +275,8 @@ def _search_error(query: str, exc: sqlite3.OperationalError, sql: str, params: l
 
 def _is_text(annotation: Any) -> bool:
     """Whether a field of this declared type is indexed by default: ``str``, or a type made
-    with ``str`` among its arguments (``Optional[str]``)."""
-    return annotation is str or (
-        hasattr(annotation, "__origin__") and str in getattr(annotation, "__args__", ())
-    )
+    with ``str`` among its arguments (``Optional[str]``, ``str | None``, ``list[str]``)."""
+    return annotation is str or str in getattr(annotation, "__args__", ())
 
 
 def _fts_config(cls: type) -> Tuple[list[str], str]:
@@ -1336,8 +1334,9 @@ class SearchableMixin(_SearchHost):
         article = Article(title="Hello", content="World")
         article.save()  # Automatically indexed
 
-    Without an ``FTS`` class every public field that declares text (``str``,
-    ``Optional[str]``) is indexed.
+    Without an ``FTS`` class every public field whose declared type holds text is indexed
+    (``str``, ``Optional[str]``, ``str | None``, and a container such as ``list[str]`` as its
+    JSON text).
     """
 
     _fts_index: Optional[FTSIndex] = None

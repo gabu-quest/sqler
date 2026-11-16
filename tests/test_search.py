@@ -2039,6 +2039,53 @@ def test_search_works_on_every_model_base(base, is_async, lite, fts):
     assert asyncio.run(run()) == [fts or ["title", "note"], ["red apple"], found_by_note, 1]
 
 
+@pytest.mark.parametrize("base, is_async, lite", SEARCH_BASES, ids=BASE_IDS)
+def test_a_field_declared_str_or_none_is_indexed_by_default(base, is_async, lite):
+    mixin = AsyncSearchableMixin if is_async else SearchableMixin
+    ns = {
+        "__module__": __name__,
+        "__annotations__": {"title": str, "note": str | None, "n": int | None},
+        "title": "",
+        "note": None,
+        "n": None,
+        "__tablename__": "uniondocs",
+    }
+    name = f"Union{base.__name__}"
+    cls = type(name, (mixin, base), {"__qualname__": name, **ns})
+    Doc = dataclasses.dataclass(cls) if lite else cls
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).in_memory(shared=False)
+        await _v(db.connect())
+        try:
+            index = await _v(Doc.create_search_index(db))
+            await _v(Doc(title="red apple", note="memo", n=3).save(db=db))
+            await _v(Doc(title="blue sky").save(db=db))
+            return [index.fields, [d.title for d in await _v(Doc.search("memo", db=db))]]
+        finally:
+            await _v(db.close())
+
+    assert asyncio.run(run()) == [["title", "note"], ["red apple"]]
+
+
+def test_a_list_of_text_is_indexed_by_default_as_its_json_text():
+    class Tagged(SearchableMixin, SQLerModel):
+        __tablename__ = "taggeddocs"
+        title: str = ""
+        tags: list[str] = []
+        sizes: list[int] = []
+
+    db = SQLerDB.in_memory(shared=False)
+    try:
+        index = Tagged.create_search_index(db)
+        Tagged(title="red apple", tags=["fruit", "snack"], sizes=[7]).save(db=db)
+        Tagged(title="blue sky", tags=["weather"]).save(db=db)
+        found = [d.title for d in Tagged.search("snack", db=db)]
+    finally:
+        db.close()
+    assert (index.fields, found) == (["title", "tags"], ["red apple"])
+
+
 # ----- an index made through one database object is used through the other ----------------
 
 

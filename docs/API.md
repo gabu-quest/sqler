@@ -2351,7 +2351,9 @@ its database").
 
 The mixin works on every sync base (`SQLerModel`, `SQLerSafeModel`, `SQLerLiteModel`,
 `SQLerLiteSafeModel`, `SQLerMsgspecModel`). Without an `FTS` class it indexes every public
-field that declares text (`str`, `Optional[str]`), on every base.
+field whose declared type holds text, on every base: `str`, `Optional[str]` and `str | None`,
+and a container of text such as `list[str]`, which is indexed as its JSON text. An `FTS`
+class names the fields itself.
 
 **On an `AsyncSQLerDB`** the same calls are awaited: `AsyncFTSIndex` has every public call of
 `FTSIndex` (`create`, `drop`, `rebuild`, `index`, `remove`, `search`, `search_ranked`,
