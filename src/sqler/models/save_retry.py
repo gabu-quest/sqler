@@ -176,17 +176,22 @@ class SaveRetry:
             raise stale from e
 
 
-def rebase(latest: dict, held: dict, snap: dict, delta: dict[str, int]) -> dict:
+def rebase(
+    latest: dict, held: dict, snap: dict, delta: dict[str, int], stale: StaleVersionError
+) -> dict:
     """The payload of a save rebased onto the newer row ``latest``.
 
     It is that row, with the fields the caller changed since its snapshot ``snap`` taken
     from its payload ``held``, and the counter ``delta`` added. A field only the other
-    writer changed keeps the other writer's value.
+    writer changed keeps the other writer's value. A field both changed, to two different
+    values, cannot be merged: the ``stale`` conflict the caller caught is raised.
     """
     out = {k: v for k, v in latest.items() if k not in ("_id", "_version")}
-    for k in _dirty.changed_fields(snap, held) - delta.keys():
-        if k in held:
-            out[k] = held[k]
+    mine = (_dirty.changed_fields(snap, held) - delta.keys()) & held.keys()
+    if mine & _dirty.changed_fields(snap, out) & _dirty.changed_fields(out, held):
+        raise stale
+    for k in mine:
+        out[k] = held[k]
     return apply_numeric_scalar_deltas(out, delta)
 
 

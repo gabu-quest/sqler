@@ -115,6 +115,7 @@ class SQLerSafeModel(SQLerModel):
         retry = _retry.SaveRetry(rebase_config)
 
         payload, written = held, None
+        version, base = self._version, snap  # the model keeps its own until a write succeeds
         while True:
             retry.begin_try()
             try:
@@ -122,18 +123,18 @@ class SQLerSafeModel(SQLerModel):
                 if promoted:
                     db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
                 if _partial:
-                    changed = _dirty.changed_fields(self._snapshot or {}, payload)
+                    changed = _dirty.changed_fields(base or {}, payload)
                     new_id, new_version = self._id, db._update_fields(
-                        table, self._id, payload, changed, promoted or (), self._version
+                        table, self._id, payload, changed, promoted or (), version
                     )
                 elif promoted:
                     new_id, new_version = db.upsert_with_version_promoted(
-                        table, self._id, payload, self._version,
+                        table, self._id, payload, version,
                         list(promoted.keys()),
                     )
                 else:
                     new_id, new_version = db.upsert_with_version(
-                        table, self._id, payload, self._version
+                        table, self._id, payload, version
                     )
                 self._id = new_id
                 self._version = new_version
@@ -155,12 +156,11 @@ class SQLerSafeModel(SQLerModel):
                 latest_doc = retry.reread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
-                payload = _retry.rebase(latest_doc, held, snap, delta)
+                payload = _retry.rebase(latest_doc, held, snap, delta, stale)
                 written = retry.build(
                     stale, lambda: cls.model_validate(_refs.resolve(payload, db, frozenset(), cls))
                 )
-                self._version = latest_doc.get("_version", 0)
-                self._snapshot = _dirty.snapshot(latest_doc)
+                version, base = latest_doc.get("_version", 0), _dirty.snapshot(latest_doc)
 
             _retry.sleep(delay)
 
