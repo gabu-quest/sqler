@@ -1,3 +1,5 @@
+import pytest
+from sqler import F, SQLerDB, SQLerModel
 from sqler.query.expression import SQLerExpression
 
 # sql bits to reuse
@@ -69,3 +71,52 @@ def test_chaining_expressions():
     expression = ((a | b) & c) & ~d
     assert expression.sql == f"((({LEN_SQL}) OR ({TM_SQL})) AND ({LIKE_SQL})) AND (NOT ({IS_SQL}))"
     assert expression.params == [20, 50, "TTT%"]
+
+
+@pytest.fixture
+def db():
+    """Create an in-memory database for testing."""
+    return SQLerDB.in_memory()
+
+class TestNullComparison:
+    """Tests for proper NULL comparison handling in queries."""
+
+    def test_eq_none_generates_is_null(self, db):
+        """Test that == None generates IS NULL SQL."""
+        from sqler import F
+
+        expr = F("field") == None  # noqa: E711
+        assert "IS NULL" in expr.sql
+        assert expr.params == []
+
+    def test_ne_none_generates_is_not_null(self, db):
+        """Test that != None generates IS NOT NULL SQL."""
+        from sqler import F
+
+        expr = F("field") != None  # noqa: E711
+        assert "IS NOT NULL" in expr.sql
+        assert expr.params == []
+
+    def test_null_comparison_works_in_queries(self, db):
+        """Test NULL comparisons work correctly in actual queries."""
+        from typing import Optional
+
+        class Item(SQLerModel):
+            name: str
+            category: Optional[str] = None
+
+        Item.set_db(db)
+
+        # Create items with and without category
+        Item(name="A", category="tools").save()
+        Item(name="B", category=None).save()
+        Item(name="C", category="food").save()
+
+        # Find items without category
+        no_category = Item.filter(F("category") == None).all()  # noqa: E711
+        assert len(no_category) == 1
+        assert no_category[0].name == "B"
+
+        # Find items with category
+        with_category = Item.filter(F("category") != None).all()  # noqa: E711
+        assert len(with_category) == 2
