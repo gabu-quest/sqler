@@ -339,14 +339,13 @@ def test_a_model_put_in_an_untyped_field_reads_back_as_its_reference_and_saves_u
         comment = await aw(w.c["comment"](author="a", anything=user, extra={"m": user}).save())
         before = await w.stored("comment", comment._id)
         got = await w.load("comment", comment._id, way)
-        dirty = got.is_dirty() if hasattr(got, "is_dirty") else "no is_dirty"
+        dirty = got.is_dirty()
         values = (got.anything, got.extra)
         await aw(got.save())
         return values, dirty, await w.stored("comment", comment._id) == before
 
     ref = {"_table": f"rp_{key.replace('-', '_')}_user", "_id": 1}
-    dirty = "no is_dirty" if key in ("async-pydantic", "async-safe") else False
-    assert run(key, scenario) == ((ref, {"m": ref}), dirty, True)
+    assert run(key, scenario) == ((ref, {"m": ref}), False, True)
 
 
 @pytest.mark.parametrize("key", list(BASES))
@@ -904,9 +903,6 @@ def test_a_required_typed_field_whose_row_is_not_there(key, way):
 
 
 # ``is_dirty()``: a model whose reference read as no row would be saved without it
-DIRTY = {k: "no is_dirty" if k in ("async-pydantic", "async-safe") else None for k in BASES}
-
-
 @pytest.mark.parametrize("way", WAYS)
 @pytest.mark.parametrize("key", list(BASES))
 def test_a_model_loaded_with_a_reference_to_no_row_is_dirty(key, way):
@@ -924,11 +920,10 @@ def test_a_model_loaded_with_a_reference_to_no_row_is_dirty(key, way):
         out = []
         for h in saved:
             got = await w.load("holder", h._id, way)
-            out.append(got.is_dirty() if hasattr(got, "is_dirty") else "no is_dirty")
+            out.append(got.is_dirty())
         return out
 
-    want = [False, True, True, True] if DIRTY[key] is None else ["no is_dirty"] * 4
-    assert run(key, scenario) == want
+    assert run(key, scenario) == [False, True, True, True]
 
 
 # statements of one load of a holder: its row's SELECT ("refresh" also the query that loads the
