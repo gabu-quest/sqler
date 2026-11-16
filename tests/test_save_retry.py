@@ -19,7 +19,7 @@ from datetime import date
 from typing import Optional
 
 import pytest
-from sqler import AsyncSQLerDB, SQLerDB
+from sqler import DEFAULT_REBASE_CONFIG, PERMISSIVE_REBASE_CONFIG, AsyncSQLerDB, SQLerDB
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.adapter.synchronous import SQLiteAdapter
 from sqler.exceptions import LockTimeoutError, StaleVersionError
@@ -32,7 +32,13 @@ from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
 from sqler.models.model import SQLerModel
 from sqler.models.safe import SQLerSafeModel
-from sqler.models.utils import NO_REBASE_CONFIG, RebaseConfig
+from sqler.models.utils import (
+    NO_REBASE_CONFIG,
+    RebaseConfig,
+    apply_numeric_scalar_deltas,
+    can_rebase_deltas,
+    compute_numeric_scalar_deltas,
+)
 
 KINDS = ["sync", "async", "lite_sync", "lite_async"]
 LOCKED = "database is locked"
@@ -1234,3 +1240,95 @@ def test_lock_on_the_reference_read_of_the_merged_row_writes_it_once(kind, sleep
         return row["count"], row["_version"], row["child"]["_id"], mine.child._id, locked[0], writes[0]
 
     assert _rebase(kind, steps) == (11, 2, 2, 2, 0, 2)
+
+
+class TestRebaseConfig:
+    """Tests for configurable intent rebasing in SQLerSafeModel."""
+
+    def test_default_rebase_config(self):
+        """Test default rebase config allows count field with ±1."""
+        config = DEFAULT_REBASE_CONFIG
+
+        assert config.can_rebase("count", 1)
+        assert config.can_rebase("count", -1)
+        assert not config.can_rebase("count", 2)  # exceeds max_delta
+        assert not config.can_rebase("views", 1)  # not in allowed_fields
+
+    def test_permissive_rebase_config(self):
+        """Test permissive config allows any integer field."""
+        config = PERMISSIVE_REBASE_CONFIG
+
+        assert config.can_rebase("count", 1)
+        assert config.can_rebase("views", 1)
+        assert config.can_rebase("likes", -1)
+        assert not config.can_rebase("score", 5)  # exceeds max_delta
+
+    def test_no_rebase_config(self):
+        """Test disabled rebase config."""
+        config = NO_REBASE_CONFIG
+
+        assert not config.can_rebase("count", 1)
+        assert not config.can_rebase("anything", 0)
+
+    def test_custom_rebase_config(self):
+        """Test custom rebase configuration."""
+        config = RebaseConfig(
+            enabled=True,
+            allowed_fields={"likes", "views"},
+            max_delta=10,
+        )
+
+        assert config.can_rebase("likes", 5)
+        assert config.can_rebase("views", -10)
+        assert not config.can_rebase("likes", 11)  # exceeds max_delta
+        assert not config.can_rebase("count", 1)  # not in allowed_fields
+
+    def test_can_rebase_deltas(self):
+        """Test the can_rebase_deltas helper function."""
+        # Single field delta within limits
+        assert can_rebase_deltas({"count": 1})
+        assert can_rebase_deltas({"count": -1})
+
+        # Multiple fields should fail (safety check)
+        assert not can_rebase_deltas({"count": 1, "views": 1})
+
+        # Empty delta
+        assert not can_rebase_deltas({})
+
+        # Exceeds max_delta
+        assert not can_rebase_deltas({"count": 5})
+
+        # Field not in allowed_fields
+        assert not can_rebase_deltas({"views": 1})
+
+
+class TestNumericDeltaUtils:
+    """Tests for numeric delta computation and application utilities."""
+
+    def test_compute_deltas_basic(self):
+        """Test basic delta computation."""
+        orig = {"count": 5, "score": 10}
+        target = {"count": 7, "score": 10}
+
+        deltas = compute_numeric_scalar_deltas(orig, target)
+
+        assert deltas == {"count": 2}  # score unchanged
+
+    def test_compute_deltas_with_missing_field(self):
+        """Test delta computation when original field is missing."""
+        orig = {}
+        target = {"count": 3}
+
+        deltas = compute_numeric_scalar_deltas(orig, target)
+
+        assert deltas == {"count": 3}
+
+    def test_apply_deltas(self):
+        """Test applying deltas to a document."""
+        base = {"count": 10, "name": "test"}
+        delta = {"count": 5}
+
+        result = apply_numeric_scalar_deltas(base, delta)
+
+        assert result["count"] == 15
+        assert result["name"] == "test"

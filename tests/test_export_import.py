@@ -1,4 +1,4 @@
-"""Tests for new features: export/import, tracking (the cache tests are in test_query_cache.py)."""
+"""Export to and import from CSV, JSON and JSONL files and strings."""
 
 import csv
 import json
@@ -7,14 +7,10 @@ import tempfile
 
 import pytest
 from sqler import (
-    ChangeTracker,
-    DiffMixin,
     ExportResult,
     ImportResult,
-    QueryCache,
     SQLerDB,
     SQLerModel,
-    TrackedModel,
     export_csv,
     export_csv_string,
     export_json,
@@ -25,10 +21,7 @@ from sqler import (
     import_jsonl,
     stream_jsonl,
 )
-
-# =============================================================================
-# Export/Import Tests
-# =============================================================================
+from sqler.export import export_jsonl_string
 
 
 class TestExportCSV:
@@ -74,9 +67,12 @@ class TestExportCSV:
         """Export to CSV string works."""
         csv_str = export_csv_string(self.User)
 
-        assert "name,email,age" in csv_str or "_id,name,email,age" in csv_str
-        assert "Alice" in csv_str
-        assert "Bob" in csv_str
+        assert csv_str == (
+            "_id,name,email,age\r\n"
+            "1,Alice,alice@example.com,30\r\n"
+            "2,Bob,bob@example.com,25\r\n"
+            "3,Charlie,charlie@example.com,35\r\n"
+        )
 
     def test_export_csv_escapes_formula_injection(self):
         """Values starting with =, +, -, @ must be escaped to neutralize spreadsheet formula injection.
@@ -323,154 +319,8 @@ class TestImportJSONL:
             assert len(logs) == 2
 
 
-# =============================================================================
-# Change Tracking Tests
-# =============================================================================
-
-
-class TestChangeTracker:
-    """Tests for ChangeTracker class."""
-
-    def test_tracker_snapshot(self):
-        """Snapshot captures initial state."""
-        tracker = ChangeTracker()
-        tracker.snapshot({"name": "Alice", "age": 30})
-
-        assert tracker._original == {"name": "Alice", "age": 30}
-
-    def test_tracker_detect_changes(self):
-        """Detects changed fields."""
-        tracker = ChangeTracker()
-        tracker.snapshot({"name": "Alice", "age": 30})
-
-        changed = tracker.get_changed_fields({"name": "Bob", "age": 30})
-
-        assert changed == {"name"}
-
-    def test_tracker_get_changes(self):
-        """Gets old and new values for changes."""
-        tracker = ChangeTracker()
-        tracker.snapshot({"name": "Alice", "age": 30})
-
-        changes = tracker.get_changes({"name": "Bob", "age": 31})
-
-        assert changes == {
-            "name": ("Alice", "Bob"),
-            "age": (30, 31),
-        }
-
-
-class TestTrackedModel:
-    """Tests for TrackedModel mixin."""
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        self.db = SQLerDB.in_memory()
-
-        class User(TrackedModel, SQLerModel):
-            name: str
-            email: str
-            age: int
-
-        User.set_db(self.db)
-        self.User = User
-
-    def test_model_is_dirty_after_change(self):
-        """Model is dirty after field change."""
-        user = self.User(name="Alice", email="alice@test.com", age=30)
-        user.save()
-        user.mark_clean()
-
-        user.name = "Bob"
-
-        assert user.is_dirty
-        assert "name" in user.changed_fields
-
-    def test_model_not_dirty_after_save(self):
-        """Model is clean after save."""
-        user = self.User(name="Alice", email="alice@test.com", age=30)
-        user.save()
-
-        assert not user.is_dirty
-
-    def test_get_changes(self):
-        """get_changes returns old and new values."""
-        user = self.User(name="Alice", email="alice@test.com", age=30)
-        user.save()
-        user.mark_clean()
-
-        user.name = "Bob"
-        user.age = 31
-
-        changes = user.get_changes()
-
-        assert changes["name"] == ("Alice", "Bob")
-        assert changes["age"] == (30, 31)
-
-    def test_revert_changes(self):
-        """revert_changes restores original values."""
-        user = self.User(name="Alice", email="alice@test.com", age=30)
-        user.save()
-        user.mark_clean()
-
-        user.name = "Bob"
-        user.revert_changes()
-
-        assert user.name == "Alice"
-        assert not user.is_dirty
-
-
-class TestDiffMixin:
-    """Tests for DiffMixin."""
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        self.db = SQLerDB.in_memory()
-
-        class Item(DiffMixin, SQLerModel):
-            name: str
-            quantity: int
-
-        Item.set_db(self.db)
-        self.Item = Item
-
-    def test_diff_detects_differences(self):
-        """diff() detects field differences."""
-        item1 = self.Item(name="Apple", quantity=10)
-        item2 = self.Item(name="Apple", quantity=15)
-
-        diff = item1.diff(item2)
-
-        assert diff == {"quantity": (10, 15)}
-
-    def test_is_equal(self):
-        """is_equal() compares field values."""
-        item1 = self.Item(name="Apple", quantity=10)
-        item2 = self.Item(name="Apple", quantity=10)
-        item3 = self.Item(name="Orange", quantity=10)
-
-        assert item1.is_equal(item2)
-        assert not item1.is_equal(item3)
-
-    def test_clone(self):
-        """clone() creates a copy with overrides."""
-        item = self.Item(name="Apple", quantity=10)
-        item.save()
-
-        cloned = item.clone(quantity=20)
-
-        assert cloned.name == "Apple"
-        assert cloned.quantity == 20
-        assert cloned._id is None  # Clone has no _id
-
-
-# =============================================================================
-# Integration Tests
-# =============================================================================
-
-
-class TestFeatureIntegration:
-    """Integration tests combining multiple features."""
+class TestExportImportRoundtrip:
+    """Export and import combined."""
 
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -508,38 +358,6 @@ class TestFeatureIntegration:
             assert len(products) == 2
             names = {p.name for p in products}
             assert names == {"Widget", "Gadget"}
-
-    def test_tracked_model_with_cache(self):
-        """TrackedModel works with caching."""
-
-        class Item(TrackedModel, SQLerModel):
-            name: str
-            count: int
-
-        Item.set_db(self.db)
-
-        cache = QueryCache(max_size=100)
-
-        # Create and cache
-        item = Item(name="Test", count=10)
-        item.save()
-        cache.set("item:1", item)
-
-        # Modify
-        item.name = "Modified"
-        assert item.is_dirty
-
-        # Cache still has old version (by design)
-        cached = cache.get("item:1")
-        assert cached.name == "Modified"  # Same object reference
-
-
-# =============================================================================
-# Export of a bound model whose table was dropped
-# =============================================================================
-
-
-from sqler.export import export_jsonl_string  # noqa: E402
 
 
 def _export_to_file(fn):

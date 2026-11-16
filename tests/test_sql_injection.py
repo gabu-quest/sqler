@@ -1208,3 +1208,28 @@ class TestPromotedWriteNames:
     def test_valid_names_still_work(self, pdb, method):
         _PROMOTED_WRITES[method](pdb, "jobs", ["s"])
         assert pdb.adapter.execute("SELECT s FROM jobs WHERE s = 'a'").fetchone()[0] == "a"
+
+
+class TestTableNameValidation:
+    """Tests for shared table name validation utility."""
+
+    def test_valid_table_names(self):
+        """Test that valid table names pass validation."""
+        assert validate_table_name("users") == "users"
+        assert validate_table_name("User_data") == "User_data"
+        assert validate_table_name("_private") == "_private"
+        assert validate_table_name("table123") == "table123"
+
+    def test_invalid_table_names(self):
+        """Test that invalid table names raise InvalidTableNameError."""
+        with pytest.raises(InvalidTableNameError):
+            validate_table_name("123starts_with_number")
+
+        with pytest.raises(InvalidTableNameError):
+            validate_table_name("has-dashes")
+
+        with pytest.raises(InvalidTableNameError):
+            validate_table_name("has spaces")
+
+        with pytest.raises(InvalidTableNameError):
+            validate_table_name("")
