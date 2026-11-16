@@ -9,6 +9,7 @@ import re
 import types
 import warnings
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date, datetime, timedelta, timezone
 from typing import ClassVar, Optional
 
@@ -921,3 +922,144 @@ async def test_a_field_loads_as_the_type_it_declares(db, kind):
     assert got == want
     assert {n: type(v) for n, v in got.items()} == {n: type(v) for n, v in want.items()}
     assert loaded.is_dirty() is False
+
+
+# ----- a field holding a plain dataclass: stored as its fields, loaded as its type ----------
+
+
+@dataclass
+class Address:
+    city: str = ""
+
+
+@dataclass
+class Home:
+    address: Optional[Address] = None
+    since: Optional[date] = None
+
+
+# (row, field type, value saved, the document's value for it); each loads back as that value
+NESTED = [
+    ("dataclass_in_dataclass", Optional[Home], Home(Address(city="x"), date(2026, 1, 2)),
+     {"address": {"city": "x"}, "since": "2026-01-02"}),
+    ("optional_none", Optional[Address], None, None),
+    ("list_two", list[Address], [Address(city="x"), Address(city="y")], [{"city": "x"}, {"city": "y"}]),
+    ("dict", dict[str, Address], {"k": Address(city="x")}, {"k": {"city": "x"}}),
+]
+NESTED_CASES = [
+    pytest.param(hint, value, doc, kind, id=f"{row}-{kind}") for row, hint, value, doc in NESTED for kind in KINDS
+]
+
+
+@pytest.mark.parametrize("hint, value, doc, kind", NESTED_CASES)
+async def test_a_dataclass_field_is_stored_as_its_fields_and_loads_as_its_type(db, hint, value, doc, kind):
+    Item = make(kind, fields={"home": (hint, None)})
+    saved = await Item(name="a", home=value).save(db=db)
+
+    assert await _docs(db, Item) == [(saved._id, {"name": "a", "home": doc})]
+    loaded = await Item.from_id(saved._id, db=db)
+    assert loaded.home == value
+    assert type(loaded.home) is type(value)
+    assert loaded.is_dirty() is False
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_reference_stays_a_reference_beside_a_dataclass_field(db, kind):
+    Owner = make(kind)
+    Item = make(kind, fields={"owner": (Optional[Owner], None), "home": (Optional[Address], None)})
+    owner = await Owner(name="o").save(db=db)
+    saved = await Item(name="a", owner=owner, home=Address(city="x")).save(db=db)
+
+    assert await _docs(db, Item) == [
+        (saved._id, {"name": "a", "owner": {"_table": Owner.__tablename__, "_id": owner._id}, "home": {"city": "x"}})
+    ]
+    loaded = await Item.from_id(saved._id, db=db)
+    assert (type(loaded.owner), loaded.owner._id, loaded.owner.name) == (Owner, owner._id, "o")
+    assert loaded.home == Address(city="x")
+
+
+@pytest.mark.parametrize("kind", ["lite", "lite_safe"])
+async def test_a_lite_dataclass_field_loads_by_a_query_and_a_refresh(db, kind):
+    Item = make(kind, fields={"home": (Optional[Home], None)})
+    saved = await Item(name="a", home=Home(Address(city="x"))).save(db=db)
+
+    [queried] = await Item.using(db).all()
+    assert queried.home == Home(Address(city="x"))
+    other = await Item.from_id(saved._id, db=db)
+    other.home = Home(Address(city="y"), date(2026, 1, 2))
+    await other.save(db=db)
+
+    assert (await saved.refresh(db=db)).home == Home(Address(city="y"), date(2026, 1, 2))
+    assert type(saved.home.since) is date
+
+
+# ----- a model inside a dataclass value: refused, never a reference nothing loads ----------
+
+
+def _holders(Owner):
+    """A dataclass holding ``Owner`` directly, in a list, a tuple, a dict and a dataclass."""
+
+    @dataclass
+    class Inner:
+        owner: Optional[Owner] = None
+
+    @dataclass
+    class Holder:
+        city: str = ""
+        owner: Optional[Owner] = None
+        owners: list = dataclass_field(default_factory=list)
+        pair: tuple = ()
+        by: dict = dataclass_field(default_factory=dict)
+        inner: Optional[Inner] = None
+
+    return Holder, Inner
+
+
+# (row, the Holder's arguments given the saved owner, where the owner sits)
+MODEL_INSIDE = [
+    ("direct", lambda Inner, o: {"owner": o}, "home.owner"),
+    ("in_a_list", lambda Inner, o: {"owners": ["x", o]}, r"home.owners\[1\]"),
+    ("in_a_tuple", lambda Inner, o: {"pair": ("x", o)}, r"home.pair\[1\]"),
+    ("in_a_dict", lambda Inner, o: {"by": {"k": o}}, "home.by.k"),
+    ("in_a_dataclass", lambda Inner, o: {"inner": Inner(owner=o)}, "home.inner.owner"),
+]
+
+
+@pytest.mark.parametrize("args, place", [pytest.param(a, p, id=r) for r, a, p in MODEL_INSIDE])
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_model_inside_a_dataclass_value_is_refused_at_its_place_and_nothing_is_written(
+    db, kind, args, place
+):
+    from sqler.exceptions import UnstorableValueError
+
+    Owner = make(kind)
+    Holder, Inner = _holders(Owner)
+    Item = make(kind, fields={"home": (Optional[Holder], None)})
+    owner = await Owner(name="o").save(db=db)
+    item = Item(name="a", home=Holder(city="x", **args(Inner, owner)))
+
+    with pytest.raises(
+        UnstorableValueError,
+        match=rf"^model {Owner.__name__} inside a dataclass value is not stored as a reference: "
+        rf"make it a field of the model \(at {place}\)$",
+    ):
+        await item.save(db=db)
+    assert await _docs(db, Item) == []
+    assert item._id is None
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_model_in_a_list_and_a_dict_field_of_the_model_stays_a_reference_beside_a_dataclass(db, kind):
+    Owner = make(kind)
+    Holder, _ = _holders(Owner)
+    Item = make(kind, fields={
+        "owners": (list[Owner], None), "by": (dict[str, Owner], None), "home": (Optional[Holder], None)
+    })
+    owner = await Owner(name="o").save(db=db)
+    saved = await Item(name="a", owners=[owner], by={"k": owner}, home=Holder(city="x")).save(db=db)
+
+    ref = {"_table": Owner.__tablename__, "_id": owner._id}
+    home = {"city": "x", "owner": None, "owners": [], "pair": [], "by": {}, "inner": None}
+    assert await _docs(db, Item) == [(saved._id, {"name": "a", "owners": [ref], "by": {"k": ref}, "home": home})]
+    loaded = await Item.from_id(saved._id, db=db)
+    assert [(type(o), o._id) for o in [*loaded.owners, *loaded.by.values()]] == [(Owner, owner._id)] * 2

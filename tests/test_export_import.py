@@ -7,9 +7,11 @@ import os
 import tempfile
 import types
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import msgspec
 import pytest
 
 from sqler import (
@@ -562,3 +564,71 @@ def test_an_empty_csv_cell_is_the_default_of_a_field_that_cannot_hold_none(two_d
         {"name": "Kyoto", "pop": 7, "rank": None},
         {"name": "Osaka", "pop": 2700000, "rank": 3},
     ]
+
+
+@dataclass
+class Place:
+    city: str = ""
+    since: Optional[datetime] = None
+
+
+@dataclass
+class Trip:
+    start: Optional[Place] = None
+    stops: list[Place] = dataclass_field(default_factory=list)
+
+
+TRIPS = [
+    dict(name="a", trip=Trip(Place("Kyoto", WHEN), [Place("Nara"), Place("Uji", WHEN)])),
+    dict(name="b", trip=None),
+]
+TRIP_FIELDS = {"name": (str, ""), "trip": (Optional[Trip], None)}
+
+
+@pytest.mark.parametrize("kind", list(IMPORT_BASES))
+@pytest.mark.parametrize("how", list(IMPORTS))
+def test_a_dataclass_field_exports_and_imports_as_the_dataclass(two_dbs, tmp_path, how, kind):
+    src, dst = two_dbs
+    Model = _import_model(kind, fields=TRIP_FIELDS)
+    for row in TRIPS:
+        Model(**row).save(db=src)
+
+    result = IMPORTS[how](Model, src, dst, tmp_path)
+
+    assert (result.count, result.succeeded, result.failed, result.errors) == (2, 2, 0, [])
+    got = _values(Model, dst, TRIP_FIELDS)
+    assert got == TRIPS
+    assert type(got[0]["trip"].stops[1].since) is datetime
+
+
+class StructPlace(msgspec.Struct):
+    city: str = ""
+    since: Optional[datetime] = None
+
+
+class StructTrip(msgspec.Struct):
+    start: Optional[StructPlace] = None
+    stops: list[StructPlace] = []
+
+
+STRUCT_TRIPS = [
+    dict(name="a", trip=StructTrip(StructPlace("Kyoto", WHEN), [StructPlace("Nara"), StructPlace("Uji", WHEN)])),
+    dict(name="b", trip=None),
+]
+STRUCT_TRIP_FIELDS = {"name": (str, ""), "trip": (Optional[StructTrip], None)}
+
+
+@pytest.mark.parametrize("kind", ["msgspec", "lite", "lite_safe"])
+@pytest.mark.parametrize("how", list(IMPORTS))
+def test_a_struct_field_exports_and_imports_as_the_struct(two_dbs, tmp_path, how, kind):
+    src, dst = two_dbs
+    Model = _import_model(kind, fields=STRUCT_TRIP_FIELDS)
+    for row in STRUCT_TRIPS:
+        Model(**row).save(db=src)
+
+    result = IMPORTS[how](Model, src, dst, tmp_path)
+
+    assert (result.count, result.succeeded, result.failed, result.errors) == (2, 2, 0, [])
+    got = _values(Model, dst, STRUCT_TRIP_FIELDS)
+    assert got == STRUCT_TRIPS
+    assert (type(got[0]["trip"]), type(got[0]["trip"].stops[1].since)) == (StructTrip, datetime)

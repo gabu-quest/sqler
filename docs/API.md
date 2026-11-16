@@ -329,6 +329,18 @@ of a `dict`. A value that is not in its type's stored form loads as it was saved
 typed as a union of two or more types besides `None` loads as stored. A load is `from_id()`,
 `from_ids()`, a query, a followed reference, `refresh()` and an import.
 
+A field may hold a plain dataclass instance on every base: it is stored as an object of all its
+fields, each in its own stored form, and loads as the dataclass the field declares, each field
+by the same rule (a lite model builds it from the fields `__init__` takes; pydantic and msgspec
+validate it). A dataclass that is a lite model is a reference, never a nested value. A model
+inside a dataclass value (in a field of it, in a list, tuple or dict there, or in a dataclass
+inside it) is refused on save with an `UnstorableValueError` that names its place, as
+`home.owner`: make it a field of the model, where it is a reference. A field may hold a plain
+`msgspec.Struct` the same way: it is stored in the shape msgspec reads back (an object of its
+fields by the names the Struct encodes them with, `rename=`; with its tag when it has one; a
+list when it is `array_like`), and loads as the Struct the field declares on the msgspec and
+lite bases; a sqler msgspec model inside one is refused as inside a dataclass.
+
 `PYDANTIC_AVAILABLE` and `MSGSPEC_AVAILABLE` are `True` when the package imports, and
 `PYDANTIC_VERSION` and `MSGSPEC_VERSION` hold its version string (`None` when it is missing).
 `get_model_backend()` returns `"pydantic"` when pydantic is installed and `"dataclass"` when it
