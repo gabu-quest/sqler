@@ -27,9 +27,7 @@ import json
 import types
 import typing
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from decimal import Decimal
-from enum import Enum
+from datetime import date, datetime
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -179,20 +177,6 @@ def _admits_none(field_type: Any) -> bool:
     return False
 
 
-def _json_cell(kind: Any) -> bool:
-    """Whether a CSV cell of a field of type ``kind`` holds JSON text: the stored form of
-    ``kind`` is a list, a dict or a number other than ``int`` and ``float`` (which the
-    caller reads itself), or an ``Enum`` whose values are not all strings."""
-    base = typing.get_origin(kind) or kind
-    if base in (list, dict, set, frozenset, tuple):
-        return True
-    if not isinstance(base, type):
-        return False
-    if issubclass(base, Enum):
-        return not all(isinstance(m.value, str) for m in base)
-    return issubclass(base, (Decimal, timedelta))
-
-
 def _deserialize_value(value: Optional[str], field_type: Any) -> Any:
     """The value of a field of type ``field_type`` that the CSV cell ``value`` holds.
 
@@ -211,7 +195,7 @@ def _deserialize_value(value: Optional[str], field_type: Any) -> Any:
         return int(value)
     if kind is float:
         return float(value)
-    if _json_cell(kind):
+    if _stored.as_json(kind):
         try:
             return _stored.loaded(json.loads(value), field_type)
         except json.JSONDecodeError:

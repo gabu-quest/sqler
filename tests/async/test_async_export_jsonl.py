@@ -624,3 +624,31 @@ async def test_an_async_import_keeps_the_created_at_a_mixin_gave_the_row(kind, u
     finally:
         await src.close()
         await dst.close()
+
+
+@dataclass
+class Place:
+    city: str = ""
+    since: Optional[datetime] = None
+
+
+@pytest.mark.parametrize("kind", list(ASYNC_BASES))
+async def test_a_dataclass_field_exports_and_imports_as_the_dataclass(kind, tmp_path):
+    Model = _typed_model(kind, fields={"name": (str, ""), "stops": (list[Place], None)})
+    rows = [dict(name="a", stops=[Place("Nara"), Place("Uji", WHEN)]), dict(name="b", stops=[])]
+    src, dst = await _new_adb(), await _new_adb()
+    try:
+        for row in rows:
+            await Model(**row).save(db=src)
+        path = tmp_path / "rows.jsonl"
+        await async_export_jsonl(Model.using(src), path)
+
+        result = await async_import_jsonl(Model, path, db=dst)
+
+        assert _result_tuple(result) == (2, 2, 0, [])
+        got = [{"name": r.name, "stops": r.stops} for r in await Model.using(dst).order_by("_id").all()]
+        assert got == rows
+        assert type(got[0]["stops"][1].since) is datetime
+    finally:
+        await src.close()
+        await dst.close()

@@ -8,13 +8,15 @@ import re
 import threading
 import types
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from pathlib import PurePosixPath
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 from uuid import UUID
 
+import msgspec
 import pytest
 
 from sqler import (
@@ -1235,3 +1237,372 @@ def test_a_lite_field_typed_in_quotes_loads_as_its_type(db, base):
     saved = Visit(when=T_SET).save(db=db)
 
     assert Visit.from_id(saved._id, db=db).when == T_SET
+
+
+# ----- a field holding a plain dataclass: stored as its fields, loaded as its type ----------
+
+
+@dataclass
+class Address:
+    city: str = ""
+
+
+@dataclass
+class Stamp:
+    at: Optional[datetime] = None
+    ticket: Optional[UUID] = None
+
+
+@dataclass
+class Home:
+    address: Optional[Address] = None
+    since: Optional[date] = None
+
+
+@dataclass(frozen=True)
+class FrozenAddress:
+    city: str = ""
+
+
+@dataclass(slots=True)
+class SlottedAddress:
+    city: str = ""
+
+
+@dataclass
+class Counted:
+    items: list = dataclass_field(default_factory=list)
+    count: int = dataclass_field(init=False, default=0)
+
+    def __post_init__(self):
+        self.count = len(self.items)
+
+
+
+
+@dataclass
+class Blob:
+    data: bytes = b""
+
+
+# (row, field type, value saved, the document's value for it); each loads back as that value
+NESTED = [
+    ("dataclass", Optional[Address], Address(city="x"), {"city": "x"}),
+    ("datetime_and_uuid", Optional[Stamp], Stamp(T_SET, UUID(int=7)), {"at": T_SET.isoformat(), "ticket": str(UUID(int=7))}),
+    (
+        "dataclass_in_dataclass",
+        Optional[Home],
+        Home(Address(city="x"), date(2026, 1, 2)),
+        {"address": {"city": "x"}, "since": "2026-01-02"},
+    ),
+    ("optional_none", Optional[Address], None, None),
+    ("list_empty", list[Address], [], []),
+    ("list_two", list[Address], [Address(city="x"), Address(city="y")], [{"city": "x"}, {"city": "y"}]),
+    ("tuple", tuple[Address, ...], (Address(city="x"),), [{"city": "x"}]),
+    ("dict", dict[str, Address], {"k": Address(city="x")}, {"k": {"city": "x"}}),
+    ("frozen", Optional[FrozenAddress], FrozenAddress(city="x"), {"city": "x"}),
+    ("slots", Optional[SlottedAddress], SlottedAddress(city="x"), {"city": "x"}),
+    ("init_false", Optional[Counted], Counted(items=[1, 2]), {"items": [1, 2], "count": 2}),
+]
+NESTED_CASES = [
+    pytest.param(hint, value, doc, kind, id=f"{row}-{kind}") for row, hint, value, doc in NESTED for kind in KINDS
+]
+
+
+@pytest.mark.parametrize("hint, value, doc, kind", NESTED_CASES)
+def test_a_dataclass_field_is_stored_as_its_fields_and_loads_as_its_type(db, hint, value, doc, kind):
+    Item = make(kind, fields={"home": (hint, None)})
+    saved = Item(name="a", home=value).save(db=db)
+
+    assert _docs(db, Item) == [(saved._id, {"name": "a", "home": doc})]
+    loaded = Item.from_id(saved._id, db=db)
+    assert loaded.home == value
+    assert type(loaded.home) is type(value)
+    if isinstance(value, (list, tuple, dict)):  # each entry an Address, not the dict it is stored as
+        entries = list(loaded.home.values() if isinstance(value, dict) else loaded.home)
+        assert [type(v) for v in entries] == [Address] * len(value)
+    assert loaded.is_dirty() is False
+
+
+@pytest.mark.parametrize("kind", ["lite", "lite_safe"])
+def test_a_lite_dataclass_field_loads_by_a_query_a_refresh_and_a_nested_typed_field(db, kind):
+    Item = make(kind, fields={"home": (Optional[Home], None)})
+    value = Home(Address(city="x"), date(2026, 1, 2))
+    saved = Item(name="a", home=value).save(db=db)
+
+    [queried] = Item.using(db).all()
+    assert queried.home == value
+    assert type(queried.home.address) is Address and type(queried.home.since) is date
+
+    other = Item.from_id(saved._id, db=db)
+    other.home = Home(Address(city="y"))
+    other.save(db=db)
+    assert saved.refresh(db=db).home == Home(Address(city="y"))
+    assert type(saved.home) is Home
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_reference_stays_a_reference_beside_a_dataclass_field(db, kind):
+    Owner = make(kind)
+    Item = make(kind, fields={"owner": (Optional[Owner], None), "home": (Optional[Address], None)})
+    owner = Owner(name="o").save(db=db)
+    saved = Item(name="a", owner=owner, home=Address(city="x")).save(db=db)
+
+    assert _docs(db, Item) == [
+        (saved._id, {"name": "a", "owner": {"_table": Owner.__tablename__, "_id": owner._id}, "home": {"city": "x"}})
+    ]
+    loaded = Item.from_id(saved._id, db=db)
+    assert (type(loaded.owner), loaded.owner._id, loaded.owner.name) == (Owner, owner._id, "o")
+    assert loaded.home == Address(city="x")
+
+
+def test_a_lite_model_the_caller_does_not_store_as_a_reference_is_refused_not_nested():
+    from sqler import AsyncSQLerLiteModel
+    from sqler._stored import dumps, stored
+    from sqler.exceptions import UnstorableValueError
+
+    @dataclass
+    class Other(AsyncSQLerLiteModel):
+        __tablename__ = "wr_other_async_lite"
+        name: str = ""
+
+    with pytest.raises(UnstorableValueError, match=r"Object of type Other is not JSON serializable \(at home\)"):
+        dumps(stored({"home": Other(name="o")}, SQLerLiteModel))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_field_init_does_not_take_is_stored_and_loads_as_init_makes_it_on_every_base(db, kind):
+    Item = make(kind, fields={"home": (Optional[Counted], None)})
+    counted = Counted(items=[1, 2])
+    counted.count = 5  # set after __init__
+    saved = Item(name="a", home=counted).save(db=db)
+
+    assert _docs(db, Item) == [(saved._id, {"name": "a", "home": {"items": [1, 2], "count": 5}})]
+    assert Item.from_id(saved._id, db=db).home == Counted(items=[1, 2])  # count 2: __post_init__
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_bytes_inside_a_dataclass_field_is_refused_at_its_path(db, kind):
+    from sqler.exceptions import UnstorableValueError
+
+    Item = make(kind, fields={"home": (Optional[Blob], None)})
+    with pytest.raises(UnstorableValueError, match=r"bytes cannot be stored .* \(at home\.data\)"):
+        Item(name="a", home=Blob(b"\x00")).save(db=db)
+    assert _docs(db, Item) == []
+
+
+@pytest.mark.parametrize("value", [Address, object()], ids=["dataclass_class", "unknown_object"])
+def test_a_dataclass_class_or_an_unknown_object_is_refused(value):
+    from sqler._stored import dumps
+    from sqler.exceptions import UnstorableValueError
+
+    with pytest.raises(UnstorableValueError, match=r"is not JSON serializable \(at home\)"):
+        dumps({"home": value})
+
+
+@pytest.mark.parametrize("kind", ["lite", "lite_safe"])
+def test_a_stored_dict_loads_as_the_dataclass_its_field_declares_and_a_dict_field_stays_a_dict(db, kind):
+    Item = make(kind, fields={"home": (Optional[Address], None), "extra": (Optional[dict], None)})
+    _id = db.insert_document(Item.__tablename__, {"name": "a", "home": {"city": "x"}, "extra": {"city": "y"}})
+
+    loaded = Item.from_id(_id, db=db)
+
+    assert loaded.home == Address(city="x")
+    assert loaded.extra == {"city": "y"}
+
+
+# ----- a model inside a dataclass value: refused, never a reference nothing loads ----------
+
+
+def _holders(Owner):
+    """A dataclass holding ``Owner`` directly, in a list, a tuple, a dict and a dataclass."""
+
+    @dataclass
+    class Inner:
+        owner: Optional[Owner] = None
+
+    @dataclass
+    class Holder:
+        city: str = ""
+        owner: Optional[Owner] = None
+        owners: list = dataclass_field(default_factory=list)
+        pair: tuple = ()
+        by: dict = dataclass_field(default_factory=dict)
+        inner: Optional[Inner] = None
+
+    return Holder, Inner
+
+
+# (row, the Holder's arguments given the saved owner, where the owner sits)
+MODEL_INSIDE = [
+    ("direct", lambda Inner, o: {"owner": o}, "home.owner"),
+    ("in_a_list", lambda Inner, o: {"owners": ["x", o]}, r"home.owners\[1\]"),
+    ("in_a_tuple", lambda Inner, o: {"pair": ("x", o)}, r"home.pair\[1\]"),
+    ("in_a_dict", lambda Inner, o: {"by": {"k": o}}, "home.by.k"),
+    ("in_a_dataclass", lambda Inner, o: {"inner": Inner(owner=o)}, "home.inner.owner"),
+]
+
+
+@pytest.mark.parametrize("args, place", [pytest.param(a, p, id=r) for r, a, p in MODEL_INSIDE])
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_model_inside_a_dataclass_value_is_refused_at_its_place_and_nothing_is_written(db, kind, args, place):
+    from sqler.exceptions import UnstorableValueError
+
+    Owner = make(kind)
+    Holder, Inner = _holders(Owner)
+    Item = make(kind, fields={"home": (Optional[Holder], None)})
+    owner = Owner(name="o").save(db=db)
+    item = Item(name="a", home=Holder(city="x", **args(Inner, owner)))
+
+    with pytest.raises(
+        UnstorableValueError,
+        match=rf"^model {Owner.__name__} inside a dataclass value is not stored as a reference: "
+        rf"make it a field of the model \(at {place}\)$",
+    ):
+        item.save(db=db)
+    assert _docs(db, Item) == []
+    assert item._id is None
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_model_in_a_list_and_a_dict_field_of_the_model_stays_a_reference_beside_a_dataclass(db, kind):
+    Owner = make(kind)
+    Holder, _ = _holders(Owner)
+    Item = make(kind, fields={
+        "owners": (list[Owner], None), "by": (dict[str, Owner], None), "home": (Optional[Holder], None)
+    })
+    owner = Owner(name="o").save(db=db)
+    saved = Item(name="a", owners=[owner], by={"k": owner}, home=Holder(city="x")).save(db=db)
+
+    ref = {"_table": Owner.__tablename__, "_id": owner._id}
+    home = {"city": "x", "owner": None, "owners": [], "pair": [], "by": {}, "inner": None}
+    assert _docs(db, Item) == [(saved._id, {"name": "a", "owners": [ref], "by": {"k": ref}, "home": home})]
+    loaded = Item.from_id(saved._id, db=db)
+    assert [(type(o), o._id) for o in [*loaded.owners, *loaded.by.values()]] == [(Owner, owner._id)] * 2
+
+
+# ----- a field holding a plain msgspec.Struct ----------------------------------------------
+
+
+class SAddress(msgspec.Struct):
+    city: str = ""
+
+
+class SStamp(msgspec.Struct):
+    at: Optional[datetime] = None
+    place: Optional[SAddress] = None
+
+
+class SFrozen(msgspec.Struct, frozen=True):
+    city: str = ""
+
+
+class SKwOnly(msgspec.Struct, kw_only=True):
+    city: str
+    zip: str = ""
+
+
+class SCamel(msgspec.Struct, rename="camel"):
+    zip_code: str = ""
+    home_city: str = ""
+
+
+class SBlob(msgspec.Struct):
+    data: bytes = b""
+
+
+class SPair(msgspec.Struct, array_like=True):
+    x: int = 0
+    y: int = 0
+
+
+class SCat(msgspec.Struct, tag="cat"):
+    name: str = ""
+
+
+class SDog(msgspec.Struct, tag="dog"):
+    name: str = ""
+
+
+# (row, field type, value saved, the document's value for it); each loads back as that value
+STRUCTS = [
+    ("struct", Optional[SAddress], SAddress(city="x"), {"city": "x"}),
+    ("datetime_and_struct_in_struct", Optional[SStamp], SStamp(T_SET, SAddress("y")),
+     {"at": T_SET.isoformat(), "place": {"city": "y"}}),
+    ("optional_none", Optional[SAddress], None, None),
+    ("list_two", list[SAddress], [SAddress(city="x"), SAddress(city="y")], [{"city": "x"}, {"city": "y"}]),
+    ("frozen", Optional[SFrozen], SFrozen(city="x"), {"city": "x"}),
+    ("kw_only", Optional[SKwOnly], SKwOnly(city="x", zip="1"), {"city": "x", "zip": "1"}),
+    ("renamed_by_its_encoded_names", Optional[SCamel], SCamel("1", "x"), {"zipCode": "1", "homeCity": "x"}),
+    ("array_like_as_a_list", Optional[SPair], SPair(1, 2), [1, 2]),
+    ("list_of_array_like", list[SPair], [SPair(1, 2), SPair(3, 4)], [[1, 2], [3, 4]]),
+    ("tagged_with_its_tag", Optional[SDog], SDog("rex"), {"type": "dog", "name": "rex"}),
+]
+
+
+@pytest.mark.parametrize("hint, value, doc", [pytest.param(h, v, d, id=r) for r, h, v, d in STRUCTS])
+@pytest.mark.parametrize("kind", ["msgspec", "lite", "lite_safe"])
+def test_a_struct_field_is_stored_as_its_fields_and_loads_as_its_type(db, kind, hint, value, doc):
+    Item = make(kind, fields={"home": (hint, None)})
+    saved = Item(name="a", home=value).save(db=db)
+
+    assert _docs(db, Item) == [(saved._id, {"name": "a", "home": doc})]
+    loaded = Item.from_id(saved._id, db=db)
+    assert loaded.home == value
+    assert type(loaded.home) is type(value)
+    if isinstance(value, list):
+        assert [type(v) for v in loaded.home] == [type(v) for v in value]
+    if isinstance(value, SStamp):
+        assert (type(loaded.home.at), type(loaded.home.place)) == (datetime, SAddress)
+    assert loaded.is_dirty() is False
+
+
+def test_a_union_of_tagged_structs_loads_as_the_one_that_was_saved(db):
+    Item = make("msgspec", fields={"pet": (Union[SCat, SDog, None], None)})
+    saved = Item(name="a", pet=SDog("rex")).save(db=db)
+
+    assert _docs(db, Item) == [(saved._id, {"name": "a", "pet": {"type": "dog", "name": "rex"}})]
+    assert Item.from_id(saved._id, db=db).pet == SDog("rex")
+
+
+def test_a_msgspec_model_field_stays_a_reference_beside_a_struct_field(db):
+    Owner = make("msgspec")
+    Item = make("msgspec", fields={"owner": (Optional[Owner], None), "home": (Optional[SAddress], None)})
+    owner = Owner(name="o").save(db=db)
+    saved = Item(name="a", owner=owner, home=SAddress(city="x")).save(db=db)
+
+    assert _docs(db, Item) == [
+        (saved._id, {"name": "a", "owner": {"_table": Owner.__tablename__, "_id": owner._id}, "home": {"city": "x"}})
+    ]
+    loaded = Item.from_id(saved._id, db=db)
+    assert (type(loaded.owner), loaded.owner._id, loaded.owner.name) == (Owner, owner._id, "o")
+    assert loaded.home == SAddress(city="x")
+
+
+def test_a_msgspec_model_inside_a_struct_value_is_refused_at_its_place(db):
+    from sqler.exceptions import UnstorableValueError
+
+    Owner = make("msgspec")
+    Holder = msgspec.defstruct("Holder", [("owners", list, [])])
+    Item = make("msgspec", fields={"home": (Optional[Holder], None)})
+    owner = Owner(name="o").save(db=db)
+    item = Item(name="a", home=Holder(owners=[owner]))
+
+    with pytest.raises(
+        UnstorableValueError,
+        match=rf"^model {Owner.__name__} inside a Struct value is not stored as a reference: "
+        r"make it a field of the model \(at home.owners\[0\]\)$",
+    ):
+        item.save(db=db)
+    assert _docs(db, Item) == []
+    assert item._id is None
+
+
+@pytest.mark.parametrize("kind", ["msgspec", "lite", "lite_safe"])
+def test_bytes_inside_a_struct_field_is_refused_at_its_path(db, kind):
+    from sqler.exceptions import UnstorableValueError
+
+    Item = make(kind, fields={"home": (Optional[SBlob], None)})
+    with pytest.raises(UnstorableValueError, match=r"bytes cannot be stored .* \(at home\.data\)"):
+        Item(name="a", home=SBlob(b"\x00")).save(db=db)
+    assert _docs(db, Item) == []
