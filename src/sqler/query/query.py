@@ -44,6 +44,22 @@ def _squeezed(sql: str, guard: str) -> str:
 _META_COLUMNS = ["_id", "_version"]
 
 
+def _has_version(names: Optional[tuple[str, ...]]) -> bool:
+    """Whether a table whose ``SELECT *`` gives ``names`` (``None`` for a missing table) has
+    its ``_version`` column: the row's version, which every write of a row of it moves,
+    whoever writes it."""
+    return names is not None and "_version" in names
+
+
+# The version of a row as every read and every check takes it: its column, in which a NULL (a
+# column sqler did not make) is 0; and the term of every write that moves it, which leaves a number.
+_VERSION = "IFNULL(_version, 0)"
+_MOVE_VERSION = f"_version = {_VERSION} + 1"
+
+# The names of a table's columns, for a query with no database object behind it.
+_NAMES_SQL = "SELECT name FROM pragma_table_xinfo(?);"
+
+
 def is_missing_table(exc: BaseException, table: str) -> bool:
     """True when ``exc`` is SQLite's "no such table" for ``table`` itself.
 
@@ -92,8 +108,9 @@ class _WriteStatements:
     """The statements of a query's writing methods, sync and async: ``update``, ``update_one``,
     ``update_n`` and ``delete`` take their SET, WHERE and picked rows from here.
 
-    On a versioned query (``with_version()``) every update moves ``_version`` by one, in the
-    same statement, and ``_version`` cannot be set: it is the row's own.
+    On a versioned query (one whose table has the ``_version`` column) every update moves
+    ``_version`` by one, in the same statement, and ``_version`` cannot be set: it is the
+    row's own.
 
     A query a model's queryset runs has its database behind it (``_db``, with ``_use``, what
     the rows are for: ``"rows"`` read or returned, ``"update"``, or neither): each statement
@@ -145,6 +162,10 @@ class _WriteStatements:
             raise ValueError("n must be >= 1")
         for key in fields:
             validate_field_name(key)
+        self._refuse_version(fields)  # a query that is versioned whatever its table has: before the table is touched
+
+    def _refuse_version(self, fields: dict) -> None:
+        """An update of a versioned row moves its version and takes no value for it."""
         if self._include_version and "_version" in fields:
             raise ValueError("_version cannot be set: every update of a versioned row moves it")
 
@@ -153,6 +174,7 @@ class _WriteStatements:
         columns, then the version; each value in stored form."""
         from sqler.query.field import SQLerUpdateExpression
 
+        self._refuse_version(fields)  # a query that learned from its table that the rows are versioned
         json_parts: list[str] = []
         json_params: list[Any] = []
         columns: list[str] = []
@@ -173,9 +195,7 @@ class _WriteStatements:
                 json_parts.append(f"'$.{field}', {slot}")
                 json_params.extend(params)
         if self._include_version:
-            # the document keeps its copy of the version in step, which a save checks too
-            json_parts.append("'$._version', _version + 1")
-            columns.append("_version = _version + 1")
+            columns.append(_MOVE_VERSION)
         if json_parts:
             columns.insert(0, f"data = json_set(data, {', '.join(json_parts)})")
         return ", ".join(columns), json_params + column_params
@@ -205,7 +225,7 @@ class _WriteStatements:
     def _returning(self) -> str:
         """The columns a written row is read back with."""
         return ", ".join(
-            ["_id", "data"] + (["_version"] if self._include_version else []) + self._promoted_fields
+            ["_id", "data"] + ([_VERSION] if self._include_version else []) + self._promoted_fields
         )
 
     def _returned(self, row) -> dict[str, Any]:
@@ -317,23 +337,20 @@ class SQLerQuery(_WriteStatements):
 
     def _laid_out(self) -> Self:
         """This query as its database remembers the table: every promoted column read from
-        its column, ``_version`` read where the table has it (``_use`` ``"rows"``) or given
-        to the table first (``"update"``), and the guard of the remembered names
-        (``sqler.db.sqler_db._guard``) in each statement built from it. Made once for each
-        memory of the table, and kept.
+        its column, ``_version`` read and moved by each update where the table has it
+        (``SQLerDB._shape_of``), whatever class reads or writes it; a versioned query
+        (``with_version()``) for ``_use`` ``"update"`` gives the table the column first. Each
+        statement built from it carries the guard of the remembered names
+        (``sqler.db.sqler_db._guard``). Made once for each memory of the table, and kept.
 
         Raises:
             SchemaError: A document still holds the key of a promoted column.
         """
         db, table = self._db, self._table
-        promoted, names = db._memory_of(table)
-        version = self._include_version
-        if version and self._use:
-            has = db._has_version_column(table)
-            if self._use == "update" and has is False:
-                db._ensure_versioned_table(table)
-                promoted, names = db._memory_of(table)
-            version = self._use == "update" or bool(has)
+        promoted, names, version = db._shape_of(table)
+        if not version and self._include_version and self._use == "update" and db._has_version_column(table) is False:
+            db._ensure_versioned_table(table)
+            promoted, names, version = db._shape_of(table)
         key = (names, promoted, version)
         laid = self._laid
         if laid is None or laid[0] != key:
@@ -372,6 +389,15 @@ class SQLerQuery(_WriteStatements):
             if is_missing_table(exc, self._table):
                 return used, None
             raise
+
+    def _updating(self) -> Self:
+        """This query as its updates are built: a query with no database behind it reads its
+        table's columns for each update, so each row it changes moves its version where the
+        table has the column (:func:`_has_version`), whoever made that column and when."""
+        if self._db is not None or self._include_version:
+            return self
+        names = tuple(row[0] for row in self._adapter.execute(_NAMES_SQL, [self._table]).fetchall())
+        return self._clone(include_version=True) if _has_version(names) else self
 
     def _rows(self, *, include_id: bool = False) -> list[tuple]:
         """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
@@ -510,7 +536,11 @@ class SQLerQuery(_WriteStatements):
         return self._clone(select_fields=list(fields))
 
     def with_version(self) -> Self:
-        """Return a new query that includes `_version` column in results."""
+        """Return a new query that reads `_version` with each row and moves it on each update.
+
+        A query from a database object does both wherever its table has the column, asked or
+        not; on a table without the column there is no version to read or move. A query set of
+        a safe class gives its table the column at its first update."""
         return self._clone(include_version=True)
 
     def group_by(self, *fields: str) -> Self:
@@ -674,7 +704,7 @@ class SQLerQuery(_WriteStatements):
         distinct_kw = "DISTINCT " if self._distinct else ""
         if include_id:
             select = "_id, data" + (
-                ", _version" if (include_version or self._include_version) else ""
+                f", {_VERSION}" if (include_version or self._include_version) else ""
             )
             if self._promoted_fields:
                 select += ", " + ", ".join(self._promoted_fields)
@@ -1053,7 +1083,7 @@ class SQLerQuery(_WriteStatements):
 
             query.update(count=F("count") + 1)  # atomic increment
 
-        On a versioned query (``with_version()``) each row's ``_version`` moves by one, as
+        Where the table has the ``_version`` column each row's version moves by one, as
         ``update_one()`` and ``update_n()`` move it.
 
         Args:
@@ -1067,7 +1097,7 @@ class SQLerQuery(_WriteStatements):
             int: Number of rows updated.
         """
         self._write_checks(fields)
-        _, cur = self._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
+        _, cur = self._updating()._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
         if cur is None:
             return 0
         self._adapter.auto_commit()
@@ -1080,8 +1110,7 @@ class SQLerQuery(_WriteStatements):
         for race-free claiming. The query's WHERE and ORDER BY determine which
         row is selected.
 
-        When ``include_version`` is set (SafeModel querysets), ``_version`` is
-        auto-bumped.
+        Where the table has the ``_version`` column the row's version moves by one.
 
         Args:
             **fields: Field names and values (or SQLerUpdateExpression) to update.
@@ -1110,7 +1139,7 @@ class SQLerQuery(_WriteStatements):
 
     def _update_picked(self, fields: dict, n: int, op: str) -> list[dict[str, Any]]:
         self._write_checks(fields, n)
-        query, cur = self._execute(lambda q: q._update_picked_sql(fields, n, op))
+        query, cur = self._updating()._execute(lambda q: q._update_picked_sql(fields, n, op))
         if cur is None:
             return []
         rows = cur.fetchall()
@@ -1125,7 +1154,7 @@ class SQLerQuery(_WriteStatements):
         that no other connection writes a row between its read and its write.
         """
         self._write_checks(fields, n)
-        query, cur = self._execute(lambda q: q._picked(n, q._returning()))
+        query, cur = self._updating()._execute(lambda q: q._picked(n, q._returning()))
         if cur is None:
             return []
         before = {doc["_id"]: doc for doc in map(query._returned, cur.fetchall())}

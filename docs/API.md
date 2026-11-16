@@ -633,10 +633,7 @@ acc.balance = 120
 acc.save()
 
 table = getattr(Account, "__tablename__", "accounts")
-db.adapter.execute(
-    f"UPDATE {table} SET data = json_set(data,'$._version', json_extract(data,'$._version') + 1) WHERE _id = ?;",
-    [acc._id],
-)
+db.adapter.execute(f"UPDATE {table} SET _version = _version + 1 WHERE _id = ?;", [acc._id])
 db.adapter.commit()
 
 acc.balance = 130
@@ -648,10 +645,21 @@ else:
     raise AssertionError("stale writes must raise")
 ```
 
-A queryset's `update()`, `update_one()` and `update_n()` move the version of each row they
-change, so a later `save()` of an instance loaded before them raises `StaleVersionError`
-too, as after another instance's `save()`; an instance loaded after them, or returned by
-`update_one()` / `update_n()`, holds the new version and saves.
+The version of a row is its table's `_version` column, and every write sqler makes of a row
+of a table that has it moves it by one, whatever writes it: a safe or a plain class's
+`save()` and queryset `update()`, `update_one()`, `update_n()`, `db.query(table).update()`,
+the same three of a query built from the adapter alone (`SQLerQuery(table, db.adapter)`,
+which reads the table's columns before each update), `upsert_document()`, `bulk_upsert()`,
+`upsert_with_version()`, a delete policy's `set_null`. An insert (`save_many()`,
+`insert_document()`) writes 0. So a later `save()` of an instance loaded before any of them
+raises `StaleVersionError`; an instance loaded after them, or returned by `update_one()` /
+`update_n()`, holds the new version and saves. A `_version` key in a document written to
+such a table is not stored and sets nothing, and `update(_version=...)` on it is refused.
+Every read of such a table through a database object or a model (`find_document`, the
+dicts of `db.query(table)` or of a model's query set, a model) gives `_version` from the
+column; a NULL in a column made by other means is 0, and the next write of the
+row leaves 1. A statement sent by hand with `db.adapter.execute()` moves it only if it
+says so, as above.
 
 A table made before versioning (by a plain model, by SQL, or copied without its `_version`
 column) is read as it is, through every door (`from_id`, `from_ids`, `refresh`, a
@@ -1437,7 +1445,7 @@ the rules of its own table's registered class), meet the same rules but the hook
 
 | Rule | Set-based ways and a policy's rows |
 |------|------------------------------------|
-| version (safe models) | every update moves `_version` by one, in the same statement (in its column and in the document's copy that a `save()` checks too), and so does the update that nulls a reference (a holder who loaded the row before cannot save the reference back); `_version` cannot be named in an update (`ValueError`) |
+| version (a table with the `_version` column) | every update moves `_version` by one, in the same statement, and so does the update that nulls a reference (a holder who loaded the row before cannot save the reference back); `_version` cannot be named in an update (`ValueError`) |
 | `TimestampMixin` / `AuditMixin` | each updated (or nulled) row gets `updated_at` (and `updated_by`) in the same statement, stored as `save()` stores it; one time for all rows of the statement (the strictly-later promise of `save()` is per instance). A field you name in the update is yours: `update(updated_at=x)` writes `x` |
 | `AuditLogMixin` | one `update` row per row changed (`changes` holds the old and new of each key that differs; the new value is what the row holds afterwards, F-expressions included) and one `delete` row per row deleted, in one unit with the write; each row is read and written inside that unit, so no other connection writes it in between |
 | `HooksMixin` | calls no hook; use a loop of `save()` where a hook must run |

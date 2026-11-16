@@ -108,7 +108,7 @@ def test_safe_model_rebase_retry_exhaustion():
 
     db = SQLerDB.in_memory(shared=False)
     Counter.set_db(db)
-    original_commit = db.adapter.commit
+    original_reread = db.find_document_with_version
     try:
         counter = Counter(count=0).save()
         stale = Counter.from_id(counter._id)
@@ -119,26 +119,23 @@ def test_safe_model_rebase_retry_exhaustion():
 
         stale.count += 1
 
-        # Monkey-patch adapter.commit to bump version on every retry,
-        # ensuring the stale copy can never catch up.
-        call_count = 0
+        # Each rebase re-reads the row; another writer moves its version right after the
+        # read, so the stale copy can never catch up.
+        rereads = 0
 
-        def sabotaging_commit():
-            nonlocal call_count
-            original_commit()
-            call_count += 1
-            # After each rebase attempt commits, bump version again
-            if call_count <= 3:
-                db.adapter.execute(
-                    "UPDATE counters SET _version = _version + 1 WHERE _id = ?;",
-                    [stale._id],
-                )
-                original_commit()
+        def sabotaging_reread(table, _id):
+            nonlocal rereads
+            doc = original_reread(table, _id)
+            rereads += 1
+            db.adapter.execute("UPDATE counters SET _version = _version + 1 WHERE _id = ?;", [_id])
+            db.adapter.commit()
+            return doc
 
-        db.adapter.commit = sabotaging_commit
+        db.find_document_with_version = sabotaging_reread
 
         with pytest.raises(StaleVersionError, match="retries exhausted"):
             stale.save()
+        assert rereads == 1  # two conflicts (max_retries), one re-read between them
     finally:
-        db.adapter.commit = original_commit
+        db.find_document_with_version = original_reread
         db.close()

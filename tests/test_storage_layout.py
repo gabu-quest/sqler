@@ -175,13 +175,13 @@ def test_table_made_by_a_query(written):
 
 
 def test_safe_model_table_has_version_and_data_key(written):
-    """Section "The version column": safe models, and the `_version` key in data."""
+    """Section "The version column": safe models; the version is the column, not a key in data."""
     assert [c[0] for c in _cols(written, "tasks")] == ["_id", "data", "_version"]
     assert _cols(written, "tasks")[2] == ("_version", "INTEGER", 1, "0", 0)
     ((data, version),) = written.execute("SELECT data, _version FROM tasks").fetchall()
-    # saved once, then updated once: the column and the key in data agree
+    # saved once, then updated once: the column says 1, and the document holds no copy
     assert version == 1
-    assert json.loads(data) == {"n": 2, "_version": 1}
+    assert json.loads(data) == {"n": 2}
 
 
 def test_with_version_writes_add_the_column_and_insert_zero(written):
@@ -446,7 +446,7 @@ def test_a_write_after_another_object_changed_the_table_lands_each_key_in_its_co
         assert (data["name"], key in data, value) == ("y", False, "v")
     fresh = SQLerDB.on_disk(path)
     try:
-        assert fresh.find_document("t", _id).get(key, "absent") == (value if key != "_version" else "absent")
+        assert fresh.find_document("t", _id).get(key, "absent") == value
     finally:
         fresh.close()
 
@@ -1017,7 +1017,7 @@ def test_a_safe_class_with_a_promoted_field_saved_at_a_stale_version_writes_noth
     finally:
         a.close()
     assert sqlite3.connect(path).execute("SELECT data, status, _version FROM safe_promoting").fetchall() == [
-        ('{"name":"x","_version":1}', "s", 1)
+        ('{"name":"x"}', "s", 1)
     ]
 
 

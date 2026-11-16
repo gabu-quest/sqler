@@ -542,7 +542,7 @@ def test_a_class_with_a_promoted_column_saves_through_an_object_that_learned_its
             "CREATE TABLE rbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, "
             "_version INTEGER NOT NULL DEFAULT 0)",
             ("""'{"name": "a"}'""",),
-            {"name": "a", "_id": 1},
+            {"name": "a", "_id": 1, "_version": 0},  # the column is the row's version: every read gives it
         ),
         (
             "CREATE TABLE rbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, extra TEXT)",

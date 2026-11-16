@@ -33,10 +33,9 @@ from sqler.db.sqler_db import (
     _TableMemory,
     _unwritable,
     _upsert_sql,
-    _versioned_sql,
 )
 from sqler.exceptions import StaleVersionError
-from sqler.query.query import aend_failed, is_missing_table
+from sqler.query.query import _has_version, aend_failed, is_missing_table
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -295,12 +294,18 @@ class AsyncSQLerDB(_TableMemory):
 
     async def _memory_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]]]:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._memory_of`."""
+        return (await self._shape_of(table, fields))[:2]
+
+    async def _shape_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]], bool]:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._shape_of`."""
         known = self._known(table)
         if known is None or known[1] is None:
-            columns, layout = await self._columns_of(table), self._layout_of(table)
+            names, columns = await self._learn(table)
+            layout = self._layout_of(table)
         else:
             columns, layout = known[1], known[0]
-        return (_and_fields(columns, fields) if fields else columns), layout
+            names = layout
+        return (_and_fields(columns, fields) if fields else columns), layout, _has_version(names)
 
     async def _columns_of(self, table: str) -> list[str]:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._columns_of`."""
@@ -336,7 +341,8 @@ class AsyncSQLerDB(_TableMemory):
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._upsert`."""
 
         async def make() -> tuple[str, list[Any], Any]:
-            return _upsert_sql(table, _id, doc, *await self._memory_of(table, fields))
+            columns, layout, has = await self._shape_of(table, fields)
+            return _upsert_sql(table, _id, doc, columns, layout, has)
 
         try:
             cur = await self._sent(table, make)
@@ -382,7 +388,8 @@ class AsyncSQLerDB(_TableMemory):
             await self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
             if not self._is_versioned(table) and (_id is None or await self._has_version_column(table) is not None):
                 await self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
-            return _versioned_sql(table, _id, doc, expected_version, *await self._memory_of(table, fields))
+            columns, layout, has = await self._shape_of(table, fields)
+            return _upsert_sql(table, _id, doc, columns, layout, has, expected_version)
 
         try:
             cur = await self._sent(table, make)
@@ -435,8 +442,8 @@ class AsyncSQLerDB(_TableMemory):
         async def make() -> Optional[tuple[str, list[Any], Any]]:
             if expected_version is not None and not self._is_versioned(table) and await self._has_version_column(table) is not None:
                 await self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
-            columns, layout = await self._memory_of(table, promoted)
-            return _fields_update(table, _id, doc, fields, columns, expected_version, layout)
+            columns, layout, has = await self._shape_of(table, promoted)
+            return _fields_update(table, _id, doc, fields, columns, expected_version, layout, has)
 
         try:
             cur = await self._sent(table, make)
@@ -489,10 +496,9 @@ class AsyncSQLerDB(_TableMemory):
 
         async def make() -> tuple[str, list[Any], Any]:
             nonlocal columns, read
-            promoted, layout = await self._memory_of(table)
-            has_version = versioned and await self._has_version_column(table)
-            columns = _row_columns(promoted, versioned)
-            read = _row_columns(promoted) if versioned and not has_version else columns
+            promoted, layout, has = await self._shape_of(table)
+            columns = _row_columns(promoted, has or versioned)
+            read = columns if has or not versioned else _row_columns(promoted)
             return _rows_sql(table, read, n, layout), params, layout
 
         try:
@@ -517,7 +523,7 @@ class AsyncSQLerDB(_TableMemory):
             layout, names = await self._names(table)
             if layout:
                 self._seen(table, layout, names)
-        return ("_version" in layout) if layout else None
+        return _has_version(layout) if layout else None
 
     async def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
@@ -552,7 +558,7 @@ class AsyncSQLerDB(_TableMemory):
             return []
         table = validate_table_name(table)
         await self._ensure_table(table)
-        return await self._insert_many_chunked(table, docs, versioned=False)
+        return await self._insert_many_chunked(table, docs)
 
     async def insert_many_promoted(
         self, table: str, docs: list[dict[str, Any]], promoted_fields: list[str]
@@ -574,7 +580,7 @@ class AsyncSQLerDB(_TableMemory):
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
-        return await self._insert_many_chunked(table, docs, versioned=False, promoted_fields=promoted_fields)
+        return await self._insert_many_chunked(table, docs, promoted_fields=promoted_fields)
 
     async def insert_many_with_version(
         self, table: str, docs: list[dict[str, Any]]
@@ -593,7 +599,7 @@ class AsyncSQLerDB(_TableMemory):
         table = validate_table_name(table)
         await self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
         await self._ensure_versioned_table(table)
-        ids = await self._insert_many_chunked(table, docs, versioned=True)
+        ids = await self._insert_many_chunked(table, docs)
         return [(id_, 0) for id_ in ids]
 
     async def insert_many_with_version_promoted(
@@ -616,7 +622,7 @@ class AsyncSQLerDB(_TableMemory):
         for field in promoted_fields:
             validate_identifier(field)
         await self._ensure_versioned_table(table)
-        ids = await self._insert_many_chunked(table, docs, versioned=True, promoted_fields=promoted_fields)
+        ids = await self._insert_many_chunked(table, docs, promoted_fields=promoted_fields)
         return [(id_, 0) for id_ in ids]
 
     async def _insert_many_chunked(
@@ -624,13 +630,13 @@ class AsyncSQLerDB(_TableMemory):
         table: str,
         docs: list[dict[str, Any]],
         *,
-        versioned: bool,
         promoted_fields: list[str] | None = None,
     ) -> list[int]:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._insert_many_chunked`."""
 
         async def make() -> Any:
-            return _inserts(table, docs, versioned, *await self._memory_of(table, promoted_fields or ()))
+            columns, layout, has = await self._shape_of(table, promoted_fields or ())
+            return _inserts(table, docs, has, columns, layout)
 
         async with self.transaction():
             return await self._sent_all(table, make)
@@ -655,7 +661,8 @@ class AsyncSQLerDB(_TableMemory):
             return []
 
         async def make() -> Any:
-            return _bulk_upserts(table, docs, *await self._memory_of(table))
+            columns, layout, has = await self._shape_of(table)
+            return _bulk_upserts(table, docs, has, columns, layout)
 
         async with self.transaction():
             ids = await self._sent_all(table, make)
@@ -851,7 +858,7 @@ class AsyncSQLerDB(_TableMemory):
         layout, names = await self._names(table)
         await self.adapter.auto_commit()
         added: tuple[str, ...] = ()
-        if "_version" not in layout:
+        if not _has_version(layout):
             cur = await self.adapter.execute(f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;')
             try:
                 await self.adapter.auto_commit()

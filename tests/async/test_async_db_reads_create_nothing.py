@@ -189,8 +189,13 @@ async def _by_hand(d, t):
 
 QUERY_ROUTES = {"db_query": _db_query, "by_hand": _by_hand}
 # what a read of a missing table sends: a query from the database looks at the table first, as a
-# model's query set does; one built by hand on the adapter sends its own statement only
+# model's query set does; one built by hand on the adapter sends its own statement only, and
+# before an update the read of its table's columns (whether the update moves a version)
 SENT = {"db_query": 2, "by_hand": 1}
+
+
+def _sent(route, name):
+    return SENT[route] + (route == "by_hand" and name.startswith("update"))
 
 
 async def _model_query(d, table):
@@ -247,7 +252,7 @@ async def _answers(d, path, route, call):
 @pytest.mark.parametrize("name", list(QUERY_CALLS))
 async def test_the_query_of_a_missing_table_answers_as_an_empty_one(db, path, route, name):
     call, empty = QUERY_CALLS[name]
-    assert await _answers(db, path, QUERY_ROUTES[route], call) == (empty, empty, SENT[route], False, 0)
+    assert await _answers(db, path, QUERY_ROUTES[route], call) == (empty, empty, _sent(route, name), False, 0)
 
 
 @pytest.mark.parametrize("route", list(QS_ROUTES))

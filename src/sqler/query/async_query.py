@@ -8,7 +8,10 @@ from sqler.exceptions import NoAdapterError
 from sqler.query.expression import SQLerExpression
 from sqler.query.query import (
     _META_COLUMNS,
+    _NAMES_SQL,
+    _VERSION,
     PaginatedResult,
+    _has_version,
     _rewrite_promoted_refs,
     _WriteStatements,
     aend_failed,
@@ -79,14 +82,10 @@ class AsyncSQLerQuery(_WriteStatements):
     async def _laid_out(self) -> Self:
         """Async twin of :meth:`sqler.query.query.SQLerQuery._laid_out`."""
         db, table = self._db, self._table
-        promoted, names = await db._memory_of(table)
-        version = self._include_version
-        if version and self._use:
-            has = await db._has_version_column(table)
-            if self._use == "update" and has is False:
-                await db._ensure_versioned_table(table)
-                promoted, names = await db._memory_of(table)
-            version = self._use == "update" or bool(has)
+        promoted, names, version = await db._shape_of(table)
+        if not version and self._include_version and self._use == "update" and await db._has_version_column(table) is False:
+            await db._ensure_versioned_table(table)
+            promoted, names, version = await db._shape_of(table)
         key = (names, promoted, version)
         laid = self._laid
         if laid is None or laid[0] != key:
@@ -118,6 +117,17 @@ class AsyncSQLerQuery(_WriteStatements):
             if is_missing_table(exc, self._table):
                 return used, None
             raise
+
+    async def _updating(self) -> Self:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._updating`."""
+        if self._db is not None or self._include_version:
+            return self
+        cur = await self._adapter.execute(_NAMES_SQL, [self._table])
+        try:
+            names = tuple(row[0] for row in await cur.fetchall())
+        finally:
+            await cur.close()
+        return self._clone(include_version=True) if _has_version(names) else self
 
     async def _rows(self, *, include_id: bool = False) -> list[tuple]:
         """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
@@ -330,7 +340,7 @@ class AsyncSQLerQuery(_WriteStatements):
 
         distinct_kw = "DISTINCT " if self._distinct else ""
         if include_id:
-            select = "_id, data" + (", _version" if self._include_version else "")
+            select = "_id, data" + (f", {_VERSION}" if self._include_version else "")
             if self._promoted_fields:
                 select += ", " + ", ".join(self._promoted_fields)
         else:
@@ -630,7 +640,7 @@ class AsyncSQLerQuery(_WriteStatements):
 
             await query.update(count=F("count") + 1)
 
-        On a versioned query (``with_version()``) each row's ``_version`` moves by one, as
+        Where the table has the ``_version`` column each row's version moves by one, as
         ``update_one()`` and ``update_n()`` move it.
 
         Args:
@@ -640,7 +650,7 @@ class AsyncSQLerQuery(_WriteStatements):
             int: Number of rows updated.
         """
         self._write_checks(fields)
-        _, cur = await self._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
+        _, cur = await (await self._updating())._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
         if cur is None:
             return 0
         rowcount = cur.rowcount
@@ -680,7 +690,7 @@ class AsyncSQLerQuery(_WriteStatements):
 
     async def _update_picked(self, fields: dict, n: int, op: str) -> list[dict[str, Any]]:
         self._write_checks(fields, n)
-        query, cur = await self._execute(lambda q: q._update_picked_sql(fields, n, op))
+        query, cur = await (await self._updating())._execute(lambda q: q._update_picked_sql(fields, n, op))
         if cur is None:
             return []
         rows = await cur.fetchall()
@@ -691,7 +701,7 @@ class AsyncSQLerQuery(_WriteStatements):
     async def _changed(self, fields: dict, n: Optional[int] = None) -> list[tuple[dict, dict]]:
         """Async twin of :meth:`SQLerQuery._changed` (run it inside a transaction)."""
         self._write_checks(fields, n)
-        query, cur = await self._execute(lambda q: q._picked(n, q._returning()))
+        query, cur = await (await self._updating())._execute(lambda q: q._picked(n, q._returning()))
         if cur is None:
             return []
         rows = await cur.fetchall()

@@ -1042,9 +1042,7 @@ def test_a_typed_reference_holds_its_row_and_the_parent_saves_unchanged(typed, b
         {"_table": ct, "_id": 1}, {"_table": ct, "_id": 2}, {"_table": ct, "_id": 1}
     ]
     assert rows_of(db, pt)[0][1]["bag"] == {"a": {"_table": ct, "_id": 2}}
-    assert [r[1] for r in rows_of(db, pt)] == [
-        {**stored[0][1], "_version": 1} if base in VERSIONED else stored[0][1]
-    ]
+    assert [r[1] for r in rows_of(db, pt)] == [stored[0][1]]  # no document holds the version
     assert rows_of(db, ct) == children
     assert len(children) == 2
     assert rows_of(db, gt) == grand
@@ -1310,22 +1308,21 @@ def test_a_validator_that_reshapes_the_children_keeps_each_child_its_row(make_db
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", VERSIONED)
 def test_a_child_holds_the_version_its_row_holds_after_a_set_update_and_saves(typed, base, way):
-    """A queryset ``update_one()`` moves the version in the column and in the document's copy
-    that a save checks too. The child holds it, as the row loaded on its own does: the first
-    of the two to save writes, the other then holds a stale version."""
+    """A queryset ``update_one()`` moves the version in the column, the one place it is kept.
+    The child holds it, as the row loaded on its own does: the first of the two to save
+    writes, the other then holds a stale version."""
     db, (_, c_cls, p_cls, _), pid = typed(base)
     ct = c_cls.__tablename__
     c_cls.query().filter(F("_id") == 2).update_one(name="u")
     c_cls.query().filter(F("_id") == 2).update_one(name="c2")
-    assert version_of(db, ct, 2) == 2
-    assert rows_of(db, ct)[1][1]["_version"] == 2
+    assert (version_of(db, ct, 2), "_version" in rows_of(db, ct)[1][1]) == (2, False)
     got = load(p_cls, pid, way)
     alone = c_cls.from_id(2)
     assert (got.bag["a"]._version, alone._version) == (2, 2)
     got.bag["a"].save()
     with pytest.raises(StaleVersionError):
         alone.save()
-    assert (version_of(db, ct, 2), rows_of(db, ct)[1][1]["_version"]) == (3, 3)
+    assert (version_of(db, ct, 2), "_version" in rows_of(db, ct)[1][1]) == (3, False)
 
 
 # ---- a child class bound to another database, and one never bound ---------------------
@@ -1456,9 +1453,7 @@ def test_a_child_of_a_class_never_bound_read_through_using_saves_its_row(make_db
     assert (got.never._id, got.never.name) == (1, "never-bound")
     got.never.name = "renamed"
     got.never.save(db=db)
-    # a safe class writes its version into the JSON too
-    want = {"name": "renamed", "_version": 1} if base == "safe" else {"name": "renamed"}
-    assert rows_of(db, ut) == [(1, want)]
+    assert rows_of(db, ut) == [(1, {"name": "renamed"})]
 
 
 # ---- typed fields of a class --------------------------------------------------------
@@ -1846,7 +1841,7 @@ def test_a_batch_read_adds_no_version_column_and_the_child_saves(make_db, way):
     got.one.name = "c2"
     got.one.save(db=db)
     assert version_of(db, NcC.__tablename__, 1) == 1
-    assert rows_of(db, NcC.__tablename__) == [(1, {"name": "c2", "_version": 1})]
+    assert rows_of(db, NcC.__tablename__) == [(1, {"name": "c2"})]
 
 
 @pytest.mark.parametrize("way", sorted(BATCH))

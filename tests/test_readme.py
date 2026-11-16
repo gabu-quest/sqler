@@ -151,16 +151,9 @@ def test_C06_safe_models_stale_write_raises():
     acc.balance = 120
     acc.save()
 
-    # bump stored version using public adapter (JSON path)
+    # another writer moves the row's version, its column, by hand
     table = getattr(Account, "__tablename__", "accounts")
-    db.adapter.execute(
-        f"""
-        UPDATE {table}
-        SET data = json_set(data,'$._version', json_extract(data,'$._version') + 1)
-        WHERE _id = ?
-    """,
-        (acc._id,),
-    )
+    db.adapter.execute(f"UPDATE {table} SET _version = _version + 1 WHERE _id = ?", (acc._id,))
     db.adapter.commit()
 
     with pytest.raises(StaleVersionError):

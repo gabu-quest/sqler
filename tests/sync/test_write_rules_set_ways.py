@@ -201,16 +201,16 @@ PINS = [
         "safe update_one",
         Safe,
         lambda q: q.filter(F("_id") == 1).update_one(k=6),
-        "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 WHERE "
-        "_id = (SELECT _id FROM sw_pin_safe WHERE _id = ? AND " + _g("sw_pin_safe", "_id", "data", "_version") + " LIMIT 1) RETURNING _id, data, _version",
+        "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?), _version = IFNULL(_version, 0) + 1 WHERE "
+        "_id = (SELECT _id FROM sw_pin_safe WHERE _id = ? AND " + _g("sw_pin_safe", "_id", "data", "_version") + " LIMIT 1) RETURNING _id, data, IFNULL(_version, 0)",
         [6, 1],
     ),
     (
         "safe update_n",
         Safe,
         lambda q: q.filter(F("_id") >= 1).update_n(3, k=7),
-        "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 WHERE "
-        "_id IN (SELECT _id FROM sw_pin_safe WHERE _id >= ? AND " + _g("sw_pin_safe", "_id", "data", "_version") + " LIMIT 3) RETURNING _id, data, _version",
+        "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?), _version = IFNULL(_version, 0) + 1 WHERE "
+        "_id IN (SELECT _id FROM sw_pin_safe WHERE _id >= ? AND " + _g("sw_pin_safe", "_id", "data", "_version") + " LIMIT 3) RETURNING _id, data, IFNULL(_version, 0)",
         [7, 1],
     ),
     (
@@ -220,10 +220,10 @@ PINS = [
         .order_by("priority", desc=True)
         .update_one(status="running", attempts=F("attempts") + 1, updated_at=17),
         "UPDATE sw_pin_job SET data = json_set(data, '$.attempts', json_extract(data, '$.attempts') "
-        "+ ?, '$.updated_at', ?, '$._version', _version + 1), status = ?, _version = _version + 1 WHERE _id = (SELECT "
+        "+ ?, '$.updated_at', ?), status = ?, _version = IFNULL(_version, 0) + 1 WHERE _id = (SELECT "
         "_id FROM "
         "sw_pin_job WHERE (status = ?) AND (JSON_EXTRACT(data, '$.attempts') < ?) AND " + _g("sw_pin_job", "_id", "data", "status", "priority", "_version") + " ORDER BY priority "
-        "DESC LIMIT 1) RETURNING _id, data, _version, status, priority",
+        "DESC LIMIT 1) RETURNING _id, data, IFNULL(_version, 0), status, priority",
         [1, 17, "running", "pending", 3],
     ),
     (
@@ -232,10 +232,9 @@ PINS = [
         lambda q: q.filter(F("status") == "running").order_by("priority").update_n(
             5, status="pending", priority=F("priority") - 1
         ),
-        "UPDATE sw_pin_job SET data = json_set(data, '$._version', _version + 1), status = ?, priority = priority - ?, "
-        "_version = _version + 1 WHERE "
+        "UPDATE sw_pin_job SET status = ?, priority = priority - ?, _version = IFNULL(_version, 0) + 1 WHERE "
         "_id IN (SELECT _id FROM sw_pin_job WHERE status = ? AND " + _g("sw_pin_job", "_id", "data", "status", "priority", "_version") + " ORDER BY priority LIMIT 5) RETURNING "
-        "_id, data, _version, status, priority",
+        "_id, data, IFNULL(_version, 0), status, priority",
         ["pending", 1, "running"],
     ),
     (
@@ -262,7 +261,7 @@ def test_update_on_a_versioned_class_gains_only_the_version_term(db):
     _, sent = _sent(lambda: q.filter(F("_id") == 1).update(k=5))
     assert sent == [
         (
-            "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?, '$._version', _version + 1), _version = _version + 1 "
+            "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?), _version = IFNULL(_version, 0) + 1 "
             "WHERE _id = ? AND " + _g("sw_pin_safe", "_id", "data", "_version"),
             [5, 1],
         )
@@ -275,8 +274,7 @@ def test_job_update_gains_only_the_version_term(db):
     _, sent = _sent(lambda: q.filter(F("status") == "pending").update(priority=3))
     assert sent == [
         (
-            "UPDATE sw_pin_job SET data = json_set(data, '$._version', _version + 1), priority = ?, "
-            "_version = _version + 1 WHERE status = ? AND " + _g("sw_pin_job", "_id", "data", "status", "priority", "_version"),
+            "UPDATE sw_pin_job SET priority = ?, _version = IFNULL(_version, 0) + 1 WHERE status = ? AND " + _g("sw_pin_job", "_id", "data", "status", "priority", "_version"),
             [3, "pending"],
         )
     ]
@@ -338,7 +336,7 @@ def test_version_cannot_be_set_on_a_versioned_class(db, kind, way):
         way(bound(Item, db))
 
     assert _version_column(db, Item.__tablename__) == [0]
-    assert [d.get("_version") for _, d in _stored(db, Item.__tablename__)] == [0]
+    assert [d.get("_version") for _, d in _stored(db, Item.__tablename__)] == [None]
 
 
 def test_version_named_on_a_class_with_no_version_is_a_document_field_as_before(db):
@@ -847,8 +845,7 @@ def test_set_null_moves_the_version_of_a_versioned_referrer_so_a_stale_save_is_r
     _, sent = _sent(lambda: binder.delete_with_policy(db=db, on_delete="set_null"))
 
     assert [sql for sql, _ in sent if table in sql and not sql.startswith("SELECT")] == [
-        f"UPDATE {table} SET data = json(?), _version = _version + 1 WHERE _id = ? AND _version = ? "
-        f"AND COALESCE(json_extract(data, '$._version'), ?) = ? AND CASE WHEN 1 THEN 1 ELSE "
+        f"UPDATE {table} SET data = json(?), _version = IFNULL(_version, 0) + 1 WHERE _id = ? AND CASE WHEN 1 THEN 1 ELSE "
         f"(SELECT (`_id`, `data`, `_version`) IN (SELECT * FROM {table}) FROM {table}) END;"
     ]
     assert _version_column(db, table) == [1]
@@ -1017,7 +1014,7 @@ def test_delete_all_of_one_row_and_of_ten_thousand_send_the_same_statements(db, 
         assert sent == [
             (
                 f"DELETE FROM {Item.__tablename__} WHERE JSON_EXTRACT(data, '$.name') = ? AND "
-                f"{_g(Item.__tablename__, '_id', 'data', *version[2:].split())} RETURNING _id, data{version}",
+                f"{_g(Item.__tablename__, '_id', 'data', *version[2:].split())} RETURNING _id, data{', IFNULL(_version, 0)' if version else ''}",
                 [name],
             ),
             look(ids),

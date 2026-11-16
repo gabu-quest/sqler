@@ -79,14 +79,50 @@ the columns again.)
 
 A versioned table (`ensure_table(..., versioned=True)`, safe models, the
 `*_with_version` writes) has one more column:
-`_version INTEGER NOT NULL DEFAULT 0`. A versioned insert writes 0; each
-versioned update adds 1. A safe model's table has it, and so do the tables
-first written by `upsert_with_version`, `insert_many_with_version` and
-`insert_many_with_version_promoted` (those writes add the column).
+`_version INTEGER NOT NULL DEFAULT 0`. A safe model's table has it, and so do the
+tables first written by `upsert_with_version`, `insert_many_with_version` and
+`insert_many_with_version_promoted`, by a safe model's save of some fields, and by a safe
+model's queryset `update()`, `update_one()` and `update_n()` (those writes add the column).
+A plain write adds no column.
 
-A safe model also writes the version as a `_version` key inside `data`
-(`{"n":2,"_version":1}`), and it agrees with the column after each save. The
-`*_with_version` writes put nothing in `data`; the column alone holds the version.
+The column is the row's version, and the only place it is kept. Every statement sqler
+sends that writes a row of a table with the column moves it, whichever class or method
+sends it: an insert writes 0, each update adds 1 (an update to the same values too; the
+version counts writes), each row of a set-based update once. A query built from the adapter
+alone (`SQLerQuery(table, adapter)`) has no database object that knows the table, so each of
+its updates first reads the table's columns (one statement). A statement that only moves a
+promoted value between its column and the document leaves the version as it is, unless it
+changes what a read of the row gives: `move_promoted(..., keep="document")` moves the version
+of each row whose document held a value other than its column's; `keep="column"` and the
+promotion of a field change no read. A versioned save is written only while the column is at
+the version its instance read. `data` holds no copy: a `_version` key in a document written
+to the table is dropped, and every read through a database object or a model gives
+`_version` from the column. On a table without the column, a `_version` key is a field like
+any other.
+
+A `_version` column made by other means may allow NULL. A NULL is version 0: every read
+gives 0, a save is checked against 0, and the first write of the row leaves 1. A filter of
+your own on `_version` compares the column as SQLite holds it, so `F("_version") == 0` does
+not match a NULL.
+
+A document last written by an older sqler (1.2026.4.4, the released version) may still hold
+a `_version` key inside `data`, equal to the column when it was written. A database object
+and a model do not read it; a query built from the adapter alone gives each document as it
+is stored, that key included. The next write of the whole row drops it, a write of some
+fields leaves it. Such a file is
+used as it is, with no step and no change of its schema.
+
+The released version cannot share a file with this one. It reads the version from the
+column too, but it checks a save against the key in `data` as well
+(`_version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?`), and its own plain
+writes do not move the column. So, with both on one file:
+
+- The released version fails with an error: a row whose key this version left at an older
+  value (a write of some fields of a row the released version saved) is refused by every
+  save of the released version with `StaleVersionError`.
+- A write is lost with no error: a plain write the released version makes (a plain class's
+  save, `upsert_document()`, a plain query's update) leaves the column as it was, so a save
+  by this version of an instance read before it goes through and overwrites it.
 
 ## References
 

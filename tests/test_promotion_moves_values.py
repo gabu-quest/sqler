@@ -1441,7 +1441,7 @@ def test_a_plain_writer_writes_the_row_the_model_writes(run, tmp_path, is_async,
     assert _stored_row(run.path, _id, list(promoted)) == stored
     assert stored[0] == ('{"name":"m"}' if len(promoted) == 2 else '{"name":"m","n":8}')
     found = run.go(run.adb.find_document(TABLE, _id)) if is_async else run.db.find_document(TABLE, _id)
-    assert found == {**read, "_id": _id}
+    assert found == {**read, "_id": _id, **_version_read(kind, name)}
     (row,) = cls.from_ids([_id], db=run.db)
     assert row.model_dump() == {"name": "m", "status": "closed", "n": 8}
 
@@ -1475,6 +1475,13 @@ def _found(run, is_async, _id):
     return run.go(run.adb.find_document(TABLE, _id)) if is_async else run.db.find_document(TABLE, _id)
 
 
+def _version_read(kind, name, versioned=False):
+    """The ``_version`` a read gives after writer ``name``: a table with the column (made so, or
+    given it by a ``*_with_version`` writer) gives each row's, 0 for a new row and 1 for row 1
+    written once; a table without it gives none."""
+    return {"_version": int(kind == "update")} if versioned or "with_version" in name else {}
+
+
 @IS_ASYNC
 @pytest.mark.parametrize("definition", ["TEXT DEFAULT 'pending'", "TEXT NOT NULL DEFAULT 'pending'"], ids=["default", "not null default"])
 @pytest.mark.parametrize("name", list(UPDATES), ids=str)
@@ -1483,7 +1490,7 @@ def test_an_update_without_the_key_leaves_the_column(run, is_async, definition, 
     run.db.upsert_document_promoted(TABLE, None, {"name": "a", "status": "open"}, ["status"])
     _write(run, is_async, "update", name, {"name": "a2"})
     assert _stored_row(run.path, 1, ["status"]) == ('{"name":"a2"}', "open", "text")
-    assert _found(run, is_async, 1) == {"name": "a2", "_id": 1, "status": "open"}
+    assert _found(run, is_async, 1) == {"name": "a2", "_id": 1, "status": "open", **_version_read("update", name)}
 
 
 @IS_ASYNC
@@ -1493,7 +1500,7 @@ def test_an_insert_without_the_key_gives_the_column_its_default(run, is_async, d
     run.db.ensure_table(TABLE, promoted={"status": definition})
     _id = _write(run, is_async, "insert", name, {"name": "b"})
     assert _stored_row(run.path, _id, ["status"]) == ('{"name":"b"}', "pending", "text")
-    assert _found(run, is_async, _id) == {"name": "b", "_id": _id, "status": "pending"}
+    assert _found(run, is_async, _id) == {"name": "b", "_id": _id, "status": "pending", **_version_read("insert", name)}
 
 
 @IS_ASYNC
@@ -1625,7 +1632,7 @@ def test_a_column_added_by_hand_takes_its_key(run, is_async, kind, name):
     _id = _write(run, is_async, kind, name, {"name": "b", "note": "kept"})
     assert _stored_row(run.path, _id, ["note"]) == ('{"name":"b"}', "kept", "text")
     found = run.go(run.adb.find_document(TABLE, _id)) if is_async else run.db.find_document(TABLE, _id)
-    assert found == {"name": "b", "_id": _id, "note": "kept"}
+    assert found == {"name": "b", "_id": _id, "note": "kept", **_version_read(kind, name)}
 
 
 @IS_ASYNC
@@ -1935,7 +1942,7 @@ def test_a_generated_column_is_never_named_and_its_key_stays_in_the_document(run
     finally:
         conn.close()
     assert row == ('{"name":"m","g":"x","s":"y"}', "m", "M")
-    assert _found(run, is_async, _id) == {"name": "m", "g": "x", "s": "y", "_id": _id}
+    assert _found(run, is_async, _id) == {"name": "m", "g": "x", "s": "y", "_id": _id, **_version_read(kind, name, True)}
 
 
 # each writer as one call on a database object, sync (its result) or async (its coroutine)

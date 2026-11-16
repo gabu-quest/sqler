@@ -795,6 +795,8 @@ async def test_a_set_null_on_a_safe_table_another_object_remade_without_its_vers
         await author.delete_with_policy(db=db, on_delete="set_null")
     finally:
         await db.close()
-    [(data, version)] = _raw(path, "SELECT data, _version FROM awr_safe_books")
-    assert (json.loads(data), version) == ({"title": "b", "author": None, "_version": 1}, 1)
+    # written as the table is now: a plain write adds no column (see the sync twin)
+    assert _raw(path, "SELECT name FROM pragma_table_info('awr_safe_books')") == [("_id",), ("data",)]
+    [(data,)] = _raw(path, "SELECT data FROM awr_safe_books")
+    assert json.loads(data) == {"title": "b", "author": None}
     assert _raw(path, "SELECT count(*) FROM awr_nulled_authors") == [(0,)]
