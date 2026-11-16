@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, List, Sequence, Type, Union
 
 from sqler._stored import stored
+from sqler.models._table_names import _model_table_name
 from sqler.models.model import SQLerModel
 from sqler.query.expression import SQLerExpression
 
@@ -35,7 +36,6 @@ class SQLerModelField:
             raise ValueError("Empty path for model field")
         from sqler.exceptions import InvalidFieldNameError
         from sqler.query.field import _json_path_literal
-        from sqler.utils import validate_table_name
 
         for seg in self.path:
             if isinstance(seg, str) and not seg:
@@ -52,30 +52,8 @@ class SQLerModelField:
         # the key escape is the owner's: it raises before any SQL exists for a key it cannot carry
         first_literal = _json_path_literal([first])
         ref_literal = _json_path_literal([first, "_id"])
-        # related table name is default-plural of field type's class; we rely on registry-set table on model
-        # find table by inspecting registry mapping; use child model's _table
-        # fall back to pluralized field name if unknown
-        try:
-            # prefer registry-known names
-            from sqler import registry as _reg
-
-            keys = set(_reg.tables().keys())
-            if first in keys:
-                table = first
-            elif f"{first}s" in keys:
-                table = f"{first}s"
-            elif first.lower().endswith("s"):
-                table = first.lower()
-            else:
-                table = f"{first.lower()}s"
-        except Exception:
-            table = first.lower() if first.lower().endswith("s") else f"{first.lower()}s"
-        # the table name goes into the statement as an identifier: the owner's check
-        validate_table_name(table)
-
-        outer_table = validate_table_name(
-            getattr(self.model, "_table", None) or self.model.__name__.lower() + "s"
-        )
+        table = _related_table(self.model, first, self.array_any)
+        outer_table = _model_table_name(self.model)
 
         # Check if querying for _id specifically (it's a column, not in JSON)
         is_id_field = rest == ["_id"]
@@ -121,3 +99,58 @@ class SQLerModelField:
 
     def __le__(self, other: Any) -> SQLerExpression:
         return self.__compare("<=", other)
+
+
+def _related_table(model: type, first: str, array_any: bool) -> str:
+    """The table the rows a reference field of ``model`` points to are stored in.
+
+    It is the table of the model class the field's annotation admits there
+    (``Optional[Team]``, ``Team``; each entry of ``list[Team]`` with ``any()``), from
+    the owners of both rules: :func:`typed_fields` and :func:`_model_table_name`.
+
+    A field whose annotation admits no model class there (a plain ``dict``, a key the
+    class does not declare) keeps the table its name gives (``team`` -> ``teams``, or a
+    table of that name the registry knows), as before. A field that admits classes of
+    several tables uses that name's table only when it is one of them.
+
+    Raises:
+        ValueError: The field admits classes of several tables and its name gives none of them.
+    """
+    from sqler.models._refs import typed_fields
+
+    at = typed_fields(model).get(first)
+    if at is None:
+        admits: tuple = ()
+    elif array_any:
+        admits = at.item.admits if at.item is not None else ()
+    else:
+        admits = at.admits
+    tables = list(dict.fromkeys(_model_table_name(cls) for cls in admits))
+    if len(tables) == 1:
+        return tables[0]
+    guess = _table_of_field_name(first)
+    if tables and guess not in tables:
+        raise ValueError(
+            f"{model.__name__}.{first}: its annotation admits classes of the tables "
+            f"{', '.join(tables)}, so a filter through it cannot name one table"
+        )
+    return guess
+
+
+def _table_of_field_name(first: str) -> str:
+    """The table a field's name gives: one the registry knows by that name or its plural,
+    else the plural of the name."""
+    from sqler import registry
+    from sqler.utils import validate_table_name
+
+    keys = set(registry.tables().keys())
+    if first in keys:
+        table = first
+    elif f"{first}s" in keys:
+        table = f"{first}s"
+    elif first.lower().endswith("s"):
+        table = first.lower()
+    else:
+        table = f"{first.lower()}s"
+    # the table name goes into the statement as an identifier: the owner's check
+    return validate_table_name(table)
