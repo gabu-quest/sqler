@@ -170,8 +170,7 @@ class TestPromotedFilterRewriting:
         qs = Job.query().filter(F("status") == "pending")
         # Check SQL uses direct column
         sql = qs.sql()
-        assert "status = ?" in sql or "status =" in sql
-        assert "json_extract" not in sql.lower() or "status" not in sql.split("json_extract")[0]
+        assert sql == "SELECT data FROM jobs WHERE status = ?"
 
         results = qs.all()
         assert len(results) == 1

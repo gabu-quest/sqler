@@ -11,10 +11,14 @@ import asyncio
 import sqlite3
 import threading
 import time
+import uuid
+from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from sqler import AsyncSQLerDB
 from sqler.adapter import AsyncSQLiteAdapter
+from sqler.exceptions import NotConnectedError
 
 
 def _locked_by_another_connection(path: str) -> sqlite3.Connection:
@@ -267,33 +271,270 @@ async def test_timeout_ms_and_a_pragma_that_disagree_raise_at_connect_naming_bot
     await adapter.close()
 
 
-# ---- a shared-cache in-memory database: no busy handler ----
+# ---- a shared-cache in-memory database: the same wait ----
+#
+# SQLite calls no busy handler for a shared-cache table lock (SQLITE_LOCKED_SHAREDCACHE): the
+# adapter waits for it itself, in the connection's thread, up to ``timeout_ms``. Two adapters on
+# one named database are two connections; the holder keeps its lock until ``release()``, and
+# ``pauses.first`` is set when the waiter starts to wait.
+
+
+@pytest.fixture
+def pauses(monkeypatch):
+    """The pauses of the adapter's lock wait: ``count``, and ``first``, set at the first."""
+    real = time.sleep
+    seen = SimpleNamespace(count=0, first=threading.Event())
+
+    def pause(seconds: float) -> None:
+        seen.count += 1
+        seen.first.set()
+        real(seconds)
+
+    monkeypatch.setattr(time, "sleep", pause)
+    return seen
+
+
+@pytest_asyncio.fixture
+async def pair():
+    """``make(timeout_ms)``: a holder and a waiter adapter on one new shared-cache database, with
+    ``t`` holding 'a' and 'b' and ``u`` holding 'x' and 'y'; both closed at the end."""
+    made: list[AsyncSQLiteAdapter] = []
+
+    async def make(timeout_ms: int = 5000) -> tuple[AsyncSQLiteAdapter, AsyncSQLiteAdapter]:
+        name = f"lock-wait-{uuid.uuid4().hex}"
+        holder = AsyncSQLiteAdapter.in_memory(shared=True, name=name, timeout_ms=timeout_ms)
+        waiter = AsyncSQLiteAdapter.in_memory(shared=True, name=name, timeout_ms=timeout_ms)
+        made.extend((holder, waiter))
+        await holder.connect()
+        await waiter.connect()
+        await holder.executescript(
+            "CREATE TABLE t (v TEXT); CREATE TABLE u (v TEXT);"
+            "INSERT INTO t VALUES ('a'), ('b'); INSERT INTO u VALUES ('x'), ('y');"
+        )
+        return holder, waiter
+
+    yield make
+    for adapter in reversed(made):
+        await adapter.close()
+
+
+async def _hold(adapter: AsyncSQLiteAdapter, kind: str):
+    """Take the lock: ``write``, a transaction that has written 'held' into ``t``; ``read``, a
+    SELECT over ``t`` with one row read. Returns the call that releases it (a commit for ``write``)."""
+    if kind == "write":
+        await adapter.begin_transaction()
+        await adapter.execute("INSERT INTO t VALUES ('held')")
+        return lambda: adapter.end_transaction(commit=True)
+    cursor = await adapter.execute("SELECT v FROM t")
+    assert (await cursor.fetchone())[0] == "a"
+
+    async def release() -> None:
+        await cursor.close()
+        await adapter.auto_commit()
+
+    return release
+
+
+async def _values(adapter: AsyncSQLiteAdapter, table: str = "t") -> list[str]:
+    cursor = await adapter.execute(f"SELECT v FROM {table} ORDER BY rowid")
+    rows = [row[0] for row in await cursor.fetchall()]
+    await adapter.auto_commit()
+    return rows
+
+
+async def _insert_mine(adapter: AsyncSQLiteAdapter) -> None:
+    await adapter.execute("INSERT INTO t VALUES ('mine')")
+    await adapter.auto_commit()
+
+
+async def _many(adapter: AsyncSQLiteAdapter) -> None:
+    await adapter.executemany("INSERT INTO t VALUES (?)", [["m1"], ["m2"], ["m3"]])
+
+
+async def _many_inside(adapter: AsyncSQLiteAdapter) -> None:
+    await adapter.begin_transaction()
+    await adapter.executemany("INSERT INTO t VALUES (?)", [["m1"], ["m2"], ["m3"]])
+    await adapter.end_transaction(commit=True)
+
+
+async def _begin(adapter: AsyncSQLiteAdapter) -> None:
+    await adapter.begin_transaction()
+    await adapter.execute("INSERT INTO t VALUES ('mine')")
+    await adapter.end_transaction(commit=True)
+
+
+async def _inside(adapter: AsyncSQLiteAdapter) -> None:
+    await adapter.begin_transaction()
+    await adapter.execute("INSERT INTO u VALUES ('mine')")
+    await adapter.execute("INSERT INTO t VALUES ('mine')")  # meets the reader's lock on t
+    await adapter.end_transaction(commit=True)
+
+
+# (the lock held, what the waiter does, what it returns, t at the end, u at the end)
+WAITS = {
+    "insert": ("write", _insert_mine, None, ["a", "b", "held", "mine"], ["x", "y"]),
+    "select": ("write", _values, ["a", "b", "held"], ["a", "b", "held"], ["x", "y"]),
+    "executemany": ("read", _many, None, ["a", "b", "m1", "m2", "m3"], ["x", "y"]),
+    "executemany-inside-a-transaction": ("read", _many_inside, None, ["a", "b", "m1", "m2", "m3"], ["x", "y"]),
+    "begin_transaction": ("write", _begin, None, ["a", "b", "held", "mine"], ["x", "y"]),
+    "inside-a-transaction": ("read", _inside, None, ["a", "b", "mine"], ["x", "y", "mine"]),
+}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("statement", ["INSERT INTO t VALUES ('mine')", "SELECT v FROM t"])
-@pytest.mark.parametrize("timeout_ms", [200, 5000])
-async def test_a_shared_cache_memory_database_raises_at_once_on_another_adapters_table_lock(timeout_ms, statement):
-    """SQLite calls no busy handler for a shared-cache table lock: ``timeout_ms`` does not reach it."""
-    name = f"lock-wait-{timeout_ms}-{statement.split()[0]}"
-    holder = AsyncSQLiteAdapter.in_memory(shared=True, name=name, timeout_ms=timeout_ms)
-    writer = AsyncSQLiteAdapter.in_memory(shared=True, name=name, timeout_ms=timeout_ms)
-    await holder.connect()
-    await writer.connect()
+@pytest.mark.parametrize("case", list(WAITS))
+async def test_a_statement_that_meets_another_adapters_table_lock_waits_for_it_and_runs_once(case, pair, pauses):
+    kind, work, returned, t_rows, u_rows = WAITS[case]
+    holder, waiter = await pair()
+    release = await _hold(holder, kind)
+    task = asyncio.ensure_future(work(waiter))
     try:
-        await holder.execute("CREATE TABLE t (v TEXT)")
-        await holder.auto_commit()
+        assert await asyncio.to_thread(pauses.first.wait, 10)  # it waits ...
+        assert not task.done()  # ... and has not finished while the lock is held
+    finally:
+        await release()
+    assert await asyncio.wait_for(task, 30) == returned
+    assert (await _values(waiter, "t"), await _values(waiter, "u")) == (t_rows, u_rows)
+    assert waiter._pool.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_an_adapter_that_connects_while_another_holds_an_uncommitted_table_waits_and_connects(pauses):
+    """A new connection reads the schema with its first statement; a table another adapter has
+    made and not committed locks it."""
+    name = f"lock-wait-{uuid.uuid4().hex}"
+    holder = AsyncSQLiteAdapter.in_memory(shared=True, name=name)
+    newcomer = AsyncSQLiteAdapter.in_memory(shared=True, name=name)
+    await holder.connect()
+    try:
         await holder.begin_transaction()
-        await holder.execute("INSERT INTO t VALUES ('held')")
+        await holder.execute("CREATE TABLE made (v TEXT)")
+        task = asyncio.ensure_future(newcomer.connect())
+        try:
+            assert await asyncio.to_thread(pauses.first.wait, 10)  # it waits ...
+            assert not task.done()  # ... and has not connected while the lock is held
+        finally:
+            await holder.end_transaction(commit=True)
+        await asyncio.wait_for(task, 30)
+        assert await _values(newcomer, "made") == []
+    finally:
+        await newcomer.close()
+        await holder.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["write", "read"])
+async def test_a_lock_that_is_not_released_raises_sqlites_error_once_timeout_ms_has_passed(kind, pair, clock_tick):
+    holder, waiter = await pair(timeout_ms=200)
+    release = await _hold(holder, kind)
+    try:
         start = time.monotonic()
         with pytest.raises(sqlite3.OperationalError) as raised:
-            await writer.execute(statement)
+            await waiter.execute("INSERT INTO t VALUES ('mine')")
         elapsed = time.monotonic() - start
-        await holder.end_transaction(commit=False)
+        # the failed write left nothing open: the connection is back in the pool
+        settled = (waiter.in_transaction, waiter._pool.qsize())
     finally:
-        await writer.close()
-        await holder.close()
-    assert (str(raised.value).split(":")[0], elapsed < 1.0) == ("database table is locked", True)
+        await release()
+    assert (str(raised.value).split(":")[0], raised.value.sqlite_errorcode) == (
+        "database table is locked",
+        sqlite3.SQLITE_LOCKED_SHAREDCACHE,
+    )
+    assert elapsed >= 0.2 - clock_tick
+    assert settled == (False, 1)
+    assert await _values(waiter) == (["a", "b", "held"] if kind == "write" else ["a", "b"])
+
+
+@pytest.mark.asyncio
+async def test_timeout_ms_zero_raises_the_shared_cache_lock_at_once(pair, pauses):
+    holder, waiter = await pair(timeout_ms=0)
+    release = await _hold(holder, "write")
+    try:
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            await waiter.execute("INSERT INTO t VALUES ('mine')")
+    finally:
+        await release()
+    assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
+    assert await _values(waiter) == ["a", "b", "held"]
+
+
+@pytest.mark.asyncio
+async def test_executemany_with_rows_from_an_iterator_raises_at_once(pair, pauses):
+    """An iterator has given up the rows it was asked for: they cannot be sent a second time."""
+    holder, waiter = await pair()
+    release = await _hold(holder, "read")
+    try:
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            await waiter.executemany("INSERT INTO t VALUES (?)", iter([["m1"], ["m2"]]))
+    finally:
+        await release()
+    assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
+    assert await _values(waiter) == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_executescript_that_meets_the_lock_raises_at_once_with_its_earlier_statements_run(pair, pauses):
+    """The statements before the one that met the lock have run: the script is not sent again."""
+    holder, waiter = await pair()
+    release = await _hold(holder, "read")
+    try:
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            await waiter.executescript("INSERT INTO u VALUES ('s1'); INSERT INTO t VALUES ('s2');")
+    finally:
+        await release()
+    assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
+    assert (await _values(waiter, "t"), await _values(waiter, "u")) == (["a", "b"], ["x", "y", "s1"])
+
+
+@pytest.mark.asyncio
+async def test_two_tasks_that_each_hold_what_the_other_wants_both_end_after_timeout_ms(pair, clock_tick):
+    """The holder's transaction has written t and wants u; the other task reads u through the
+    waiter and wants t through a third adapter. Neither can go on: each raises once its wait has passed."""
+    holder, waiter = await pair(timeout_ms=300)
+    third = AsyncSQLiteAdapter(holder.path, pragmas=list(holder.pragmas), timeout_ms=300)
+    await third.connect()
+    await _hold(holder, "write")  # ended below, rolled back
+    cursor = await waiter.execute("SELECT v FROM u")
+    assert (await cursor.fetchone())[0] == "x"
+
+    async def timed(statement) -> tuple[int, float]:
+        start = time.monotonic()
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            await statement
+        return raised.value.sqlite_errorcode, time.monotonic() - start
+
+    try:
+        ends = await asyncio.wait_for(
+            asyncio.gather(
+                timed(holder.execute("INSERT INTO u VALUES ('holder-wants')")),
+                timed(third.execute("INSERT INTO t VALUES ('third-wants')")),
+            ),
+            30,
+        )
+    finally:
+        await cursor.close()
+        await waiter.auto_commit()
+        await holder.end_transaction(commit=False)
+        await third.close()
+    assert [code for code, _ in ends] == [sqlite3.SQLITE_LOCKED_SHAREDCACHE] * 2
+    assert [elapsed >= 0.3 - clock_tick for _, elapsed in ends] == [True, True]
+    assert (await _values(waiter, "t"), await _values(waiter, "u")) == (["a", "b"], ["x", "y"])
+
+
+@pytest.mark.asyncio
+async def test_a_waiter_whose_adapter_is_closed_while_it_waits_ends_with_an_error(pair, pauses):
+    holder, waiter = await pair(timeout_ms=60_000)  # far longer than the test may take
+    release = await _hold(holder, "write")
+    try:
+        task = asyncio.ensure_future(waiter.execute("INSERT INTO t VALUES ('mine')"))
+        assert await asyncio.to_thread(pauses.first.wait, 10)
+        await asyncio.wait_for(waiter.close(), 30)  # it does not wait on for the 60 s it was given
+        with pytest.raises(NotConnectedError) as raised:
+            await asyncio.wait_for(task, 30)
+    finally:
+        await release()
+    assert str(raised.value) == "the adapter was closed while a statement waited for another connection's lock"
+    assert await _values(holder) == ["a", "b", "held"]
 
 
 # ---- connect: once at a time, and a failed one leaves nothing open ----

@@ -886,7 +886,7 @@ def test_a_decimal_is_stored_as_a_number_in_the_row_text(base, given, text):
         return await rows.sql("SELECT data FROM t")
 
     [(data,)] = _run(steps, spec.is_async)
-    assert f'"v": {text}' in data or f'"v":{text}' in data
+    assert data == f'{{"v":{text}}}'
 
 
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])

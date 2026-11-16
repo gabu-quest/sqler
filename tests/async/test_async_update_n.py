@@ -185,8 +185,7 @@ class TestAsyncUpdateNPromoted:
             .update_n(2, priority=F("priority") + 100)
         )
         assert len(results) == 2
-        for r in results:
-            assert r.priority >= 105  # was 5 or 10, now +100
+        assert sorted(r.priority for r in results) == [105, 110]  # was 5 and 10, now +100
 
     async def test_filters_on_promoted_column(self, async_db_promoted_items):
         """WHERE clause uses promoted column directly."""
@@ -196,9 +195,9 @@ class TestAsyncUpdateNPromoted:
             .update_n(10, status="claimed")
         )
         assert len(results) == 2
+        assert sorted(r.priority for r in results) == [5, 10]
         for r in results:
             assert r.status == "claimed"
-            assert r.priority >= 5
 
 
 @pytest.mark.asyncio

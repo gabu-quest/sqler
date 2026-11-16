@@ -300,7 +300,8 @@ def _seed_versioned(db: SQLerDB, table: str, promoted: bool) -> int:
 
 @pytest.mark.parametrize("promoted", [False, True], ids=["plain", "promoted"])
 def test_versioned_write_blocked_by_a_table_lock_ends_its_transaction(promoted):
-    db = SQLerDB.in_memory()
+    # the write waits timeout_ms for the reader's table lock, then raises
+    db = SQLerDB.in_memory(timeout_ms=100)
     table = "vers"
     _id = _seed_versioned(db, table, promoted)
     reader, held = _reader_holding(db, table)

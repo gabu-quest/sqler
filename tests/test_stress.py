@@ -16,7 +16,6 @@ sys.path.insert(0, "src")
 import concurrent.futures
 import gc
 import random
-import sqlite3
 import string
 import threading
 import time
@@ -53,11 +52,10 @@ def disk_db(tmp_path):
 class TestConcurrencyStress:
     """Tests for concurrent access patterns."""
 
-    def test_100_concurrent_inserts_with_retry(self, db):
-        """Stress test: 100 concurrent inserts with retry logic.
+    def test_100_concurrent_inserts_all_saved(self, db):
+        """100 inserts from 10 threads on an in-memory DB: every one is saved.
 
-        SQLite in-memory databases serialize writes, so we add retry logic
-        to handle lock contention gracefully.
+        The adapter waits for a lock, so no insert fails and none is retried here.
         """
 
         class Item(SQLerModel):
@@ -70,30 +68,24 @@ class TestConcurrencyStress:
         lock = threading.Lock()
 
         def insert_item(i):
-            # Retry with exponential backoff for lock contention
-            for attempt in range(5):
-                try:
-                    Item(name=f"item_{i}", value=i).save()
-                    with lock:
-                        success_count[0] += 1
-                    return
-                except Exception as e:
-                    if "locked" in str(e).lower() and attempt < 4:
-                        time.sleep(0.01 * (2**attempt))
-                        continue
-                    with lock:
-                        errors.append((i, str(e)))
-                    return
+            try:
+                Item(name=f"item_{i}", value=i).save()
+            except Exception as e:
+                with lock:
+                    errors.append((i, str(e)))
+                return
+            with lock:
+                success_count[0] += 1
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             list(executor.map(insert_item, range(100)))
 
-        # With retries, most should succeed
-        assert success_count[0] >= 80, f"Only {success_count[0]} succeeded, errors: {errors[:5]}"
-        assert Item.query().count() == success_count[0]
+        assert errors == []
+        assert success_count[0] == 100
+        assert Item.query().count() == 100
 
-    def test_100_concurrent_inserts_disk_db(self, disk_db):
-        """Stress test: 100 concurrent inserts on disk-based DB with WAL mode."""
+    def test_100_concurrent_inserts_disk_db_all_saved(self, disk_db):
+        """100 inserts from 10 threads on a WAL disk DB: every one is saved."""
 
         class Item(SQLerModel):
             name: str
@@ -105,27 +97,23 @@ class TestConcurrencyStress:
         lock = threading.Lock()
 
         def insert_item(i):
-            for attempt in range(3):
-                try:
-                    Item(name=f"item_{i}", value=i).save()
-                    with lock:
-                        success_count[0] += 1
-                    return
-                except Exception as e:
-                    if "locked" in str(e).lower() and attempt < 2:
-                        time.sleep(0.02 * (attempt + 1))
-                        continue
-                    with lock:
-                        errors.append((i, str(e)))
-                    return
+            try:
+                Item(name=f"item_{i}", value=i).save()
+            except Exception as e:
+                with lock:
+                    errors.append((i, str(e)))
+                return
+            with lock:
+                success_count[0] += 1
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             list(executor.map(insert_item, range(100)))
 
-        # Disk-based DB with WAL should handle this better
-        assert success_count[0] >= 90, f"Only {success_count[0]} succeeded, errors: {errors[:5]}"
+        assert errors == []
+        assert success_count[0] == 100
+        assert Item.query().count() == 100
 
-    def test_concurrent_reads_and_writes(self, disk_db):
+    def test_concurrent_reads_and_writes_lose_nothing(self, disk_db):
         """Stress test: concurrent reads while writing on WAL-mode disk DB."""
 
         class Counter(SQLerModel):
@@ -140,41 +128,33 @@ class TestConcurrencyStress:
 
         read_results = []
         write_count = [0]
-        unexpected_errors = []
+        errors = []
         lock = threading.Lock()
-        max_retries = 5
 
         def reader():
             for _ in range(50):
                 try:
                     counters = Counter.query().all()
+                except Exception as e:
                     with lock:
-                        read_results.append(len(counters))
-                except sqlite3.OperationalError as e:
-                    msg = str(e).lower()
-                    if "locked" not in msg and "transaction" not in msg:
-                        with lock:
-                            unexpected_errors.append(("read", str(e)))
+                        errors.append(("read", str(e)))
+                    continue
+                with lock:
+                    read_results.append(len(counters))
                 time.sleep(0.001)
 
         def writer():
             for i in range(20):
-                for attempt in range(max_retries):
-                    try:
-                        Counter(
-                            name=f"new_counter_{threading.current_thread().name}_{i}", value=i
-                        ).save()
-                        with lock:
-                            write_count[0] += 1
-                        break
-                    except sqlite3.OperationalError as e:
-                        msg = str(e).lower()
-                        if "locked" not in msg and "transaction" not in msg:
-                            with lock:
-                                unexpected_errors.append(("write", str(e)))
-                            break
-                        if attempt < max_retries - 1:
-                            time.sleep(0.01 * (attempt + 1))
+                try:
+                    Counter(
+                        name=f"new_counter_{threading.current_thread().name}_{i}", value=i
+                    ).save()
+                except Exception as e:
+                    with lock:
+                        errors.append(("write", str(e)))
+                    continue
+                with lock:
+                    write_count[0] += 1
                 time.sleep(0.001)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -186,20 +166,21 @@ class TestConcurrencyStress:
             for f in futures:
                 f.result()
 
-        assert len(unexpected_errors) == 0, f"Unexpected errors: {unexpected_errors}"
-        # WAL mode + retries: most writes should succeed (5 writers × 20 = 100 total)
-        assert write_count[0] >= 80, f"Expected >= 80 writes, got {write_count[0]}"
-        assert len(read_results) >= 100, f"Expected >= 100 reads, got {len(read_results)}"
-        # All reads should see at least the initial 10 counters
-        assert all(r >= 10 for r in read_results), f"All reads should see >= 10 counters: {read_results}"
-        # Final count must be consistent: 10 initial + successful writes
-        final_count = Counter.query().count()
-        assert final_count == 10 + write_count[0], (
-            f"Final count {final_count} != 10 + {write_count[0]} writes"
-        )
+        assert errors == []
+        # 5 writers x 20 writes, 5 readers x 50 reads: none lost, none failed
+        assert write_count[0] == 100
+        assert len(read_results) == 250
+        # Every read sees the 10 initial counters, and no more than all 110
+        assert min(read_results) >= 10
+        assert max(read_results) <= 110
+        assert Counter.query().count() == 110
 
-    def test_optimistic_locking_contention(self, db):
-        """Stress test: many threads fighting over the same counter."""
+    def test_optimistic_locking_contention_every_increment_lands(self, db):
+        """10 threads x 5 increments of one safe counter with rebasing: all 50 land.
+
+        No increment raises a stale-version or lock-timeout error, and the stored
+        count equals the number of saves.
+        """
 
         class Counter(SQLerSafeModel):
             name: str
@@ -209,62 +190,46 @@ class TestConcurrencyStress:
 
         Counter.set_db(db)
 
-        # Create the counter
         counter = Counter(name="contended").save()
         counter_id = counter._id
 
         success_count = [0]
         stale_errors = [0]
         lock_failures = [0]
-        lock = threading.Lock()
-
         unexpected_errors = []
+        lock = threading.Lock()
 
         def increment():
             for _ in range(5):
                 try:
                     c = Counter.from_id(counter_id)
-                except sqlite3.OperationalError as e:
-                    # The read before a save (from_id, not a save) can find the
-                    # table locked by a writer; that is not the save's error.
-                    if "locked" not in str(e).lower():
-                        with lock:
-                            unexpected_errors.append(f"read: {e}")
-                    continue
-                try:
-                    if c:
-                        c.count += 1
-                        c.save()
-                        with lock:
-                            success_count[0] += 1
+                    c.count += 1
+                    c.save()
                 except StaleVersionError:
                     with lock:
                         stale_errors[0] += 1
                 except LockTimeoutError:
-                    # The save waited its lock_timeout and gave up: a lock failure.
                     with lock:
                         lock_failures[0] += 1
-                except sqlite3.OperationalError as e:
-                    # A save waits out every lock (also on its re-read) and ends in
-                    # LockTimeoutError, so no raw SQLite error may leave it.
+                except Exception as e:
                     with lock:
-                        unexpected_errors.append(f"save: {e}")
+                        unexpected_errors.append(repr(e))
+                else:
+                    with lock:
+                        success_count[0] += 1
 
-        # 10 threads each trying to increment 5 times; a hang fails instead of waiting.
+        # a hang fails instead of waiting
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(increment) for _ in range(10)]
             for f in futures:
-                f.result(timeout=10)
+                f.result(timeout=30)
 
-        assert len(unexpected_errors) == 0, f"Unexpected errors: {unexpected_errors}"
-        # Check that some increments succeeded
+        assert unexpected_errors == []
+        assert stale_errors[0] == 0
+        assert lock_failures[0] == 0
+        assert success_count[0] == 50
         final = Counter.from_id(counter_id)
-        assert final is not None
-        # With rebasing, most should succeed; final.count == success_count[0]
-        assert final.count > 0
-        assert final.count == success_count[0], (
-            f"count mismatch: final.count={final.count}, success_count={success_count[0]}"
-        )
+        assert final.count == 50
 
 
 class TestDeepNestingAndCircularReferences:

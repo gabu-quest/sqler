@@ -12,7 +12,8 @@ def test_debug_returns_sql_and_params(oligo_db: SQLerDB):
 
     q = SQLerQuery(table="oligos", adapter=db.adapter).filter(F("length") >= 15)
     sql, params = q.debug()
-    assert "SELECT" in sql and params == [15]
+    assert sql == "SELECT data FROM oligos WHERE JSON_EXTRACT(data, '$.length') >= ?"
+    assert params == [15]
 
 
 def test_explain_query_plan_runs_and_returns_rows(oligo_db: SQLerDB):
