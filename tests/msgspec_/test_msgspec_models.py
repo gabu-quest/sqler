@@ -582,19 +582,70 @@ async def test_a_camel_renamed_field_is_stored_under_its_python_name(kit):
     assert await aw(kit.db.find_document("ms_camel", saved._id)) == {"_id": 1, "first_name": "Ann"}
 
 
-@pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="a renamed field is written under its Python name and read under its encoded name, "
-    "on both msgspec bases: the load gives the field's default",
-)
-async def test_a_camel_renamed_field_loads_back_its_value(kit):
-    class Cm(kit.base, rename="camel"):
-        __tablename__ = "ms_camel"
-        first_name: str = ""
+def _renamed(base, shape):
+    """A model whose ``first_name`` msgspec encodes under another name, in each way a class
+    can say so."""
+    if shape == "camel":
 
-    saved = await aw(Cm(first_name="Ann").save(db=kit.db))
-    assert (await aw(Cm.from_id(saved._id, db=kit.db))).first_name == "Ann"
+        class Cm(base, rename="camel"):
+            __tablename__ = "ms_renamed"
+            first_name: str = ""
+            home_city: str = ""
+
+    elif shape == "mapping":
+
+        class Cm(base, rename={"first_name": "fn"}):
+            __tablename__ = "ms_renamed"
+            first_name: str = ""
+            home_city: str = ""
+
+    else:
+
+        class Cm(base):
+            __tablename__ = "ms_renamed"
+            first_name: str = msgspec.field(default="", name="fn")
+            home_city: str = ""
+
+    return Cm
+
+
+RENAMED = ["camel", "mapping", "field-name"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", RENAMED)
+async def test_a_renamed_field_loads_back_its_value(kit, shape):
+    Cm = _renamed(kit.base, shape)
+    saved = await aw(Cm(first_name="Ann", home_city="Oslo").save(db=kit.db))
+    got = await aw(Cm.from_id(saved._id, db=kit.db))
+    assert (got._id, got.first_name, got.home_city) == (1, "Ann", "Oslo")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", RENAMED)
+async def test_a_loaded_model_with_a_renamed_field_saves_what_it_loaded(kit, shape):
+    Cm = _renamed(kit.base, shape)
+    await aw(Cm(first_name="Ann", home_city="Oslo").save(db=kit.db))
+    got = await aw(Cm.from_id(1, db=kit.db))
+    got.home_city = "Bergen"
+    await aw(got.save(db=kit.db))
+    assert await aw(kit.db.find_document("ms_renamed", 1)) == {
+        "_id": 1,
+        "first_name": "Ann",
+        "home_city": "Bergen",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", RENAMED)
+async def test_a_query_and_a_refresh_load_a_renamed_field(kit, shape):
+    Cm = _renamed(kit.base, shape)
+    held = await aw(Cm(first_name="Ann", home_city="Oslo").save(db=kit.db))
+    await aw(Cm(first_name="Bo", home_city="Oslo").save(db=kit.db))
+    found = await aw(Cm.using(kit.db).filter(F("first_name") == "Bo").all())
+    await sql(kit.db, "UPDATE ms_renamed SET data = json_set(data, '$.first_name', 'Cy') WHERE _id = 1")
+    await aw(held.refresh(db=kit.db))
+    assert ([(m._id, m.first_name) for m in found], held.first_name) == ([(2, "Bo")], "Cy")
 
 
 class MsPoint(msgspec.Struct):

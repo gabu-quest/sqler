@@ -31,7 +31,8 @@ _SQLER_PREFIXES = (os.path.dirname(os.path.abspath(registry.__file__)) + os.sep,
 _PUBLIC_FIELDS_CACHE: dict[type, tuple] = {}
 _PUBLIC_FIELD_NAMES_CACHE: dict[type, set[str]] = {}
 _MIXIN_FIELD_NAMES_CACHE: dict[type, frozenset[str]] = {}
-_MIXIN_LOADS_CACHE: dict[type, tuple[tuple[str, Optional[_stored.Load]], ...]] = {}
+_RowNames = tuple[dict[str, str], tuple[tuple[str, Optional[_stored.Load]], ...]]
+_ROW_NAMES_CACHE: dict[type, _RowNames] = {}
 
 
 def _public_fields(cls: type) -> tuple:
@@ -83,15 +84,22 @@ def _mixin_field_names(cls: type) -> frozenset[str]:
     return result
 
 
-def _mixin_loads(cls: type) -> tuple[tuple[str, Optional[_stored.Load]], ...]:
-    """``(name, loader)`` of each mixin field of ``cls`` (cached): the loader gives the
-    stored value as the type the field declares, ``None`` where it is that value."""
-    cached = _MIXIN_LOADS_CACHE.get(cls)
+def _row_names(cls: Type[msgspec.Struct]) -> _RowNames:
+    """What a load needs to know of ``cls`` besides its Struct fields, cached in one entry:
+
+    - ``{Python name: encoded name}`` of each field msgspec reads under another name
+      (``rename=``, ``msgspec.field(name=...)``); empty for most classes;
+    - ``(name, loader)`` of each mixin field: the loader gives the stored value as the type
+      the field declares, ``None`` where it is that value.
+    """
+    cached = _ROW_NAMES_CACHE.get(cls)
     if cached is not None:
         return cached
+    pairs = zip(cls.__struct_fields__, cls.__struct_encode_fields__)
+    renamed = {name: encoded for name, encoded in pairs if name != encoded}
     hints = field_types(cls)
-    result = tuple((name, _stored.loader(hints.get(name))) for name in sorted(_mixin_field_names(cls)))
-    _MIXIN_LOADS_CACHE[cls] = result
+    loads = tuple((name, _stored.loader(hints.get(name))) for name in sorted(_mixin_field_names(cls)))
+    _ROW_NAMES_CACHE[cls] = result = (renamed, loads)
     return result
 
 
@@ -139,10 +147,11 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
     def model_validate(cls: Type[T], data: dict) -> T:
         """Create instance from dict (Pydantic-compatible method).
 
-        Passes the dict directly to ``msgspec.convert()`` — ``_id`` is a
+        Passes the dict to ``msgspec.convert()`` — ``_id`` is a
         declared Struct field so it's set automatically, ``_snapshot`` keeps
         its ``None`` default, and unknown keys (e.g. ``_version``) are
-        silently ignored by ``strict=False``.
+        silently ignored by ``strict=False``. The keys are the Python names of
+        the fields, also on a class with ``rename=``.
 
         Args:
             data: Dictionary with field values.
@@ -153,10 +162,14 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
         # strict=False: (1) ignores unknown keys like _version, (2) allows
         # permissive coercion (e.g. str "123" → int 123) for Pydantic compat.
         # _id is a declared Struct field — set directly by convert from data.
-        inst = msgspec.convert(data, cls, strict=False)
+        # a row is stored under the Python names of its fields (a filter, an index and a
+        # promoted column name them so); msgspec reads a renamed field under its encoded name
+        renamed, mixin_loads = _row_names(cls)
+        doc = {renamed.get(key, key): value for key, value in data.items()} if renamed else data
+        inst = msgspec.convert(doc, cls, strict=False)
         # mixin fields are no Struct fields: msgspec neither sets nor converts them, so each
         # is set here as the type it declares (a ``datetime`` from its ISO string)
-        for name, load in _mixin_loads(cls):
+        for name, load in mixin_loads:
             if name in data:
                 value = data[name]
                 setattr(inst, name, value if load is None else load(value))

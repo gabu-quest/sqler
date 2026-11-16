@@ -326,7 +326,9 @@ where it reads or writes, on an `AsyncSQLerDB`; it takes the async mixins (`Asyn
 `AsyncPartialUpdateMixin`, `AsyncHooksMixin`, `AsyncFullMixin`, `AsyncAuditMixin`,
 `AsyncAuditLogMixin`, `TimestampMixin`, `CacheAwareModel`). A field of an async msgspec model
 can hold a sync msgspec model, stored as a reference and loaded as that model; a sync model
-refuses an async one, as the lite pair does.
+refuses an async one, as the lite pair does. A msgspec model made with `rename=` is stored
+under the Python names of its fields, and a filter, an index and a promoted column name them
+so; the encoded names are for JSON the program makes itself with msgspec.
 
 Every base loads a field as the type it declares. A lite model, which checks no type itself,
 turns a stored value back by the rules a save stores it by: a `datetime`, `date` or `time`
