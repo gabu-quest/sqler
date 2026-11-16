@@ -100,11 +100,6 @@ to the table is dropped, and every read through a database object or a model giv
 `_version` from the column. On a table without the column, a `_version` key is a field like
 any other.
 
-A `_version` column made by other means may allow NULL. A NULL is version 0: every read
-gives 0, a save is checked against 0, and the first write of the row leaves 1. A filter of
-your own on `_version` compares the column as SQLite holds it, so `F("_version") == 0` does
-not match a NULL.
-
 A document last written by an older sqler (1.2026.4.4, the released version) may still hold
 a `_version` key inside `data`, equal to the column when it was written. A database object
 and a model do not read it; a query built from the adapter alone gives each document as it

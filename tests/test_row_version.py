@@ -3,8 +3,7 @@
 Every statement sqler sends that writes a row of a table with the column moves it by one,
 whatever class or method sends it, so a save of an instance read before any write is refused;
 no document carries a copy, and every read gives the column. A table without the column is
-written as it always was. A NULL in the column (one not made by sqler) is version 0. Sync and
-async, both safe bases.
+written as it always was. Sync and async, both safe bases.
 """
 
 import asyncio
@@ -488,17 +487,16 @@ def test_a_version_in_a_document_written_to_a_versioned_table_is_not_stored(give
     assert (written, [tuple(r) for r in rows]) == (expect[-1][0], expect)
 
 
-@pytest.mark.parametrize("version", [0, None], ids=["column at 0", "column NULL"])
 @pytest.mark.parametrize("query", ["db.query", "a query built from the adapter"])
-def test_update_of_version_is_refused_on_a_versioned_table_for_a_plain_query(tmp_path, query, version):
-    path = str(tmp_path / "t.db")
-    _nullable(path, "t", version)
-    db = SQLerDB.on_disk(path)
+def test_update_of_version_is_refused_on_a_versioned_table_for_a_plain_query(tmp_path, query):
+    db = SQLerDB.on_disk(str(tmp_path / "t.db"))
     try:
+        db.ensure_table("t", versioned=True)
+        db.insert_document("t", {"name": "a"})
         q = db.query("t") if query == "db.query" else SQLerQuery("t", db.adapter)
         with pytest.raises(ValueError, match="_version cannot be set"):
             q.update(_version=5)
-        assert [tuple(r) for r in db.adapter.execute("SELECT data, _version FROM t").fetchall()] == [('{"name":"a"}', version)]
+        assert [tuple(r) for r in db.adapter.execute("SELECT data, _version FROM t").fetchall()] == [('{"name":"a"}', 0)]
     finally:
         db.close()
 
@@ -526,17 +524,6 @@ def test_with_version_on_a_table_without_the_column_reads_and_writes_with_no_ver
         assert w.raw("SELECT data FROM rv_plain") == [('{"name":"q"}',)]
     finally:
         w.close()
-
-
-def _nullable(path, table=TABLE, *versions):
-    """``table`` made by hand with a ``_version`` column that takes NULL, one row of each of
-    ``versions`` (a NULL by default), each document ``{"name": "a"}``."""
-    conn = sqlite3.connect(path)
-    conn.execute(f"CREATE TABLE {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL, _version INTEGER)")
-    for version in versions or (None,):
-        conn.execute(f"INSERT INTO {table} (data, _version) VALUES ('{{\"name\":\"a\"}}', ?)", [version])
-    conn.commit()
-    conn.close()
 
 
 # ---- a database written before this change ----------------------------------------------------
@@ -867,79 +854,6 @@ def test_a_bare_query_on_a_table_without_the_column_sends_the_update_it_always_d
         "SELECT name FROM pragma_table_xinfo(?);",
         "UPDATE t SET data = json_set(data, '$.a', ?) WHERE JSON_EXTRACT(data, '$.a') = ?",
     ]
-
-
-# ---- a NULL version (a column not made by sqler) is 0 -------------------------------------------
-
-
-def test_a_null_version_reads_as_zero_and_a_whole_save_leaves_one(mode, base, tmp_path):
-    path = str(tmp_path / "null.db")
-    _nullable(path)
-    w = _world_at(mode, base, path)
-    try:
-        inst = w.call(w.Safe.from_id, 1, db=w.db)
-        reads = (inst._version, w.call(w.db.find_document, TABLE, 1)["_version"], w.call(w.go(w.db.query(TABLE)).all_dicts)[0]["_version"])
-        inst.qty = 2
-        w.call(inst.save, db=w.db)
-        assert (reads, w.row(1)[0], inst._version) == ((0, 0, 0), 1, 1)
-    finally:
-        w.close()
-
-
-def test_a_save_of_some_fields_of_a_null_version_is_checked(mode, base, tmp_path):
-    path = str(tmp_path / "null.db")
-    _nullable(path)
-    w = _world_at(mode, base, path)
-    try:
-        first, second = w.call(w.Safe.from_id, 1, db=w.db), w.call(w.Safe.from_id, 1, db=w.db)
-        first.qty = 2
-        w.call(first.save, db=w.db, _partial=True)
-        second.name = "second"
-        with pytest.raises(StaleVersionError):
-            w.call(second.save, db=w.db, _partial=True)
-        version, _, doc = w.row(1)
-        assert (version, doc["name"], doc["qty"]) == (1, "a", 2)
-    finally:
-        w.close()
-
-
-PLAIN_WRITES = {
-    "upsert_document": lambda db: db.upsert_document(TABLE, 1, {"name": "p"}),
-    "db.query update": lambda db: db.query(TABLE).update(name="p"),
-    "_update_fields": lambda db: db._update_fields(TABLE, 1, {"name": "p"}, ["name"]),
-    "bulk_upsert beside numbers": lambda db: db.bulk_upsert(TABLE, [{"_id": i, "name": "p"} for i in (1, 2, 3)]),
-}
-
-
-@pytest.mark.parametrize("write", list(PLAIN_WRITES))
-def test_a_plain_write_of_a_null_version_leaves_a_number(tmp_path, write):
-    path = str(tmp_path / "null.db")
-    _nullable(path, TABLE, None, 0, 4)
-    db = SQLerDB.on_disk(path)
-    try:
-        PLAIN_WRITES[write](db)
-        rows = [tuple(r) for r in db.adapter.execute(f"SELECT _version, data FROM {TABLE} WHERE _id = 1").fetchall()]
-        others = [r[0] for r in db.adapter.execute(f"SELECT _version FROM {TABLE} WHERE _id > 1 ORDER BY _id").fetchall()]
-    finally:
-        db.close()
-    moved = write in ("db.query update", "bulk_upsert beside numbers")
-    assert (rows, others) == ([(1, '{"name":"p"}')], [1, 5] if moved else [0, 4])
-
-
-def test_a_child_of_a_null_version_loaded_through_a_typed_field_saves(mode, tmp_path):
-    path = str(tmp_path / "null.db")
-    _nullable(path, "rv_children")
-    w = _world_at(mode, "pydantic_safe", path)
-    try:
-        Child, Holder = _holder(w.is_async)
-        holder = w.call(Holder(child=w.call(Child.from_id, 1, db=w.db)).save, db=w.db)
-        child = w.call(Holder.from_id, holder._id, db=w.db).child
-        assert child._version == 0
-        child.name = "saved"
-        w.call(child.save, db=w.db)
-        assert w.row(1, "rv_children")[0] == 1
-    finally:
-        w.close()
 
 
 # ---- a move that changes what a read gives moves the version --------------------------------------

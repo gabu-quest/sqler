@@ -51,10 +51,8 @@ def _has_version(names: Optional[tuple[str, ...]]) -> bool:
     return names is not None and "_version" in names
 
 
-# The version of a row as every read and every check takes it: its column, in which a NULL (a
-# column sqler did not make) is 0; and the term of every write that moves it, which leaves a number.
-_VERSION = "IFNULL(_version, 0)"
-_MOVE_VERSION = f"_version = {_VERSION} + 1"
+# The term of every write that moves the version of a row.
+_MOVE_VERSION = "_version = _version + 1"
 
 # The names of a table's columns, for a query with no database object behind it.
 _NAMES_SQL = "SELECT name FROM pragma_table_xinfo(?);"
@@ -225,7 +223,7 @@ class _WriteStatements:
     def _returning(self) -> str:
         """The columns a written row is read back with."""
         return ", ".join(
-            ["_id", "data"] + ([_VERSION] if self._include_version else []) + self._promoted_fields
+            ["_id", "data"] + (["_version"] if self._include_version else []) + self._promoted_fields
         )
 
     def _returned(self, row) -> dict[str, Any]:
@@ -704,7 +702,7 @@ class SQLerQuery(_WriteStatements):
         distinct_kw = "DISTINCT " if self._distinct else ""
         if include_id:
             select = "_id, data" + (
-                f", {_VERSION}" if (include_version or self._include_version) else ""
+                ", _version" if (include_version or self._include_version) else ""
             )
             if self._promoted_fields:
                 select += ", " + ", ".join(self._promoted_fields)

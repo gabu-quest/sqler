@@ -9,7 +9,6 @@ from sqler.query.expression import SQLerExpression
 from sqler.query.query import (
     _META_COLUMNS,
     _NAMES_SQL,
-    _VERSION,
     PaginatedResult,
     _has_version,
     _rewrite_promoted_refs,
@@ -340,7 +339,7 @@ class AsyncSQLerQuery(_WriteStatements):
 
         distinct_kw = "DISTINCT " if self._distinct else ""
         if include_id:
-            select = "_id, data" + (f", {_VERSION}" if self._include_version else "")
+            select = "_id, data" + (", _version" if self._include_version else "")
             if self._promoted_fields:
                 select += ", " + ", ".join(self._promoted_fields)
         else:
