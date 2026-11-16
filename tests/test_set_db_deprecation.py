@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.async_model import AsyncSQLerModel

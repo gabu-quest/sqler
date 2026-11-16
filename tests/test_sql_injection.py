@@ -2,6 +2,7 @@
 
 
 import pytest
+
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import (
     InvalidColumnDefError,
@@ -662,6 +663,7 @@ class TestReservedWordProtection:
 from typing import Union  # noqa: E402
 
 from pydantic import Field as _PydField  # noqa: E402
+
 from sqler import SQLerDB as _SQLerDB  # noqa: E402
 from sqler.logging import query_logger  # noqa: E402
 from sqler.models import SQLerModel  # noqa: E402

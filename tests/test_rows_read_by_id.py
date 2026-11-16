@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 import pytest
+
 from sqler import SQLerDB, SQLerLiteModel, SQLerLiteSafeModel, SQLerModel, SQLerSafeModel
 from sqler.logging import query_logger
 

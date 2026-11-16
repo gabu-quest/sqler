@@ -3,6 +3,7 @@
 import json
 
 import pytest
+
 from sqler import F, SQLerDB, SQLerModel, SQLerSafeModel
 
 # ---- Schema tests ----

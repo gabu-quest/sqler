@@ -20,6 +20,7 @@ import time
 import aiosqlite
 import pytest
 import pytest_asyncio
+
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import QueryError
 

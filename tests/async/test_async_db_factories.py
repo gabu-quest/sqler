@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import pytest
+
 from sqler import AsyncSQLerDB
 from sqler.adapter.abstract import AsyncAdapterABC
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S

@@ -24,6 +24,7 @@ from typing import Annotated, Any, Optional, Union
 import pytest
 from pairwise import all_pairs
 from pydantic import Field as PydField
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,

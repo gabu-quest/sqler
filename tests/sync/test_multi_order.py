@@ -1,6 +1,7 @@
 """Tests for multi-field order_by support."""
 
 import pytest
+
 from sqler import F, SQLerDB, SQLerModel
 
 # ---- SQL generation tests (no DB needed) ----

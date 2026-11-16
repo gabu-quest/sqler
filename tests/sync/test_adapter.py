@@ -7,6 +7,7 @@ from typing import Optional
 
 import pytest
 from exception_points import needs_libc_raise, stop_once_and_interrupt
+
 from sqler import SQLerDB, SQLerModel
 from sqler.adapter import AdapterABC, NotConnectedError, SQLiteAdapter
 from sqler.exceptions import TransactionStateError

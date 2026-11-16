@@ -1,6 +1,7 @@
 """Sync tests for update_n (batch update with RETURNING)."""
 
 import pytest
+
 from sqler import F, SQLerDB, SQLerModel, SQLerSafeModel
 
 

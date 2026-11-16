@@ -11,8 +11,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pytest
-import sqler.models as models
 from pydantic import BaseModel
+
+import sqler.models as models
 from sqler import SQLerDB, StaleVersionError, registry
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.logging import query_logger

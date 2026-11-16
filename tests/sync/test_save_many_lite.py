@@ -4,6 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 
 import pytest
+
 from sqler import SQLerDB
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel

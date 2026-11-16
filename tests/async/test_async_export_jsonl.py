@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pytest
 import pytest_asyncio
 from pydantic import field_validator
+
 from sqler import (
     AsyncSQLerLiteModel,
     AsyncSQLerLiteSafeModel,

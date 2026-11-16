@@ -2,6 +2,7 @@
 
 import pytest
 import pytest_asyncio
+
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import (
     InvalidColumnDefError,
@@ -275,6 +276,7 @@ class TestAsyncCreateIndexWhereRejectsInjection:
 from typing import Union  # noqa: E402
 
 from pydantic import Field as _PydField  # noqa: E402
+
 from sqler import AsyncSQLerModel  # noqa: E402
 from sqler.logging import query_logger  # noqa: E402
 from sqler.query import SQLerField as F  # noqa: E402

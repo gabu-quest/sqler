@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pytest
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,

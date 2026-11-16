@@ -1,6 +1,7 @@
 """Change tracking: ChangeTracker, TrackedModel and DiffMixin."""
 
 import pytest
+
 from sqler import (
     ChangeTracker,
     DiffMixin,

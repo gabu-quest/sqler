@@ -8,6 +8,7 @@ version column), it leaves the same schema as those calls in qler's order.
 import sqlite3
 
 import pytest
+
 from sqler import AsyncSQLerDB, SQLerDB
 from sqler.exceptions import InvalidColumnDefError, InvalidTableNameError
 

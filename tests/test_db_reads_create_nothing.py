@@ -15,6 +15,7 @@ import time
 import warnings
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.exceptions import NoAdapterError
 from sqler.logging import query_logger

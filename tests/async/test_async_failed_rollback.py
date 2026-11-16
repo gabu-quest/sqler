@@ -10,6 +10,7 @@ import logging
 import sqlite3
 
 import pytest
+
 from sqler.db.async_db import AsyncSQLerDB
 
 REPLACED = "rollback of a reclaimed connection failed (OperationalError: interrupted); replacing it"

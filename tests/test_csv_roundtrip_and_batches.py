@@ -4,6 +4,7 @@ import csv
 from typing import Optional
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.export import (
     export_csv,

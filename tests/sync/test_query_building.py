@@ -1,6 +1,7 @@
 import json
 
 import pytest
+
 from sqler.query import SQLerExpression, SQLerQuery
 
 

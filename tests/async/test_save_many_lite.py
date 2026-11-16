@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
+
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel

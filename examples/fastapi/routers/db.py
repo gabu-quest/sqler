@@ -6,10 +6,9 @@ Demonstrates: health_check, get_stats, vacuum, checkpoint, schema
 
 from typing import Any
 
+from fastapi import APIRouter
 from sqler.ops import checkpoint, get_stats, health_check, vacuum
 from sqler.utils import SQLER_TABLES
-
-from fastapi import APIRouter
 
 from ..db import get_db, seed_db
 from ..utils import db_call

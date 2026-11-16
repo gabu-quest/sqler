@@ -5,6 +5,7 @@ and other edge cases to ensure robustness.
 """
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel, StaleVersionError
 from sqler.models import ReferentialIntegrityError
 from sqler.models.integrity import find_referrers

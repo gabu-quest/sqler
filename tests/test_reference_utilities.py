@@ -1,6 +1,7 @@
 """is_ref_dict: what counts as a stored reference."""
 
 import pytest
+
 from sqler.utils import is_ref_dict
 
 

@@ -9,6 +9,7 @@ from datetime import date, datetime
 from typing import Optional
 
 import pytest
+
 from sqler import (
     MSGSPEC_AVAILABLE,
     SQLerDB,

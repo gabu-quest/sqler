@@ -21,6 +21,7 @@ import tempfile
 import aiosqlite
 import pytest
 import pytest_asyncio
+
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter, _InThread
 
 BOUND_S = 2.5  # a write that waits on a leaked lock takes the full 5 s busy timeout

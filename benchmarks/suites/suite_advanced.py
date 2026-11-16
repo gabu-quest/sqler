@@ -18,14 +18,6 @@ import tempfile
 import threading
 import time
 
-from sqler import (
-    F,
-    FTSIndex,
-    SQLerDB,
-    StaleVersionError,
-    cached_query,
-)
-
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.sqlite_baseline import (
@@ -38,6 +30,13 @@ from benchmarks.core.sqlite_baseline import (
 from benchmarks.core.timer import PrecisionTimer, timing_stats_from_list
 from benchmarks.generators.documents import DocumentGenerator
 from benchmarks.generators.models import BenchmarkArticle, BenchmarkCounter
+from sqler import (
+    F,
+    FTSIndex,
+    SQLerDB,
+    StaleVersionError,
+    cached_query,
+)
 
 SUITE_NAME = "advanced"
 

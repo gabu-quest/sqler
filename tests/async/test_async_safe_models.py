@@ -1,4 +1,5 @@
 import pytest
+
 from sqler.models import StaleVersionError
 from sqler.models.async_safe import AsyncSQLerSafeModel
 from sqler.models.utils import RebaseConfig

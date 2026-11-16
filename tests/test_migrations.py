@@ -1,6 +1,7 @@
 """MigrationRunner: applying, targeting, rolling back and validating migrations."""
 
 import pytest
+
 from sqler import Migration, MigrationRunner, SQLerDB
 
 

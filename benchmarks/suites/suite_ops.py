@@ -21,8 +21,6 @@ import sqlite3
 import tempfile
 import time
 
-from sqler import F, SQLerDB, backup, export_csv, export_json, export_jsonl, restore
-
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.sqlite_baseline import (
@@ -34,6 +32,7 @@ from benchmarks.core.sqlite_baseline import (
 from benchmarks.core.timer import PrecisionTimer, timing_stats_from_list
 from benchmarks.generators.documents import DocumentGenerator
 from benchmarks.generators.models import BenchmarkItem
+from sqler import F, SQLerDB, backup, export_csv, export_json, export_jsonl, restore
 
 SUITE_NAME = "ops"
 

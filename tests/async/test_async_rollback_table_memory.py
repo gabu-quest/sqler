@@ -13,6 +13,7 @@ from typing import Optional
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel, AsyncSQLerSafeModel
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.models.lite.async_model import AsyncSQLerLiteModel

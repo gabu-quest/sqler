@@ -13,6 +13,7 @@ import textwrap
 from datetime import datetime
 
 import pytest
+
 import sqler
 from sqler import SQLerError
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter

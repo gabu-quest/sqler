@@ -26,6 +26,7 @@ from exception_points import (
     trace_raising_at_line,
     tracing,
 )
+
 from sqler import SQLerDB
 from sqler.adapter.synchronous import SQLiteAdapter
 from sqler.exceptions import NotConnectedError, TransactionStateError

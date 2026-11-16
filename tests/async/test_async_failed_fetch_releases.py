@@ -18,6 +18,7 @@ import time
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 

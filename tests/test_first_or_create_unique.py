@@ -12,6 +12,7 @@ import threading
 from dataclasses import dataclass
 
 import pytest
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,

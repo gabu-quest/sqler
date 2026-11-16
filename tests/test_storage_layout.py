@@ -9,6 +9,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+
 from sqler import F, SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.exceptions import StaleVersionError
 from sqler.fts import FTSIndex

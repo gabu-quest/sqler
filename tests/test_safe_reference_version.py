@@ -4,6 +4,7 @@ import warnings
 from typing import Optional
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 
 

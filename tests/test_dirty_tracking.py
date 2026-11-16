@@ -15,6 +15,7 @@ from typing import Optional
 import msgspec
 import pytest
 from pairwise import all_pairs
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerModel,

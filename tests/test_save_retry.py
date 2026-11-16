@@ -19,6 +19,7 @@ from datetime import date
 from typing import Optional
 
 import pytest
+
 from sqler import DEFAULT_REBASE_CONFIG, PERMISSIVE_REBASE_CONFIG, AsyncSQLerDB, SQLerDB
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.adapter.synchronous import SQLiteAdapter

@@ -1,6 +1,7 @@
 """SoftDeleteMixin: soft_delete, restore, active, with_deleted and only_deleted."""
 
 import pytest
+
 from sqler import SoftDeleteMixin, SQLerDB, SQLerModel
 
 

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 import pytest
+
 from sqler.models import mixins
 
 

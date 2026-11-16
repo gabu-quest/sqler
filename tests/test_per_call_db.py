@@ -8,6 +8,7 @@ SQLerModel, SQLerSafeModel, SQLerLiteModel, SQLerLiteSafeModel.
 from dataclasses import dataclass
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.exceptions import (
     InvalidIdentifierError,

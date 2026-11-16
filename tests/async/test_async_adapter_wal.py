@@ -1,4 +1,5 @@
 import pytest
+
 from sqler.adapter import AsyncSQLiteAdapter
 
 
