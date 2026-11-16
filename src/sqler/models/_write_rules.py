@@ -31,7 +31,7 @@ from sqler import registry
 from sqler._stored import stored
 from sqler.exceptions import ReferentialIntegrityError
 from sqler.models import _dirty, _refs, async_integrity, integrity
-from sqler.models._table_names import _Home, _home_of, _set_home
+from sqler.models._table_names import _check_given, _Home, _home_of, _set_home
 
 Row = tuple[str, Any, Optional[dict], Optional[dict]]
 
@@ -210,6 +210,7 @@ def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]
     one batch; with row rules, in one transaction with them, and a failure puts every
     instance's identity back."""
     if not instances:
+        _check_given(cls, db)
         return instances
     new_only(instances)
     db, table = cls._resolve_binding(db)
@@ -244,6 +245,7 @@ def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]
 async def asave_many(cls, instances: list, db, insert) -> list:
     """Async twin of :func:`save_many`; ``insert(db, table, instances)`` returns an awaitable."""
     if not instances:
+        _check_given(cls, db)
         return instances
     new_only(instances)
     db, table = cls._resolve_binding(db)

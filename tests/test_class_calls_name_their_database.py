@@ -640,6 +640,135 @@ def test_a_search_given_an_async_database_raises_as_an_index_on_one_does(two_dbs
         cls.search("banana", db=adb)
 
 
+# ----- a database of the other kind ---------------------------------------------------------
+
+
+def wrong_kind_message(cls: type, takes: str, given: str) -> str:
+    """The ``TypeError`` of a model given a database it cannot use, word for word."""
+    article = {"SQLerDB": "a", "AsyncSQLerDB": "an"}[takes]
+    return (
+        f"{cls.__name__} takes {article} {takes} as its database, not an object of type {given}: "
+        "a sync model reads and writes through a SQLerDB, an async model through an AsyncSQLerDB."
+    )
+
+
+# How each call is made with the database ``db``. ``kept`` is a saved instance (``apple``, id 1).
+# Each call is awaited when it returns an awaitable, so one table serves both kinds.
+WRONG_KIND_CALLS = {
+    "save": lambda cls, kept, db: cls(name="damson").save(db=db),
+    "save_saved": lambda cls, kept, db: kept.save(db=db),
+    "delete": lambda cls, kept, db: kept.delete(db=db),
+    "refresh": lambda cls, kept, db: kept.refresh(db=db),
+    "from_id": lambda cls, kept, db: cls.from_id(1, db=db),
+    "from_ids": lambda cls, kept, db: cls.from_ids([1], db=db),
+    "from_ids_empty": lambda cls, kept, db: cls.from_ids([], db=db),
+    "save_many": lambda cls, kept, db: cls.save_many([cls(name="damson")], db=db),
+    "save_many_empty": lambda cls, kept, db: cls.save_many([], db=db),
+    "first_or_create": lambda cls, kept, db: cls.first_or_create({"name": "damson"}, db=db),
+    "add_index": lambda cls, kept, db: cls.add_index("name", db=db),
+    "ensure_index": lambda cls, kept, db: cls.ensure_index("name", db=db),
+    "validate_references": lambda cls, kept, db: cls.validate_references(db=db),
+    "using": lambda cls, kept, db: cls.using(db),
+    "set_db": lambda cls, kept, db: cls.set_db(db),
+    "bind": lambda cls, kept, db: cls.bind(db),
+}
+
+
+def _method_of(name: str) -> str:
+    return {"save_saved": "save", "from_ids_empty": "from_ids", "save_many_empty": "save_many"}.get(
+        name, name
+    )
+
+
+def wrong_kind_cases(want_async: bool) -> list:
+    """Every call of ``WRONG_KIND_CALLS`` a base of the kind has, on every base of the kind."""
+    return [
+        pytest.param(base, name, id=f"{base.__name__}-{name}")
+        for base in _bases()
+        if is_async(base) == want_async
+        for name in sorted(WRONG_KIND_CALLS)
+        if hasattr(base, _method_of(name))
+    ]
+
+
+def test_every_sync_base_is_given_every_call_of_the_other_kind():
+    """Five sync bases; ``validate_references`` is on the two pydantic ones, ``bind`` on the
+    lite and msgspec ones: 5 * 14 + 2 + 3 cases."""
+    assert len(wrong_kind_cases(want_async=False)) == 75
+
+
+def _binding(cls) -> tuple:
+    return (cls._db, cls._table, cls.__dict__.get("__tablename__"))
+
+
+def _identity(inst) -> tuple:
+    home = vars(inst).get("_home")
+    return (inst._id, inst.name, getattr(inst, "_version", None), home.db if home else None)
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+@pytest.mark.parametrize("given", ["async_db", "str"])
+@pytest.mark.parametrize(("base", "name"), wrong_kind_cases(want_async=False))
+def test_a_sync_model_given_a_database_it_cannot_use_raises_before_anything_runs(
+    base, name, given, bound, two_dbs
+):
+    """The ``TypeError`` names the class, the type given and the database the class takes;
+    the sync database, the saved instance and the class binding are as they were."""
+    right, _ = two_dbs
+    cls, _ = make_class(base, None, own_table=True)
+    if bound:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cls.set_db(right)
+    kept = cls(name="apple").save(db=right)
+    wrong = sqler.AsyncSQLerDB.in_memory(shared=False) if given == "async_db" else "x"
+    before = (_snapshot(_db_path(right)), _identity(kept), _binding(cls))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        with pytest.raises(TypeError) as caught:
+            _run(_v(WRONG_KIND_CALLS[name](cls, kept, wrong)))
+    given_type = "AsyncSQLerDB" if given == "async_db" else "str"
+    assert str(caught.value) == wrong_kind_message(cls, "SQLerDB", given_type)
+    assert (_snapshot(_db_path(right)), _identity(kept), _binding(cls)) == before
+
+
+def test_a_sync_model_saved_with_an_async_database_keeps_no_id_and_writes_nothing(two_dbs):
+    right, _ = two_dbs
+    cls, table = make_class(sqler.SQLerModel, None, own_table=True)
+    right.ensure_table(table)
+    note = cls(name="x")
+    with pytest.raises(TypeError) as caught:
+        note.save(db=sqler.AsyncSQLerDB.in_memory(shared=False))
+    assert str(caught.value) == wrong_kind_message(cls, "SQLerDB", "AsyncSQLerDB")
+    assert note._id is None
+    assert vars(note).get("_home") is None
+    with sqlite3.connect(_db_path(right)) as raw:
+        assert raw.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
+
+
+class _OwnDB(SQLerDB):
+    """A database class of the program's own, on ``SQLerDB``."""
+
+
+@pytest.mark.parametrize(
+    "base", [b for b in _bases() if not is_async(b)], ids=lambda b: b.__name__
+)
+def test_a_subclass_of_the_sync_database_is_taken_as_the_database_is(base, tmp_path):
+    db = _OwnDB.on_disk(str(tmp_path / "own.db"))
+    try:
+        cls, _ = make_class(base, None, own_table=True)
+        _run(seed(cls, db))
+        assert _names(cls.using(db).order_by("_id").all()) == NAMES
+        assert cls.from_id(2, db=db).name == "banana"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cls.set_db(db)
+        assert cls._db is db
+        assert cls.count() == 3
+    finally:
+        db.close()
+
+
 # ----- the imports ------------------------------------------------------------------------
 
 
