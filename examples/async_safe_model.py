@@ -11,14 +11,13 @@ class AAccount(AsyncSQLerSafeModel):
 async def amain():
     db = AsyncSQLerDB.in_memory()
     await db.connect()
-    AAccount.set_db(db)
 
     acc = AAccount(owner="Ada", balance=100)
-    await acc.save()
+    await acc.save(db=db)
     print("version:", acc._version)
 
     acc.balance = 120
-    await acc.save()
+    await acc.save(db=db)
     print("version:", acc._version)
 
     try:
@@ -28,9 +27,9 @@ async def amain():
             [acc._id],
         )
         await db.adapter.commit()
-        await acc.save()
+        await acc.save(db=db)
     except StaleVersionError:
-        await acc.refresh()
+        await acc.refresh(db=db)
         print("stale detected, refreshed to version:", acc._version)
 
     await db.close()

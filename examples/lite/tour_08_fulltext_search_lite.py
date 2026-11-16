@@ -103,8 +103,8 @@ def _(mo):
     >     class FTS:
     >         fields = ["title", "body"]
     >
-    > BlogPost.create_search_index()
-    > results = BlogPost.search("python")  # search directly on model
+    > BlogPost.create_search_index(db=db)
+    > results = BlogPost.search("python", db=db)  # search directly on model
     > ```
     >
     > Run locally: `uv run marimo edit examples/tour_08_fulltext_search.py`
@@ -173,9 +173,6 @@ def _(SQLerLiteModel, dataclass, db):
         content: str
         author: str
 
-    # Register the model with the database
-    Article.set_db(db)
-
     # Create sample articles
     _articles = [
         ("Python Basics", "Learn Python programming fundamentals. Variables, loops, and functions.", "Alice"),
@@ -188,9 +185,9 @@ def _(SQLerLiteModel, dataclass, db):
         ("SQLite Guide", "Using SQLite for embedded database applications.", "Eve"),
     ]
     for _title, _content, _author in _articles:
-        Article(title=_title, content=_content, author=_author).save()
+        Article(title=_title, content=_content, author=_author).save(db=db)
 
-    print(f"Created {Article.count()} articles")
+    print(f"Created {Article.using(db).count()} articles")
     return (Article,)
 
 
@@ -206,9 +203,9 @@ def _(mo):
 
 
 @app.cell
-def _(Article, FTSIndex):
+def _(Article, FTSIndex, db):
     # Create FTS index on title and content fields
-    fts = FTSIndex(Article, fields=["title", "content"])
+    fts = FTSIndex(Article, fields=["title", "content"], db=db)
 
     # Create the FTS5 virtual table
     fts.create()

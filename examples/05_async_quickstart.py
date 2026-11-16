@@ -12,10 +12,9 @@ class AUser(AsyncSQLerModel):
 async def main():
     db = AsyncSQLerDB.in_memory()
     await db.connect()
-    AUser.set_db(db)
 
-    await AUser(name="Alice", age=30).save()
-    adults = await AUser.query().filter(F("age") >= 18).order_by("age").all()
+    await AUser(name="Alice", age=30).save(db=db)
+    adults = await AUser.using(db).filter(F("age") >= 18).order_by("age").all()
     print([u.name for u in adults])
 
     await db.close()

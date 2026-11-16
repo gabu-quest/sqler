@@ -65,7 +65,6 @@ def _(SQLerModel, db):
         content: str
         author: str
 
-    Article.set_db(db)
 
     # Create sample articles
     _articles = [
@@ -79,9 +78,9 @@ def _(SQLerModel, db):
         ("SQLite Guide", "Using SQLite for embedded database applications.", "Eve"),
     ]
     for _title, _content, _author in _articles:
-        Article(title=_title, content=_content, author=_author).save()
+        Article(title=_title, content=_content, author=_author).save(db=db)
 
-    print(f"Created {Article.query().count()} articles")
+    print(f"Created {Article.using(db).count()} articles")
     return (Article,)
 
 
@@ -96,9 +95,9 @@ def _(mo):
 
 
 @app.cell
-def _(Article, FTSIndex):
+def _(Article, FTSIndex, db):
     # Create FTS index on title and content fields
-    fts = FTSIndex(Article, fields=["title", "content"])
+    fts = FTSIndex(Article, fields=["title", "content"], db=db)
 
     # Create the FTS5 virtual table
     fts.create()
@@ -315,17 +314,16 @@ def _(SQLerModel, db):
         class FTS:
             fields = ["title", "body"]
 
-    BlogPost.set_db(db)
 
     # Create the search index
-    BlogPost.create_search_index()
+    BlogPost.create_search_index(db=db)
 
     # Create and index posts
-    BlogPost(title="Hello World", body="My first blog post about Python").save()
-    BlogPost(title="SQLer Tips", body="Best practices for using SQLer ORM").save()
+    BlogPost(title="Hello World", body="My first blog post about Python").save(db=db)
+    BlogPost(title="SQLer Tips", body="Best practices for using SQLer ORM").save(db=db)
 
     # Search directly on model - returns model instances
-    _results = BlogPost.search("python")
+    _results = BlogPost.search("python", db=db)
     print("BlogPost.search('python'):")
     for _post in _results:
         print(f"  - {_post.title}")

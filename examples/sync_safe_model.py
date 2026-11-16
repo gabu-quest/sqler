@@ -8,14 +8,13 @@ class Account(SQLerSafeModel):
 
 def main():
     db = SQLerDB.in_memory()
-    Account.set_db(db)
 
     acc = Account(owner="Ada", balance=100)
-    acc.save()
+    acc.save(db=db)
     print("version:", acc._version)
 
     acc.balance = 120
-    acc.save()
+    acc.save(db=db)
     print("version:", acc._version)
 
     try:
@@ -26,9 +25,9 @@ def main():
         )
         db.adapter.commit()
         acc.balance = 130
-        acc.save()
+        acc.save(db=db)
     except StaleVersionError:
-        acc.refresh()
+        acc.refresh(db=db)
         print("stale detected, refreshed to version:", acc._version)
 
     db.close()
