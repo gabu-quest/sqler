@@ -1306,10 +1306,11 @@ class SQLerDB(_TableMemory):
             raise ValueError("expected_version required for update")
 
         def make() -> tuple[str, list[Any], Any]:
-            self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
-            if not self._is_versioned(table) and (_id is None or self._has_version_column(table) is not None):
-                self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
+            # one look at what is remembered; an unsettled table is refused here, before it is given ``_version``
             columns, layout, has = self._shape_of(table, fields)
+            if not has and (_id is None or self._has_version_column(table) is not None):
+                self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
+                columns, layout, has = self._shape_of(table, fields)
             return _upsert_sql(table, _id, doc, columns, layout, has, expected_version)
 
         if _id is None:
