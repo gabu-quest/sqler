@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import json
 import sqlite3
 from contextvars import ContextVar
 from typing import Any, Optional
@@ -8,15 +7,22 @@ from typing import Any, Optional
 from sqler import cache
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter, PoolStats
 from sqler.db.sqler_db import (
+    _INDEX_EXISTS_SQL,
     _and_fields,
     _bulk_upserts,
+    _checked_promotion,
     _columns_sql,
+    _create_index_sql,
     _create_sql,
+    _delete_sql,
+    _drop_index_sql,
     _ended_while_leaving,
     _fields_update,
     _hand_ids,
     _id_params,
     _in_order,
+    _index_rows,
+    _indexes_sql,
     _inserts,
     _keep_word,
     _layout,
@@ -24,23 +30,24 @@ from sqler.db.sqler_db import (
     _moved,
     _promoted_in,
     _promotion,
+    _read_only,
     _record,
     _refuse_unwritten,
     _row_columns,
     _row_documents,
+    _row_there_sql,
     _rows_sql,
     _settled,
+    _sql_results,
     _TableMemory,
     _unwritable,
     _upsert_sql,
+    _versioning,
 )
 from sqler.exceptions import StaleVersionError
 from sqler.query.query import _has_version, aend_failed, is_missing_table
 from sqler.utils import (
-    validate_check_expression,
-    validate_column_def,
     validate_column_name,
-    validate_field_name,
     validate_identifier,
     validate_table_name,
 )
@@ -176,13 +183,7 @@ class AsyncSQLerDB(_TableMemory):
         model: Any = None,
     ) -> None:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._ensure_table_with_promoted`."""
-        table = validate_table_name(table)
-        checks = checks or {}
-        for col_name, col_def in promoted.items():
-            validate_column_name(col_name)
-            validate_column_def(col_def)
-        for chk_expr in checks.values():
-            validate_check_expression(chk_expr)
+        table, checks = _checked_promotion(table, promoted, checks)
 
         layout, names = await self._names(table)
         unsettled = await self._run(_settled(table, names))
@@ -459,7 +460,7 @@ class AsyncSQLerDB(_TableMemory):
         if rowcount > 0:
             return None if expected_version is None else expected_version + 1
         gone = expected_version is None or not await _afetch_all(
-            self.adapter, f"SELECT 1 FROM {table} WHERE _id = ?;", [_id]
+            self.adapter, _row_there_sql(table), [_id]
         )
         _refuse_unwritten(gone, table, _id)
 
@@ -531,7 +532,7 @@ class AsyncSQLerDB(_TableMemory):
             _id: Row id to delete.
         """
         await self._ensure_table(table)
-        cur = await self.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [_id])
+        cur = await self.adapter.execute(_delete_sql(table), [_id])
         try:
             await self.adapter.auto_commit()
         finally:
@@ -673,53 +674,30 @@ class AsyncSQLerDB(_TableMemory):
 
         Only read-only statements (SELECT, EXPLAIN, PRAGMA, WITH) are allowed.
 
-        When the result set exposes a ``data`` column alongside ``_id``, the
-        JSON payload is decoded and merged with ``_id``. For ad-hoc projections
-        (e.g. ``SELECT _id``) the method returns simple dicts keyed by the
-        selected columns so callers can hydrate with :meth:`AsyncSQLerModel.from_id`.
+        Each row is read by its column names (:func:`sqler.db.sqler_db._sql_results`): with a
+        ``data`` column, its JSON document, with ``_id`` set from an ``_id`` column; with
+        ``_id`` the only column, ``{"_id": id}``, so callers can hydrate with
+        :meth:`AsyncSQLerModel.from_id`; else a dict of every column by its name.
 
         Args:
             query: SQL SELECT statement.
             params: Optional parameter list.
 
         Returns:
-            list[dict[str, Any]]: Decoded documents with ``_id`` included.
+            list[dict[str, Any]]: One dict per row, as above; a ``data`` column whose JSON is not an object, read with an ``_id`` column, raises ``TypeError``.
 
         Raises:
             ValueError: If the query is not a read-only statement.
         """
-        stripped = query.strip()
-        first_word = stripped.split()[0].upper() if stripped else ""
-        if first_word not in ("SELECT", "EXPLAIN", "PRAGMA", "WITH"):
-            raise ValueError(
-                "execute_sql only accepts read-only queries (SELECT/EXPLAIN/PRAGMA/WITH)"
-            )
-        # Reject multi-statement queries (semicolon before the end)
-        if ";" in stripped.rstrip(";"):
-            raise ValueError(
-                "execute_sql does not allow multi-statement queries"
-            )
+        _read_only(query)
         cur = await self.adapter.execute(query, params or [])
         try:
+            description = cur.description
             rows = await cur.fetchall()
         finally:
             await cur.close()
         await self.adapter.auto_commit()
-        docs: list[dict[str, Any]] = []
-        for row in rows:
-            if len(row) >= 2:
-                # Assume (_id, data) or (_id, data, ...)
-                try:
-                    obj = json.loads(row[1])
-                    obj["_id"] = int(row[0])
-                    docs.append(obj)
-                except (json.JSONDecodeError, TypeError):
-                    docs.append({"_id": int(row[0])})
-            elif len(row) == 1:
-                docs.append({"_id": int(row[0])})
-            else:
-                docs.append({})
-        return docs
+        return _sql_results(description, rows)
 
     async def create_index(
         self,
@@ -743,17 +721,7 @@ class AsyncSQLerDB(_TableMemory):
             where: Optional partial-index WHERE clause.
         """
         await self._ensure_table(table)
-        validate_field_name(field) if not field.startswith("_") else validate_identifier(field)
-        if name is not None:
-            validate_identifier(name)
-        if where is not None:
-            validate_check_expression(where)
-        idx_name = name or f"idx_{table}_{field.replace('.', '_')}"
-        unique_sql = "UNIQUE" if unique else ""
-        expr = f"json_extract(data, '$.{field}')" if not field.startswith("_") else field
-        where_sql = f"WHERE {where}" if where else ""
-        ddl = f"CREATE {unique_sql} INDEX IF NOT EXISTS {idx_name} ON {table} ({expr}) {where_sql};"
-        cur = await self.adapter.execute(ddl)
+        cur = await self.adapter.execute(_create_index_sql(table, field, unique, name, where))
         try:
             await self.adapter.auto_commit()
         finally:
@@ -765,9 +733,7 @@ class AsyncSQLerDB(_TableMemory):
         Args:
             name: Index name.
         """
-        validate_identifier(name)
-        ddl = f"DROP INDEX IF EXISTS {name};"
-        cur = await self.adapter.execute(ddl)
+        cur = await self.adapter.execute(_drop_index_sql(name))
         try:
             await self.adapter.auto_commit()
         finally:
@@ -782,43 +748,13 @@ class AsyncSQLerDB(_TableMemory):
         Returns:
             List of dicts with index info: name, table, sql, unique.
         """
-        if table:
-            query = """
-                SELECT name, tbl_name, sql
-                FROM sqlite_master
-                WHERE type = 'index' AND tbl_name = ? AND name NOT LIKE 'sqlite_%'
-                ORDER BY name;
-            """
-            cur = await self.adapter.execute(query, [table])
-        else:
-            query = """
-                SELECT name, tbl_name, sql
-                FROM sqlite_master
-                WHERE type = 'index' AND name NOT LIKE 'sqlite_%'
-                ORDER BY tbl_name, name;
-            """
-            cur = await self.adapter.execute(query)
-
+        cur = await self.adapter.execute(*_indexes_sql(table))
         try:
             rows = await cur.fetchall()
         finally:
             await cur.close()
         await self.adapter.auto_commit()
-
-        indexes = []
-        for row in rows:
-            name = row[0]
-            tbl_name = row[1]
-            sql = row[2] or ""
-            indexes.append(
-                {
-                    "name": name,
-                    "table": tbl_name,
-                    "sql": sql,
-                    "unique": "UNIQUE" in sql.upper() if sql else False,
-                }
-            )
-        return indexes
+        return _index_rows(rows)
 
     async def index_exists(self, name: str) -> bool:
         """Check if an index exists by name.
@@ -829,9 +765,7 @@ class AsyncSQLerDB(_TableMemory):
         Returns:
             True if the index exists, False otherwise.
         """
-        cur = await self.adapter.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;", [name]
-        )
+        cur = await self.adapter.execute(_INDEX_EXISTS_SQL, [name])
         try:
             row = await cur.fetchone()
         finally:
@@ -857,12 +791,10 @@ class AsyncSQLerDB(_TableMemory):
         await self.adapter.auto_commit()
         added: tuple[str, ...] = ()
         if not _has_version(layout):
-            cur = await self.adapter.execute(f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;')
-            try:
-                await self.adapter.auto_commit()
-            finally:
-                await cur.close()
-            added = ("_version",)
+            # the look again and the change in one transaction that holds the write lock from
+            # its start, so no other task, connection or process changes the table between them
+            async with self:
+                layout, names, added = await self._run(_versioning(table))
         self._seen(table, layout, names, added)
 
     async def upsert_with_version(
