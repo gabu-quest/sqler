@@ -763,7 +763,11 @@ def test_a_typed_reference_to_no_row_of_the_fields_class(key, field, held, want,
     assert run(key, scenario) == (want, 0)
 
 
-@pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("table,rid", BAD), ("way", WAYS)))
+# a reference (a str ``_table``, an int ``_id``) no row can be at
+UNUSABLE = [p for p in BAD if p.id in {"table-not-a-name", "id-past-int64"}]
+
+
+@pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("table,rid", UNUSABLE), ("way", WAYS)))
 def test_an_unusable_reference_at_a_typed_position_reads_as_no_row(key, table, rid, way):
     async def scenario(w):
         await w.put("user", {"name": "u1"})
@@ -799,6 +803,37 @@ def test_a_reference_deeper_than_the_annotation_puts_a_model_is_data(key, way):
         return got.either == {"k": ref}, deeper, selects_from(sent, w.t["user"])
 
     assert run(key, scenario) == (True, DEEPER_THAN_A_USER[key], 0)
+
+
+# Dicts that are not references (a reference is exactly ``_table``, a str, and ``_id``, an int
+# that is not a bool), each held at a typed position: read as any other dict there is (a
+# pydantic base validates it as a ``User`` with no row id, a lite base keeps the dict), and
+# the row it names is not read. ``USER`` stands for the user table, which has row 1.
+NOT_A_REFERENCE = [
+    pytest.param({"_table": "USER", "_id": 1, "label": "data"}, id="more-keys"),
+    pytest.param({"_table": "USER", "_id": True}, id="id-bool"),
+]
+
+
+@pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("held", NOT_A_REFERENCE), ("way", WAYS)))
+def test_a_dict_that_is_not_a_reference_at_a_typed_position_is_not_followed(key, held, way):
+    async def scenario(w):
+        await w.put("user", {"name": "u1"})
+        data = {k: w.t["user"] if v == "USER" else v for k, v in held.items()}
+        twin = w.ref("user", 1)
+        hid = await w.put("holder", {"one": data, "many": [twin, data], "by_key": {"a": twin, "b": data}})
+        with query_logger.capture() as sent:
+            got = await w.load("holder", hid, way)
+        return (
+            (pic(key, got.one), pic(key, got.many), pic(key, got.by_key)),
+            pic(key, data),
+            selects_from(sent, w.t["user"]),
+        )
+
+    (one, many, by_key), data, user_reads = run(key, scenario)
+    read = data if BASES[key][1] else ("User", None, "")
+    assert (one, many, by_key) == (read, [U1, read], {"a": U1, "b": read})
+    assert user_reads == 1
 
 
 @pytest.mark.parametrize("way", WAYS)

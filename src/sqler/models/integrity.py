@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Callable, Collection, Generator, Optional
 from sqler import registry
 from sqler.models import _refs, _write_rules
 from sqler.query.query import is_missing_table
-from sqler.utils import validate_table_name
+from sqler.utils import is_ref_dict, validate_table_name
 
 if TYPE_CHECKING:
     from sqler.db.sqler_db import SQLerDB
@@ -153,7 +153,7 @@ def _swap(value: Any, at: _refs.Position, hit: Callable, path: str, paths: list)
     as the loader does not (but at :data:`_ANYWHERE`, where nothing is known)."""
     anywhere = at is _ANYWHERE
     if isinstance(value, dict):
-        if "_table" in value and "_id" in value:
+        if is_ref_dict(value):
             if at.admits and hit(value, at.admits):
                 paths.append(path or "$")
                 return None
@@ -333,7 +333,8 @@ def find_ref_paths(data: dict, allowed_tables: set[str], target_id: int) -> list
     """Find the JSON paths in ``data`` holding a reference to ``target_id`` of one of
     ``allowed_tables``, at any position, as :func:`validate_references` reads them (this
     takes no class: :func:`find_referrers` looks only at the positions a class declares as
-    a model). An ``_id`` is compared as ``int(_id)``, which raises for one that is no number.
+    a model). A dict that is not a reference (:func:`sqler.utils.is_ref_dict`) is data, and
+    is only walked into.
 
     Args:
         data: The document to search.
@@ -348,7 +349,7 @@ def find_ref_paths(data: dict, allowed_tables: set[str], target_id: int) -> list
 
     def walk(value, path: str):
         if isinstance(value, dict):
-            if value.get("_table") in allowed_tables and int(value.get("_id", -1)) == target_id:
+            if is_ref_dict(value) and value["_table"] in allowed_tables and value["_id"] == target_id:
                 paths.append(path or "$")
             for k, v in value.items():
                 walk(v, f"{path}.{k}" if path else k)
@@ -446,18 +447,17 @@ def validate_references(db: "SQLerDB"):
                 continue
 
             def walk(value, path: str):
-                if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    t = value.get("_table")
-                    i = int(value.get("_id", -1))
+                if is_ref_dict(value):
+                    t, i = value["_table"], value["_id"]
                     # Validate table name to prevent SQL injection
-                    if not isinstance(t, str) or not _is_valid_table_name(t):
+                    if not _is_valid_table_name(t):
                         # Invalid table name in reference - treat as broken
                         broken.append(
                             BrokenRef(
                                 table=table,
                                 row_id=int(_id),
                                 path=path or "$",
-                                target_table=str(t),
+                                target_table=t,
                                 target_id=i,
                             )
                         )

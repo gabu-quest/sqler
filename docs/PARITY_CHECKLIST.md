@@ -215,7 +215,6 @@ This document enumerates every feature in the sync implementation and tracks par
 | `delete_with_policy(on_delete, db=None)` | ✅ | ✅ | ✅ | restrict, set_null, cascade all work |
 | `refresh()` | ✅ | ✅ | ✅ | |
 | **Relationship Helpers** |
-| `_is_ref_dict(value)` | ✅ | N/A | 🔧 | Handled inline in async |
 | `_resolve_relations(data)` | ✅ | ✅ | 🔧 | Async uses `_aresolve_relations` |
 | `_dump_with_relations()` | ✅ | ✅ | 🔧 | Async uses `_adump_with_relations` |
 | **Integrity Helpers** |
@@ -227,7 +226,6 @@ This document enumerates every feature in the sync implementation and tracks par
 
 ### Model Notes:
 1. **`set_db()` doesn't call `_ensure_table` in async** — By design (async requires await)
-2. **`_is_ref_dict()` handled inline in async** — Not needed as separate helper
 
 ---
 
@@ -350,7 +348,6 @@ This document enumerates every feature in the sync implementation and tracks par
 |------------|----------|-------|
 | `timeout_ms` parameter | Adapter | Not applicable to aiosqlite |
 | Memory singleton mode | Adapter | Different concurrency model |
-| `_is_ref_dict()` helper | Model | Handled inline in async |
 | `set_db()` lazy in async | Model/SafeModel | Async can't call sync `_ensure_table` |
 | Row count detection | Query | Sync: `cursor.rowcount`, async: `SELECT changes()` |
 

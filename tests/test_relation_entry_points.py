@@ -1179,7 +1179,7 @@ def test_a_typed_field_holding_a_reference_that_cannot_be_followed(typed, base, 
         else {"_table": g_cls.__tablename__, "_id": 1}
     )
     rid = db.insert_document(pt, {"title": "h", "one": held})
-    assert _observe(db, p_cls, rid, way, pt) == UNFOLLOWED_EXPECTED
+    assert _observe(db, p_cls, rid, way, pt) == unfollowed_expected(base, shape, c_cls)
 
 
 @pytest.mark.parametrize("base", sorted(TYPED))
@@ -1714,6 +1714,26 @@ UNFOLLOWED_EXPECTED = (
     {"bag": {}, "many": [], "one": None, "title": "h"},
     {"bag": {}, "many": [], "one": None, "title": "h"},
 )
+
+
+def unfollowed_expected(base: str, shape: str, c_cls: type) -> Any:
+    """``other-table`` is a reference into another class's table (``UNFOLLOWED_EXPECTED``).
+    ``id-str``, an ``_id`` that is text, is no reference: a dict like any other at that
+    position. A lite base keeps it and saving writes it back; a pydantic base validates it
+    as a blank child, which the parent's save refuses."""
+    if shape == "other-table":
+        return UNFOLLOWED_EXPECTED
+    held = {"_table": c_cls.__tablename__, "_id": "x"}
+    if base.startswith("lite"):
+        return (
+            {"bag": {}, "many": [], "one": ("ref", held["_table"], "x"), "title": "h"},
+            {"bag": {}, "many": [], "one": held, "title": "h"},
+        )
+    blank = (c_cls.__name__, None, 0 if base in VERSIONED else "-", {"name": "", "g": None})
+    return (
+        {"bag": {}, "many": [], "one": blank, "title": "h"},
+        ("ValueError", "Related model must be saved before saving parent"),
+    )
 ELSEWHERE_EXPECTED: dict = {('lite', 'all'): ({'never': ('LtyuC', 1, '-', {'name': 'never-bound'}),
                     'other': ('LtyoC', 1, '-', {'name': 'in-parent-db'}),
                     'title': 'e'},

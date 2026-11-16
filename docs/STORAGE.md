@@ -127,7 +127,10 @@ writes do not move the column. So, with both on one file:
 ## References
 
 A saved model stored in a field of another model is written inside `data` as
-`{"_table": "<table>", "_id": <id>}`: the referred table's name and the row's `_id`.
+`{"_table": "<table>", "_id": <id>}`: the referred table's name and the row's `_id`. A
+reference is exactly these two keys, `_table` a string and `_id` an integer (not `true` or
+`false`); any other dict, one with these two keys and more among them, is data: it is
+stored and read whole, and never followed (`sqler.utils.is_ref_dict` tells them apart).
 
 ## Indexes made by `create_index`
 

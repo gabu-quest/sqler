@@ -20,7 +20,7 @@ from sqler.models.integrity import (  # noqa: F401
     _nulled,
     find_ref_paths,
 )
-from sqler.utils import validate_table_name
+from sqler.utils import is_ref_dict, validate_table_name
 
 if TYPE_CHECKING:
     from sqler.db.async_db import AsyncSQLerDB
@@ -145,18 +145,17 @@ async def async_validate_references(db: "AsyncSQLerDB"):
                 continue
 
             async def check_refs(value, path: str):
-                if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    t = value.get("_table")
-                    i = int(value.get("_id", -1))
+                if is_ref_dict(value):
+                    t, i = value["_table"], value["_id"]
                     # Validate table name to prevent SQL injection
-                    if not isinstance(t, str) or not _is_valid_table_name(t):
+                    if not _is_valid_table_name(t):
                         # Invalid table name in reference - treat as broken
                         broken.append(
                             BrokenRef(
                                 table=table,
                                 row_id=int(_id),
                                 path=path or "$",
-                                target_table=str(t),
+                                target_table=t,
                                 target_id=i,
                             )
                         )

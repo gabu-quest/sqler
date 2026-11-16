@@ -86,6 +86,10 @@ class Slot(pydantic.BaseModel):
     inner: Optional[Inner] = None
 
 
+# A dict with the two key names of a reference and more is data, stored and read whole; its
+# ``_table`` names the table these tests save to, and ``_id`` the row saved first
+WITH_REF_KEYS = {"_table": "t", "_id": 1, "label": "kept", "n": 3}
+
 # Its elements do not sort, and the set itself gives them as 8, 1, (0,): stored by type name
 # and repr, so the same set is the same list in every process.
 MIXED = {8, 1, (0,)}
@@ -119,6 +123,7 @@ KINDS = [
     Kind("list_of_date", list[date], [DAY], [DAY_TEXT], [date(2026, 11, 15)]),
     Kind("dict_of_date", dict[str, date], {"d": DAY}, {"d": DAY_TEXT}, {"d": date(2026, 11, 15)}),
     Kind("deep", None, [{"d": [DAY, (AT,)], "u": {UID}}], [{"d": [DAY_TEXT, [AT_TEXT]], "u": [UID_TEXT]}], []),
+    Kind("reference_keys_and_more", dict, dict(WITH_REF_KEYS), WITH_REF_KEYS, {"_table": "t", "_id": 1, "n": 4}),
     Kind("nested_model", Inner, Inner(day=DAY), {"day": DAY_TEXT}, Inner(day=date(2026, 11, 15))),
     Kind("decimal", Decimal, Decimal("1.1"), 1.1, Decimal("2.5")),
     Kind("decimal_whole", Decimal, Decimal("5"), 5, Decimal("6")),
@@ -352,14 +357,29 @@ def test_a_reference_and_a_stored_reference_beside_a_date(family):
             child.set_db(rows.db, "sv_kids")
         parent.set_db(rows.db, "sv_pars")
         kid = await _aw(child(label="k").save())
-        held = {"_table": "sv_kids", "_id": kid._id, "label": "not part of a reference"}
+        held = {"_table": "sv_kids", "_id": kid._id, "label": "data, not a reference"}
         await _aw(parent(one=kid, items=[kid, held, DAY, {"deep": [kid, AT]}]).save())
         return kid._id, (await rows.documents("sv_pars"))[0]
 
     kid_id, doc = _run(steps, is_async)
     ref = {"_table": "sv_kids", "_id": 1}
     assert kid_id == 1
-    assert doc == {"one": ref, "items": [ref, ref, DAY_TEXT, {"deep": [ref, AT_TEXT]}]}
+    held = {**ref, "label": "data, not a reference"}
+    assert doc == {"one": ref, "items": [ref, held, DAY_TEXT, {"deep": [ref, AT_TEXT]}]}
+
+
+@pytest.mark.parametrize("base", list(BASES))
+def test_a_dict_with_the_reference_keys_and_more_is_read_back_whole(base):
+    """The dict names this very table and the row saved: a load does not follow it."""
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = spec.make(spec.cls, dict)
+        cls.set_db(rows.db, "t")
+        saved = await _aw(cls(v=dict(WITH_REF_KEYS)).save())
+        return saved._id, (await _aw(cls.from_id(saved._id))).v
+
+    assert _run(steps, spec.is_async) == (1, WITH_REF_KEYS)
 
 
 # ---- filters --------------------------------------------------------------------------
@@ -527,6 +547,7 @@ _UPDATE_VALUES = [
     ("nested_model", Inner(day=DAY), f'{{"day":"{DAY_TEXT}"}}', "object"),
     ("plain_list", [1, "a"], '[1,"a"]', "array"),
     ("plain_dict", {"k": [1]}, '{"k":[1]}', "object"),
+    ("reference_keys_and_more", dict(WITH_REF_KEYS), '{"_table":"t","_id":1,"label":"kept","n":3}', "object"),
     ("text", "plain", "plain", "text"),
     ("int", 5, 5, "integer"),
     ("decimal", Decimal("1.1"), 1.1, "real"),

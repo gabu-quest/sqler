@@ -283,9 +283,10 @@ def validate_column_name(name: str) -> str:
 
 
 def is_ref_dict(value: object) -> bool:
-    """Check if a value is a reference dictionary.
-
-    A reference dictionary has the form {"_table": str, "_id": int}.
+    """True when ``value`` is a reference to a row: a dict whose keys are exactly ``_table``,
+    a ``str``, and ``_id``, an ``int`` that is not a ``bool`` (what
+    :func:`sqler.models.ref.as_ref` builds). Any other dict is data: stored whole, read
+    whole, and never followed or counted as a referrer.
 
     Args:
         value: Value to check.
@@ -293,7 +294,10 @@ def is_ref_dict(value: object) -> bool:
     Returns:
         bool: True if value is a reference dictionary.
     """
-    return isinstance(value, dict) and "_table" in value and "_id" in value
+    if not isinstance(value, dict) or len(value) != 2:
+        return False
+    table, rid = value.get("_table"), value.get("_id")
+    return isinstance(table, str) and isinstance(rid, int) and not isinstance(rid, bool)
 
 
 def format_model_context(

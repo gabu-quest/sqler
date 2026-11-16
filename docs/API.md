@@ -548,7 +548,10 @@ assert [row.name for row in q.all()] == ["Alice"]
 
 ### [C47] How references are loaded
 
-A stored reference is a dict `{"_table": ..., "_id": ...}`. In a field whose type hint
+A stored reference is a dict of exactly two keys, `{"_table": <str>, "_id": <int>}` (an
+`_id` that is a `bool`, a float or a string makes it no reference); any other dict, one
+with these keys and more too, is data: stored and read whole, never followed, never a
+referrer (`sqler.utils.is_ref_dict`). In a field whose type hint
 names a model class (`Address | None`, `list[Address]`, `dict[str, Address]`), a reference
 into a table of that class is loaded as the model of its row. Every way of loading
 (`from_id`, `refresh`, `from_ids`, `query().all()`, `query().first()`, sync and async, on
@@ -1031,9 +1034,10 @@ rows too, and theirs.
 - A row refers to another when it holds the reference at a position its class declares as a
   model: `author: U | None`, `items: list[U]`, `by_key: dict[str, U]`, nested, or a base
   class of `U`. These are the positions a load follows. Only a field declared as a model
-  counts: a dict shaped `{"_table": ..., "_id": ...}` in a plain `dict`, `list` or `Any`
-  field is data, and it neither refuses a delete nor is nulled or cascaded.
-  `validate_references()` still reports such a dict whose row is gone.
+  counts: a reference in a plain `dict`, `list` or `Any` field is data, and it neither
+  refuses a delete nor is nulled or cascaded; a dict with a key more than a reference is
+  data at every position. `validate_references()` still reports a reference in any field
+  whose row is gone, and never a dict that is not a reference.
 - The fields that count for a table are those of every class whose rows live in it: the
   class registered for it, a subclass that inherits its table, another class bound to it
   (`__tablename__`, `set_db(db, table)`) and a class whose rows were read or written there
