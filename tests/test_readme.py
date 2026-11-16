@@ -720,7 +720,7 @@ def test_C29_query_logging():
 
     # Stats count matches total logged queries
     stats = query_logger.get_stats()
-    assert stats["count"] >= 2
+    assert stats["count"] == 4
 
     query_logger.disable()
     query_logger.clear()
@@ -1203,7 +1203,7 @@ def test_C44_metrics_collection():
 
     # Get metrics
     data = metrics.get_metrics()
-    assert data["queries"]["total_queries"] >= 3
+    assert data["queries"]["total_queries"] == 6
 
     # Prometheus format export
     prometheus = metrics.prometheus_export()

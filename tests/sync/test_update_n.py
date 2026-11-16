@@ -164,8 +164,7 @@ class TestSyncUpdateNPromoted:
             .update_n(2, priority=F("priority") + 100)
         )
         assert len(results) == 2
-        for r in results:
-            assert r.priority >= 105
+        assert sorted(r.priority for r in results) == [105, 110]
 
 
 class TestSyncUpdateNVersioned:

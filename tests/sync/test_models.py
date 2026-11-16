@@ -66,7 +66,10 @@ def test_model_query_chaining():
 
         # sql inspection
         s = qs.sql()
-        assert s.startswith("SELECT data FROM users") or s.startswith("SELECT _id, data FROM users")
+        assert s == (
+            "SELECT data FROM users WHERE JSON_EXTRACT(data, '$.age') >= ? "
+            "ORDER BY json_extract(data, '$.age') LIMIT 2"
+        )
     finally:
         db.close()
 
