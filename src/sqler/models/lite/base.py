@@ -59,6 +59,10 @@ class SQLerLiteModelBase:
     _id: Optional[int] = None
     _snapshot: Optional[dict] = None
 
+    if typing.TYPE_CHECKING:
+        # each model is a dataclass: ``@dataclass`` on the subclass sets this
+        __dataclass_fields__: ClassVar[dict[str, dataclasses.Field[Any]]]
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Inject annotations from non-dataclass mixin bases.
 

@@ -98,13 +98,15 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
 
     def __copy__(self: T) -> T:
         """A copy that also holds this instance's state that is not a field."""
-        new = msgspec.Struct.__copy__(self)
+        new = msgspec.Struct.__copy__(self)  # type: ignore[attr-defined]  # msgspec's stubs leave out Struct.__copy__, which it has
         new.__dict__.update(self.__dict__)
         return new
 
     def __deepcopy__(self: T, memo: dict) -> T:
         """A deep copy that also holds a deep copy of this instance's state that is not a field."""
-        rebuild, args = self.__reduce__()
+        reduced = self.__reduce__()
+        assert isinstance(reduced, tuple)  # a Struct reduces to (class, field values), never to a name
+        rebuild, args = reduced
         new = rebuild(*copy.deepcopy(args, memo))
         new.__dict__.update(copy.deepcopy(self.__dict__, memo))
         return new

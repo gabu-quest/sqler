@@ -55,6 +55,7 @@ A safe model checks and bumps a row version on every save. `SQLerLiteModelBase` 
   `examples/fastapi/tests`.
 - One file: `uv run pytest tests/<file>`; one test: `uv run pytest tests/<file>::<test>`.
 - Lint: `uv run ruff check .` (CI runs it before the tests).
+- Type check: `uv run mypy` (its settings are `[tool.mypy]` in `pyproject.toml`).
 - Performance tests (marker `perf`, opt-in): `uv run pytest -m perf`.
 
 ## Test folders

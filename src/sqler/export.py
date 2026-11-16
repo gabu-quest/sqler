@@ -33,14 +33,19 @@ from typing import (
     Any,
     Callable,
     Iterator,
+    Literal,
     Optional,
     Type,
     Union,
 )
 
 if TYPE_CHECKING:
-    from sqler.models import SQLerModel
-    from sqler.models.queryset import ModelQuerySet
+    from sqler.models import AsyncSQLerModel, SQLerModel
+    from sqler.models.async_queryset import AsyncSQLerQuerySet
+    from sqler.models.queryset import SQLerQuerySet
+
+    # a queryset of a model, sync or async
+    ModelQuerySet = Union[SQLerQuerySet[Any], AsyncSQLerQuerySet[Any]]
 
 
 @dataclass
@@ -191,7 +196,7 @@ def _deserialize_value(value: str, field_type: Any) -> Any:
     return value
 
 
-def _get_model_fields(model_class: Type["SQLerModel"]) -> list[str]:
+def _get_model_fields(model_class: Union[Type["SQLerModel"], Type["AsyncSQLerModel"]]) -> list[str]:
     """Get exportable field names from a model."""
     fields = []
     for name, field_info in model_class.model_fields.items():
@@ -205,12 +210,13 @@ def _get_model_fields(model_class: Type["SQLerModel"]) -> list[str]:
 # =============================================================================
 
 
-def _get_query_and_model(source: Union["ModelQuerySet", Type["SQLerModel"]]):
+def _get_query_and_model(
+    source: Union["ModelQuerySet", Type["SQLerModel"], Type["AsyncSQLerModel"]],
+):
     """Extract the underlying query object and model class from an export source."""
-    if hasattr(source, "_query"):  # queryset (sync or async)
-        return source._query, source._model_cls
-    else:  # model class
+    if isinstance(source, type):  # model class
         return source.query()._query, source
+    return source._query, source._model_cls  # queryset (sync or async)
 
 
 # =============================================================================
@@ -225,7 +231,7 @@ def export_csv(
     fields: Optional[list[str]] = None,
     include_id: bool = True,
     delimiter: str = ",",
-    quoting: int = csv.QUOTE_MINIMAL,
+    quoting: Literal[0, 1, 2, 3, 4, 5] = csv.QUOTE_MINIMAL,
 ) -> ExportResult:
     """Export query results or model table to CSV.
 
@@ -1088,7 +1094,7 @@ def import_jsonl_string(
 
 
 async def async_export_jsonl(
-    source: Union["ModelQuerySet", Type["SQLerModel"]],
+    source: Union["AsyncSQLerQuerySet[Any]", Type["AsyncSQLerModel"]],
     path: Union[str, Path],
     *,
     fields: Optional[list[str]] = None,
@@ -1129,7 +1135,7 @@ async def async_export_jsonl(
 
 
 async def async_import_jsonl(
-    model_class: Type["SQLerModel"],
+    model_class: Type["AsyncSQLerModel"],
     path: Union[str, Path],
     *,
     skip_errors: bool = False,

@@ -65,9 +65,9 @@ def _json_path_literal(path: "list[Union[str, int]]") -> str:
 
 
 def _normalize_alias_stack(
-    alias_stack: list[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]],
-) -> list[tuple[str, str, Optional[SQLerExpression]]]:
-    norm: list[tuple[str, str, Optional[SQLerExpression]]] = []
+    alias_stack: list[Union[tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]]],
+) -> list[tuple[str, Union[str, int], Optional[SQLerExpression]]]:
+    norm: list[tuple[str, Union[str, int], Optional[SQLerExpression]]] = []
     for entry in alias_stack:
         if len(entry) == 2:  # type: ignore[arg-type]
             a, f = entry  # type: ignore[misc]
@@ -124,7 +124,7 @@ class SQLerField:
         self,
         path: Union[str, list[Union[str, int]]],
         alias_stack: Optional[
-            list[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]]
+            list[Union[tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]]]
         ] = None,
     ):
         """
@@ -142,7 +142,7 @@ class SQLerField:
             if isinstance(segment, str):
                 _check_not_empty(segment)
         self.alias_stack: list[
-            Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]
+            Union[tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]]
         ] = alias_stack or []
 
     def __repr__(self) -> str:
@@ -409,7 +409,7 @@ class SQLerAnyExpression(SQLerExpression):
     def __init__(
         self,
         path: list[Union[str, int]],
-        alias_stack: list[Union[tuple[str, str], tuple[str, str, Optional[SQLerExpression]]]],
+        alias_stack: list[Union[tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]]],
         op: str,
         val: Any,
     ):

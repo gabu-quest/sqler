@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import reprlib
 import warnings
-from typing import ClassVar, Optional, Type, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, Type, TypeVar
 
 from pydantic import BaseModel, PrivateAttr
 
@@ -60,6 +60,9 @@ class SQLerModel(BaseModel):
     _table: ClassVar[Optional[str]] = None
     # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
     _versioned_rows: ClassVar[bool] = False
+    if TYPE_CHECKING:
+        # a model's table: its own, or the one ``set_db()`` gives it
+        __tablename__: ClassVar[str]
 
     # ----- class config -----
     model_config = {
@@ -130,9 +133,10 @@ class SQLerModel(BaseModel):
         from .model_field import SQLerModelField
 
         class _RefBuilder:
-            def __init__(self, model_cls, base: str):
+            def __init__(self, model_cls, base: str | list[str]):
                 self.model_cls = model_cls
-                self.path = [base]
+                # a key, or the one-key path ``any()`` passes, which ``SQLerModelField`` reads by its ``str()``
+                self.path: list[Any] = [base]
 
             def field(self, *parts: str) -> SQLerModelField:
                 return SQLerModelField(self.model_cls, self.path + list(parts))

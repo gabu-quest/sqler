@@ -440,13 +440,16 @@ class _Kind:
 
     __slots__ = ("model", "struct", "lite", "pydantic", "forbids", "set", "gone")
 
+    set: "typing.Callable[[typing.Any, str, typing.Any], None]"  # sets an attribute of an instance
+
     def __init__(self, cls: type) -> None:
         key = id(cls)
         self.gone = weakref.ref(cls, lambda _: _KINDS.pop(key, None))
         self.struct = hasattr(cls, "__struct_fields__")
         self.lite = dataclasses.is_dataclass(cls)
         self.pydantic = hasattr(cls, "__pydantic_validator__")
-        self.forbids = self.pydantic and cls.model_config.get("extra") == "forbid"
+        # a pydantic class has ``model_config``; ``type`` does not declare it
+        self.forbids = self.pydantic and getattr(cls, "model_config").get("extra") == "forbid"
         # every pydantic and lite base has ``_versioned_rows``; a msgspec class stores its rows too
         self.model = hasattr(cls, "_versioned_rows") or (self.struct and hasattr(cls, "from_id"))
         if self.struct:
@@ -651,7 +654,7 @@ def _blank(mdl: Any) -> Any:
         empty = _EMPTY.get(mdl)
         if empty is None:
             empty = _EMPTY[mdl] = _empty(mdl)
-        return Struct.__copy__(empty)  # a Struct's copy runs no ``__post_init__``
+        return Struct.__copy__(empty)  # type: ignore[attr-defined]  # msgspec's stubs leave out Struct.__copy__, which it has; a Struct's copy runs no ``__post_init__``
     obj = object.__new__(mdl)
     if kind.pydantic:
         # each field that has a default holds it, as ``model_construct()`` gives (which
@@ -774,7 +777,7 @@ _ITEM_NAMES = frozenset(
 )
 _VALUE_NAMES = frozenset({"dict", "Dict", "Mapping", "MutableMapping"})
 _NOT_A_MODEL = frozenset({"None", "Any", "ClassVar", "typing", "Literal", "..."})
-_ANY_LENGTH = [("...", [])]  # the ``...`` of ``tuple[Child, ...]``, as :func:`_parse` gives it
+_ANY_LENGTH: list[tuple[str, list]] = [("...", [])]  # the ``...`` of ``tuple[Child, ...]``, as :func:`_parse` gives it
 
 
 def typed_fields(cls: Any) -> dict[str, Position]:

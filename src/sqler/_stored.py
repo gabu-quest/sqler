@@ -32,10 +32,13 @@ from datetime import date, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import PurePath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqler.exceptions import UnstorableValueError
+
+if TYPE_CHECKING:
+    from sqler.models.ref import SQLerRef
 
 _AS_IS = frozenset({str, int, float, bool, type(None)})
 _BINARY = (bytes, bytearray, memoryview)
@@ -196,7 +199,7 @@ def _default(value: Any) -> Any:
 _ENCODER = json.JSONEncoder(default=_default)
 
 
-def _reference(model: Any) -> dict:
+def _reference(model: Any) -> "SQLerRef":
     if model._id is None:
         kind = "async model" if inspect.iscoroutinefunction(model.save) else "model"
         raise ValueError(f"Related {kind} must be saved before saving parent")

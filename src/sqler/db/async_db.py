@@ -215,7 +215,7 @@ class AsyncSQLerDB(_TableMemory):
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._run`."""
         adapter = self.adapter
         try:
-            step = next(steps)
+            step: tuple[str, list] = next(steps)  # each step is a statement and its parameters
             while True:
                 try:
                     rows = await _afetch_all(adapter, *step, adapter._execute_judged)
@@ -414,6 +414,7 @@ class AsyncSQLerDB(_TableMemory):
         await self.adapter.auto_commit()
         if rowcount == 0:
             raise StaleVersionError("Stale version: update rejected")
+        assert expected_version is not None  # refused above for a write by ``_id``
         return _id, expected_version + 1
 
     async def insert_document(self, table: str, doc: dict[str, Any]) -> int:
@@ -484,7 +485,7 @@ class AsyncSQLerDB(_TableMemory):
         rows, columns = await self._read_rows(table, ids)
         return _row_documents(_in_order(rows or [], ids), columns)
 
-    async def _read_rows(self, table: str, ids: list, *, versioned: bool = False) -> tuple[Optional[list], list[str]]:
+    async def _read_rows(self, table: str, ids: list, *, versioned: bool = False) -> tuple[Optional[list], tuple[str, ...]]:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._read_rows`."""
         table = validate_table_name(table)
         n, params = _id_params(ids)

@@ -134,12 +134,12 @@ else:
         _Stub.__qualname__ = name
         return _Stub
 
-    SQLerModel = _pydantic_required_class("SQLerModel")
-    SQLerSafeModel = _pydantic_required_class("SQLerSafeModel")
-    AsyncSQLerModel = _pydantic_required_class("AsyncSQLerModel")
-    AsyncSQLerSafeModel = _pydantic_required_class("AsyncSQLerSafeModel")
-    SQLerQuerySet = _pydantic_required_class("SQLerQuerySet")
-    AsyncSQLerQuerySet = _pydantic_required_class("AsyncSQLerQuerySet")
+    SQLerModel = _pydantic_required_class("SQLerModel")  # type: ignore[misc]  # stub used when pydantic is not installed
+    SQLerSafeModel = _pydantic_required_class("SQLerSafeModel")  # type: ignore[misc]  # stub used when pydantic is not installed
+    AsyncSQLerModel = _pydantic_required_class("AsyncSQLerModel")  # type: ignore[misc]  # stub used when pydantic is not installed
+    AsyncSQLerSafeModel = _pydantic_required_class("AsyncSQLerSafeModel")  # type: ignore[misc]  # stub used when pydantic is not installed
+    SQLerQuerySet = _pydantic_required_class("SQLerQuerySet")  # type: ignore[misc]  # stub used when pydantic is not installed
+    AsyncSQLerQuerySet = _pydantic_required_class("AsyncSQLerQuerySet")  # type: ignore[misc]  # stub used when pydantic is not installed
 from .ops import (
     BackupResult,
     DatabaseStats,

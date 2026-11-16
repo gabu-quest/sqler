@@ -9,8 +9,8 @@ from collections import deque
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
-from functools import partial, reduce
-from typing import Any, Callable, List, NoReturn, Optional, Self
+from functools import partial
+from typing import Any, Callable, List, NoReturn, Optional, Self, Sequence
 
 import aiosqlite
 
@@ -63,7 +63,9 @@ def _check_aiosqlite() -> None:
             )
     for call, count in _AIOSQLITE_CALLS.items():
         try:
-            inspect.signature(reduce(getattr, call.split("."), aiosqlite)).bind(*[None] * count)
+            owner, _, attribute = call.rpartition(".")
+            found = getattr(getattr(aiosqlite, owner) if owner else aiosqlite, attribute)
+            inspect.signature(found).bind(*[None] * count)
         except TypeError:
             raise SQLerConnectionError(
                 f"aiosqlite {aiosqlite.__version__}'s {call} does not take the {count} arguments sqler's "
@@ -354,7 +356,7 @@ class _Cursor(_Sent):
     _OWN = frozenset((*__slots__, "_open"))
 
     def __init__(
-        self, adapter: "AsyncSQLiteAdapter", lease: Optional[_Lease], conn: aiosqlite.Connection, judged: bool = False
+        self, adapter: "AsyncSQLiteAdapter", lease: _Lease, conn: aiosqlite.Connection, judged: bool = False
     ):
         # made before its statement is sent; both are set once the statement has run
         self._open = None  # set in the connection's thread after the statement
@@ -382,6 +384,7 @@ class _Cursor(_Sent):
     def _read_ahead(self) -> None:
         """Queue the read of the rows not returned yet on the connection now, ahead of what is sent after."""
         self._conn, conn = None, self._conn
+        assert conn is not None  # only a cursor still in ``_unread`` of its connection reads ahead
         self._taking = self._adapter._background(self._take(conn), eager=True)
 
     async def _take(self, conn: aiosqlite.Connection) -> None:
@@ -420,12 +423,14 @@ class _Cursor(_Sent):
         """Up to ``size`` (None: all) of the rows read ahead; the read that runs out of them raises their error."""
         try:
             if self._rows is None:  # still being read
+                assert self._taking is not None  # a cursor with no rows in memory reads ahead
                 await asyncio.wait({self._taking})
             if self._gone is _CLOSED:
                 raise sqlite3.ProgrammingError("Cannot operate on a closed cursor.")
             if self._gone is not None:
                 raise NotConnectedError(self._gone)
             rows = self._rows
+            assert rows is not None  # the read ahead, or the loss of the cursor, set them
             if self._error is not None and (size is None or size > len(rows)):
                 error, self._error = self._error, None
                 rows.clear()  # a lazy read that raises drops the rows it had read, too
@@ -437,6 +442,7 @@ class _Cursor(_Sent):
 
     async def fetchone(self):
         if self._taking is None and self._gone is None:
+            assert self._raw is not None  # set in the connection's thread when the statement ran
             row = await self._lazy(self._raw.fetchone)
             if row is None:
                 self._done()
@@ -445,7 +451,9 @@ class _Cursor(_Sent):
         return rows[0] if rows else None
 
     async def fetchmany(self, size: Optional[int] = None):
+        assert self._cursor is not None  # set by ``execute`` before it returns the cursor
         if self._taking is None and self._gone is None:
+            assert self._raw is not None  # set in the connection's thread when the statement ran
             rows = await self._lazy(self._raw.fetchmany, *(() if size is None else (size,)))
             if len(rows) < (self._cursor.arraysize if size is None else size):
                 self._done()
@@ -454,6 +462,7 @@ class _Cursor(_Sent):
 
     async def fetchall(self):
         if self._taking is None and self._gone is None:
+            assert self._raw is not None  # set in the connection's thread when the statement ran
             rows = await self._lazy(self._raw.fetchall)
             self._done()
             return rows
@@ -462,14 +471,17 @@ class _Cursor(_Sent):
     async def close(self) -> None:
         if self._taking is None and self._gone is None:
             self._done()
+            assert self._cursor is not None  # set by ``execute`` before it returns the cursor
             await self._cursor.close()
             self._lose(_CLOSED)  # a loop over it gives no row after this, as for one read ahead
             return
         if self._rows is None:
+            assert self._taking is not None  # a cursor with no rows in memory reads ahead
             await asyncio.wait({self._taking})
         self._lose(_CLOSED)
 
     async def __aiter__(self):
+        assert self._cursor is not None  # set by ``execute`` before it returns the cursor
         size = self._cursor.iter_chunk_size  # as aiosqlite iterates: a chunk at a time
         while rows := await self.fetchmany(size):
             for row in rows:
@@ -627,7 +639,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         task.add_done_callback(callback)
 
     def _unhold(self, lease: _Lease, task: Optional[asyncio.Task]) -> None:
-        callback = lease.holders.pop(task, None)
+        callback = lease.holders.pop(task, None) if task is not None else None
         if callback is not None and task is not None:
             task.remove_done_callback(callback)
 
@@ -937,7 +949,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
 
     def _forget(self, cursor: _Cursor) -> None:
         """``cursor`` has no rows left to read lazily."""
-        if (cursors := self._unread.get(cursor._conn)) is not None:
+        if cursor._conn is not None and (cursors := self._unread.get(cursor._conn)) is not None:
             cursors.discard(cursor)
         cursor._conn = None
 
@@ -991,11 +1003,11 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             await _close_all(conns)
             self._ending.clear()
 
-    async def execute(self, query: str, params: Optional[List[Any]] = None) -> aiosqlite.Cursor:
+    async def execute(self, query: str, params: Optional[List[Any]] = None) -> _Cursor:
         """Execute a SQL query with optional parameters and return cursor."""
         return await self._execute(query, params, False)
 
-    async def _execute_judged(self, query: str, params: Optional[List[Any]] = None) -> aiosqlite.Cursor:
+    async def _execute_judged(self, query: str, params: Optional[List[Any]] = None) -> _Cursor:
         """``execute`` for a library caller that reads the statement's failure as an answer
         (the look for referrers in ``sqler.models.async_integrity``): outside a transaction an
         ``Exception`` of the statement, or of a read of its rows, ends nothing and is raised
@@ -1012,9 +1024,10 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         await self._release_after_failure(exc)
         raise exc
 
-    async def _execute(self, query: str, params: Optional[List[Any]], judged: bool) -> aiosqlite.Cursor:
+    async def _execute(self, query: str, params: Optional[List[Any]], judged: bool) -> _Cursor:
         conn = await self._acquire()
         lease = self._task_lease.get()
+        assert lease is not None  # ``_acquire`` set the task's lease
         _logging = query_logger.enabled
         if _logging:
             start = time.perf_counter()
@@ -1054,7 +1067,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         if lease.txn and not wrapped._open:  # not ended by the adapter meanwhile: by this statement
             self._forget(wrapped)
             raise self._ended_behind(lease)
-        return wrapped  # type: ignore[return-value]
+        return wrapped
 
     async def executemany(self, query: str, param_list: List[List[Any]]) -> aiosqlite.Cursor:
         """Run ``query`` once per parameter list.
@@ -1149,7 +1162,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         return lease if lease is not None and lease.txn else None
 
     @staticmethod
-    def _place(stack: list[_Savepoint], inside: tuple[_Savepoint, ...], task: Optional[asyncio.Task] = None):
+    def _place(stack: Sequence[_Savepoint], inside: tuple[_Savepoint, ...], task: Optional[asyncio.Task] = None):
         """The innermost savepoint of ``inside`` still open on ``stack``; None: the transaction itself.
 
         ``_OWN_ENDED`` if one that ``task`` (default: the current task) opened has ended under it.
@@ -1294,7 +1307,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             except BaseException as exc:
                 await self._release_after_failure(exc)  # a failed BEGIN leaves no transaction to end
                 raise
-            self._task_lease.get().txn = True
+            lease = self._task_lease.get()
+            assert lease is not None  # ``_acquire`` set the task's lease
+            lease.txn = True
             return
         if lease.broken:
             raise _broken(lease.broken)
@@ -1404,7 +1419,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             failed = lease.broken
             self._pop_to(lease, own)
         else:
-            failed = await asyncio.shield(self._end_savepoint(lease, own, rollback=not commit or above > 0))
+            ending = self._end_savepoint(lease, own, rollback=not commit or above > 0)
+            assert ending is not None  # ``own`` is on the stack (its index was found above)
+            failed = await asyncio.shield(ending)
         if failed is not None:
             raise _broken(failed)
         if commit and above:
