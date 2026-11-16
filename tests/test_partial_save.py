@@ -591,7 +591,7 @@ def test_two_threads_that_each_change_another_field_both_land(tmp_path):
     setup = SQLerDB.on_disk(path)
     rid = PsDoc(key="k").save(db=setup)._id
     setup.close()
-    loaded = threading.Barrier(2)
+    loaded = threading.Barrier(2, timeout=30)
     errors = []
 
     def change(name, value):
@@ -610,8 +610,9 @@ def test_two_threads_that_each_change_another_field_both_land(tmp_path):
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
-    assert errors == []
+        t.join(30)
+    assert not any(t.is_alive() for t in threads), "a thread was still running after 30 s"
+    assert errors == [], "a thread failed (a BrokenBarrierError means the barrier timed out after 30 s)"
     check = SQLerDB.on_disk(path)
     loaded_row = _load(PsDoc, check, rid)
     assert (loaded_row.value, loaded_row.flag) == ("t1", True)

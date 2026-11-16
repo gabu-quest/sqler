@@ -26,6 +26,12 @@ def _open_files() -> int:
     return len(os.listdir("/proc/self/fd"))
 
 
+def _join(t: threading.Thread, what: str) -> None:
+    """Join a thread the test started; a thread that does not end fails the test, naming it."""
+    t.join(30)
+    assert not t.is_alive(), f"{what} was still running after 30 s"
+
+
 def _run_in_thread(target) -> None:
     """Run ``target`` on a new thread and join it; re-raise what it raised."""
     raised: list[BaseException] = []
@@ -117,25 +123,28 @@ def test_a_running_thread_keeps_its_connection_while_others_end(db):
     used = threading.Event()
     go_on = threading.Event()
     ids: list[int] = []
+    late: list[str] = []
 
     def long_lived():
         ids.append(id(db.adapter._conn()))
         used.set()
-        go_on.wait()
+        if not go_on.wait(30):
+            late.append("go_on")
         ids.append(id(db.adapter._conn()))
         assert db.find_document("items", 1) == {"_id": 1, "n": 1}
 
     t = threading.Thread(target=long_lived)
     t.start()
-    used.wait()
-    main_conn = db.adapter._conn()
     try:
+        assert used.wait(30), "the long-lived thread never signalled `used` within 30 s"
+        main_conn = db.adapter._conn()
         for _ in range(20):
             _run_in_thread(lambda: db.find_document("items", 1))
         held_meanwhile = len(db.adapter._conns)
     finally:
         go_on.set()
-        t.join()
+        _join(t, "the long-lived thread")
+    assert late == [], "the long-lived thread timed out waiting for `go_on`"
     assert held_meanwhile == 2  # main + the running thread
     assert ids[0] == ids[1]
     assert db.adapter._conn() is main_conn
@@ -208,7 +217,7 @@ def test_threads_ending_while_another_thread_closes(tmp_path):
     for round_no in range(30):
         database = SQLerDB.on_disk(str(tmp_path / f"c{round_no}.db"))
         database.insert_document("items", {"n": 1})
-        start = threading.Barrier(3)
+        start = threading.Barrier(3, timeout=30)
         errors: list[BaseException] = []
 
         def reader():
@@ -219,14 +228,17 @@ def test_threads_ending_while_another_thread_closes(tmp_path):
                 errors.append(exc)
 
         def closer():
-            start.wait()
-            database.close()
+            try:
+                start.wait()
+                database.close()
+            except BaseException as exc:  # noqa: BLE001 - reported below
+                errors.append(exc)
 
         threads = [threading.Thread(target=reader), threading.Thread(target=reader), threading.Thread(target=closer)]
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            _join(t, "a reader or the closer")
         assert errors == []
         assert len(database.adapter._conns) == 0
 
@@ -235,12 +247,14 @@ def test_close_from_another_thread_closes_a_live_threads_connection(db):
     used = threading.Event()
     go_on = threading.Event()
     seen: list[str] = []
+    late: list[str] = []
 
     def live():
         db.find_document("items", 1)
         own = db.adapter._conn()
         used.set()
-        go_on.wait()
+        if not go_on.wait(30):
+            late.append("go_on")
         try:
             own.execute("SELECT 1")
         except sqlite3.ProgrammingError as exc:
@@ -248,10 +262,13 @@ def test_close_from_another_thread_closes_a_live_threads_connection(db):
 
     t = threading.Thread(target=live)
     t.start()
-    used.wait()
-    _run_in_thread(db.close)
-    go_on.set()
-    t.join()
+    try:
+        assert used.wait(30), "the live thread never signalled `used` within 30 s"
+        _run_in_thread(db.close)
+    finally:
+        go_on.set()
+        _join(t, "the live thread")
+    assert late == [], "the live thread timed out waiting for `go_on`"
     assert seen == ["Cannot operate on a closed database."]
     assert len(db.adapter._conns) == 0
 
@@ -269,11 +286,13 @@ def test_a_live_thread_after_close_and_connect_works_again(db):
     closed_and_reconnected = threading.Event()
     result: list[object] = []
     raised: list[BaseException] = []
+    late: list[str] = []
 
     def live():
         db.find_document("items", 1)
         used.set()
-        closed_and_reconnected.wait()
+        if not closed_and_reconnected.wait(30):
+            late.append("closed_and_reconnected")
         try:
             result.append(db.find_document("items", 1))
             result.append(db.adapter._txn_depth)
@@ -282,11 +301,14 @@ def test_a_live_thread_after_close_and_connect_works_again(db):
 
     t = threading.Thread(target=live)
     t.start()
-    used.wait()
-    db.close()
-    db.adapter.connect()
-    closed_and_reconnected.set()
-    t.join()
+    try:
+        assert used.wait(30), "the live thread never signalled `used` within 30 s"
+        db.close()
+        db.adapter.connect()
+    finally:
+        closed_and_reconnected.set()
+        _join(t, "the live thread")
+    assert late == [], "the live thread timed out waiting for `closed_and_reconnected`"
     assert raised == []
     assert result == [{"_id": 1, "n": 1}, 0]
 
@@ -466,7 +488,7 @@ def test_the_interpreter_exits_with_live_daemon_threads_and_an_unclosed_database
 
         db = SQLerDB.on_disk(sys.argv[1])
         db.insert_document("items", {"n": 1})
-        ready = threading.Barrier(3)
+        ready = threading.Barrier(3, timeout=30)
         never = threading.Event()
 
         def reader():
