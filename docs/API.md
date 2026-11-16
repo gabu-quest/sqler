@@ -1421,6 +1421,13 @@ base: `save()`, `save_partial()`, `save_many()`, `delete()`, `delete_with_policy
 | `AuditLogMixin` | one audit row per row written (`create`, `update` where the stored document changed, `delete`), in one unit with the row: both are there or neither is. Inside your transaction the unit is a savepoint: both follow your commit or rollback, and a write that fails leaves neither, also when you catch the error and commit |
 | `HooksMixin` | `before_save` / `after_save` around each instance saved, `before_delete` / `after_delete` around each delete |
 
+`updated_at` is a time of day, not the order of writes. A `save()` gives its instance a
+stamp later than the one that instance held, also when the clock has not moved. A save by
+another instance of the same row, and a set-based update, store the clock's reading, so two
+writes of a row inside one tick of the clock (about 15 ms on Windows before Python 3.13, far
+less elsewhere) can leave equal stamps. What orders the writes of a row is its `_version`:
+on a table with that column every write moves it by one.
+
 Order: `before_save()` runs first, then the timestamps are set, then the row is written; a
 `before_save()` that returns False leaves the instance as it was. `after_save()` and
 `after_delete()` run once the write is committed (or, inside your transaction, once it is
