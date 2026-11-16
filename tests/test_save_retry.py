@@ -739,11 +739,10 @@ _THEIR_EDIT_CASES = [
     for name, edit, expect in _THEIR_EDITS
     for kind in KINDS
 ] + [
-    # a date field: the pydantic base gives a date back, the lite bases the stored string;
-    # the async pydantic bases cannot save one at all, so there is no case for them
-    pytest.param("sync", _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], date(2026, 11, 14)), id="date-sync"),
-    pytest.param("lite_sync", _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], "2026-11-14"), id="date-lite_sync"),
-    pytest.param("lite_async", _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], "2026-11-14"), id="date-lite_async"),
+    # a date field: every base gives a date back; the async pydantic bases cannot save one
+    # at all, so there is no case for them
+    pytest.param(kind, _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], date(2026, 11, 14)), id=f"date-{kind}")
+    for kind in ("sync", "lite_sync", "lite_async")
 ]
 
 

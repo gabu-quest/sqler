@@ -4,8 +4,11 @@ import asyncio
 import json
 import sys
 import threading
+import types
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import pytest
 import pytest_asyncio
@@ -27,6 +30,7 @@ from sqler import (
     import_jsonl,
 )
 from sqler.db.async_db import AsyncSQLerDB
+from sqler.models.mixins import TimestampMixin
 
 pytestmark = pytest.mark.asyncio
 
@@ -536,3 +540,87 @@ async def test_export_of_a_dropped_table_gives_what_an_empty_table_gives(adb, tm
     )
     cur = await adb.adapter.execute("SELECT name FROM sqlite_master WHERE type='table'")
     assert "agone_table" not in {r[0] for r in await cur.fetchall()}
+
+
+# ── every async base: the rows it exports import with equal values ─────────────
+
+ASYNC_BASES = {
+    "pydantic": AsyncSQLerModel,
+    "pydantic_safe": AsyncSQLerSafeModel,
+    "lite": AsyncSQLerLiteModel,
+    "lite_safe": AsyncSQLerLiteSafeModel,
+}
+WHEN = datetime(2026, 3, 4, 5, 6, 7, 890000, tzinfo=timezone.utc)
+# the rows every base exports and imports: one field of each type a document holds
+TYPED_ROWS = [
+    dict(name="Kyoto", count=1400000, ratio=0.5, active=True, when=WHEN,
+         tags=["old", "temple"], meta={"rank": 2}),
+    dict(name="=Osaka", count=0, ratio=-1.25, active=False, when=WHEN + timedelta(days=1),
+         tags=[], meta={}),
+]
+TYPED_FIELDS = {
+    "name": (str, ""),
+    "count": (int, 0),
+    "ratio": (float, 0.0),
+    "active": (bool, False),
+    "when": (Optional[datetime], None),
+    "tags": (list[str], None),
+    "meta": (dict[str, int], None),
+}
+
+
+def _typed_model(kind, *mixins, fields=TYPED_FIELDS):
+    ns = {"__tablename__": f"typed_{kind}", "__annotations__": {n: h for n, (h, _) in fields.items()}}
+    ns.update({n: d for n, (_, d) in fields.items()})
+    cls = types.new_class(f"Typed_{kind}", (*mixins, ASYNC_BASES[kind]), {}, lambda body: body.update(ns))
+    return dataclass(cls) if kind.startswith("lite") else cls
+
+
+async def _new_adb():
+    db = AsyncSQLerDB.in_memory(shared=False)
+    await db.connect()
+    return db
+
+
+@pytest.mark.parametrize("kind", list(ASYNC_BASES))
+async def test_rows_exported_from_an_async_base_import_with_equal_values(kind, tmp_path):
+    Model = _typed_model(kind)
+    src, dst = await _new_adb(), await _new_adb()
+    try:
+        for row in TYPED_ROWS:
+            await Model(**row).save(db=src)
+        path = tmp_path / "rows.jsonl"
+        await async_export_jsonl(Model.using(src), path)
+
+        result = await async_import_jsonl(Model, path, db=dst)
+
+        assert _result_tuple(result) == (2, 2, 0, [])
+        got = [{n: getattr(r, n) for n in TYPED_FIELDS} for r in await Model.using(dst).order_by("_id").all()]
+        assert got == TYPED_ROWS
+        assert [type(r["when"]) for r in got] == [datetime, datetime]
+    finally:
+        await src.close()
+        await dst.close()
+
+
+@pytest.mark.parametrize("update_existing", [False, True])
+@pytest.mark.parametrize("kind", list(ASYNC_BASES))
+async def test_an_async_import_keeps_the_created_at_a_mixin_gave_the_row(kind, update_existing, tmp_path):
+    Model = _typed_model(kind, TimestampMixin, fields={"name": (str, "")})
+    src, dst = await _new_adb(), await _new_adb()
+    try:
+        made = await Model(name="a").save(db=src)
+        if update_existing:
+            await Model(name="before").save(db=dst)
+        path = tmp_path / "rows.jsonl"
+        await async_export_jsonl(Model.using(src), path)
+
+        result = await async_import_jsonl(Model, path, db=dst, update_existing=update_existing)
+
+        assert _result_tuple(result) == (1, 1, 0, [])
+        [row] = await Model.using(dst).all()
+        assert (row._id, row.name, row.created_at) == (1, "a", made.created_at)
+        assert type(row.created_at) is datetime
+    finally:
+        await src.close()
+        await dst.close()

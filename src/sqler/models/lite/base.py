@@ -14,7 +14,9 @@ from dataclasses import fields
 from datetime import date, datetime
 from typing import Any, ClassVar, Optional, Type, TypeVar
 
+from sqler import _stored
 from sqler.models import _dirty
+from sqler.models._compat import field_types
 
 T = TypeVar("T", bound="SQLerLiteModelBase")
 
@@ -43,8 +45,18 @@ def _asdict(value: Any, within: tuple) -> Any:
     return copy.deepcopy(value)
 
 
-# {class: the names of its fields ``__init__`` takes from a document} (see ``_init_fields``)
-_INIT_NAMES: dict[type, frozenset] = {}
+# {class: (the names of its fields ``__init__`` takes from a document, (name, loader) of
+# each of them whose stored value is not its value)} (see ``_init_fields``)
+_INIT_NAMES: dict[type, tuple[frozenset, tuple[tuple[str, _stored.Load], ...]]] = {}
+
+
+def _init_names(cls: type) -> tuple[frozenset, tuple[tuple[str, _stored.Load], ...]]:
+    names = frozenset(f.name for f in fields(cls) if not f.name.startswith("_"))  # type: ignore[arg-type]
+    hints = field_types(cls)
+    loads = tuple(
+        (name, load) for name in sorted(names) if (load := _stored.loader(hints.get(name))) is not None
+    )
+    return names, loads
 
 
 class SQLerLiteModelBase:
@@ -146,16 +158,22 @@ class SQLerLiteModelBase:
 
     @classmethod
     def _init_fields(cls, data: dict) -> dict:
-        """The keyword arguments of ``__init__`` that ``data`` gives: its keys that are fields,
-        none starting with ``_`` (others are ignored, like pydantic's ``extra="ignore"``).
-        ``model_validate`` and the reference loader, which runs ``__init__`` on an object it
-        made before the row was built (a cycle), both take them from here."""
-        names = _INIT_NAMES.get(cls)
-        if names is None:  # a class's fields are fixed once ``@dataclass`` made it
-            names = _INIT_NAMES[cls] = frozenset(
-                f.name for f in fields(cls) if not f.name.startswith("_")  # type: ignore[arg-type]
-            )
-        return {k: v for k, v in data.items() if k in names}
+        """The keyword arguments of ``__init__`` that ``data``, a stored document, gives: its
+        keys that are fields, none starting with ``_`` (others are ignored, like pydantic's
+        ``extra="ignore"``), each value as the type its field declares (``_stored.loader``:
+        a ``datetime`` field gets a ``datetime``, not the ISO string it is stored as), since a
+        dataclass's ``__init__`` converts nothing. ``model_validate`` and the reference loader,
+        which runs ``__init__`` on an object it made before the row was built (a cycle), both
+        take them from here."""
+        known = _INIT_NAMES.get(cls)
+        if known is None:  # a class's fields are fixed once ``@dataclass`` made it
+            known = _INIT_NAMES[cls] = _init_names(cls)
+        names, loads = known
+        found = {k: v for k, v in data.items() if k in names}
+        for name, load in loads:
+            if name in found:
+                found[name] = load(found[name])
+        return found
 
     def model_dump(
         self,

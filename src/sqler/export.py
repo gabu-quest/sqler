@@ -25,8 +25,11 @@ import csv
 import io
 import json
 import types
+import typing
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -38,6 +41,9 @@ from typing import (
     Type,
     Union,
 )
+
+from sqler import _stored
+from sqler.models._compat import field_types
 
 if TYPE_CHECKING:
     from sqler.db.async_db import AsyncSQLerDB
@@ -159,43 +165,99 @@ def _serialize_value(value: Any, for_csv: bool = False) -> Any:
     return value
 
 
-def _deserialize_value(value: str, field_type: Any) -> Any:
-    """Deserialize a string value based on field type.
+def _admits_none(field_type: Any) -> bool:
+    """Whether a field of ``field_type`` can hold ``None``: ``Any``, ``None``, ``object``, a
+    union with ``None`` in it, and ``Annotated`` of one of these."""
+    if field_type in (Any, None, type(None), object):
+        return True
+    origin = typing.get_origin(field_type)
+    args = typing.get_args(field_type)
+    if origin is typing.Annotated:
+        return _admits_none(args[0])
+    if origin is Union or origin is types.UnionType:
+        return any(_admits_none(a) for a in args)
+    return False
 
-    An empty cell is ``None``. A string value loses the one leading ``'`` that
-    the CSV export adds (see :func:`_csv_escape_string`).
+
+def _json_cell(kind: Any) -> bool:
+    """Whether a CSV cell of a field of type ``kind`` holds JSON text: the stored form of
+    ``kind`` is a list, a dict or a number other than ``int`` and ``float`` (which the
+    caller reads itself), or an ``Enum`` whose values are not all strings."""
+    base = typing.get_origin(kind) or kind
+    if base in (list, dict, set, frozenset, tuple):
+        return True
+    if not isinstance(base, type):
+        return False
+    if issubclass(base, Enum):
+        return not all(isinstance(m.value, str) for m in base)
+    return issubclass(base, (Decimal, timedelta))
+
+
+def _deserialize_value(value: Optional[str], field_type: Any) -> Any:
+    """The value of a field of type ``field_type`` that the CSV cell ``value`` holds.
+
+    An empty cell is ``None``. ``int``, ``float`` and ``bool`` are read from their text; a
+    field whose stored form is a list, a dict or another number from the JSON text the
+    export writes; any other cell is text and loses the one leading ``'`` that the CSV
+    export adds (see :func:`_csv_escape_string`). The value is then the type the field
+    declares, as a load gives it (``_stored.loaded``: a ``datetime`` from its ISO text).
     """
     if value == "" or value is None:
         return None
-
-    # Handle Optional types
-    origin = getattr(field_type, "__origin__", None)
-    if origin is Union or isinstance(field_type, types.UnionType):
-        args = field_type.__args__
-        # Get non-None type
-        for arg in args:
-            if arg is not type(None):
-                field_type = arg
-                break
-
-    if field_type is int:
-        return int(value)
-    if field_type is float:
-        return float(value)
-    if field_type is bool:
+    kind = _stored.one_type(field_type)
+    if kind is bool:
         return value.lower() in ("true", "1", "yes")
-    if field_type is datetime:
-        return datetime.fromisoformat(value)
-    if field_type is date:
-        return date.fromisoformat(value)
-    if field_type in (list, dict) or origin in (list, dict):
+    if kind is int:
+        return int(value)
+    if kind is float:
+        return float(value)
+    if _json_cell(kind):
         try:
-            return json.loads(value)
+            return _stored.loaded(json.loads(value), field_type)
         except json.JSONDecodeError:
-            return value
-    if isinstance(value, str):
-        return _csv_unescape_string(value)
-    return value
+            pass  # not JSON: the cell is the text it holds
+    return _stored.loaded(_csv_unescape_string(value), field_type)
+
+
+def _typed(model_class: Any, record: dict) -> dict:
+    """``record``, a row as it was exported, with each value of a field as the type the
+    field declares (``_stored.loaded``), on every model base."""
+    hints = field_types(model_class)
+    return {k: _stored.loaded(v, hints[k]) if k in hints else v for k, v in record.items()}
+
+
+def _new(model_class: Any, record: dict) -> Any:
+    """A new instance of ``model_class`` holding ``record``, a row as it was exported.
+
+    A pydantic class validates it as keyword arguments. A lite or msgspec class is built as
+    a load builds it (``model_validate``): each value as the type its field declares, the
+    fields a mixin gives a msgspec class set too (they are not ``__init__`` arguments there),
+    and a key that is no field left out, as pydantic leaves it out.
+    """
+    if hasattr(model_class, "__pydantic_validator__"):
+        return model_class(**record)
+    return model_class.model_validate(record)
+
+
+def _set_record(existing: Any, record: dict) -> None:
+    """Copy an imported record onto an existing instance (before it is saved), each value
+    of a field as the type the field declares."""
+    for key, value in _typed(type(existing), record).items():
+        setattr(existing, key, value)
+
+
+def _save_record(
+    model_class: Any, record_id: Any, record: dict, update_existing: bool, db: Optional["SQLerDB"]
+) -> None:
+    """Save one imported record: onto the row ``record_id`` when ``update_existing`` and
+    that row exists, else as a new row; in ``db`` when given, else in the class's database."""
+    if update_existing and record_id:
+        existing = model_class.from_id(record_id, db=db)
+        if existing:
+            _set_record(existing, record)
+            existing.save(db=db)
+            return
+    _new(model_class, record).save(db=db)
 
 
 def _get_model_fields(model_class: Union[Type["SQLerModel"], Type["AsyncSQLerModel"]]) -> list[str]:
@@ -326,7 +388,10 @@ def _import_csv_row(
     db: Optional["SQLerDB"] = None,
 ) -> None:
     """Save one CSV row: transform, ``_id``, deserialize, create or update, in ``db`` when
-    given, else in the class's database."""
+    given, else in the class's database.
+
+    An empty cell is a missing value: ``None`` in a field that can hold it, and left out of
+    any other field, which then keeps its default (or, updated, its value)."""
     if transform:
         row = transform(row)
 
@@ -334,23 +399,16 @@ def _import_csv_row(
     if record_id:
         record_id = int(record_id)
 
+    hints = field_types(model_class)
     for field_name, value in list(row.items()):
-        if field_name in model_class.model_fields:
-            field_info = model_class.model_fields[field_name]
-            row[field_name] = _deserialize_value(value, field_info.annotation)
+        if field_name in hints:
+            hint = hints[field_name]
+            if (value == "" or value is None) and not _admits_none(hint):
+                del row[field_name]
+            else:
+                row[field_name] = _deserialize_value(value, hint)
 
-    if update_existing and record_id:
-        existing = model_class.from_id(record_id, db=db)
-        if existing:
-            for key, value in row.items():
-                setattr(existing, key, value)
-            existing.save(db=db)
-        else:
-            instance = model_class(**row)
-            instance.save(db=db)
-    else:
-        instance = model_class(**row)
-        instance.save(db=db)
+    _save_record(model_class, record_id, row, update_existing, db)
 
 
 def import_csv(
@@ -594,19 +652,7 @@ def import_json(
                 record = transform(record)
 
             record_id = record.pop("_id", None)
-
-            if update_existing and record_id:
-                existing = model_class.from_id(record_id, db=db)
-                if existing:
-                    for key, value in record.items():
-                        setattr(existing, key, value)
-                    existing.save(db=db)
-                else:
-                    instance = model_class(**record)
-                    instance.save(db=db)
-            else:
-                instance = model_class(**record)
-                instance.save(db=db)
+            _save_record(model_class, record_id, record, update_existing, db)
 
             succeeded += 1
 
@@ -718,12 +764,6 @@ def _jsonl_parse_record(
     # version on update, so it is dropped here.
     record.pop("_version", None)
     return record_id, record
-
-
-def _jsonl_apply_record(existing: Any, record: dict) -> None:
-    """Copy an imported record onto an existing instance (before it is saved)."""
-    for key, value in record.items():
-        setattr(existing, key, value)
 
 
 def _jsonl_error(line_num: int, line: str, exc: Exception) -> dict[str, Any]:
@@ -866,18 +906,7 @@ def import_jsonl(
 
             try:
                 record_id, record = _jsonl_parse_record(line, transform)
-
-                if update_existing and record_id:
-                    existing = model_class.from_id(record_id, db=db)
-                    if existing:
-                        _jsonl_apply_record(existing, record)
-                        existing.save(db=db)
-                    else:
-                        instance = model_class(**record)
-                        instance.save(db=db)
-                else:
-                    instance = model_class(**record)
-                    instance.save(db=db)
+                _save_record(model_class, record_id, record, update_existing, db)
 
                 succeeded += 1
 
@@ -998,19 +1027,7 @@ def import_json_string(
                 record = transform(record)
 
             record_id = record.pop("_id", None)
-
-            if update_existing and record_id:
-                existing = model_class.from_id(record_id, db=db)
-                if existing:
-                    for key, value in record.items():
-                        setattr(existing, key, value)
-                    existing.save(db=db)
-                else:
-                    instance = model_class(**record)
-                    instance.save(db=db)
-            else:
-                instance = model_class(**record)
-                instance.save(db=db)
+            _save_record(model_class, record_id, record, update_existing, db)
 
             succeeded += 1
 
@@ -1075,19 +1092,7 @@ def import_jsonl_string(
                 record = transform(record)
 
             record_id = record.pop("_id", None)
-
-            if update_existing and record_id:
-                existing = model_class.from_id(record_id, db=db)
-                if existing:
-                    for key, value in record.items():
-                        setattr(existing, key, value)
-                    existing.save(db=db)
-                else:
-                    instance = model_class(**record)
-                    instance.save(db=db)
-            else:
-                instance = model_class(**record)
-                instance.save(db=db)
+            _save_record(model_class, record_id, record, update_existing, db)
 
             succeeded += 1
 
@@ -1193,17 +1198,14 @@ async def async_import_jsonl(
             try:
                 record_id, record = _jsonl_parse_record(line, transform)
 
+                existing = None
                 if update_existing and record_id:
                     existing = await model_class.from_id(record_id, db=db)
-                    if existing:
-                        _jsonl_apply_record(existing, record)
-                        await existing.save(db=db)
-                    else:
-                        instance = model_class(**record)
-                        await instance.save(db=db)
+                if existing:
+                    _set_record(existing, record)
+                    await existing.save(db=db)
                 else:
-                    instance = model_class(**record)
-                    await instance.save(db=db)
+                    await _new(model_class, record).save(db=db)
 
                 succeeded += 1
 

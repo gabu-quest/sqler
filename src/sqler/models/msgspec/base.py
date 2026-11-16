@@ -13,6 +13,9 @@ from typing import Any, ClassVar, Optional, Type, TypeVar
 import msgspec
 import msgspec.structs
 
+from sqler import _stored
+from sqler.models._compat import field_types
+
 T = TypeVar("T", bound="SQLerMsgspecModelBase")
 
 # Per-class caches for field introspection — msgspec.structs.fields() does
@@ -20,6 +23,7 @@ T = TypeVar("T", bound="SQLerMsgspecModelBase")
 _PUBLIC_FIELDS_CACHE: dict[type, tuple] = {}
 _PUBLIC_FIELD_NAMES_CACHE: dict[type, set[str]] = {}
 _MIXIN_FIELD_NAMES_CACHE: dict[type, frozenset[str]] = {}
+_MIXIN_LOADS_CACHE: dict[type, tuple[tuple[str, Optional[_stored.Load]], ...]] = {}
 
 
 def _public_fields(cls: type) -> tuple:
@@ -68,6 +72,18 @@ def _mixin_field_names(cls: type) -> frozenset[str]:
             names.add(name)
     result = frozenset(names)
     _MIXIN_FIELD_NAMES_CACHE[cls] = result
+    return result
+
+
+def _mixin_loads(cls: type) -> tuple[tuple[str, Optional[_stored.Load]], ...]:
+    """``(name, loader)`` of each mixin field of ``cls`` (cached): the loader gives the
+    stored value as the type the field declares, ``None`` where it is that value."""
+    cached = _MIXIN_LOADS_CACHE.get(cls)
+    if cached is not None:
+        return cached
+    hints = field_types(cls)
+    result = tuple((name, _stored.loader(hints.get(name))) for name in sorted(_mixin_field_names(cls)))
+    _MIXIN_LOADS_CACHE[cls] = result
     return result
 
 
@@ -130,10 +146,12 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
         # permissive coercion (e.g. str "123" → int 123) for Pydantic compat.
         # _id is a declared Struct field — set directly by convert from data.
         inst = msgspec.convert(data, cls, strict=False)
-        # Restore mixin fields (not recognized as Struct fields by msgspec)
-        for name in _mixin_field_names(cls):
+        # mixin fields are no Struct fields: msgspec neither sets nor converts them, so each
+        # is set here as the type it declares (a ``datetime`` from its ISO string)
+        for name, load in _mixin_loads(cls):
             if name in data:
-                setattr(inst, name, data[name])
+                value = data[name]
+                setattr(inst, name, value if load is None else load(value))
         return inst
 
     def model_dump(

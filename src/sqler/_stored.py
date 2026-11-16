@@ -21,6 +21,9 @@ are stored as they are. Any other value has no stored form and is passed on as i
 document that holds one is refused by ``json``. ``bytes``, ``bytearray`` and ``memoryview`` are
 refused in a document (JSON has no binary value): promote the field to a ``BLOB`` column, or
 store text. A promoted ``BLOB`` column takes them as they are.
+
+:func:`loader` goes the other way, for a model base that does not convert a loaded value to
+the type its field declares (the lite bases, and the fields a mixin gives a msgspec model).
 """
 
 from __future__ import annotations
@@ -28,11 +31,13 @@ from __future__ import annotations
 import inspect
 import json
 import sys
+import types
+import typing
 from datetime import date, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, Optional
 from uuid import UUID
 
 from sqler.exceptions import UnstorableValueError
@@ -197,6 +202,157 @@ def _default(value: Any) -> Any:
 
 
 _ENCODER = json.JSONEncoder(default=_default)
+
+
+# ---- a stored value back to the type its field declares ----------------------------------
+
+Load = Callable[[Any], Any]
+
+
+def loader(hint: Any) -> Optional[Load]:
+    """The function that gives, for a stored value, the value of the type ``hint`` declares
+    that :func:`stored` stores as it: an ISO string back to a ``datetime``, ``date`` or
+    ``time``, a string to a ``UUID`` or a path, a value to its ``Enum`` member, a number to a
+    ``Decimal`` or ``timedelta``, a list to a ``set``, ``frozenset`` or ``tuple``, and the
+    same inside a ``list``, ``set``, ``tuple`` or the values of a ``dict``; ``Optional[X]``
+    and ``Annotated[X, ...]`` as ``X``.
+
+    ``None`` where a stored value is already the value: ``str``, ``int``, ``float``, ``bool``,
+    ``Any``, a model or other class it does not know, and a union of more than one type
+    besides ``None`` (which of them a string is cannot be told). The function returns a value
+    that is not in the stored form of ``hint`` (``None``, a string that is no ISO date) as it
+    is: such a field loads what was saved into it.
+    """
+    hint = one_type(hint)
+    origin = typing.get_origin(hint)
+    args = typing.get_args(hint)
+    if origin is typing.Union or origin is types.UnionType:
+        return None
+    if origin is list:
+        return _each(list, loader(args[0])) if args else None
+    if origin in (set, frozenset) or hint in (set, frozenset):
+        return _each(origin or hint, loader(args[0]) if args else None)
+    if origin is tuple or hint is tuple:
+        if len(args) == 2 and args[1] is Ellipsis:
+            return _each(tuple, loader(args[0]))
+        if args:
+            return _fixed_tuple([loader(a) for a in args])
+        return _each(tuple, None)
+    if origin is dict:
+        return _values(loader(args[1])) if len(args) == 2 else None
+    if not isinstance(hint, type) or origin is not None:
+        return None
+    if issubclass(hint, Enum):  # before str and int: a StrEnum or IntEnum is one of them
+        return _member(hint)
+    if hint in _AS_IS:
+        return None
+    if issubclass(hint, (date, time)):  # a datetime is a date
+        return _from_text(hint.fromisoformat)
+    if issubclass(hint, (UUID, PurePath)):
+        return _from_text(hint)
+    if issubclass(hint, Decimal):
+        return _from_number(lambda n: hint(repr(n)))  # repr: the float :func:`_number` stored
+    if issubclass(hint, timedelta):
+        return _from_number(lambda n: hint(seconds=n))
+    return None
+
+
+def one_type(hint: Any) -> Any:
+    """``hint`` without ``Annotated`` and, in a union, without ``None`` when one type is
+    left; a union of more types is returned as it is."""
+    while True:
+        origin = typing.get_origin(hint)
+        args = typing.get_args(hint)
+        if origin is typing.Annotated:
+            hint = args[0]
+        elif origin is typing.Union or origin is types.UnionType:
+            kinds = [a for a in args if a is not type(None)]
+            if len(kinds) != 1:
+                return hint
+            hint = kinds[0]
+        else:
+            return hint
+
+
+def _from_text(make: Callable[[str], Any]) -> Load:
+    def load(value: Any) -> Any:
+        if type(value) is not str:
+            return value
+        try:
+            return make(value)
+        except ValueError:  # not the form sqler stores this type in: what was saved
+            return value
+
+    return load
+
+
+def _from_number(make: Callable[[Any], Any]) -> Load:
+    def load(value: Any) -> Any:
+        if type(value) is not int and type(value) is not float:  # a bool is no number here
+            return value
+        try:
+            return make(value)
+        except (ValueError, OverflowError):  # no value of the type is that number
+            return value
+
+    return load
+
+
+def _member(enum: type[Enum]) -> Load:
+    def load(value: Any) -> Any:
+        if isinstance(value, enum):
+            return value
+        try:
+            return enum(value)
+        except (ValueError, TypeError):  # no member has that value: what was saved
+            return value
+
+    return load
+
+
+def _each(kind: type, item: Optional[Load]) -> Optional[Load]:
+    """A list's entries, each loaded by ``item``, as a ``kind``; ``None`` for a list of values
+    that load as they are."""
+    if item is None and kind is list:
+        return None
+
+    def load(value: Any) -> Any:
+        if type(value) is not list:
+            return value
+        items = value if item is None else [item(v) for v in value]
+        try:
+            return items if kind is list else kind(items)
+        except TypeError:  # an entry a set cannot hold (a dict, a list): what was saved
+            return value
+
+    return load
+
+
+def _fixed_tuple(items: list[Optional[Load]]) -> Load:
+    def load(value: Any) -> Any:
+        if type(value) is not list or len(value) != len(items):
+            return value
+        return tuple(v if f is None else f(v) for f, v in zip(items, value))
+
+    return load
+
+
+def _values(item: Optional[Load]) -> Optional[Load]:
+    if item is None:
+        return None
+
+    def load(value: Any) -> Any:
+        if type(value) is not dict:
+            return value
+        return {k: item(v) for k, v in value.items()}
+
+    return load
+
+
+def loaded(value: Any, hint: Any) -> Any:
+    """``value``, a stored value, as the type ``hint`` declares (see :func:`loader`)."""
+    load = loader(hint)
+    return value if load is None else load(value)
 
 
 def _reference(model: Any) -> "SQLerRef":

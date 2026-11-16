@@ -428,9 +428,11 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
 
     def _refreshed(self: T, doc: dict, row: dict) -> T:
         """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
-        for f in _public_fields(type(self)):
-            if f.name in doc:
-                setattr(self, f.name, doc[f.name])
+        cls = type(self)
+        fresh = _refs.validate(cls, doc)  # typed, as a load gives it
+        for name in (*(f.name for f in _public_fields(cls)), *_mixin_field_names(cls)):
+            if name in doc:
+                setattr(self, name, getattr(fresh, name))
         self._snapshot = _dirty.snapshot(row)
         return self
 
