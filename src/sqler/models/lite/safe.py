@@ -186,7 +186,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
                 latest_doc = retry.reread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
-                payload = _retry.rebase(latest_doc, held, snap, delta)
+                payload = _retry.rebase(latest_doc, held, snap, delta, stale)
                 written = retry.build(stale, lambda: cls.model_validate(cls._resolve_relations(payload, db=db)))
                 object.__setattr__(self, "_version", latest_doc.get("_version", 0))
                 object.__setattr__(self, "_snapshot", _dirty.snapshot(latest_doc))

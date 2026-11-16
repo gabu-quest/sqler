@@ -758,17 +758,78 @@ def test_rebase_keeps_the_field_the_other_writer_changed(kind, edit, expect):
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_rebase_where_both_changed_a_field_keeps_this_writers_value(kind):
-    # Whether this should raise is the user's question; pinned as it is.
+def test_rebase_where_both_changed_a_field_to_different_values_raises_and_writes_nothing(kind):
     async def steps(rows, mine, theirs):
         theirs.title = "theirs"
         await _aw(theirs.save())
         mine.title = "mine"
         mine.count += 1
-        await _aw(mine.save())
-        return _stored(await rows.row()), _held(mine)
+        with pytest.raises(StaleVersionError, match="^Stale version: update rejected$"):
+            await _aw(mine.save())
+        stored = await rows.row()
+        return _stored(stored), stored["_version"], _held(mine), mine._version
 
-    assert _rebase(kind, steps) == (("mine", 11, 0, ["a"], 1), ("mine", 11, 0, ["a"], 1))
+    assert _rebase(kind, steps) == (
+        ("theirs", 10, 0, ["a"], 1), 1, ("mine", 11, 0, ["a"], 1), 0,
+    )
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebase_where_both_changed_a_field_to_one_value_adds_the_counter(kind):
+    async def steps(rows, mine, theirs):
+        theirs.title = "agreed"
+        await _aw(theirs.save())
+        mine.title = "agreed"
+        mine.count += 1
+        await _aw(mine.save())
+        stored = await rows.row()
+        return _stored(stored), stored["_version"], _held(mine), mine._version
+
+    assert _rebase(kind, steps) == (
+        ("agreed", 11, 0, ["a"], 1), 2, ("agreed", 11, 0, ["a"], 1), 2,
+    )
+
+
+def _moves_its_date(rows, doc):
+    doc.when = date(2026, 11, 15)
+
+
+_MY_EDITS = [
+    ("list", lambda r, d: d.tags.append("b"), ("theirs", 11, 0, ["a", "b"], 1, {"k": 1}, [1], None)),
+    ("dict-key", lambda r, d: d.meta.update(k=2), ("theirs", 11, 0, ["a"], 1, {"k": 2}, [1], None)),
+    ("reference", lambda r, d: setattr(d, "child", r.c2), ("theirs", 11, 0, ["a"], 2, {"k": 1}, [1], None)),
+    ("typed-list", lambda r, d: setattr(d, "kids", [r.c2]), ("theirs", 11, 0, ["a"], 1, {"k": 1}, [2], None)),
+]
+_MY_EDIT_CASES = [
+    pytest.param(kind, None, edit, expect, id=f"{name}-{kind}")
+    for name, edit, expect in _MY_EDITS
+    for kind in KINDS
+] + [
+    # the async pydantic bases cannot save a date at all, so there is no case for them
+    pytest.param(kind, date(2026, 11, 14), _moves_its_date,
+                 ("theirs", 11, 0, ["a"], 1, {"k": 1}, [1], date(2026, 11, 15)), id=f"date-{kind}")
+    for kind in ("sync", "lite_sync", "lite_async")
+]
+
+
+@pytest.mark.parametrize("kind, when, edit, expect", _MY_EDIT_CASES)
+def test_rebase_of_a_model_never_reloaded_keeps_the_field_only_it_changed(kind, when, edit, expect):
+    # its snapshot is the payload it saved, not a row it read
+    async def steps(rows, _mine, _theirs):
+        mine = rows.doc_cls(
+            title="own", count=10, tags=["a"], child=rows.c1, kids=[rows.c1], meta={"k": 1}, when=when
+        )
+        await _aw(mine.save())
+        theirs = await _aw(rows.doc_cls.from_id(mine._id))
+        theirs.title = "theirs"
+        await _aw(theirs.save())
+        edit(rows, mine)
+        mine.count += 1
+        await _aw(mine.save())
+        stored = await _aw(rows.db.find_document("rb_doc", mine._id))
+        return _flat(mine), stored["title"], stored["count"], stored["_version"]
+
+    assert _rebase(kind, steps) == (expect, "theirs", 11, 2)
 
 
 @pytest.mark.parametrize("kind", KINDS)
