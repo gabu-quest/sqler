@@ -83,7 +83,10 @@ A versioned table (`ensure_table(..., versioned=True)`, safe models, the
 tables first written by `upsert_with_version`, `insert_many_with_version` and
 `insert_many_with_version_promoted`, by a safe model's save of some fields, and by a safe
 model's queryset `update()`, `update_one()` and `update_n()` (those writes add the column).
-A plain write adds no column.
+A plain write adds no column, and neither does a read: a table made by plain writes gets the
+column at a safe model's first write to it. Until then nothing counts its writes, so a safe
+instance read before a plain write saves over that write without an error.
+`db.ensure_table(table, versioned=True)` before the first read gives the table the column.
 
 The column is the row's version, and the only place it is kept. Every statement sqler
 sends that writes a row of a table with the column moves it, whichever class or method

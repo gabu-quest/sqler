@@ -1,8 +1,11 @@
 """What kind a model class is (pydantic, lite, msgspec; frozen or not) is found once per
 class: a row read after the first asks the class nothing of what it is, each class has its
-own answer, and the answer keeps no class alive."""
+own answer, and the answer keeps no class alive. A pydantic class that forbids extra keys
+is one of the answers: it is not given the row's own ``_id`` and ``_version`` as fields."""
 
+import asyncio
 import gc
+import inspect
 import sys
 import threading
 import weakref
@@ -10,8 +13,16 @@ from dataclasses import FrozenInstanceError, dataclass
 from typing import Optional
 
 import pytest
-from pydantic import ConfigDict
-from sqler import SQLerDB, SQLerLiteModel, SQLerModel
+from pydantic import ConfigDict, ValidationError
+from sqler import (
+    AsyncSQLerDB,
+    AsyncSQLerModel,
+    AsyncSQLerSafeModel,
+    SQLerDB,
+    SQLerLiteModel,
+    SQLerModel,
+    SQLerSafeModel,
+)
 from sqler.models import _refs
 from sqler.models.msgspec import SQLerMsgspecModel
 
@@ -287,3 +298,81 @@ def test_an_answer_left_under_the_id_of_a_class_that_is_gone_is_not_given_to_the
     KNew(name="a").save(db=db)
     (model,) = KNew.using(db, "k_new").all()
     assert (type(model), model.name, model._id) == (KNew, "a", 1)
+
+
+# ---- a class that forbids extra keys --------------------------------------------------
+
+
+def _forbidding(base, child_base):
+    """A parent and a child class on ``base`` that both set ``extra="forbid"``."""
+    config = ConfigDict(extra="forbid")
+    child = type("FbChild", (child_base,), {
+        "__tablename__": "fb_child", "__module__": __name__, "model_config": config,
+        "__annotations__": {"label": str}, "label": "",
+    })
+    parent = type("FbParent", (base,), {
+        "__tablename__": "fb_parent", "__module__": __name__, "model_config": config,
+        "__annotations__": {"name": str, "child": Optional[child]}, "name": "", "child": None,
+    })
+    return parent, child
+
+
+FORBIDDING = {
+    "plain": (SQLerModel, SQLerModel, False),
+    "safe": (SQLerSafeModel, SQLerModel, False),
+    "async": (AsyncSQLerModel, AsyncSQLerModel, True),
+    "async_safe": (AsyncSQLerSafeModel, AsyncSQLerModel, True),
+}
+
+
+async def _aw(value):
+    return await value if inspect.isawaitable(value) else value
+
+
+def _with_forbidding(kind, steps):
+    base, child_base, is_async = FORBIDDING[kind]
+
+    async def scenario():
+        db = AsyncSQLerDB.in_memory() if is_async else SQLerDB.in_memory()
+        if is_async:
+            await db.connect()
+        parent, child = _forbidding(base, child_base)
+        try:
+            return await steps(db, parent, child)
+        finally:
+            await _aw(db.close())
+
+    return asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind", list(FORBIDDING))
+def test_a_class_that_forbids_extra_keys_reads_the_rows_it_saved_each_way(kind):
+    async def steps(db, parent, child):
+        kid = await _aw(child(label="one").save(db=db))
+        saved = await _aw(parent(name="a", child=kid).save(db=db))
+        saved.name = "b"
+        await _aw(saved.save(db=db))
+        got = [
+            await _aw(parent.from_id(saved._id, db=db)),
+            (await _aw(parent.from_ids([saved._id], db=db)))[0],
+            await _aw(parent.using(db).first()),
+            (await _aw(parent.using(db).all()))[0],
+        ]
+        again = await _aw(parent.from_id(saved._id, db=db))
+        again.name = "stale"
+        await _aw(again.refresh())
+        got.append(again)
+        return [(p._id, p.name, type(p.child).__name__, p.child._id, p.child.label) for p in got]
+
+    assert _with_forbidding(kind, steps) == [(1, "b", "FbChild", 1, "one")] * 5
+
+
+@pytest.mark.parametrize("kind", list(FORBIDDING))
+def test_a_class_that_forbids_extra_keys_still_refuses_a_key_it_has_no_field_for(kind):
+    async def steps(db, parent, child):
+        await _aw(db.insert_document("fb_parent", {"name": "a", "child": None, "other": 1}))
+        with pytest.raises(ValidationError) as caught:
+            await _aw(parent.from_id(1, db=db))
+        return [(e["loc"], e["type"]) for e in caught.value.errors()]
+
+    assert _with_forbidding(kind, steps) == [(("other",), "extra_forbidden")]
