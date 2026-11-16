@@ -156,7 +156,9 @@ class SQLerSafeModel(SQLerModel):
                 latest_doc = retry.reread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
-                payload = _retry.rebase(latest_doc, held, snap, delta, stale)
+                payload = _retry.rebase(
+                    latest_doc, held, snap, delta, stale, getattr(cls, "_update_stamps", dict)()
+                )
                 written = retry.build(
                     stale, lambda: cls.model_validate(_refs.resolve(payload, db, frozenset(), cls))
                 )

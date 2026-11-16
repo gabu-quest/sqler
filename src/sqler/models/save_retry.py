@@ -177,18 +177,21 @@ class SaveRetry:
 
 
 def rebase(
-    latest: dict, held: dict, snap: dict, delta: dict[str, int], stale: StaleVersionError
+    latest: dict, held: dict, snap: dict, delta: dict[str, int], stale: StaleVersionError, stamped: Any = ()
 ) -> dict:
     """The payload of a save rebased onto the newer row ``latest``.
 
     It is that row, with the fields the caller changed since its snapshot ``snap`` taken
     from its payload ``held``, and the counter ``delta`` added. A field only the other
     writer changed keeps the other writer's value. A field both changed, to two different
-    values, cannot be merged: the ``stale`` conflict the caller caught is raised.
+    values, cannot be merged: the ``stale`` conflict the caller caught is raised. A field in
+    ``stamped`` (what every save of the class stamps, ``_update_stamps()``: ``updated_at``)
+    is no such field: each save moved it, and this one's stamp is the one that stays.
     """
     out = {k: v for k, v in latest.items() if k not in ("_id", "_version")}
     mine = (_dirty.changed_fields(snap, held) - delta.keys()) & held.keys()
-    if mine & _dirty.changed_fields(snap, out) & _dirty.changed_fields(out, held):
+    both = mine & _dirty.changed_fields(snap, out) & _dirty.changed_fields(out, held)
+    if both - set(stamped):
         raise stale
     for k in mine:
         out[k] = held[k]

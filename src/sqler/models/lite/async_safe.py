@@ -165,7 +165,9 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
                 latest_doc = await retry.areread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
-                payload = _retry.rebase(latest_doc, held, snap, delta, stale)
+                payload = _retry.rebase(
+                    latest_doc, held, snap, delta, stale, getattr(cls, "_update_stamps", dict)()
+                )
                 async def build():
                     return cls.model_validate(await cls._aresolve_relations(payload, db=db))
 
