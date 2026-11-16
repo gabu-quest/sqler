@@ -334,6 +334,7 @@ class QueryCache:
         is held (the result is not stored)."""
         with self._lock:
             if table in _held:
+                self._stats.misses += 1
                 return False, None
             entry = self._cache.get(key)
             if entry is not None:
@@ -344,6 +345,7 @@ class QueryCache:
                     return True, entry.value
                 self._remove_key(key)
                 self._stats.expirations += 1
+            self._stats.misses += 1
             return False, self._generations.get(table, 0)
 
     def invalidate(self, key: str) -> bool:
@@ -536,7 +538,7 @@ def cached_query(
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            c = cache or get_cache()
+            c = get_cache() if cache is None else cache
             cache_key = key or _make_cache_key(func, args, kwargs)
             name = _table_name(table)
             found, value = c._lookup(cache_key, name)
@@ -548,7 +550,7 @@ def cached_query(
             return result
 
         # Add cache control methods
-        wrapper.invalidate = lambda: (cache or get_cache()).invalidate(
+        wrapper.invalidate = lambda: (get_cache() if cache is None else cache).invalidate(
             key or _make_cache_key(func, (), {})
         )
         wrapper.cache_key = key
@@ -569,7 +571,7 @@ def async_cached_query(
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            c = cache or get_cache()
+            c = get_cache() if cache is None else cache
             cache_key = key or _make_cache_key(func, args, kwargs)
             name = _table_name(table)
             found, value = c._lookup(cache_key, name)
@@ -580,7 +582,7 @@ def async_cached_query(
                 c._store(cache_key, result, ttl_seconds, name, value)
             return result
 
-        wrapper.invalidate = lambda: (cache or get_cache()).invalidate(
+        wrapper.invalidate = lambda: (get_cache() if cache is None else cache).invalidate(
             key or _make_cache_key(func, (), {})
         )
         wrapper.cache_key = key
