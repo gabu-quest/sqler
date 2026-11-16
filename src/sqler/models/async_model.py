@@ -60,6 +60,8 @@ class AsyncSQLerModel(BaseModel):
 
     # class-bound db + table metadata
     _db: ClassVar[Optional[AsyncSQLerDB]] = None
+    # the database this class takes; every way one comes in checks it (``_check_database``)
+    _takes_db: ClassVar[type[AsyncSQLerDB]] = AsyncSQLerDB
     _table: ClassVar[Optional[str]] = None
     # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
     _versioned_rows: ClassVar[bool] = False
@@ -85,6 +87,12 @@ class AsyncSQLerModel(BaseModel):
 
     @classmethod
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
+        """Bind this model class to ``db`` (deprecated: see :meth:`SQLerModel.set_db`).
+
+        Raises:
+            TypeError: ``db`` is neither ``None`` nor an ``AsyncSQLerDB``; the class is left as it was.
+        """
+        _table_names._check_given(cls, db)
         warnings.warn(
             f"{cls.__name__}.set_db() is deprecated. "
             f"{_table_names.DATABASE_RULE} "
@@ -139,6 +147,7 @@ class AsyncSQLerModel(BaseModel):
             Missing ids are silently omitted from result.
         """
         if not ids:
+            _table_names._check_given(cls, db)
             return []
         db, table = cls._resolve_binding(db)
         read = _refs.aread_versioned if cls._versioned_rows else _aread_documents
@@ -193,6 +202,7 @@ class AsyncSQLerModel(BaseModel):
         A read creates no table: on a table nobody created, ``all()`` is empty,
         ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
         """
+        _table_names._check_database(cls, db)
         table = validate_table_name(table) if table is not None else _model_table_name(cls)
         return cls._queryset(db, table)
 

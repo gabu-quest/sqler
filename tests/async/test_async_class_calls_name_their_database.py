@@ -12,15 +12,22 @@ import pytest_asyncio
 from test_class_calls_name_their_database import (  # tests/ is on the import path
     ALL_ROWS,
     WAYS,
+    WRONG_KIND_CALLS,
     _all_names,
     _bases,
+    _binding,
     _db_path,
+    _identity,
+    _names,
     _snapshot,
+    _v,
     expected_of,
     is_async,
     make_class,
     seed,
     subject_cases,
+    wrong_kind_cases,
+    wrong_kind_message,
 )
 
 import sqler
@@ -111,46 +118,111 @@ def test_an_unbound_soft_delete_queryset_without_db_raises_the_unbound_error(nam
         getattr(cls, name)()
 
 
-# An async model given a sync database fails as ``save(db=)`` does for the same mistake: it
-# awaits what the sync database returned.
-WRONG_KIND = {
-    "save": lambda cls, db: cls(name="damson").save(db=db),
-    "add_index": lambda cls, db: cls.add_index("name", db=db),
-    "ensure_index": lambda cls, db: cls.ensure_index("name", db=db),
-    "validate_references": lambda cls, db: cls.validate_references(db=db),
-    "from_id": lambda cls, db: cls.from_id(1, db=db),
-}
+def test_every_async_base_is_given_every_call_of_the_other_kind():
+    """Four async bases; ``validate_references`` is on the two pydantic ones, ``bind`` on the
+    two lite ones: 4 * 14 + 2 + 2 cases."""
+    assert len(wrong_kind_cases(want_async=True)) == 60
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", sorted(WRONG_KIND))
-async def test_an_async_model_given_a_sync_database_fails_as_save_does(name, tmp_path):
-    sync_db = SQLerDB.on_disk(str(tmp_path / "sync.db"))
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+@pytest.mark.parametrize("given", ["sync_db", "str"])
+@pytest.mark.parametrize(("base", "name"), wrong_kind_cases(want_async=True))
+async def test_an_async_model_given_a_database_it_cannot_use_raises_before_anything_runs(
+    base, name, given, bound, two_dbs
+):
+    """The ``TypeError`` names the class, the type given and the database the class takes;
+    the async database, the saved instance and the class binding are as they were."""
+    right, _ = two_dbs
+    cls, _ = make_class(base, None, own_table=True)
+    if bound:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cls.set_db(right)
+    kept = await cls(name="apple").save(db=right)
+    wrong = SQLerDB.in_memory(shared=False) if given == "sync_db" else "x"
+    before = (_snapshot(_db_path(right)), _identity(kept), _binding(cls))
     try:
-        cls, _ = make_class(sqler.AsyncSQLerModel, None, own_table=True)
-        sync_db.insert_document(cls.__tablename__, {"name": "apple"})
-        with pytest.raises(TypeError, match="can't be used in 'await' expression"):
-            await WRONG_KIND[name](cls, sync_db)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            with pytest.raises(TypeError) as caught:
+                await _v(WRONG_KIND_CALLS[name](cls, kept, wrong))
     finally:
-        sync_db.close()
+        if given == "sync_db":
+            wrong.close()
+    given_type = "SQLerDB" if given == "sync_db" else "str"
+    assert str(caught.value) == wrong_kind_message(cls, "AsyncSQLerDB", given_type)
+    assert (_snapshot(_db_path(right)), _identity(kept), _binding(cls)) == before
 
 
 @pytest.mark.asyncio
-# the sync database hands back the async query's statement maker unawaited
-@pytest.mark.filterwarnings("ignore:coroutine .* was never awaited:RuntimeWarning")
-@pytest.mark.parametrize("name", ["using", "active", "with_deleted", "only_deleted"])
-async def test_an_async_soft_delete_queryset_given_a_sync_database_fails_as_using_does(name, tmp_path):
-    """A soft-delete queryset is a query: given a sync database it fails as ``using(db)``
-    does for the same mistake."""
+@pytest.mark.parametrize("name", ["active", "with_deleted", "only_deleted"])
+async def test_an_async_soft_delete_queryset_given_a_sync_database_raises_as_using_does(name, tmp_path):
+    """A soft-delete queryset is a query: given a sync database it raises as ``using(db)``
+    does, when it is asked for, before it reads anything."""
     sync_db = SQLerDB.on_disk(str(tmp_path / "sync.db"))
     try:
         cls, _ = make_class(sqler.AsyncSQLerModel, sqler.AsyncSoftDeleteMixin, own_table=True)
-        sync_db.insert_document(cls.__tablename__, {"name": "apple"})
-        queryset = cls.using(sync_db) if name == "using" else getattr(cls, name)(db=sync_db)
-        with pytest.raises(TypeError, match="cannot unpack non-iterable coroutine object"):
-            await queryset.all()
+        with pytest.raises(TypeError) as caught:
+            getattr(cls, name)(db=sync_db)
+        assert str(caught.value) == wrong_kind_message(cls, "AsyncSQLerDB", "SQLerDB")
     finally:
         sync_db.close()
+
+
+@pytest.mark.asyncio
+async def test_an_async_model_saved_with_a_sync_database_writes_no_row(tmp_path):
+    sync_db = SQLerDB.on_disk(str(tmp_path / "sync.db"))
+    try:
+        cls, table = make_class(sqler.AsyncSQLerModel, None, own_table=True)
+        sync_db.ensure_table(table)
+        note = cls(name="x")
+        with pytest.raises(TypeError) as caught:
+            await note.save(db=sync_db)
+        assert str(caught.value) == wrong_kind_message(cls, "AsyncSQLerDB", "SQLerDB")
+        assert note._id is None
+        with sqlite3.connect(_db_path(sync_db)) as raw:
+            assert raw.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
+    finally:
+        sync_db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", [b for b in _bases() if is_async(b)], ids=lambda b: b.__name__)
+async def test_set_db_none_leaves_an_async_class_unbound(base, two_dbs):
+    """``set_db(None)`` is not a database of the other kind: it unbinds the class."""
+    right, _ = two_dbs
+    cls, _ = make_class(base, None, own_table=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cls.set_db(right)
+        cls.set_db(None)
+    assert cls._db is None
+    with pytest.raises(NotBoundError, match=f"Model {cls.__name__} is not bound. {RULE}"):
+        await cls.from_id(1)
+
+
+class _OwnAsyncDB(AsyncSQLerDB):
+    """A database class of the program's own, on ``AsyncSQLerDB``."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", [b for b in _bases() if is_async(b)], ids=lambda b: b.__name__)
+async def test_a_subclass_of_the_async_database_is_taken_as_the_database_is(base, tmp_path):
+    db = _OwnAsyncDB.on_disk(str(tmp_path / "own.db"))
+    await db.connect()
+    try:
+        cls, _ = make_class(base, None, own_table=True)
+        await seed(cls, db)
+        assert _names(await cls.using(db).order_by("_id").all()) == ["apple", "banana", "cherry"]
+        assert (await cls.from_id(2, db=db)).name == "banana"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cls.set_db(db)
+        assert cls._db is db
+        assert await cls.count() == 3
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio

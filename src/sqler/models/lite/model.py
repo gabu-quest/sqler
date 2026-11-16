@@ -22,6 +22,7 @@ from typing import (
 
 from sqler import registry
 from sqler._stored import stored
+from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import UniqueConstraintError
 from sqler.models import _dirty, _refs, _table_names, _write_rules
 from sqler.models._table_names import (  # noqa: F401
@@ -36,7 +37,6 @@ from sqler.models.lite.base import SQLerLiteModelBase
 from sqler.utils import validate_field_name, validate_table_name
 
 if TYPE_CHECKING:
-    from sqler.db.sqler_db import SQLerDB
     from sqler.models.queryset import SQLerQuerySet
 
 # The deprecation warning is attributed to the first caller outside the sqler package, so a
@@ -74,6 +74,8 @@ class SQLerLiteModel(SQLerLiteModelBase):
 
     # Class-level database binding (not dataclass fields)
     _db: ClassVar[Optional["SQLerDB"]] = None
+    # the database this class takes; every way one comes in checks it (``_check_database``)
+    _takes_db: ClassVar[type[SQLerDB]] = SQLerDB
     _table: ClassVar[Optional[str]] = None
     # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
     _versioned_rows: ClassVar[bool] = False
@@ -91,7 +93,11 @@ class SQLerLiteModel(SQLerLiteModelBase):
             db: Database instance to use for persistence.
             table: Optional table name. Defaults to lowercase plural of the
                 class name (e.g., ``User`` → ``users``).
+
+        Raises:
+            TypeError: ``db`` is neither ``None`` nor a ``SQLerDB``; the class is left as it was.
         """
+        _table_names._check_given(cls, db)
         warnings.warn(
             f"{cls.__name__}.set_db() is deprecated. "
             f"{_table_names.DATABASE_RULE} "
@@ -143,6 +149,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         A read creates no table: on a table nobody created, ``all()`` is empty,
         ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
         """
+        _table_names._check_database(cls, db)
         table = validate_table_name(table) if table is not None else _model_table_name(cls)
         return cls._queryset(db, table)
 
@@ -200,6 +207,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
             Missing ids are silently omitted from result.
         """
         if not ids:
+            _table_names._check_given(cls, db)
             return []
         db, table = cls._resolve_binding(db)
         read = _refs.read_versioned if cls._versioned_rows else _read_documents

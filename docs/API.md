@@ -188,8 +188,12 @@ read from elsewhere is a referenced row: it is read from the database its own cl
 bound to when it has one, else from `db` (see [C47]). Without `db`, the call uses the
 class's `set_db()` binding as before; with neither it raises `NotBoundError`, whose
 message says this rule (the search calls raise `ValueError`, as `FTSIndex` does). An async
-class given a `SQLerDB` fails as its `save(db=)` does, with `TypeError` from awaiting what
-the sync database returned.
+class given anything but an `AsyncSQLerDB`, and a sync class given anything but a `SQLerDB`
+(a subclass of either is taken as its parent is), raise `TypeError` naming the class, the
+type given and the database the class takes, before any statement runs and with the
+instance and the class as they were: on every call above but the search calls (which
+raise as `FTSIndex` does), and on `save()`, `delete()`, `refresh()`, `using()`, `set_db()`
+and `bind()` (these two let `None` through, as before).
 
 The search calls given `db` use an index of the class's definition (the class's index's
 fields, name, tokenizer and `content_sync`, else its `FTS` configuration) on that database,
