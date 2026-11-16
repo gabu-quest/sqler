@@ -107,8 +107,11 @@ def test_a_close_that_fails_does_not_hide_the_next_one(tmp_path):
         done.returncode,
         re.search(r"^1 passed, 1 error in ", done.stdout, re.M) is not None,
     ) == (1, True), shown
-    assert "left open and its close raised ValueError" in done.stdout, shown
-    assert done.stdout.count("the test left async connections open") == 1, shown
+    # The report is counted where the teardown printed it, at the start of a line: the short
+    # summary repeats it after the test's name, cut to the terminal's width or, on CI, in full.
+    reports = re.findall(r"^the test left async connections open: .*$", done.stdout, re.M)
+    assert len(reports) == 1, shown
+    assert "left open and its close raised ValueError('Connection closed')" in reports[0], shown
 
 
 def test_a_connection_in_a_statement_that_never_ends_fails_its_test_and_the_run_ends(tmp_path):
