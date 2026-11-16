@@ -176,7 +176,7 @@ takes `db=None`, keyword-only, after its other parameters:
 - `SoftDeleteMixin` and `AsyncSoftDeleteMixin`: `active(*, db=None)`,
   `with_deleted(*, db=None)`, `only_deleted(*, db=None)`, each the queryset of
   `using(db)` narrowed;
-- `SearchableMixin`: `search(query, *, limit=100, offset=0, plain=False, db=None)`,
+- `SearchableMixin` and `AsyncSearchableMixin`: `search(query, *, limit=100, offset=0, plain=False, db=None)`,
   `search_ranked(query, *, limit=100, offset=0, plain=False, db=None)`,
   `search_count(query, *, plain=False, db=None)`, `rebuild_search_index(*, db=None)`,
   `drop_search_index(*, db=None)`; `create_search_index(db=None)` takes it positionally too;
@@ -207,11 +207,11 @@ index is the one of `db`.
 
 **What "the async classes match the sync ones" means.** One test holds it:
 `tests/test_public_names.py::test_an_async_class_has_every_public_name_of_its_sync_twin`. It
-takes 14 pairs of sync and async classes (`SQLerDB`/`AsyncSQLerDB`,
+takes 16 pairs of sync and async classes (`SQLerDB`/`AsyncSQLerDB`,
 `SQLiteAdapter`/`AsyncSQLiteAdapter`, `SQLerQuery`/`AsyncSQLerQuery`,
 `SQLerQuerySet`/`AsyncSQLerQuerySet`, the four pydantic and lite model bases with their async
-twins, `MigrationRunner`, `Migration`, `TrackedModel`, `PartialUpdateMixin`, `HooksMixin` and
-`AuditLogMixin` with their async twins) and checks that every public name (one with no
+twins, `MigrationRunner`, `Migration`, `TrackedModel`, `PartialUpdateMixin`, `HooksMixin`,
+`AuditLogMixin`, `FTSIndex` and `SearchableMixin` with their async twins) and checks that every public name (one with no
 leading underscore) of the sync class is on the async class, under the same name or with an
 `a` in front. It checks names only: not signatures, not behaviour, not private names, not
 names that only the async class has, and not classes or functions outside those pairs.
@@ -2324,8 +2324,12 @@ Every way in indexes a field as it is stored: a promoted column from its column,
 field from `data` (a list or dict as its JSON text, a number as the number, `None` as
 nothing). `index(model)` reads the saved row, not the instance's unsaved values.
 
-A search index works on a `SQLerDB`: given an `AsyncSQLerDB` (through `db=` or the
-class's bound database), every method raises `TypeError` before it sends anything.
+`FTSIndex` and `SearchableMixin` work on a `SQLerDB`; `AsyncFTSIndex` and
+`AsyncSearchableMixin` are their twins for an `AsyncSQLerDB` (below). An index given a
+database of the other kind (through `db=` or the class's bound database) raises `TypeError`,
+naming the index that takes it, before it sends anything. `SearchableMixin` on an async model
+class, and `AsyncSearchableMixin` on a sync one, raise `TypeError` when the class is made,
+naming the mixin to use.
 
 ```python
 from sqler import SearchableMixin
@@ -2353,6 +2357,47 @@ Every search call takes the database: `Post.create_search_index(db)`, then
 `Post.search("Python", db=db)`, `search_ranked(..., db=db)`, `search_count(..., db=db)`,
 `rebuild_search_index(db=db)` and `drop_search_index(db=db)` (see "Every class call names
 its database").
+
+The mixin works on every sync base (`SQLerModel`, `SQLerSafeModel`, `SQLerLiteModel`,
+`SQLerLiteSafeModel`, `SQLerMsgspecModel`). Without an `FTS` class it indexes every public
+field whose declared type holds text, on every base: `str`, `Optional[str]` and `str | None`,
+and a container of text such as `list[str]`, which is indexed as its JSON text. An `FTS`
+class names the fields itself.
+
+**On an `AsyncSQLerDB`** the same calls are awaited: `AsyncFTSIndex` has every public call of
+`FTSIndex` (`create`, `drop`, `rebuild`, `index`, `remove`, `search`, `search_ranked`,
+`search_with_highlights`, `snippet`, `count`, `stats`, `optimize`) as a coroutine of the same
+name, arguments and result, and `AsyncSearchableMixin` the mixin's, on every async base. Both
+send the statements the sync ones send, so an index made through a `SQLerDB` is searched
+through an `AsyncSQLerDB` on the same file, and the reverse. With `content_sync=False` the
+mixin's `await save()` and `await delete()` change the index after the write, in the write's
+transaction when one is open.
+
+```python
+import asyncio
+from sqler import AsyncFTSIndex, AsyncSearchableMixin, AsyncSQLerDB, AsyncSQLerModel
+
+class Note(AsyncSearchableMixin, AsyncSQLerModel):
+    title: str
+    body: str = ""
+
+async def main():
+    adb = AsyncSQLerDB.in_memory()
+    await adb.connect()
+    await Note.create_search_index(adb)          # every str field: title, body
+    await Note(title="Python Tips", body="Learn Python").save(db=adb)
+
+    hits = await Note.search("python", db=adb)
+    count = await Note.search_count("python", db=adb)
+    fts = AsyncFTSIndex(Note, ["title"], index_name="note_titles", db=adb)
+    await fts.create()
+    ranked = await fts.search_ranked("tips")
+    print([n.title for n in hits], count, [r.model.title for r in ranked])
+    # ['Python Tips'] 1 ['Python Tips']
+    await adb.close()
+
+asyncio.run(main())
+```
 
 `fts.stats()` returns an `FTSStats`: `table_name` (the index table), `indexed_rows`, `fields`
 and `total_tokens`, an estimate made from the length of the first indexed field.

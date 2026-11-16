@@ -49,7 +49,14 @@ from .export import (
     import_jsonl,
     stream_jsonl,
 )
-from .fts import FTSIndex, FTSStats, SearchableMixin, SearchResult
+from .fts import (
+    AsyncFTSIndex,
+    AsyncSearchableMixin,
+    FTSIndex,
+    FTSStats,
+    SearchableMixin,
+    SearchResult,
+)
 from .logging import QueryLog, QueryLogger, query_logger, timed_query
 from .metrics import MetricsCollector, metrics
 from .migrations import (
@@ -325,9 +332,11 @@ __all__ = [
     "configure_cache",
     # Full-Text Search
     "FTSIndex",
+    "AsyncFTSIndex",
     "FTSStats",
     "SearchResult",
     "SearchableMixin",
+    "AsyncSearchableMixin",
     # Change Tracking
     "TrackedModel",
     "AsyncTrackedModel",

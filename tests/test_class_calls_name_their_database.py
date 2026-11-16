@@ -134,7 +134,7 @@ async def _soft_deleted_damson(cls, db) -> None:
 
 
 async def _search_ready(cls, db) -> None:
-    cls.create_search_index(db=db)
+    await _v(cls.create_search_index(db=db))
 
 
 # ----- the one table ------------------------------------------------------------------------
@@ -197,33 +197,33 @@ async def r_only_deleted(cls, db, table):
 
 
 async def r_create_search_index(cls, db, table):
-    index = cls.create_search_index(db=db)
-    return _names(index.search("banana"))
+    index = await _v(cls.create_search_index(db=db))
+    return _names(await _v(index.search("banana")))
 
 
 async def r_search(cls, db, table):
     await _search_ready(cls, db)
-    return _names(cls.search("banana OR cherry", db=db))
+    return _names(await _v(cls.search("banana OR cherry", db=db)))
 
 
 async def r_search_ranked(cls, db, table):
     await _search_ready(cls, db)
-    return [hit.model.name for hit in cls.search_ranked("cherry", db=db)]
+    return [hit.model.name for hit in await _v(cls.search_ranked("cherry", db=db))]
 
 
 async def r_search_count(cls, db, table):
     await _search_ready(cls, db)
-    return cls.search_count("apple OR banana", db=db)
+    return await _v(cls.search_count("apple OR banana", db=db))
 
 
 async def r_rebuild_search_index(cls, db, table):
     await _search_ready(cls, db)
-    return cls.rebuild_search_index(db=db)
+    return await _v(cls.rebuild_search_index(db=db))
 
 
 async def r_drop_search_index(cls, db, table):
     await _search_ready(cls, db)
-    cls.drop_search_index(db=db)
+    await _v(cls.drop_search_index(db=db))
     return [name for kind, name in _master(_db_path(db)) if name.endswith("_fts")]
 
 
@@ -357,10 +357,7 @@ def _mixins() -> list[type]:
 
 def _fits(mixin: type, base: type) -> bool:
     """Whether ``mixin`` is made for ``base``: the same kind (sync or async; the timestamp and
-    audit-free mixins serve both), the search mixin on the pydantic sync bases, the change
-    tracking mixins on pydantic."""
-    if mixin is SearchableMixin:
-        return issubclass(base, sqler.SQLerModel)
+    audit-free mixins serve both), the change tracking mixins on pydantic."""
     if mixin.__module__ == "sqler.tracking":
         if not issubclass(base, (sqler.SQLerModel, sqler.AsyncSQLerModel)):
             return False
@@ -436,7 +433,7 @@ def test_the_subjects_are_every_base_and_mixin():
             "SQLerMsgspecModel", "SQLerMsgspecModelBase", "AsyncSQLerMsgspecModel",
             "TimestampMixin", "SoftDeleteMixin", "AsyncSoftDeleteMixin", "HooksMixin",
             "AsyncHooksMixin", "FullMixin", "AsyncFullMixin", "AuditMixin", "AsyncAuditMixin",
-            "AuditLogMixin", "AsyncAuditLogMixin", "SearchableMixin",
+            "AuditLogMixin", "AsyncAuditLogMixin", "SearchableMixin", "AsyncSearchableMixin",
             "TrackedModel", "AsyncTrackedModel", "PartialUpdateMixin", "AsyncPartialUpdateMixin",
             "DiffMixin",
         ]
