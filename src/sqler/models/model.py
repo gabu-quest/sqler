@@ -9,6 +9,7 @@ from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
 from sqler._stored import stored
+from sqler.db._statements import IndexFields
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import UniqueConstraintError
 from sqler.models import _dirty, _refs, _table_names, _write_rules
@@ -307,17 +308,18 @@ class SQLerModel(BaseModel):
     @classmethod
     def add_index(
         cls,
-        field: str,
+        field: IndexFields,
         *,
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
         db=None,
     ) -> None:
-        """Create an index on a JSON field via the model class.
+        """Create an index on one field or several via the model class.
 
         Args:
-            field: Dotted JSON path or literal column.
+            field: A field, or a list of fields each a name or ``(name, "asc" | "desc")``,
+                as ``create_index`` takes it.
             unique: Enforce uniqueness.
             name: Optional index name.
             where: Optional partial-index WHERE clause.
@@ -329,14 +331,14 @@ class SQLerModel(BaseModel):
     @classmethod
     def ensure_index(
         cls,
-        field: str,
+        field: IndexFields,
         *,
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
         db=None,
     ) -> None:
-        """Ensure an index on a JSON path or literal column exists (idempotent), in ``db``
+        """Ensure an index on one field or several exists (idempotent), in ``db``
         when given, else the class's database."""
         cls.add_index(field, unique=unique, name=name, where=where, db=db)
 

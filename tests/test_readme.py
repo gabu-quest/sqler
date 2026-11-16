@@ -492,6 +492,25 @@ def test_C20_index_helpers_readme():
 
 
 # ---------------- [C21] README FastAPI mapping ----------------
+def test_C20_index_over_several_fields():
+    db = SQLerDB.in_memory()
+    db.ensure_table("jobs", promoted={"status": "TEXT", "priority": "INTEGER"})
+    for p in range(3):
+        db.insert_document("jobs", {"queue": "a", "status": "pending", "priority": p, "eta": p})
+
+    db.create_index(
+        "jobs",
+        ["queue", ("priority", "desc"), "eta"],
+        where="status = 'pending' AND json_extract(data, '$.eta') >= 0",
+    )
+    (index,) = db.list_indexes("jobs")
+    assert index["name"] == "idx_jobs_queue__priority_desc__eta"
+    assert "(json_extract(data, '$.queue'), priority DESC, json_extract(data, '$.eta'))" in index["sql"]
+
+    q = db.query("jobs").filter((F("queue") == "a") & (F("status") == "pending")).order_by("priority", desc=True)
+    assert [d["priority"] for d in q.all_dicts()] == [2, 1, 0]
+
+
 def test_C21_fastapi_mapping_readme():
     try:
         from fastapi import HTTPException  # type: ignore

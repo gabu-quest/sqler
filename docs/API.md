@@ -1428,6 +1428,60 @@ db.create_index("indexedusers", "address._id")
 db.create_index("indexedusers", "address.city")
 ```
 
+`create_index(table, field, unique=False, name=None, where=None)` takes one field, or a list
+whose entries are a field or `(field, "asc" | "desc")` (either word in any case), and makes one
+index over them in that order. Each field is indexed where the table stores it: a promoted
+column, `_id` and `_version` as their column, any other field as
+`json_extract(data, '$.<path>')`, so a query that filters on a promoted field searches the
+index. Without `name=` the name is `idx_<table>_<field>` for one ascending field (dots as
+`_`), else each field so, with `_desc` after a descending one, joined by `__`
+(`idx_jobs_queue__priority_desc__eta`): two lists that differ in order or in a direction make
+two indexes, except that a field whose own name ends in `_desc` or holds `__` can share a name
+with a list (`"x_desc"` and `[("x", "desc")]`, `"a__b"` and `["a", "b"]`): the second call is
+skipped as the name exists, so give `name=`. An empty list, a field named twice or an entry of another shape raises
+`ValueError`, a name that is no identifier the `Invalid...Error` of that name, before anything
+is sent; a list given to `add_index()` and `ensure_index()` of every model base works the same.
+
+`where=` is SQL, laid out as a filter is: name a field by its JSON path,
+`json_extract(data, '$.status') = 'pending'`, or, for a promoted field, by its column,
+`status = 'pending'`, and both give the same index. `json_extract(data, '$.<field>')` (any
+case, any space after the comma, as a filter takes it) reads the column when `<field>` is
+promoted in the table, at `create_index` and when the index follows a promotion; the rewrite is
+a text replace, so a string literal holding that text is rewritten too (a filter does the
+same). A `where=` that already names the column, or a field that is not promoted, is kept as
+written, byte for byte.
+
+When a field is promoted after an index over it (or over it in its `where=`) was made
+(`ensure_table(promoted=...)`, the first save of a class with `__promoted__`,
+`move_promoted()`), the index is made again on the column in the same transaction, under its
+name, with its `unique` and its `where`. Only an index whose text is, byte for byte, one
+`create_index` makes is made again; an index written by hand is left as it is. If the new
+column holds what the unique index refuses (rows without the key now hold the column's
+`DEFAULT`), the whole promotion is rolled back with the unique error. An index made by an
+earlier release over a field that was already promoted is not made again by a second
+`create_index` (the name exists): `drop_index` it and make it again.
+
+```python
+from sqler import F, SQLerDB
+
+db = SQLerDB.in_memory()
+db.ensure_table("jobs", promoted={"status": "TEXT", "priority": "INTEGER"})
+for p in range(3):
+    db.insert_document("jobs", {"queue": "a", "status": "pending", "priority": p, "eta": p})
+
+db.create_index(
+    "jobs",
+    ["queue", ("priority", "desc"), "eta"],
+    where="status = 'pending' AND json_extract(data, '$.eta') >= 0",
+)
+(index,) = db.list_indexes("jobs")
+assert index["name"] == "idx_jobs_queue__priority_desc__eta"
+assert "(json_extract(data, '$.queue'), priority DESC, json_extract(data, '$.eta'))" in index["sql"]
+
+q = db.query("jobs").filter((F("queue") == "a") & (F("status") == "pending")).order_by("priority", desc=True)
+assert [d["priority"] for d in q.all_dicts()] == [2, 1, 0]
+```
+
 ### [C35] list_indexes and index_exists
 
 ```python
