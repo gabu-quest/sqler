@@ -78,7 +78,8 @@ def _referring(target_table: str) -> tuple:
     complete = True
     if isinstance(target, type):
         for table, classes in registry.holders().items():
-            fields: Optional[dict] = {}
+            held: dict = {}
+            fields: Optional[dict] = held
             for cls in classes:
                 typed = _refs.known_typed_fields(cls)
                 if typed is None:
@@ -86,7 +87,7 @@ def _referring(target_table: str) -> tuple:
                     break
                 for name, at in typed.items():
                     if _can_hold(at, target):
-                        fields[name] = _joined(fields.get(name), at)
+                        held[name] = _joined(held.get(name), at)
             if fields is None:
                 complete = False
                 found.append((table, None))
@@ -272,6 +273,7 @@ def failed_read(exc: Exception, table: str) -> Rows:
     """What a read of the look whose failure ``exc`` :func:`answers` it gives: None for a
     table that is not there; ``exc`` itself for :func:`_look` to read the table without
     SQLite's JSON functions."""
+    assert isinstance(exc, sqlite3.OperationalError)  # :func:`answers` holds only for one
     return None if is_missing_table(exc, table) else exc
 
 

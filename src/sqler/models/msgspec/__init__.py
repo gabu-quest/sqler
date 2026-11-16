@@ -43,8 +43,8 @@ else:
         _Stub.__qualname__ = name
         return _Stub
 
-    SQLerMsgspecModelBase = _msgspec_required_class("SQLerMsgspecModelBase")
-    SQLerMsgspecModel = _msgspec_required_class("SQLerMsgspecModel")
+    SQLerMsgspecModelBase = _msgspec_required_class("SQLerMsgspecModelBase")  # type: ignore[misc]  # stub used when msgspec is not installed
+    SQLerMsgspecModel = _msgspec_required_class("SQLerMsgspecModel")  # type: ignore[misc]  # stub used when msgspec is not installed
 
     __all__ = [
         "SQLerMsgspecModelBase",

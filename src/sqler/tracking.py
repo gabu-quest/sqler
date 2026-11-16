@@ -28,9 +28,14 @@ import inspect
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional, Set, Tuple, TypeVar
+from typing import TYPE_CHECKING, Any, Optional, Self, Set, Tuple, TypeVar
 
 T = TypeVar("T", bound="TrackedModel")
+
+if TYPE_CHECKING:
+    from sqler.models._host import ModelHost as _ModelHost
+else:
+    _ModelHost = object
 
 
 @dataclass
@@ -108,7 +113,7 @@ class ChangeTracker:
         return len(self._changes) > 0
 
 
-class _ChangeTracking:
+class _ChangeTracking(_ModelHost):
     """The tracker of a model and its answers, for :class:`TrackedModel` and
     :class:`AsyncTrackedModel`.
 
@@ -129,8 +134,9 @@ class _ChangeTracking:
 
     def _init_tracker(self) -> None:
         """Initialize the change tracker."""
-        object.__setattr__(self, "_tracker", ChangeTracker())
-        self._tracker.snapshot(self._get_trackable_data())
+        tracker = ChangeTracker()
+        object.__setattr__(self, "_tracker", tracker)
+        tracker.snapshot(self._get_trackable_data())
 
     def _get_trackable_data(self) -> dict[str, Any]:
         """Get current field values for tracking."""
@@ -268,7 +274,7 @@ class AsyncTrackedModel(_ChangeTracking):
         return result
 
 
-class PartialUpdateMixin:
+class PartialUpdateMixin(_ModelHost):
     """Mixin that saves only the changed fields of a :class:`TrackedModel`.
 
     Usage::
@@ -309,7 +315,7 @@ class PartialUpdateMixin:
         return self.save(db=db, _partial=True)
 
 
-class AsyncPartialUpdateMixin:
+class AsyncPartialUpdateMixin(_ModelHost):
     """Async twin of :class:`PartialUpdateMixin`, with :class:`AsyncTrackedModel`."""
 
     async def save_partial(self, *, db=None) -> "AsyncPartialUpdateMixin":
@@ -328,7 +334,7 @@ def _changed(model: Any) -> Set[str]:
         raise TypeError("PartialUpdateMixin requires TrackedModel") from None
 
 
-class DiffMixin:
+class DiffMixin(_ModelHost):
     """Mixin for comparing model instances.
 
     Usage::
@@ -390,7 +396,7 @@ class DiffMixin:
 
         return True
 
-    def clone(self: T, **overrides) -> T:
+    def clone(self, **overrides) -> Self:
         """Create a copy of this instance with optional overrides.
 
         Args:

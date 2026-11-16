@@ -1,7 +1,7 @@
 import json
 import re
 import sqlite3
-from typing import Any, AsyncIterator, Optional, Self
+from typing import Any, AsyncGenerator, Optional, Self
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
@@ -21,6 +21,8 @@ from sqler.utils import validate_field_name
 
 class AsyncSQLerQuery(_WriteStatements):
     """Async query builder/executor mirroring SQLerQuery semantics."""
+
+    _adapter: Optional[AsyncSQLiteAdapter]
 
     def __init__(
         self,
@@ -108,6 +110,7 @@ class AsyncSQLerQuery(_WriteStatements):
                 cursor = await self._db._sent(self._table, make)
                 return used, cursor
             sql, params = build(self)
+            assert self._adapter is not None  # with no database behind the query its caller refused a query with no adapter
             try:
                 return self, await self._adapter._execute_judged(sql, params)
             except Exception as exc:
@@ -121,6 +124,7 @@ class AsyncSQLerQuery(_WriteStatements):
         """Async twin of :meth:`sqler.query.query.SQLerQuery._updating`."""
         if self._db is not None or self._include_version:
             return self
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         cur = await self._adapter.execute(_NAMES_SQL, [self._table])
         try:
             names = tuple(row[0] for row in await cur.fetchall())
@@ -303,6 +307,7 @@ class AsyncSQLerQuery(_WriteStatements):
             return []
         rows = await cur.fetchall()
         await cur.close()
+        assert self._adapter is not None  # count, sum and avg refused a query with no adapter
         await self._adapter.auto_commit()
         agg_key = func.lower()
         results: list[dict[str, Any]] = []
@@ -571,7 +576,7 @@ class AsyncSQLerQuery(_WriteStatements):
         await self._adapter.auto_commit()
         return query._documents(rows)
 
-    async def iter_dicts(self) -> AsyncIterator[dict[str, Any]]:
+    async def iter_dicts(self) -> AsyncGenerator[dict[str, Any], None]:
         """Async twin of :meth:`sqler.query.query.SQLerQuery.iter_dicts`: ``async for doc in
         query.iter_dicts()`` gives the documents ``all_dicts()`` gives, one at a time.
 
@@ -654,6 +659,7 @@ class AsyncSQLerQuery(_WriteStatements):
             return 0
         rowcount = cur.rowcount
         await cur.close()
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         await self._adapter.auto_commit()
         return rowcount if rowcount >= 0 else 0
 
@@ -694,6 +700,7 @@ class AsyncSQLerQuery(_WriteStatements):
             return []
         rows = await cur.fetchall()
         await cur.close()
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         await self._adapter.auto_commit()
         return [query._returned(row) for row in rows]
 
@@ -708,6 +715,7 @@ class AsyncSQLerQuery(_WriteStatements):
         before = {doc["_id"]: doc for doc in map(query._returned, rows)}
         if not before:
             return []
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         cur = await self._adapter.execute(*query._update_ids_sql(fields, list(before)))
         rows = await cur.fetchall()
         await cur.close()

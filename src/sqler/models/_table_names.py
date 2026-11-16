@@ -8,6 +8,7 @@ to pluralization or reserved-word handling lands in one place.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
 from sqler.exceptions import NotBoundError
 
@@ -116,7 +117,7 @@ def _register_defined_class(cls: type) -> None:
     registry.register(table, cls)
 
 
-def _require_binding(cls) -> tuple:
+def _require_binding(cls) -> tuple[Any, str]:
     """The database and table bound to ``cls`` with ``set_db()``.
 
     Raises:
@@ -131,7 +132,7 @@ def _require_binding(cls) -> tuple:
     return cls._db, cls._table
 
 
-def _resolve_binding(cls, db=None) -> tuple:
+def _resolve_binding(cls, db=None) -> tuple[Any, str]:
     """``(db, the class's table)`` when ``db`` is given, else the class binding."""
     if db is not None:
         return db, _model_table_name(cls)
@@ -178,7 +179,7 @@ def _ref_table(inst: object) -> str:
     return home.table if home is not None else _model_table_name(type(inst))
 
 
-def _instance_binding(inst: object, db=None):
+def _instance_binding(inst: object, db=None) -> tuple[Any, str]:
     """Return ``(db, table)`` for writing or re-reading the row of ``inst``.
 
     The database is ``db`` when given, else the instance's home, else the class binding

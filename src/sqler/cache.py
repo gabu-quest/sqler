@@ -37,7 +37,7 @@ import weakref
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Generic, Optional, TypeVar, Union
+from typing import Any, Callable, Generic, Optional, TypeVar, Union, overload
 
 from sqler.models._table_names import _unchecked_table_name
 from sqler.models._write_rules import WriteRules
@@ -54,6 +54,12 @@ _held: dict[str, int] = {}
 _held_lock = threading.Lock()
 
 
+@overload
+def _table_name(table: Union[str, type]) -> str: ...
+@overload
+def _table_name(table: None) -> None: ...
+@overload
+def _table_name(table: Union[str, type, None]) -> Optional[str]: ...
 def _table_name(table: Union[str, type, None]) -> Optional[str]:
     """The name an entry of ``table`` is kept under: a model class stands for its table, and
     SQLite does not tell table names apart by case."""
@@ -287,7 +293,7 @@ class QueryCache:
                     self._table_keys[table] = set()
                 self._table_keys[table].add(key)
 
-    def get(self, key: str, default: T = None) -> Optional[T]:
+    def get(self, key: str, default: Optional[T] = None) -> Optional[T]:
         """Get a cached value.
 
         Args:
@@ -346,7 +352,7 @@ class QueryCache:
                 self._remove_key(key)
                 self._stats.expirations += 1
             self._stats.misses += 1
-            return False, self._generations.get(table, 0)
+            return False, self._generations.get(table, 0) if table is not None else 0
 
     def invalidate(self, key: str) -> bool:
         """Invalidate a specific key.
@@ -550,10 +556,12 @@ def cached_query(
             return result
 
         # Add cache control methods
-        wrapper.invalidate = lambda: (get_cache() if cache is None else cache).invalidate(
+        wrapper.invalidate = lambda: (  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
+            get_cache() if cache is None else cache
+        ).invalidate(
             key or _make_cache_key(func, (), {})
         )
-        wrapper.cache_key = key
+        wrapper.cache_key = key  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
 
         return wrapper
 
@@ -582,10 +590,12 @@ def async_cached_query(
                 c._store(cache_key, result, ttl_seconds, name, value)
             return result
 
-        wrapper.invalidate = lambda: (get_cache() if cache is None else cache).invalidate(
+        wrapper.invalidate = lambda: (  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
+            get_cache() if cache is None else cache
+        ).invalidate(
             key or _make_cache_key(func, (), {})
         )
-        wrapper.cache_key = key
+        wrapper.cache_key = key  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
 
         return wrapper
 

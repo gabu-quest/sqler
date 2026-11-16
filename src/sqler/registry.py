@@ -58,7 +58,7 @@ def register(table: str, cls: type) -> None:
     _REGISTRY.pop(table, None)  # a re-registered table moves to the end (latest wins)
     _REGISTRY[table] = cls
     _hold(table, cls)
-    pending = list(type.__subclasses__(cls))
+    pending: list[type] = list(type.__subclasses__(cls))
     while pending:
         sub = pending.pop()
         _hold_at_own_table(sub)

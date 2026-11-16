@@ -466,7 +466,7 @@ class MetricsCollector:
             Types: 'c' = counter, 'g' = gauge, 'ms' = timing
         """
         with self._lock:
-            metrics_list = []
+            metrics_list: list[tuple[str, float, str]] = []
 
             # Counters
             metrics_list.append(("sqler.queries.total", self._queries.total_queries, "c"))

@@ -327,8 +327,8 @@ def unique_violation_from(exc: BaseException) -> Optional[UniqueConstraintError]
         columns=columns,
         index=index,
     )
-    err.sqlite_errorcode = getattr(exc, "sqlite_errorcode", None)
-    err.sqlite_errorname = getattr(exc, "sqlite_errorname", None)
+    err.sqlite_errorcode = getattr(exc, "sqlite_errorcode", None)  # type: ignore[assignment]  # None for an error made in Python, not by SQLite; stubs say int
+    err.sqlite_errorname = getattr(exc, "sqlite_errorname", None)  # type: ignore[assignment]  # None for an error made in Python, not by SQLite; stubs say str
     return err
 
 

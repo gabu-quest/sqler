@@ -2,13 +2,15 @@ import functools
 import json
 import re
 import sqlite3
-from typing import Any, Iterator, NoReturn, Optional, Self
+from typing import TYPE_CHECKING, Any, Iterator, NoReturn, Optional, Self
 
 from sqler._stored import column_arg, json_arg
-from sqler.adapter.abstract import AdapterABC
 from sqler.exceptions import NoAdapterError
 from sqler.query import SQLerExpression
 from sqler.utils import validate_field_name
+
+if TYPE_CHECKING:
+    from sqler.adapter.synchronous import SQLiteAdapter
 
 
 def _rewrite_promoted_refs(sql: str, promoted_fields: Any) -> str:
@@ -115,6 +117,16 @@ class _WriteStatements:
     is built from what that database remembers of the table (``_names``) and carries its
     ``_guard``.
     """
+
+    # set by the __init__ of each query class
+    _table: str
+    _adapter: object
+    _expression: Optional[SQLerExpression]
+    _order: Optional[str]
+    _desc: bool
+    _include_version: bool
+    _order_fields: Optional[list[tuple[str, bool]]]
+    _promoted_fields: list[str]
 
     _db: Any = None
     _use = ""
@@ -277,10 +289,12 @@ class SQLerQuery(_WriteStatements):
     ``all_dicts()`` and ``first_dict()`` to get parsed dicts with ``_id``.
     """
 
+    _adapter: Optional["SQLiteAdapter"]
+
     def __init__(
         self,
         table: str,
-        adapter: Optional[AdapterABC] = None,
+        adapter: Optional["SQLiteAdapter"] = None,
         expression: Optional[SQLerExpression] = None,
         order: Optional[str] = None,
         desc: bool = False,
@@ -379,6 +393,7 @@ class SQLerQuery(_WriteStatements):
                 cursor = self._db._sent(self._table, make)
                 return used, cursor
             sql, params = build(self)
+            assert self._adapter is not None  # with no database behind the query its caller refused a query with no adapter
             try:
                 return self, self._adapter._execute_judged(sql, params)
             except Exception as exc:
@@ -394,6 +409,7 @@ class SQLerQuery(_WriteStatements):
         table has the column (:func:`_has_version`), whoever made that column and when."""
         if self._db is not None or self._include_version:
             return self
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         names = tuple(row[0] for row in self._adapter.execute(_NAMES_SQL, [self._table]).fetchall())
         return self._clone(include_version=True) if _has_version(names) else self
 
@@ -1098,6 +1114,7 @@ class SQLerQuery(_WriteStatements):
         _, cur = self._updating()._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
         if cur is None:
             return 0
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         self._adapter.auto_commit()
         return getattr(cur, "rowcount", 0)
 
@@ -1141,6 +1158,7 @@ class SQLerQuery(_WriteStatements):
         if cur is None:
             return []
         rows = cur.fetchall()
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         self._adapter.auto_commit()
         return [query._returned(row) for row in rows]
 
@@ -1158,6 +1176,7 @@ class SQLerQuery(_WriteStatements):
         before = {doc["_id"]: doc for doc in map(query._returned, cur.fetchall())}
         if not before:
             return []
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         cur = self._adapter.execute(*query._update_ids_sql(fields, list(before)))
         after = {doc["_id"]: doc for doc in map(query._returned, cur.fetchall())}
         return [(doc, after[_id]) for _id, doc in before.items()]

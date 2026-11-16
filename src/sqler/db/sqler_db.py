@@ -5,7 +5,7 @@ import re
 import sqlite3
 import sys
 import threading
-from typing import Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, Optional, Sequence
 
 from sqler import cache
 from sqler._stored import dumps, stored
@@ -56,6 +56,12 @@ class _TableMemory:
     refuses it once the table has other columns; only then is the table learned again.
     The class provides ``_levels()`` and ``_adapter_depth()``.
     """
+
+    if TYPE_CHECKING:
+
+        def _levels(self) -> Sequence[_Level]: ...
+
+        def _adapter_depth(self) -> int: ...
 
     def _init_memory(self) -> None:
         self._versioned_tables: set[str] = set()
@@ -271,7 +277,7 @@ def _rows_sql(table: str, columns: tuple[str, ...], n: int, names: Optional[tupl
     return f"SELECT {', '.join(columns)} FROM {table} WHERE _id IN ({ids}){_and_guard(table, names)};"
 
 
-def _row_documents(rows: Any, columns: list[str]) -> list[dict[str, Any]]:
+def _row_documents(rows: Any, columns: Sequence[str]) -> list[dict[str, Any]]:
     """Each row read with ``columns`` as a document: its JSON, then every column but ``data``
     set on it by name (a column wins over a JSON key of its name)."""
     loads = json.loads
@@ -473,7 +479,7 @@ def _fields_update(
     return f"UPDATE {table} SET {', '.join(sets)} WHERE {_AT_VERSION}{guard};", [*params, _id, expected_version], layout
 
 
-def _refuse_unwritten(gone: bool, table: str, _id: Any) -> None:
+def _refuse_unwritten(gone: bool, table: str, _id: Any) -> NoReturn:
     """The error of a write by ``_id`` that wrote no row: the row is not there, or at another version."""
     if gone:
         raise NotFoundError(
@@ -781,7 +787,9 @@ def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], mod
     if added:
         fills, conditions = {}, []
         for i, (col, definition) in enumerate(added.items()):
-            not_null, default = _DEFINITION.match(definition).groups()
+            matched = _DEFINITION.match(definition)
+            assert matched is not None  # ``validate_column_def`` accepted it, and its grammar is a part of this one
+            not_null, default = matched.groups()
             if not_null and (default is None or default.upper() == "NULL"):
                 raise SchemaError(
                     f"Cannot promote {table}.{col}: SQLite cannot add a NOT NULL column with no DEFAULT "
@@ -1309,6 +1317,7 @@ class SQLerDB(_TableMemory):
             _refuse_unwritten(False, table, _id)  # a row at another version, as with the table there
         if cursor.rowcount <= 0:
             raise StaleVersionError("Stale version: update rejected")
+        assert expected_version is not None  # refused above for a write by ``_id``
         return _id, expected_version + 1
 
     def insert_document(self, table: str, doc: dict[str, Any]) -> int:
@@ -1364,7 +1373,7 @@ class SQLerDB(_TableMemory):
         """
         table = validate_table_name(table)
 
-        def make() -> Optional[tuple[str, list[Any]]]:
+        def make() -> Optional[tuple[str, list[Any], Any]]:
             if expected_version is not None and not self._is_versioned(table) and self._has_version_column(table) is not None:
                 self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
             columns, layout, has = self._shape_of(table, promoted)
@@ -1585,7 +1594,7 @@ class SQLerDB(_TableMemory):
         rows, columns = self._read_rows(table, ids)
         return _row_documents(_in_order(rows or [], ids), columns)
 
-    def _read_rows(self, table: str, ids: list, *, versioned: bool = False) -> tuple[Optional[list], list[str]]:
+    def _read_rows(self, table: str, ids: list, *, versioned: bool = False) -> tuple[Optional[list], tuple[str, ...]]:
         """The by-id read every reader of this database goes through; it writes nothing.
 
         Returns the stored rows of ``ids`` (stored order) and the columns they were read

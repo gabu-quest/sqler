@@ -110,7 +110,7 @@ class SQLerSafeModel(SQLerModel):
         snap = getattr(self, "_snapshot", None)
         held = self._dump_with_relations()
         delta = compute_numeric_scalar_deltas(snap, held) if snap else None
-        can_rebase = bool(delta) and can_rebase_deltas(delta, rebase_config)
+        can_rebase = bool(delta and can_rebase_deltas(delta, rebase_config))
 
         retry = _retry.SaveRetry(rebase_config)
 
@@ -156,6 +156,7 @@ class SQLerSafeModel(SQLerModel):
                 latest_doc = retry.reread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
+                assert snap is not None and delta is not None  # can_rebase holds only with both
                 payload = _retry.rebase(
                     latest_doc, held, snap, delta, stale, getattr(cls, "_update_stamps", dict)()
                 )

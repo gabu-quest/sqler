@@ -15,6 +15,7 @@ cannot be installed.
 from __future__ import annotations
 
 # Detect if Pydantic is available
+PYDANTIC_VERSION: str | None
 try:
     import pydantic
 
@@ -69,6 +70,7 @@ def is_pydantic_model(cls: type) -> bool:
 
 
 # Detect if msgspec is available
+MSGSPEC_VERSION: str | None
 try:
     import msgspec
 

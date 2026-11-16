@@ -7,7 +7,7 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
-from typing import Any, ContextManager, NoReturn, Optional, Self
+from typing import Any, ContextManager, NoReturn, Optional, Self, Sequence
 
 from sqler.logging import query_logger
 
@@ -927,7 +927,7 @@ class SQLiteAdapter(AdapterABC):
         raise exc
 
     def _execute(
-        self, conn: sqlite3.Connection, query: str, params: Optional[list[Any]], read_all: bool, judged: bool
+        self, conn: sqlite3.Connection, query: str, params: Optional[Sequence[Any]], read_all: bool, judged: bool
     ) -> CursorLike:
         local = self._local
         inside = local.txn_depth > 0
@@ -1192,6 +1192,7 @@ class SQLiteAdapter(AdapterABC):
                 local.txn_depth = 0
                 local.broken = None
                 if shared is None:
+                    assert local.conn is not None  # the transaction began on this thread's own connection
                     _end_outermost(local.conn, commit and failed is None, None, local, self.timeout_ms)
                 else:
                     with shared.lock:
@@ -1213,6 +1214,7 @@ class SQLiteAdapter(AdapterABC):
             try:
                 local.txn_depth = depth
                 if shared is None:
+                    assert local.conn is not None  # the transaction began on this thread's own connection
                     _end_savepoint(local.conn, depth, commit, local)
                 else:
                     with shared.lock:

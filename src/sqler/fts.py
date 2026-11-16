@@ -44,6 +44,11 @@ if TYPE_CHECKING:
     from sqler import SQLerDB
     from sqler.models import SQLerModel
 
+    # SearchableMixin reads the fields and the save, delete and from_ids of a pydantic model
+    _SearchHost = SQLerModel
+else:
+    _SearchHost = object
+
 # Tokenizer values: alphanumeric, spaces, underscores only.
 # Covers all standard FTS5 tokenizers (porter, unicode61, ascii, trigram)
 # and numeric options (e.g. "unicode61 remove_diacritics 2").
@@ -526,7 +531,7 @@ class FTSIndex:
         db.adapter.execute(f"DELETE FROM {self.index_table};")
         self._filled(db, "", [])
 
-    def _refill(self, _id: int, db: Optional["SQLerDB"] = None) -> None:
+    def _refill(self, _id: int | None, db: Optional["SQLerDB"] = None) -> None:
         """Make the index row of ``_id`` what its stored row says: none when it has no row.
         ``db`` is the database to do it in, else the index's."""
         db = db if db is not None else self._get_db()
@@ -589,11 +594,11 @@ class FTSIndex:
 
         self._delete_entry(self._get_db(), _id)
 
-    def _delete_entry(self, db: "SQLerDB", _id: int) -> None:
+    def _delete_entry(self, db: "SQLerDB", _id: int | None) -> None:
         db.adapter.execute(f"DELETE FROM {self.index_table} WHERE rowid = ?;", [_id])
         db.adapter.auto_commit()
 
-    def _follow(self, db: "SQLerDB", table: str, _id: int, *, deleted: bool) -> None:
+    def _follow(self, db: "SQLerDB", table: str, _id: int | None, *, deleted: bool) -> None:
         """Keep the entry of ``_id`` after its row was written to, or deleted from, ``table``
         of ``db``, in that database (so in the caller's transaction on it). A row of another
         table, or a database that has no table of this index, has no entry to keep."""
@@ -885,7 +890,7 @@ class FTSIndex:
         db.adapter.auto_commit()
 
 
-class SearchableMixin:
+class SearchableMixin(_SearchHost):
     """Mixin to add search capabilities to models.
 
     Usage::
@@ -944,9 +949,10 @@ class SearchableMixin:
     @classmethod
     def rebuild_search_index(cls) -> int:
         """Rebuild the search index from all data."""
-        if cls._fts_index is None:
-            cls.create_search_index()
-        return cls._fts_index.rebuild()
+        index = cls._fts_index
+        if index is None:
+            index = cls.create_search_index()
+        return index.rebuild()
 
     @classmethod
     def drop_search_index(cls) -> None:
@@ -958,25 +964,28 @@ class SearchableMixin:
     @classmethod
     def search(cls, query: str, *, limit: int = 100, offset: int = 0, plain: bool = False) -> list:
         """Search for matching documents (``plain``: see ``FTSIndex.search()``)."""
-        if cls._fts_index is None:
-            cls.create_search_index()
-        return cls._fts_index.search(query, limit=limit, offset=offset, plain=plain)
+        index = cls._fts_index
+        if index is None:
+            index = cls.create_search_index()
+        return index.search(query, limit=limit, offset=offset, plain=plain)
 
     @classmethod
     def search_ranked(
         cls, query: str, *, limit: int = 100, offset: int = 0, plain: bool = False
     ) -> list[SearchResult]:
         """Search with relevance ranking (``plain``: see ``FTSIndex.search()``)."""
-        if cls._fts_index is None:
-            cls.create_search_index()
-        return cls._fts_index.search_ranked(query, limit=limit, offset=offset, plain=plain)
+        index = cls._fts_index
+        if index is None:
+            index = cls.create_search_index()
+        return index.search_ranked(query, limit=limit, offset=offset, plain=plain)
 
     @classmethod
     def search_count(cls, query: str, *, plain: bool = False) -> int:
         """Count matching documents (``plain``: see ``FTSIndex.search()``)."""
-        if cls._fts_index is None:
-            cls.create_search_index()
-        return cls._fts_index.count(query, plain=plain)
+        index = cls._fts_index
+        if index is None:
+            index = cls.create_search_index()
+        return index.count(query, plain=plain)
 
     def save(self, *args, **kwargs):
         """Save and update search index (with ``content_sync`` its triggers do)."""
@@ -991,10 +1000,10 @@ class SearchableMixin:
         """Delete and remove from search index (with ``content_sync`` its triggers do)."""
         _id = self._id
         index = self._fts_index
-        manual = index is not None and _id is not None and not index.content_sync
-        if manual:
+        manual = index if index is not None and _id is not None and not index.content_sync else None
+        if manual is not None:
             db, table = _instance_binding(self, kwargs.get("db"))
         result = super().delete(*args, **kwargs)
-        if manual:
-            index._follow(db, table, _id, deleted=True)
+        if manual is not None:
+            manual._follow(db, table, _id, deleted=True)
         return result
