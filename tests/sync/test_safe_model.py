@@ -1,4 +1,5 @@
 import pytest
+
 from sqler import SQLerDB
 from sqler.models import SQLerSafeModel, StaleVersionError
 from sqler.models.utils import RebaseConfig

@@ -14,6 +14,7 @@ from typing import Optional
 
 import pytest
 from pydantic import ConfigDict, ValidationError
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerModel,

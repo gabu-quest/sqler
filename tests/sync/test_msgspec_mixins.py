@@ -7,6 +7,7 @@ msgspec Struct backend.
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 from sqler import SQLerDB
 from sqler.models._compat import MSGSPEC_AVAILABLE
 from sqler.models.mixins import (

@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, F
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.async_safe import AsyncSQLerSafeModel

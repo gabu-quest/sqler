@@ -1,4 +1,5 @@
 import pytest
+
 from sqler.query import SQLerField as F
 from sqler.query.async_query import AsyncSQLerQuery
 

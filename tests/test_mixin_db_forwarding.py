@@ -7,6 +7,7 @@ accepts and forwards the db= parameter for per-call DB routing.
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.models.mixins import (
     AuditLogMixin,

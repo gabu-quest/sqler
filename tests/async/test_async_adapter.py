@@ -14,6 +14,7 @@ from typing import Optional
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel
 from sqler.adapter import AsyncSQLiteAdapter
 from sqler.exceptions import TransactionStateError

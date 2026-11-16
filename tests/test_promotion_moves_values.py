@@ -21,6 +21,7 @@ from enum import Enum
 from typing import Optional
 
 import pytest
+
 from sqler import AsyncSQLerDB, F, SQLerDB
 from sqler.adapter import SQLiteAdapter
 from sqler.exceptions import SchemaError, TableNotFoundError

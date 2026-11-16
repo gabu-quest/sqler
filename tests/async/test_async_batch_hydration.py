@@ -1,4 +1,5 @@
 import pytest
+
 from sqler import AsyncSQLerDB
 from sqler.models import AsyncSQLerModel
 

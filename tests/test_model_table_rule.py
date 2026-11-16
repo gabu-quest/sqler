@@ -15,6 +15,7 @@ from typing import Optional
 import msgspec  # noqa: F401  (the msgspec base needs it installed)
 import pytest
 import pytest_asyncio
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,

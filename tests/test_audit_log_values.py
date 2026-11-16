@@ -19,6 +19,7 @@ from typing import Any, NamedTuple, Optional
 
 import pydantic
 import pytest
+
 from sqler import AsyncSQLerDB, AsyncSQLerSafeModel, AuditMixin, SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.exceptions import NotFoundError
 from sqler.models.async_model import AsyncSQLerModel

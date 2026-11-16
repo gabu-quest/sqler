@@ -3,6 +3,7 @@
 import sqlite3
 
 import pytest
+
 from sqler.query import query
 
 

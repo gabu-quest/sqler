@@ -14,6 +14,7 @@ import time
 
 import pytest
 import pytest_asyncio
+
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter, PoolStats
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import ConnectionPoolExhaustedError, NotConnectedError

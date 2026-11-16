@@ -19,6 +19,7 @@ import time
 import aiosqlite
 import pytest
 import pytest_asyncio
+
 from sqler.adapter.asynchronous import (
     _AIOSQLITE_CALLS,
     _AIOSQLITE_PRIVATE,

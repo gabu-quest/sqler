@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import pytest
 from pydantic import BaseModel, create_model
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.cache import CacheAwareModel, cached_query, get_cache
 from sqler.exceptions import (

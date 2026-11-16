@@ -11,6 +11,7 @@ parity for the Pydantic backend.
 
 
 import pytest
+
 from sqler import SQLerModel
 from sqler.db.sqler_db import SQLerDB
 

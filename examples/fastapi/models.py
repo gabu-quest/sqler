@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 from pydantic import Field
+
 from sqler.fts import SearchableMixin
 from sqler.models import SQLerSafeModel
 from sqler.models.mixins import (

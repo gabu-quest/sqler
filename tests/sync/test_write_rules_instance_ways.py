@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import ClassVar, Optional
 
 import pytest
+
 from sqler import (
     ReferentialIntegrityError,
     SQLerDB,

@@ -6,6 +6,7 @@ import sqlite3
 import warnings
 
 import pytest
+
 from sqler import (
     AsyncSQLerDB,
     F,

@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import aiosqlite
 import pytest
 from pairwise import all_pairs
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel, AsyncSQLerSafeModel, F, SQLerDB
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError, NotConnectedError

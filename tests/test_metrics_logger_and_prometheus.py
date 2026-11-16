@@ -6,6 +6,7 @@ import re
 from contextlib import ExitStack
 
 import pytest
+
 from sqler import metrics
 from sqler.db.sqler_db import SQLerDB
 from sqler.logging import QueryLogger, query_logger

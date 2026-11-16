@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 import pytest
+
 from sqler import SQLerDB, SQLerLiteModel, SQLerModel
 from sqler.query import SQLerField as F
 

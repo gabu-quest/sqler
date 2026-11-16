@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel, AsyncSQLerSafeModel, UniqueConstraintError
 
 

@@ -1,4 +1,5 @@
 import pytest
+
 from sqler import F, SQLerDB, SQLerModel
 from sqler.query.expression import SQLerExpression
 

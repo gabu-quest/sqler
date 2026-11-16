@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import pytest
 from exception_points import needs_libc_raise, stop_once_and_interrupt
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel, stream_jsonl
 from sqler.models import SQLerLiteModel, SQLerLiteModelBase, SQLerLiteSafeModel
 from sqler.query import SQLerField as F

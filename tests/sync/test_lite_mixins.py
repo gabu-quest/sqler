@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 from sqler import SQLerDB, SQLerLiteModel
 from sqler.models.mixins import (
     AuditLogMixin,

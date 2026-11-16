@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 import pytest
+
 from sqler import (
     PYDANTIC_AVAILABLE,
     SQLerDB,

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 import pytest
+
 from sqler import SQLerDB
 from sqler.adapter import SQLiteAdapter
 from sqler.exceptions import NotConnectedError

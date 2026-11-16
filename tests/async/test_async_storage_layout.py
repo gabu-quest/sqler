@@ -5,6 +5,7 @@ import json
 import sqlite3
 
 import pytest
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel, F, SQLerDB
 from sqler.logging import query_logger
 

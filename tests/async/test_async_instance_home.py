@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pytest
-import sqler.models as models
 from pydantic import BaseModel
+
+import sqler.models as models
 from sqler import SQLerDB
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import NotConnectedError, StaleVersionError

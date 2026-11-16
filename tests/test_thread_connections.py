@@ -14,6 +14,7 @@ import textwrap
 import threading
 
 import pytest
+
 from sqler import SQLerDB
 from sqler.adapter.synchronous import SQLiteAdapter
 from sqler.exceptions import NotConnectedError

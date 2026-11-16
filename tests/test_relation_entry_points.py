@@ -29,6 +29,7 @@ import pytest
 from pairwise import all_pairs
 from pydantic import Field as PydField
 from pydantic import PrivateAttr, field_validator, model_validator
+
 from sqler import F, SQLerDB, SQLerModel, SQLerMsgspecModel
 from sqler.exceptions import StaleVersionError
 from sqler.logging import query_logger

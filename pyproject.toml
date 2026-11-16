@@ -76,7 +76,7 @@ check_untyped_defs = true
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["sqler", "examples"]
+src = ["src", "examples"]
 
 [tool.ruff.lint]
 select = [

@@ -23,8 +23,9 @@ from typing import Any, NamedTuple, Optional
 
 import pydantic
 import pytest
-import sqler
 from pairwise import all_pairs
+
+import sqler
 from sqler import AsyncSQLerDB, SQLerDB, SQLerModel, SQLerSafeModel, UnstorableValueError
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.async_safe import AsyncSQLerSafeModel

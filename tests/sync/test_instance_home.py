@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import msgspec
 import pytest
+
 from sqler import SQLerDB
 from sqler.exceptions import NotBoundError
 from sqler.models import SQLerLiteModel, SQLerModel

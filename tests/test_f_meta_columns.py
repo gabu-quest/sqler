@@ -9,6 +9,7 @@ before executing the query.
 """
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.query import F
 

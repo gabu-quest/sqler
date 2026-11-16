@@ -4,6 +4,7 @@ gives a strictly later updated_at, even when the clock has not advanced or moved
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.models import mixins
 from sqler.models.mixins import AsyncAuditMixin, AuditMixin, TimestampMixin

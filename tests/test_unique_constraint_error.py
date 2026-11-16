@@ -7,6 +7,7 @@ driver error as its cause. Other integrity errors stay what they are.
 import sqlite3
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel, UniqueConstraintError
 
 

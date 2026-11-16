@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB
 from sqler.adapter import AsyncSQLiteAdapter
 from sqler.exceptions import NotConnectedError

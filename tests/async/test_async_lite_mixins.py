@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 from sqler import AsyncSQLerLiteModel
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.mixins import (

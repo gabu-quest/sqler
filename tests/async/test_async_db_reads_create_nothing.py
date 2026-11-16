@@ -12,6 +12,7 @@ import warnings
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel
 from sqler.exceptions import NoAdapterError
 from sqler.logging import query_logger

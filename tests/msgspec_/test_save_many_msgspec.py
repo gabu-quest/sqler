@@ -3,6 +3,7 @@
 import sqlite3
 
 import pytest
+
 from sqler import SQLerDB
 from sqler.models.msgspec.model import SQLerMsgspecModel
 

@@ -10,6 +10,7 @@ from typing import Optional
 import pytest
 import pytest_asyncio
 from pydantic import create_model
+
 from sqler import (
     AsyncPartialUpdateMixin,
     AsyncSQLerDB,

@@ -11,6 +11,7 @@ import json
 import sqlite3
 
 import pytest
+
 from sqler import AsyncSQLerDB, F, SQLerDB
 
 TABLE = "tickets"

@@ -8,6 +8,7 @@ import threading
 import time
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, backup, restore
 from sqler.adapter.synchronous import SQLiteAdapter
 

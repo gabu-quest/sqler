@@ -17,14 +17,13 @@ import os
 import statistics
 import tempfile
 
-from sqler import SQLerDB
-
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.sqlite_baseline import create_conn, create_table, insert_loop, insert_many
 from benchmarks.core.timer import PrecisionTimer
 from benchmarks.generators.documents import DocumentGenerator
 from benchmarks.generators.models import BenchmarkItem, BenchmarkItemLite
+from sqler import SQLerDB
 
 SUITE_NAME = "insert"
 

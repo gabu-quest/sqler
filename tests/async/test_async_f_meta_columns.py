@@ -7,6 +7,7 @@ for sync counterpart.
 
 import pytest
 import pytest_asyncio
+
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.async_safe import AsyncSQLerSafeModel

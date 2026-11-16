@@ -9,6 +9,7 @@ import warnings
 from dataclasses import dataclass
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.async_model import AsyncSQLerModel

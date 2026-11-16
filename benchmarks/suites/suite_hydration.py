@@ -17,13 +17,12 @@ import gc
 import os
 import tempfile
 
-from sqler import MSGSPEC_AVAILABLE, SQLerDB
-
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.timer import PrecisionTimer
 from benchmarks.generators.documents import DocumentGenerator
 from benchmarks.generators.models import BenchmarkItemLite, BenchmarkItemMsgspec
+from sqler import MSGSPEC_AVAILABLE, SQLerDB
 
 SUITE_NAME = "hydration"
 

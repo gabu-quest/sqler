@@ -23,6 +23,7 @@ from typing import Optional
 
 import pytest
 from pydantic import Field
+
 from sqler import (
     PERMISSIVE_REBASE_CONFIG,
     F,

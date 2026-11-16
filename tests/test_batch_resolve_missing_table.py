@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.models.lite.model import SQLerLiteModel
 

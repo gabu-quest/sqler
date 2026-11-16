@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel, SQLiteAdapter
 from sqler.logging import query_logger
 from sqler.models.lite.model import SQLerLiteModel
