@@ -50,11 +50,28 @@ class KCountL(SQLerLiteModel, metaclass=_counting(type)):
     name: str = ""
 
 
-class KCountM(SQLerMsgspecModel, metaclass=_counting(type(SQLerMsgspecModel))):
-    name: str = ""
+try:
+
+    class KCountM(SQLerMsgspecModel, metaclass=_counting(type(SQLerMsgspecModel))):
+        name: str = ""
+
+except TypeError:  # msgspec before 0.20: no class can extend the metaclass of its structs
+    KCountM = None
+
+needs_a_counting_struct = pytest.mark.skipif(
+    KCountM is None,
+    reason="msgspec before 0.20 lets no class extend the metaclass of its structs",
+)
 
 
-@pytest.mark.parametrize("cls", [KCountP, KCountL, KCountM], ids=["pydantic", "lite", "msgspec"])
+@pytest.mark.parametrize(
+    "cls",
+    [
+        pytest.param(KCountP, id="pydantic"),
+        pytest.param(KCountL, id="lite"),
+        pytest.param(KCountM, id="msgspec", marks=needs_a_counting_struct),
+    ],
+)
 def test_a_row_read_after_the_first_asks_its_class_nothing_of_what_it_is(db, cls):
     """The two lookups left are uses, not questions: the class's ``_versioned_rows`` (a class
     may set it) and the ``model_validate`` that builds the model."""

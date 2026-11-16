@@ -1290,6 +1290,18 @@ def test_a_hand_added_column_is_read_over_the_document_and_refused_by_name(run):
 # ---------------------------------------------------------------- a default worked out from the row
 
 
+def _pydantic_gives_a_default_factory_the_row():
+    from pydantic.fields import FieldInfo
+
+    return hasattr(FieldInfo, "default_factory_takes_validated_data")
+
+
+needs_a_default_from_the_row = pytest.mark.skipif(
+    not _pydantic_gives_a_default_factory_the_row(),
+    reason="pydantic before 2.10 gives a default factory no row to work from",
+)
+
+
 def _from_the_row():
     from pydantic import Field
 
@@ -1302,6 +1314,7 @@ def _from_the_row():
     return Ticket
 
 
+@needs_a_default_from_the_row
 def test_a_default_from_the_row_refuses_when_a_row_lacks_the_key(run):
     _legacy(run.path, [{"name": "a", "status": "open"}, {"name": "b"}])
     before = _raw(run.path)
@@ -1311,6 +1324,7 @@ def test_a_default_from_the_row_refuses_when_a_row_lacks_the_key(run):
     assert _raw(run.path) == before
 
 
+@needs_a_default_from_the_row
 def test_a_default_from_the_row_is_not_needed_when_every_row_has_the_key(run):
     _legacy(run.path, [{"name": "a", "status": "open"}, {"name": "b", "status": None}])
     _from_the_row().set_db(run.db)
