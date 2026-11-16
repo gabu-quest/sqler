@@ -13,3 +13,57 @@ Document-oriented JSON store on SQLite.
 ## Follow-up TODO
 
 - [ ] Deprecate `set_db()` — soft deprecation with `warnings.warn()` added; full removal deferred
+
+## Layout
+
+`src/sqler/` (most things come as a sync class and an async twin; a change to one needs the
+same change in the other, and `tests/test_public_names.py` fails when an async class lacks a
+public name its sync twin has):
+
+- `adapter/`: the SQLite adapters, `synchronous.py` (`SQLiteAdapter`) and `asynchronous.py`
+  (`AsyncSQLiteAdapter`, with its connection pool), and the interfaces in `abstract.py`.
+- `db/`: `SQLerDB` (`sqler_db.py`) and `AsyncSQLerDB` (`async_db.py`), the document and table
+  calls on top of an adapter.
+- `models/`: the model bases (pydantic ones here), the querysets, the mixins (`mixins.py`),
+  references and delete policies (`_refs.py`, `integrity.py`), optimistic-lock retry
+  (`save_retry.py`, `utils.py`).
+  - `models/lite/`: the dataclass models, no pydantic needed.
+  - `models/msgspec/`: the msgspec model.
+- `query/`: `SQLerQuery` (`query.py`), `AsyncSQLerQuery` (`async_query.py`), `SQLerField`/`F`
+  (`field.py`) and `SQLerExpression` (`expression.py`).
+- Top-level modules: `cache.py` (query cache), `export.py` (CSV, JSON and JSONL import and
+  export), `fts.py` (FTS5 search), `migrations.py`, `ops.py` (backup, health, vacuum,
+  checkpoint), `logging.py` and `metrics.py`, `tracking.py` (change tracking), `registry.py`
+  (table to class), `exceptions.py`, `_stored.py` (the stored form of a value), `utils.py`.
+- `__init__.py` holds `__all__`; `docs/API.md` must name every name in it.
+
+## Model matrix
+
+| Backend | Plain, sync | Safe, sync | Plain, async | Safe, async |
+|---------|-------------|------------|--------------|-------------|
+| pydantic | `SQLerModel` | `SQLerSafeModel` | `AsyncSQLerModel` | `AsyncSQLerSafeModel` |
+| lite | `SQLerLiteModel` | `SQLerLiteSafeModel` | `AsyncSQLerLiteModel` | `AsyncSQLerLiteSafeModel` |
+| msgspec | `SQLerMsgspecModel` | | | |
+
+A safe model checks and bumps a row version on every save. `SQLerLiteModelBase` and
+`SQLerMsgspecModelBase` are the shared parents of the lite and msgspec models.
+
+## Running things
+
+- Whole suite (what CI runs): `uv run pytest -q -m "not perf"`. About 12,300 tests; it takes many
+  minutes. `pytest.ini` already adds `-m "not perf"` and sets `testpaths` to `tests` and
+  `examples/fastapi/tests`.
+- One file: `uv run pytest tests/<file>`; one test: `uv run pytest tests/<file>::<test>`.
+- Lint: `uv run ruff check .` (CI runs it before the tests).
+- Performance tests (marker `perf`, opt-in): `uv run pytest -m perf`.
+
+## Test folders
+
+- `tests/`: one file per feature or bug (`test_*.py`), plus shared helpers (`conftest.py`,
+  `exception_points.py`, `pairwise.py`).
+- `tests/sync/`: tests of the sync classes (adapter, db, models, queries, relationships).
+- `tests/async/`: tests of the async classes.
+- `tests/lite/`: lite models.
+- `tests/msgspec_/`: msgspec models.
+- `tests/perf/`: benchmarks marked `perf`.
+- `examples/fastapi/tests/`: tests of the FastAPI example app.

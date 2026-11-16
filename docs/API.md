@@ -5,6 +5,7 @@
 ## Table of Contents
 
 - [Core — Models, Save, Query](#core--models-save-query)
+- [Model Backends](#model-backends)
 - [Query Builder](#query-builder)
 - [Relationships](#relationships)
 - [Safe Models & Concurrency](#safe-models--concurrency)
@@ -158,6 +159,17 @@ user.delete(db=db2)     # deletes from db2
 
 Both patterns avoid global `set_db()` state and are safe for multi-DB scenarios.
 
+**What "the async classes match the sync ones" means.** One test holds it:
+`tests/test_public_names.py::test_an_async_class_has_every_public_name_of_its_sync_twin`. It
+takes 14 pairs of sync and async classes (`SQLerDB`/`AsyncSQLerDB`,
+`SQLiteAdapter`/`AsyncSQLiteAdapter`, `SQLerQuery`/`AsyncSQLerQuery`,
+`SQLerQuerySet`/`AsyncSQLerQuerySet`, the four pydantic and lite model bases with their async
+twins, `MigrationRunner`, `Migration`, `TrackedModel`, `PartialUpdateMixin`, `HooksMixin` and
+`AuditLogMixin` with their async twins) and checks that every public name (one with no
+leading underscore) of the sync class is on the async class, under the same name or with an
+`a` in front. It checks names only: not signatures, not behaviour, not private names, not
+names that only the async class has, and not classes or functions outside those pairs.
+
 **An instance belongs to the database it was read from or written to.** Every way of
 loading a row (`from_id()`, `from_ids()`, a queryset's `all()`, `first()`, `iter()`,
 `update_one()`, `update_n()`, `refresh()`, a referenced row loaded with its parent, a
@@ -225,6 +237,67 @@ return `[]` when the class's table does not exist.
 unique index refuses the insert because another caller inserted the same lookup first,
 it reads again and returns that row with `created` false. If the refusal came from a
 unique index on a field outside the lookup, the `UniqueConstraintError` reaches you.
+
+## Model Backends
+
+A model class has one of three kinds of base, each with the names below. An empty cell means
+that base does not exist.
+
+| Backend (needs) | Plain, sync | Safe, sync | Plain, async | Safe, async |
+|-----------------|-------------|------------|--------------|-------------|
+| pydantic | `SQLerModel` | `SQLerSafeModel` | `AsyncSQLerModel` | `AsyncSQLerSafeModel` |
+| lite (nothing) | `SQLerLiteModel` | `SQLerLiteSafeModel` | `AsyncSQLerLiteModel` | `AsyncSQLerLiteSafeModel` |
+| msgspec | `SQLerMsgspecModel` | | | |
+
+A safe model keeps a version for [optimistic locking](#c06-optimistic-versioning). Lite models
+are dataclasses and need neither pydantic nor msgspec (for Pyodide, say). `SQLerLiteModelBase`
+and `SQLerMsgspecModelBase` are the classes the lite and msgspec models above are built on:
+they hold the pydantic-like part of a model (`_id`, the stored snapshot, `model_validate()`,
+`model_dump()`, `get_field_names()`) and no database methods (`save()`, `query()`, ...). Subclass
+`SQLerLiteModel` or `SQLerMsgspecModel` for a model you store; `is_lite_model()` and
+`is_msgspec_model()` test against the base, so any subclass of it counts.
+
+`PYDANTIC_AVAILABLE` and `MSGSPEC_AVAILABLE` are `True` when the package imports, and
+`PYDANTIC_VERSION` and `MSGSPEC_VERSION` hold its version string (`None` when it is missing).
+`get_model_backend()` returns `"pydantic"` when pydantic is installed and `"dataclass"` when it
+is not; it does not look for msgspec. `is_pydantic_model(cls)`, `is_lite_model(cls)` and
+`is_msgspec_model(cls)` say whether a class is a pydantic model, a lite model or a msgspec
+model; each gives `False` for any other class, and `is_pydantic_model()` and
+`is_msgspec_model()` give `False` when their package is missing. `require_pydantic(feature)`
+and `require_msgspec(feature)` return `None` when the package is installed and raise
+`ImportError` naming `feature` when it is not.
+
+```python
+from dataclasses import dataclass
+from sqler import (
+    SQLerModel, SQLerLiteModel, SQLerMsgspecModel,
+    get_model_backend, is_pydantic_model, is_lite_model, is_msgspec_model,
+    require_pydantic, require_msgspec,
+)
+
+print(get_model_backend())  # pydantic
+
+class P(SQLerModel):
+    name: str
+
+@dataclass
+class L(SQLerLiteModel):
+    name: str
+
+class M(SQLerMsgspecModel):
+    name: str
+
+print([(c.__name__, is_pydantic_model(c), is_lite_model(c), is_msgspec_model(c)) for c in (P, L, M, dict)])
+# [('P', True, False, False), ('L', False, True, False), ('M', False, False, True), ('dict', False, False, False)]
+
+require_pydantic("My feature")  # returns None: pydantic is installed
+require_msgspec("My feature")
+```
+
+Without pydantic, `sqler.SQLerModel` and the other pydantic names are placeholders: calling
+one, or subclassing it, calls `require_pydantic()` and raises `ImportError`.
+
+---
 
 ---
 
@@ -489,6 +562,48 @@ empty = Status.query().filter(F("code").in_list([])).all()
 assert len(empty) == 0
 ```
 
+### Expressions and querysets: `SQLerExpression`, `SQLerQuerySet`, `AsyncSQLerQuerySet`, `AsyncSQLerQuery`
+
+A comparison on a field (`F("age") >= 21`, `F("name").like("A%")`, ...) is a
+`SQLerExpression`: a piece of SQL (`.sql`) with its parameters (`.params`). `&` joins two
+expressions with AND, `|` with OR and `~` negates one; the parameters follow in order.
+`filter()`, `exclude()`, `or_filter()` and `having()` take one.
+
+`Model.query()` and `Model.using(db)` return a `SQLerQuerySet` on a sync model of any base
+(pydantic, lite, msgspec), and an `AsyncSQLerQuerySet` on an async model (its `all()`,
+`first()`, `count()` and the others are awaited). A queryset wraps a query on one table and
+gives back model instances. The query it wraps is a `SQLerQuery`, or on the async side an
+`AsyncSQLerQuery`, which `db.query(table)` also gives (`await db.query(table)` on an
+`AsyncSQLerDB`): the same chain of `filter()`, `order_by()`, `limit()` and so on, but `all()` and
+`first()` return the stored JSON text of each row, and `all_dicts()` the parsed documents.
+
+```python
+from sqler import SQLerDB, SQLerModel, SQLerExpression, SQLerQuerySet
+from sqler.query import SQLerField as F
+
+class User(SQLerModel):
+    name: str
+    age: int
+
+db = SQLerDB.in_memory()
+User(name="Ada", age=36).save(db=db)
+User(name="Bob", age=20).save(db=db)
+
+adult = F("age") >= 21
+named = F("name") == "Ada"
+assert isinstance(adult, SQLerExpression)
+both = adult & named          # AND
+neither = ~adult              # NOT
+print(both.sql, both.params)
+# (JSON_EXTRACT(data, '$.age') >= ?) AND (JSON_EXTRACT(data, '$.name') = ?) [21, 'Ada']
+print(neither.sql, neither.params)
+# NOT (JSON_EXTRACT(data, '$.age') >= ?) [21]
+
+qs = User.using(db).filter(both)
+assert isinstance(qs, SQLerQuerySet)
+print([u.name for u in qs.all()])  # ['Ada']
+```
+
 ---
 
 ## Relationships
@@ -613,6 +728,24 @@ a.save()
 got = Node.from_id(a._id)
 assert got.next.name == "b" and got.next.next is got
 assert Node.query().resolve(False).first().next == {"_table": Node.__tablename__, "_id": b._id}
+```
+
+### `register()`: the class a table's rows belong to
+
+Defining a model class, and `set_db()`, register it under its table (see "References without
+`set_db()`" above). `register(table, cls)` does that by hand: afterwards `resolve(table)` gives
+`cls` (and `tables()` holds it), which is the class a stored reference to that table loads as.
+A table registered again keeps the latest class.
+
+```python
+from sqler import SQLerModel, register, resolve, tables
+
+class Note(SQLerModel):
+    text: str
+
+register("notes_table", Note)
+print(resolve("notes_table") is Note, tables()["notes_table"] is Note, resolve("nothing"))
+# True True None
 ```
 
 ---
@@ -755,6 +888,19 @@ s.save()
 assert s._version == 1
 ```
 
+A safe model with no `_rebase_config` uses `DEFAULT_REBASE_CONFIG`: rebasing is on, but only for
+the field named `count`, and only for a change of 1 (`max_delta=1`). `PERMISSIVE_REBASE_CONFIG`
+widens that to any field (still a change of 1), and `NO_REBASE_CONFIG` turns it off.
+
+```python
+from sqler import DEFAULT_REBASE_CONFIG
+
+print(DEFAULT_REBASE_CONFIG.allowed_fields, DEFAULT_REBASE_CONFIG.max_delta)  # {'count'} 1
+print(DEFAULT_REBASE_CONFIG.can_rebase("count", 1))  # True
+print(DEFAULT_REBASE_CONFIG.can_rebase("count", 2))  # False
+print(DEFAULT_REBASE_CONFIG.can_rebase("value", 1))  # False
+```
+
 ---
 
 ## Bulk Operations & Transactions
@@ -858,6 +1004,11 @@ TxItem(name="C").save()
 TxItem(name="D").save()
 assert TxItem.query().count() == 2
 ```
+
+An instance is not part of your transaction. After a rollback it keeps what the write gave it:
+an instance first saved inside the transaction has an `_id` that no row has, and an instance
+deleted inside it has no `_id` while its row is still there. Read the row again
+(`from_id()`, a query) before going on with it.
 
 ### `commit()`, `auto_commit()` and the adapter block
 
@@ -1625,6 +1776,59 @@ except RuntimeError as e:
     assert "before_save() returned False" in str(e)
 ```
 
+### Async mixins and the combined mixins
+
+For an async model (`AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite twins) the mixins
+with I/O have async twins; the rules in the two tables above hold for them as for the sync ones.
+
+| Sync | Async | What differs |
+|------|-------|--------------|
+| `SoftDeleteMixin` | `AsyncSoftDeleteMixin` | `await row.soft_delete()` and `await row.restore()`; `active()`, `with_deleted()` and `only_deleted()` return async querysets |
+| `HooksMixin` | `AsyncHooksMixin` | the hooks are `async def` |
+| `AuditMixin` | `AsyncAuditMixin` | its current user is its own: set it with `AsyncAuditMixin.set_current_user(...)`; `AuditMixin.set_current_user(...)` does not reach it |
+| `AuditLogMixin` | `AsyncAuditLogMixin` | `await row.get_audit_log()`; the user of each audit row is the one set on `AsyncAuditMixin` |
+
+`TimestampMixin` has no async twin: an async model uses it as it is.
+
+`FullMixin` is `TimestampMixin`, `SoftDeleteMixin` and `HooksMixin` in one base, and
+`AsyncFullMixin` is `TimestampMixin`, `AsyncSoftDeleteMixin` and `AsyncHooksMixin`. Neither adds
+an audit mixin: add `AuditMixin` or `AuditLogMixin` (or their async twins) beside it.
+
+```python
+import asyncio
+from sqler import AsyncSQLerDB, AsyncSQLerModel, AsyncFullMixin, AsyncAuditMixin, AsyncAuditLogMixin
+
+class Post(AsyncFullMixin, AsyncSQLerModel):
+    title: str
+
+    async def before_save(self) -> bool:
+        self.title = self.title.strip()
+        return True
+
+class Entry(AsyncAuditMixin, AsyncAuditLogMixin, AsyncSQLerModel):
+    text: str
+
+async def main():
+    db = AsyncSQLerDB.in_memory()
+    await db.connect()
+    Post.set_db(db)
+    Entry.set_db(db)
+
+    post = await Post(title="  hello ").save()
+    print(repr(post.title), post.created_at is not None)  # 'hello' True
+    await post.soft_delete()
+    print(post.is_deleted, len(await Post.active().all()), len(await Post.with_deleted().all()))
+    # True 0 1
+
+    AsyncAuditMixin.set_current_user("ada")
+    entry = await Entry(text="x").save()
+    print(entry.created_by, [(r["action"], r["user"]) for r in await entry.get_audit_log()])
+    # ada [('create', 'ada')]
+    await db.close()
+
+asyncio.run(main())
+```
+
 ---
 
 ## Raw SQL
@@ -1708,6 +1912,36 @@ query_logger.disable()
 query_logger.clear()
 ```
 
+`query_logger` is a `QueryLogger`, the one instance the library logs to; make your own with
+`QueryLogger(max_logs=1000)` to keep a separate log (only `query_logger` is wired to the
+adapters). Each entry in `.logs` is a `QueryLog`: `sql`, `params`, `duration_ms`, `timestamp`,
+`rows_affected` and `error`; `str(log)` prints it as one line. `get_failed_queries()` returns
+the entries that have an `error`, and `capture()` is a context manager that collects the
+queries logged inside its block.
+
+`timed_query()` is a context manager that times a block: `timer.duration_ms` is the time since
+the block began, or its length once it ended.
+
+```python
+import time
+from sqler import QueryLog, QueryLogger, timed_query
+
+logger = QueryLogger(max_logs=10)
+logger.enable(log_to_logger=False)
+logger.log("SELECT 1", [], 0.5, rows_affected=1)
+logger.log("SELECT oops", [], 2.0, error="boom")
+
+first = logger.logs[0]
+print(isinstance(first, QueryLog), first.sql, first.duration_ms, first.rows_affected, first.error)
+# True SELECT 1 0.5 1 None
+print(str(logger.logs[1]))  # [2.00ms] SELECT oops | params=[] | ERROR: boom
+print(len(logger.get_failed_queries()), logger.get_stats()["count"])  # 1 2
+
+with timed_query() as timer:
+    time.sleep(0.01)
+print(timer.duration_ms >= 10)  # True
+```
+
 ### [C38] Query caching
 
 ```python
@@ -1732,6 +1966,55 @@ cache.invalidate_table("users")
 @cached_query(ttl_seconds=60, table=User)
 def get_active_users():
     return User.query().filter(F("active") == True).all()
+```
+
+`get_cache()` returns the process-wide `QueryCache` that a decorator without `cache=` uses,
+creating it with the defaults (1000 entries, 300 s) on first use; `configure_cache(max_size=1000,
+default_ttl_seconds=300, cleanup_interval_seconds=60)` replaces it with a new one and returns it.
+`async_cached_query` is `cached_query` for `async def` functions (same arguments; the result of
+the awaited call is cached).
+
+`cache.stats` is a `CacheStats`: `hits`, `misses`, `evictions`, `expirations`, `invalidations`,
+`size`, `max_size`, the `hit_rate` property and `to_dict()`. `misses` counts the lookups
+that found nothing: a `get()`, and a call of a decorated function that had to run.
+`cache.get_entry(key)` returns the
+`CacheEntry` of a key: `value`, `created_at`, `expires_at`, `hits`, `table`, and the properties
+`is_expired`, `age_seconds` and `ttl_remaining` (`None` for an entry that never expires).
+
+```python
+import asyncio
+from sqler import QueryCache, async_cached_query, cached_query, configure_cache, get_cache
+
+cache = configure_cache(max_size=50, default_ttl_seconds=60)
+print(get_cache() is cache)  # True
+
+calls = []
+
+@cached_query(ttl_seconds=30)
+def slow():
+    calls.append(1)
+    return [1, 2]
+
+slow()
+slow()
+print(len(calls), get_cache().stats.hits)  # 1 1
+
+c = QueryCache()
+c.set("k", "v", ttl_seconds=10, table="t")
+entry = c.get_entry("k")
+print(entry.value, entry.table, entry.is_expired, entry.ttl_remaining > 0)  # v t False True
+
+runs = []
+
+@async_cached_query(ttl_seconds=30, cache=c)
+async def double(x):
+    runs.append(x)
+    return x * 2
+
+async def main():
+    print(await double(2), await double(2), len(runs))  # 4 4 1
+
+asyncio.run(main())
 ```
 
 `table=` names what a cached function reads: a table name, or a model class, which stands
@@ -1798,6 +2081,23 @@ json_string = export_json_string(User)
 
 # Import from JSON array file
 result = import_json(User, "users.json")
+```
+
+Every export function returns an `ExportResult` (`path`, `format`, `count`, `size_bytes`,
+`to_dict()`); every import function returns an `ImportResult`: `count` rows read, `succeeded`
+and `failed` (also `success_count` and `error_count`), `success_rate`, and `errors`, a list with
+one dict per failed row (`row`, `data`, `error`, `error_type`). By default the first
+row that fails ends the import; with `skip_errors=True` the import goes on and `errors` holds
+every failed row.
+
+```python
+from sqler import export_csv, import_csv
+
+result = export_csv(User, "users.csv")
+print(result.format, result.count, result.size_bytes > 0)  # csv 2 True
+
+result = import_csv(User, "users.csv")
+print(result.count, result.succeeded, result.failed, round(result.success_rate, 2))
 ```
 
 ### [C40] JSONL export/import
@@ -1979,6 +2279,17 @@ count = Post.search_count("Python")
 results = Post.search("C++", plain=True)
 ```
 
+`fts.stats()` returns an `FTSStats`: `table_name` (the index table), `indexed_rows`, `fields`
+and `total_tokens`, an estimate made from the length of the first indexed field.
+
+```python
+from sqler import FTSStats
+
+stats = fts.stats()
+print(isinstance(stats, FTSStats), stats.table_name, stats.indexed_rows, stats.fields)
+# True articles_fts 1 ['title', 'content']
+```
+
 ### [C42] Connection pooling
 
 `SQLerDB` gives each thread its own connection and returns it when the thread ends, so threads share one `SQLerDB`.
@@ -2045,6 +2356,20 @@ result = await runner.migrate()
 
 Each async migration runs in one transaction with its version row, so inside `up()` and `down()` use one `adapter.execute()` per statement: `adapter.executescript()` fails there with "cannot run inside a transaction" (SQLite commits before a script), and the failed `result.error` says so.
 
+`migrate()` and `rollback()` return a `MigrationResult`: `success`, `applied` and `rolled_back`
+(lists of `MigrationRecord`), `current_version`, `target_version`, and `error` and
+`error_at_version` (both `None` unless a migration failed); `to_dict()` serialises it. A
+`MigrationRecord` is one migration that ran: `version`, `name`, `applied_at`, `duration_ms` and
+`checksum`.
+
+```python
+res = runner.migrate()
+print(res.success, res.current_version, res.target_version, res.error)  # True 1 1 None
+rec = res.applied[0]
+print(rec.version, rec.name, rec.duration_ms >= 0)  # 1 t True
+print(runner.rollback(target_version=0).rolled_back[0].version)  # 1
+```
+
 ### [C44] Metrics collection
 
 ```python
@@ -2079,6 +2404,12 @@ metrics.reset()
 # Disable when done
 metrics.disable()
 ```
+
+`metrics` is a `MetricsCollector`, the instance the examples above use. Make another with
+`MetricsCollector()` to keep separate counts: each collector reads the same query logger, and
+`enable()` turns that logger on if it was off (`disable()` puts it back as it was).
+`enable(slow_threshold_ms=100.0, labels=None)` takes the slow-query threshold and extra
+Prometheus labels.
 
 ### [C45] Database operations (backup, restore, health)
 
@@ -2145,6 +2476,18 @@ stats = await async_get_stats(db)
 await async_vacuum(db)
 ```
 
+`async_is_healthy(db, timeout_ms=5000)` is the boolean form of `async_health_check()`, as
+`is_healthy()` is of `health_check()`. `async_checkpoint(db, mode="PASSIVE")` is the async
+`checkpoint()`: it returns `{"busy": ..., "log": ..., "checkpointed": ...}`, and a `mode` other
+than `PASSIVE`, `FULL`, `RESTART` or `TRUNCATE` (in either case) raises `ValueError`.
+
+```python
+from sqler import async_checkpoint, async_is_healthy
+
+print(await async_is_healthy(db))  # True
+print(await async_checkpoint(db, mode="TRUNCATE"))  # {'busy': 0, 'log': 0, 'checkpointed': 0}
+```
+
 ### [C46] Change tracking
 
 ```python
@@ -2187,6 +2530,24 @@ base's answer.
 `AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite twins); `TrackedModel` on an async
 model raises `TypeError` when the class is defined. A msgspec model cannot take either:
 msgspec refuses the mixin when the class is defined.
+
+Under the model is a `ChangeTracker`, kept on the instance as `_tracker`: it holds the values
+from the last snapshot and a list of `FieldChange` records, one per assignment that changed a
+value (`field`, `old_value`, `new_value`, `changed_at`, and `to_dict()`).
+`user.get_change_history()` returns that list in order; `ChangeTracker.has_changes` is true once
+it holds one.
+
+```python
+from sqler import ChangeTracker, FieldChange
+
+user.mark_clean()
+user.name = "Bob"
+user.name = "Cy"
+history = user.get_change_history()
+print([(c.field, c.old_value, c.new_value) for c in history])
+# [('name', 'Alice', 'Bob'), ('name', 'Bob', 'Cy')]
+print(isinstance(history[0], FieldChange), type(user._tracker) is ChangeTracker)  # True True
+```
 
 ```python
 from sqler import PartialUpdateMixin, TrackedModel
@@ -2271,18 +2632,23 @@ SQLer provides a unified exception hierarchy under `sqler.exceptions`:
   - `NoAdapterError` — query executed without adapter
   - `InvariantViolationError` — malformed row invariant (e.g., NULL JSON)
   - `QueryTimeoutError` — query exceeded timeout
-- **Concurrency errors**
+- **Concurrency errors** — all are a `ConcurrencyError`, so `except ConcurrencyError` catches them
   - `StaleVersionError` — optimistic check failed (HTTP 409)
   - `DeadlockError` — deadlock detected
   - `LockTimeoutError` — unable to acquire lock
+  - `TransactionStateError` — a transaction can no longer be trusted to commit what it was told to (see "Nested transactions whose end fails")
 - **Integrity errors**
   - `ReferentialIntegrityError` — foreign key constraint violated
   - `UniqueConstraintError` — unique constraint violated (also a `sqlite3.IntegrityError`; see [D02](#d02-a-unique-index-that-refuses-a-row-raises-uniqueconstrainterror))
-- **Model errors**
+- **Model errors** — all are a `ModelError`, so `except ModelError` catches them
   - `NotBoundError` — model not bound to database
   - `NotFoundError` — model instance not found
   - `ValidationError` — model validation failed
   - `UnstorableValueError` — a value has no stored form (a kind sqler does not store; a `Decimal` or `timedelta` no number holds exactly, a `timedelta` being stored as its number of seconds; or `bytes` in a JSON document: promote the field to a `BLOB` column, or store text); `value` is the value and `field` its place in the document, where known; also a `TypeError`
+- **Batch errors**
+  - `BatchOperationError` — carries `succeeded` (a list of ids) and `failed` (a list of
+    `(index, message)` pairs) for a batch that partly failed. Nothing in sqler raises it today;
+    you can raise it yourself.
 - **Hook errors**
   - `BeforeSaveError`, `AfterSaveError` — save hook failures
   - `BeforeDeleteError`, `AfterDeleteError` — delete hook failures

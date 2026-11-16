@@ -169,24 +169,36 @@ class TestQueryCache:
 class TestCachedQueryDecorator:
     """Tests for cached_query decorator."""
 
-    def test_cached_query_decorator(self):
-        """Decorator caches function results."""
-        call_count = 0
+    @pytest.mark.parametrize("flavour", ["sync", "async"])
+    def test_a_decorated_function_runs_once_and_its_cache_counts_the_miss_and_the_hit(self, flavour):
+        cache = QueryCache()
+        calls = 0
 
-        @cached_query(ttl_seconds=60)
-        def expensive_function():
-            nonlocal call_count
-            call_count += 1
-            return {"result": "data"}
+        if flavour == "sync":
 
-        # First call executes function
-        result1 = expensive_function()
-        assert call_count == 1
+            @cached_query(ttl_seconds=60, cache=cache)
+            def expensive():
+                nonlocal calls
+                calls += 1
+                return {"result": "data"}
 
-        # Second call returns cached result
-        result2 = expensive_function()
-        assert call_count == 1  # Not incremented
-        assert result1 == result2
+            results = [expensive(), expensive()]
+        else:
+
+            @async_cached_query(ttl_seconds=60, cache=cache)
+            async def expensive():
+                nonlocal calls
+                calls += 1
+                return {"result": "data"}
+
+            async def twice():
+                return [await expensive(), await expensive()]
+
+            results = asyncio.run(twice())
+
+        assert (calls, results) == (1, [{"result": "data"}, {"result": "data"}])
+        stats = cache.stats
+        assert (stats.hits, stats.misses, stats.hit_rate) == (1, 1, 0.5)
 
 
 # =============================================================================
