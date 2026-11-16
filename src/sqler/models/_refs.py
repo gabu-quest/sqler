@@ -431,13 +431,14 @@ class _Kind:
     to say it lacks an attribute than a row takes to build, so no row asks the class.
 
     ``model``: a class sqler stores the rows of; ``struct``: a msgspec class; ``lite``: a
-    dataclass; ``pydantic``: a class with a pydantic validator; ``set``: how an attribute
+    dataclass; ``pydantic``: a class with a pydantic validator; ``forbids``: a pydantic class
+    set to refuse a key it has no field for (``extra="forbid"``); ``set``: how an attribute
     of one of its objects is set, frozen or not (:func:`_set`); ``gone``: a weak reference
     to the class that takes the answer out of :data:`_KINDS` as the class goes, and that
     :func:`_kind` checks an answer against (an id is used again once its class is gone).
     """
 
-    __slots__ = ("model", "struct", "lite", "pydantic", "set", "gone")
+    __slots__ = ("model", "struct", "lite", "pydantic", "forbids", "set", "gone")
 
     def __init__(self, cls: type) -> None:
         key = id(cls)
@@ -445,6 +446,7 @@ class _Kind:
         self.struct = hasattr(cls, "__struct_fields__")
         self.lite = dataclasses.is_dataclass(cls)
         self.pydantic = hasattr(cls, "__pydantic_validator__")
+        self.forbids = self.pydantic and cls.model_config.get("extra") == "forbid"
         # every pydantic and lite base has ``_versioned_rows``; a msgspec class stores its rows too
         self.model = hasattr(cls, "_versioned_rows") or (self.struct and hasattr(cls, "from_id"))
         if self.struct:
@@ -515,11 +517,12 @@ def validate(cls: Any, doc: dict, into: Any = None) -> Any:
     reference already given it holds the row's model (a cycle); the model is ``into``.
     """
     typed = typed_fields(cls)
+    kind = _kind(cls)
     if not typed:
-        return cls.model_validate(doc)
+        return cls.model_validate(_fields_of(doc) if kind.forbids else doc)
     held = {}
     kept: dict = {}
-    if not _kind(cls).lite:
+    if not kind.lite:
         for name, at in typed.items():
             if name in doc:
                 try:
@@ -533,10 +536,19 @@ def validate(cls: Any, doc: dict, into: Any = None) -> Any:
                 if value is not doc[name]:
                     held[name] = value
     data = {**doc, **held} if held else doc
+    if kind.forbids:
+        data = _fields_of(data)
     inst = cls.model_validate(data) if into is None else _build_on(into, cls, data)
     for name in held:
         _put(inst, name, _put_back(getattr(inst, name), kept))
     return inst
+
+
+def _fields_of(doc: dict) -> dict:
+    """The row ``doc`` without the keys sqler keeps beside its fields. A class that forbids
+    extra keys is given this: ``_id`` and ``_version`` are set on the model once it is built
+    (:func:`from_row`), and every other key it has no field for it still refuses."""
+    return {k: v for k, v in doc.items() if k not in ("_id", "_version")}
 
 
 def _build_on(into: Any, cls: Any, data: dict) -> Any:
