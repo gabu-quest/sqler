@@ -1196,15 +1196,13 @@ def test_two_rebases_inside_one_save_keep_both_foreign_saves(kind):
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_lock_on_the_reference_read_of_the_merged_row_writes_it_once(kind, sleeps):
+def test_lock_on_the_reread_of_the_row_before_the_merge_writes_it_once(kind, sleeps):
     async def steps(rows, mine, theirs):
         db = rows.db
         real = db._read_rows
         locked = [1]
-        reads = [0]
 
         def pick():
-            reads[0] += 1
             if locked[0]:
                 locked[0] -= 1
                 raise sqlite3.OperationalError(TABLE_LOCKED)

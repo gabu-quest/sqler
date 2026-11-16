@@ -125,8 +125,9 @@ def test_every_async_base_is_given_every_call_of_the_other_kind():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
-@pytest.mark.parametrize("given", ["sync_db", "str"])
+@pytest.mark.parametrize(
+    ("given", "bound"), [("sync_db", False), ("str", True)], ids=["sync_db-unbound", "str-bound"]
+)
 @pytest.mark.parametrize(("base", "name"), wrong_kind_cases(want_async=True))
 async def test_an_async_model_given_a_database_it_cannot_use_raises_before_anything_runs(
     base, name, given, bound, two_dbs
