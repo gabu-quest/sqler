@@ -15,6 +15,8 @@ import dataclasses
 import inspect
 import re
 import sqlite3
+import sys
+import types
 import warnings
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Optional, Union
@@ -35,6 +37,7 @@ from sqler import (
     SQLerModel,
     SQLerSafeModel,
 )
+from sqler.exceptions import ReferentialIntegrityError
 from sqler.logging import query_logger
 
 # ---- one set of classes per base -----------------------------------------------------
@@ -1062,3 +1065,119 @@ def test_a_typed_reference_into_a_table_that_holds_no_documents_raises(key, way)
         return True
 
     assert run(key, scenario) is True
+
+
+# ---- a quoted class name the module does not have ------------------------------------
+
+_STOCK_MODULE = """
+from dataclasses import dataclass
+from sqler import {base}
+
+@dataclass
+class RpStockItem({base}):
+    __tablename__ = "{table}"
+    name: str = ""
+"""
+_ORDER_MODULE = """
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
+from sqler import {base}
+
+if TYPE_CHECKING:
+    from {warehouse} import RpStockItem
+
+@dataclass
+class RpOrder({base}):
+    __tablename__ = "{table}"
+    item: Optional["RpStockItem"] = None
+"""
+
+
+def _module(monkeypatch, name: str, source: str, **names: str) -> Any:
+    """A module ``name`` made of ``source``, as an import of a file would make it."""
+    module = types.ModuleType(name)
+    monkeypatch.setitem(sys.modules, name, module)
+    exec(source.format(**names), module.__dict__)
+    return module
+
+
+async def _stock_db(asynchronous: bool, *classes: type) -> Any:
+    db = AsyncSQLerDB.in_memory(shared=False) if asynchronous else SQLerDB.in_memory(shared=False)
+    await aw(db.connect())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        for cls in classes:
+            cls.set_db(db)
+    return db
+
+
+@pytest.mark.parametrize("base", ["SQLerLiteModel", "AsyncSQLerLiteModel"])
+@pytest.mark.parametrize("last", ["shop", "warehouse"])
+def test_a_quoted_name_its_module_lacks_is_every_model_class_of_that_name(monkeypatch, base, last):
+    """Two modules each have a class ``RpStockItem``; a third names ``"RpStockItem"`` in
+    quotes and imports the warehouse's only for the type checker. Whichever was defined
+    last, a reference to a warehouse row reads as that row and holds its delete back."""
+    tag = f"rp_{base.lower()}_{last}_last"
+    made = {}
+    for part in sorted(("shop", "warehouse"), key=lambda part: part == last):
+        made[part] = _module(monkeypatch, f"{tag}_{part}", _STOCK_MODULE, base=base, table=f"{tag}_{part}")
+    shop, warehouse = made["shop"].RpStockItem, made["warehouse"].RpStockItem
+    order_cls = _module(
+        monkeypatch, f"{tag}_orders", _ORDER_MODULE, base=base, warehouse=f"{tag}_warehouse", table=f"{tag}_orders"
+    ).RpOrder
+
+    async def main():
+        in_order = [module.RpStockItem for module in made.values()]  # bound as defined
+        db = await _stock_db(base.startswith("Async"), *in_order, order_cls)
+        try:
+            wanted = await aw(warehouse(name="from the warehouse").save())
+            other = await aw(shop(name="from the shop").save())
+            assert other._id == wanted._id  # a row of the wrong table shows as a wrong name
+            order = await aw(order_cls(item=wanted).save())
+
+            back = await aw(order_cls.from_id(order._id))
+            assert (type(back.item), back.item.name) == (warehouse, "from the warehouse")
+
+            with pytest.raises(ReferentialIntegrityError):
+                await aw(wanted.delete())
+            left = await aw(db.find_document(warehouse.__tablename__, wanted._id))
+            assert left["name"] == "from the warehouse"
+        finally:
+            await aw(db.close())
+
+    asyncio.run(main())
+
+
+def test_a_class_defined_after_a_quoted_name_was_first_read_is_admitted(monkeypatch):
+    """The field is read while only the shop's class has the name; the warehouse's class is
+    defined afterwards, and a reference to one of its rows is then followed and counted."""
+    base, tag = "SQLerLiteModel", "rp_defined_later"
+    shop = _module(monkeypatch, f"{tag}_shop", _STOCK_MODULE, base=base, table=f"{tag}_shop").RpStockItem
+    order_cls = _module(
+        monkeypatch, f"{tag}_orders", _ORDER_MODULE, base=base, warehouse=f"{tag}_warehouse", table=f"{tag}_orders"
+    ).RpOrder
+    db = SQLerDB.in_memory(shared=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        shop.set_db(db)
+        order_cls.set_db(db)
+    try:
+        first = order_cls(item=shop(name="from the shop").save()).save()
+        assert order_cls.from_id(first._id).item.name == "from the shop"
+
+        warehouse = _module(
+            monkeypatch, f"{tag}_warehouse", _STOCK_MODULE, base=base, table=f"{tag}_warehouse"
+        ).RpStockItem
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            warehouse.set_db(db)
+        wanted = warehouse(name="from the warehouse").save()
+        order = order_cls(item=wanted).save()
+
+        back = order_cls.from_id(order._id)
+        assert (type(back.item), back.item.name) == (warehouse, "from the warehouse")
+        with pytest.raises(ReferentialIntegrityError):
+            wanted.delete()
+        assert db.find_document(warehouse.__tablename__, wanted._id)["name"] == "from the warehouse"
+    finally:
+        db.close()

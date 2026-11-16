@@ -114,16 +114,13 @@ def resolve(table: str) -> Optional[type]:
     return _REGISTRY.get(table)
 
 
-def resolve_class_name(name: str) -> Optional[type]:
-    """Return the registered model class called ``name`` (the latest one registered), or None.
+def classes_named(name: str) -> tuple[type, ...]:
+    """Every registered model class called ``name``, in the order they were registered.
 
-    Used to turn a string annotation such as ``"Address"`` into its model class
-    when the class's table name is not derived from the annotation text.
+    A string annotation such as ``"Address"`` in a module that does not have the name means
+    each of them; the ``_table`` of a stored reference says which one its row belongs to.
     """
-    for cls in reversed(list(_REGISTRY.values())):
-        if cls.__name__ == name:
-            return cls
-    return None
+    return tuple(cls for cls in _REGISTRY.values() if cls.__name__ == name)
 
 
 def state() -> int:
