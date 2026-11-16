@@ -653,7 +653,7 @@ def test_timestamps_and_the_audit_log_hold_for_a_partial_save(db, cls):
     assert (m.is_dirty, SQLerModel.is_dirty(m)) == (False, False)
 
 
-def test_the_audit_row_lists_only_what_the_partial_save_wrote(db):
+def test_the_audit_row_lists_only_what_the_partial_save_wrote(db, ticking_clock):
     m = PsStamped(title="t", body="b").save(db=db)
     other = _load(PsStamped, db, m._id)
     other.title = "theirs"

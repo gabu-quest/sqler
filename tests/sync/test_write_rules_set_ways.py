@@ -474,7 +474,7 @@ def test_an_audit_mixin_class_stamps_updated_by(db):
     assert (doc["created_by"], doc["updated_by"], got.updated_by) == ("alice", "bob", "bob")
 
 
-def test_a_stamp_on_a_promoted_field_goes_to_its_column(db):
+def test_a_stamp_on_a_promoted_field_goes_to_its_column(db, ticking_clock):
     class Stamped(TimestampMixin, SQLerModel):
         __tablename__ = "sw_promoted_stamp"
         __promoted__: ClassVar[dict[str, str]] = {"updated_at": "TEXT"}
@@ -599,7 +599,7 @@ def test_an_update_that_changes_nothing_writes_no_audit_row_as_save_writes_none(
     assert _after_creates(db, Set) == _after_creates(db, Loop) == []
 
 
-def test_an_audited_versioned_class_moves_the_version_and_logs(db):
+def test_an_audited_versioned_class_moves_the_version_and_logs(db, ticking_clock):
     Item = make("pydantic_safe", AuditLogMixin, TimestampMixin)
     Item(name="a").save(db=db)
 

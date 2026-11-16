@@ -793,30 +793,53 @@ def test_a_table_dropped_by_another_object_between_two_reads_reads_as_none(tmp_p
         conn.close()
 
 
-_SLOW = "(WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000000) SELECT count(*) FROM c) > 0"
+# says it has started (the SQL function ``started``), then works with no Python in it
+_SLOW = (
+    "(WITH RECURSIVE c(x) AS (SELECT started() UNION ALL SELECT x + 1 FROM c WHERE x < 3000000) "
+    "SELECT count(*) FROM c) > 0"
+)
 
 
 def test_a_keyboard_interrupt_while_the_statement_runs_is_not_caught(tmp_path):
     """Only SQLite's refusal (``OperationalError``) is caught: an interrupt that lands while a
-    statement runs leaves at once, and the statement is not sent again."""
+    statement runs leaves at once, and the statement is not sent again.
+
+    Another thread interrupts the main thread once the statement says it runs: the
+    interrupt is pending while SQLite works and is raised as the statement returns. No
+    alarm signal (Windows has none), and no timer to outrun."""
+    import _thread
     import signal
+    import threading
 
     from sqler.query import SQLerExpression
 
+    if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
+        pytest.skip("this process does not turn SIGINT into KeyboardInterrupt")
     a, b, path = _two(tmp_path)
+    running, wanted = threading.Event(), [True]
 
-    def interrupt(*_):
-        raise KeyboardInterrupt
+    def started():
+        running.set()
+        return 1
 
-    before = signal.signal(signal.SIGALRM, interrupt)
+    def interrupt_once_it_runs():
+        if running.wait(60) and wanted[0]:
+            _thread.interrupt_main()
+
+    a.adapter._conn().create_function("started", 0, started)
+    sender = threading.Thread(target=interrupt_once_it_runs)
     try:
         with query_logger.capture() as sent:
-            signal.setitimer(signal.ITIMER_REAL, 0.05)
+            sender.start()
             with pytest.raises(KeyboardInterrupt):
                 SceneRow.using(a).filter(SQLerExpression(_SLOW, [])).count()
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, before)
+        try:  # an interrupt sent after the statement had returned is taken here, not by the run
+            wanted[0] = False
+            running.set()
+            sender.join()
+        except KeyboardInterrupt:
+            pass
         a.close(), b.close()
     assert [(q.sql.split()[0], q.error) for q in sent] == [("SELECT", "KeyboardInterrupt")]  # sent once, nothing learned
 
