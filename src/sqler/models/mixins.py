@@ -80,6 +80,12 @@ class TimestampMixin(WriteRules):
         return {**super()._update_stamps(), "updated_at": datetime.now(timezone.utc)}
 
 
+def _rows(cls, db):
+    """The queryset of every row of ``cls`` that the soft-delete querysets narrow: on ``db``
+    through ``cls.using(db)`` when it is given, else ``cls.query()`` on the class binding."""
+    return cls.query() if db is None else cls.using(db)
+
+
 class SoftDeleteMixin(_ModelHost):
     """Mixin that provides soft delete functionality.
 
@@ -136,7 +142,7 @@ class SoftDeleteMixin(_ModelHost):
         self.delete(db=db)
 
     @classmethod
-    def active(cls):
+    def active(cls, *, db=None):
         """Return a queryset that excludes soft-deleted records.
 
         This is the recommended way to query for active (non-deleted) records.
@@ -149,15 +155,19 @@ class SoftDeleteMixin(_ModelHost):
             # Filter active users
             admins = User.active().filter(F("role") == "admin").all()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             SQLerQuerySet: Queryset filtered to non-deleted records.
         """
         from sqler.query import F
 
-        return cls.query().filter(F("deleted_at") == None)  # noqa: E711
+        return _rows(cls, db).filter(F("deleted_at") == None)  # noqa: E711
 
     @classmethod
-    def with_deleted(cls):
+    def with_deleted(cls, *, db=None):
         """Return a queryset that includes soft-deleted records.
 
         Use this when you need to access all records regardless of deletion status.
@@ -167,13 +177,17 @@ class SoftDeleteMixin(_ModelHost):
             # Get all users including deleted
             all_users = User.with_deleted().all()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             SQLerQuerySet: Queryset including all records.
         """
-        return cls.query()
+        return _rows(cls, db)
 
     @classmethod
-    def only_deleted(cls):
+    def only_deleted(cls, *, db=None):
         """Return a queryset containing only soft-deleted records.
 
         Use this to find and potentially restore deleted records.
@@ -188,12 +202,16 @@ class SoftDeleteMixin(_ModelHost):
             if user:
                 user.restore()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             SQLerQuerySet: Queryset filtered to only deleted records.
         """
         from sqler.query import F
 
-        return cls.query().filter(F("deleted_at") != None)  # noqa: E711
+        return _rows(cls, db).filter(F("deleted_at") != None)  # noqa: E711
 
 
 class AsyncSoftDeleteMixin(_ModelHost):
@@ -249,7 +267,7 @@ class AsyncSoftDeleteMixin(_ModelHost):
         await self.delete(db=db)
 
     @classmethod
-    def active(cls):
+    def active(cls, *, db=None):
         """Return an async queryset that excludes soft-deleted records.
 
         Usage::
@@ -260,15 +278,19 @@ class AsyncSoftDeleteMixin(_ModelHost):
             # Filter active users
             admins = await User.active().filter(F("role") == "admin").all()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             AsyncSQLerQuerySet: Queryset filtered to non-deleted records.
         """
         from sqler.query import F
 
-        return cls.query().filter(F("deleted_at") == None)  # noqa: E711
+        return _rows(cls, db).filter(F("deleted_at") == None)  # noqa: E711
 
     @classmethod
-    def with_deleted(cls):
+    def with_deleted(cls, *, db=None):
         """Return an async queryset that includes soft-deleted records.
 
         Usage::
@@ -276,13 +298,17 @@ class AsyncSoftDeleteMixin(_ModelHost):
             # Get all users including deleted
             all_users = await User.with_deleted().all()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             AsyncSQLerQuerySet: Queryset including all records.
         """
-        return cls.query()
+        return _rows(cls, db)
 
     @classmethod
-    def only_deleted(cls):
+    def only_deleted(cls, *, db=None):
         """Return an async queryset containing only soft-deleted records.
 
         Usage::
@@ -295,12 +321,16 @@ class AsyncSoftDeleteMixin(_ModelHost):
             if user:
                 await user.restore()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             AsyncSQLerQuerySet: Queryset filtered to only deleted records.
         """
         from sqler.query import F
 
-        return cls.query().filter(F("deleted_at") != None)  # noqa: E711
+        return _rows(cls, db).filter(F("deleted_at") != None)  # noqa: E711
 
 
 class HooksMixin:

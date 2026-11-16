@@ -354,6 +354,11 @@ class FTSIndex:
             validate_identifier(value)
         self._index_table = value
 
+    def _held_db(self) -> Optional["SQLerDB"]:
+        """The database given to this index, else the one the model class is bound to, else
+        ``None``."""
+        return self._db if self._db is not None else getattr(self.model_class, "_db", None)
+
     def _get_db(self) -> "SQLerDB":
         """The database given to this index, else the one the model class is bound to.
 
@@ -361,10 +366,11 @@ class FTSIndex:
             ValueError: There is neither.
             TypeError: It is an ``AsyncSQLerDB``: a search index works on a ``SQLerDB``.
         """
-        db = self._db if self._db is not None else getattr(self.model_class, "_db", None)
+        db = self._held_db()
         if db is None:
             raise ValueError(
-                "Model has no database bound: pass db= to FTSIndex or to create()/rebuild()"
+                "Model has no database bound: pass db= to the class's search call, to "
+                "FTSIndex or to create()/rebuild()"
             )
         if isinstance(db, AsyncSQLerDB):
             raise TypeError(
@@ -947,45 +953,92 @@ class SearchableMixin(_SearchHost):
         return cls._fts_index
 
     @classmethod
-    def rebuild_search_index(cls) -> int:
-        """Rebuild the search index from all data."""
-        index = cls._fts_index
-        if index is None:
-            index = cls.create_search_index()
-        return index.rebuild()
+    def _search_index(cls, db: Optional["SQLerDB"]) -> FTSIndex:
+        """The index a search call of this class works on.
+
+        Without ``db``: the class's index (``_fts_index``), created by
+        ``create_search_index()`` on the class's database when there is none yet. With
+        ``db``: an index of the same definition (the class's index's, else the ``FTS``
+        configuration) on ``db`` alone, never created: on a ``db`` without that index a
+        search raises what a search of a missing index raises. The class's index is
+        neither used nor changed, so an index made on one database is not searched for
+        another.
+        """
+        if db is None:
+            index = cls._fts_index
+            if index is None:
+                index = cls.create_search_index()
+            return index
+        held = cls._fts_index
+        if held is not None:
+            return FTSIndex(
+                cls,
+                held.fields,
+                index_name=held._index_table,
+                tokenizer=held.tokenizer,
+                content_sync=held.content_sync,
+                db=db,
+            )
+        fields, tokenizer = cls._get_fts_config()
+        return FTSIndex(cls, fields, tokenizer=tokenizer, db=db)
 
     @classmethod
-    def drop_search_index(cls) -> None:
-        """Drop the search index."""
-        if cls._fts_index:
-            cls._fts_index.drop()
+    def rebuild_search_index(cls, *, db: Optional["SQLerDB"] = None) -> int:
+        """Rebuild the search index from all data (of ``db`` when given, else of the
+        class's database)."""
+        return cls._search_index(db).rebuild()
+
+    @classmethod
+    def drop_search_index(cls, *, db: Optional["SQLerDB"] = None) -> None:
+        """Drop the search index (of ``db`` when given, else the class's index).
+
+        With ``db``, the class's index is forgotten too when it is the index of ``db``.
+        """
+        if db is None:
+            if cls._fts_index:
+                cls._fts_index.drop()
+                cls._fts_index = None
+            return
+        cls._search_index(db).drop()
+        held = cls._fts_index
+        if held is not None and held._held_db() is db:
             cls._fts_index = None
 
     @classmethod
-    def search(cls, query: str, *, limit: int = 100, offset: int = 0, plain: bool = False) -> list:
-        """Search for matching documents (``plain``: see ``FTSIndex.search()``)."""
-        index = cls._fts_index
-        if index is None:
-            index = cls.create_search_index()
-        return index.search(query, limit=limit, offset=offset, plain=plain)
+    def search(
+        cls,
+        query: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        plain: bool = False,
+        db: Optional["SQLerDB"] = None,
+    ) -> list:
+        """Search for matching documents (``plain``: see ``FTSIndex.search()``), in ``db``
+        when given, else in the class's database."""
+        return cls._search_index(db).search(query, limit=limit, offset=offset, plain=plain)
 
     @classmethod
     def search_ranked(
-        cls, query: str, *, limit: int = 100, offset: int = 0, plain: bool = False
+        cls,
+        query: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        plain: bool = False,
+        db: Optional["SQLerDB"] = None,
     ) -> list[SearchResult]:
-        """Search with relevance ranking (``plain``: see ``FTSIndex.search()``)."""
-        index = cls._fts_index
-        if index is None:
-            index = cls.create_search_index()
-        return index.search_ranked(query, limit=limit, offset=offset, plain=plain)
+        """Search with relevance ranking (``plain``: see ``FTSIndex.search()``), in ``db``
+        when given, else in the class's database."""
+        return cls._search_index(db).search_ranked(query, limit=limit, offset=offset, plain=plain)
 
     @classmethod
-    def search_count(cls, query: str, *, plain: bool = False) -> int:
-        """Count matching documents (``plain``: see ``FTSIndex.search()``)."""
-        index = cls._fts_index
-        if index is None:
-            index = cls.create_search_index()
-        return index.count(query, plain=plain)
+    def search_count(
+        cls, query: str, *, plain: bool = False, db: Optional["SQLerDB"] = None
+    ) -> int:
+        """Count matching documents (``plain``: see ``FTSIndex.search()``), in ``db`` when
+        given, else in the class's database."""
+        return cls._search_index(db).count(query, plain=plain)
 
     def save(self, *args, **kwargs):
         """Save and update search index (with ``content_sync`` its triggers do)."""

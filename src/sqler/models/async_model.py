@@ -49,8 +49,8 @@ class AsyncSQLerModel(BaseModel):
         users = await User.using(db).filter(F("age") > 30).all()
 
     .. note::
-        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
-        ``await .save(db=db)`` / ``await .delete(db=db)`` for writes.
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and ``db=`` for
+        every other call (``await .save(db=db)``, ``Model.from_id(id, db=db)``).
     """
 
     # internal id stored outside the JSON blob
@@ -87,7 +87,7 @@ class AsyncSQLerModel(BaseModel):
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
         warnings.warn(
             f"{cls.__name__}.set_db() is deprecated. "
-            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            f"{_table_names.DATABASE_RULE} "
             "set_db() will be removed in a future version.",
             DeprecationWarning,
             skip_file_prefixes=_SQLER_PREFIXES,
@@ -169,12 +169,12 @@ class AsyncSQLerModel(BaseModel):
         return await cls.query().first()
 
     @classmethod
-    async def validate_references(cls):
-        """The broken references of every table of the bound database, as
+    async def validate_references(cls, *, db=None):
+        """The broken references of every table of ``db``, else of the bound database, as
         :func:`sqler.models.async_validate_references` gives them."""
         from .async_integrity import async_validate_references
 
-        db, _ = cls._require_binding()
+        db, _ = cls._resolve_binding(db)
         return await async_validate_references(db)
 
     @classmethod
@@ -288,6 +288,7 @@ class AsyncSQLerModel(BaseModel):
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
+        db=None,
     ) -> None:
         """Create an index on a JSON field via the model class.
 
@@ -296,8 +297,9 @@ class AsyncSQLerModel(BaseModel):
             unique: Enforce uniqueness.
             name: Optional index name.
             where: Optional partial-index WHERE clause.
+            db: Optional database (overrides class-level binding).
         """
-        db, table = cls._require_binding()
+        db, table = cls._resolve_binding(db)
         await db.create_index(table, field, unique=unique, name=name, where=where)
 
     @classmethod
@@ -308,9 +310,11 @@ class AsyncSQLerModel(BaseModel):
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
+        db=None,
     ) -> None:
-        """Ensure an index on a JSON path or literal column exists (idempotent)."""
-        await cls.add_index(field, unique=unique, name=name, where=where)
+        """Ensure an index on a JSON path or literal column exists (idempotent), in ``db``
+        when given, else the class's database."""
+        await cls.add_index(field, unique=unique, name=name, where=where, db=db)
 
     @classmethod
     async def _ensure_schema(cls) -> None:

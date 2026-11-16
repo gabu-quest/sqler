@@ -59,8 +59,8 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         await c.save(db=db)  # _version = 0
 
     .. note::
-        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
-        ``await .save(db=db)`` / ``await .delete(db=db)`` for writes.
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and ``db=`` for
+        every other call (``await .save(db=db)``, ``Model.from_id(id, db=db)``).
 
     Attributes:
         _version: The current version number for optimistic locking.

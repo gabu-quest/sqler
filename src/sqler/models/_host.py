@@ -30,3 +30,6 @@ class ModelHost:
 
     @classmethod
     def query(cls, *args: Any, **kwargs: Any) -> Any: ...
+
+    @classmethod
+    def using(cls, db: Any, *args: Any, **kwargs: Any) -> Any: ...

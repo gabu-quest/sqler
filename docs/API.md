@@ -22,9 +22,10 @@
 
 ## Core — Models, Save, Query
 
-> **Deprecation notice:** `set_db()` is soft-deprecated. Prefer `using()` for class-level
-> binding and `save(db=)` / `delete(db=)` for per-call DB targeting. `set_db()` still
-> works but emits a `DeprecationWarning`. Examples below use `set_db()` for brevity;
+> **Deprecation notice:** `set_db()` is soft-deprecated. Prefer `using(db)` for queries and
+> `db=` for every other call (`save(db=)`, `delete(db=)`, `Model.from_id(id, db=)`,
+> `Model.add_index(field, db=)`, ...). `set_db()` still works but emits a
+> `DeprecationWarning` that says this rule. Examples below use `set_db()` for brevity;
 > see [Per-Call DB Binding](#per-call-db-binding) for the recommended pattern.
 
 ### [C01] Sync quickstart: models, save, query
@@ -153,11 +154,55 @@ user = User(name="Alice", age=30)
 user.save(db=db1)       # writes to db1
 user.delete(db=db2)     # deletes from db2
 
+# Every other class call takes db= too
+User.add_index("email", unique=True, db=db)
+broken = User.validate_references(db=db)
+live = Document.active(db=db).all()       # SoftDeleteMixin
+hits = Post.search("python", db=db)       # SearchableMixin
+import_jsonl(User, "users.jsonl", db=db)  # every import that takes a model class
+
 # Works with all model variants: SQLerModel, AsyncSQLerModel,
 # SQLerLiteModel, AsyncSQLerLiteModel, SQLerMsgspecModel, SafeModel, AsyncSafeModel
 ```
 
 Both patterns avoid global `set_db()` state and are safe for multi-DB scenarios.
+
+**Every class call names its database.** A query goes through `using(db)` (`query()`,
+`all()`, `first()`, `count()` and `filter()` are its bound forms). Every other class call
+takes `db=None`, keyword-only, after its other parameters:
+
+- every base: `from_id(id_, *, db=None)`, `from_ids(ids, *, db=None)`,
+  `save_many(instances, *, db=None)`, `first_or_create(lookup, defaults=None, *, db=None)`,
+  `add_index(field, *, unique=False, name=None, where=None, db=None)`,
+  `ensure_index(field, *, unique=False, name=None, where=None, db=None)`;
+- the pydantic bases: `validate_references(*, db=None)`;
+- `SoftDeleteMixin` and `AsyncSoftDeleteMixin`: `active(*, db=None)`,
+  `with_deleted(*, db=None)`, `only_deleted(*, db=None)`, each the queryset of
+  `using(db)` narrowed;
+- `SearchableMixin`: `search(query, *, limit=100, offset=0, plain=False, db=None)`,
+  `search_ranked(query, *, limit=100, offset=0, plain=False, db=None)`,
+  `search_count(query, *, plain=False, db=None)`, `rebuild_search_index(*, db=None)`,
+  `drop_search_index(*, db=None)`; `create_search_index(db=None)` takes it positionally too;
+- `sqler.export`: `import_csv`, `import_json`, `import_jsonl`, `import_csv_string`,
+  `import_json_string`, `import_jsonl_string` and `async_import_jsonl`, each `..., db=None)`.
+
+Given `db`, a call reads and writes the class's table (the rule below) in that database,
+also on a class bound to another one, whose database it leaves as it was. The one thing
+read from elsewhere is a referenced row: it is read from the database its own class is
+bound to when it has one, else from `db` (see [C47]). Without `db`, the call uses the
+class's `set_db()` binding as before; with neither it raises `NotBoundError`, whose
+message says this rule (the search calls raise `ValueError`, as `FTSIndex` does). An async
+class given a `SQLerDB` fails as its `save(db=)` does, with `TypeError` from awaiting what
+the sync database returned.
+
+The search calls given `db` use an index of the class's definition (the class's index's
+fields, name, tokenizer and `content_sync`, else its `FTS` configuration) on that database,
+and never create it: `create_search_index(db)` does. On a database that does not have the
+index they raise what a search of a missing index raises, `sqlite3.OperationalError`
+("no such table"); the class's own index, made on another database, is not used.
+`rebuild_search_index(db=)` on a database that has no table of the class indexes nothing
+and returns 0, as `FTSIndex.rebuild()` does. `drop_search_index(db=)` drops the index of `db` and forgets the class's index when that
+index is the one of `db`.
 
 **What "the async classes match the sync ones" means.** One test holds it:
 `tests/test_public_names.py::test_an_async_class_has_every_public_name_of_its_sync_twin`. It
@@ -350,6 +395,10 @@ assert isinstance(sql, str) and isinstance(params, list)
 plan = q.explain_query_plan(Prefecture.db().adapter)
 assert plan and len(list(plan)) >= 1
 ```
+
+`add_index(field, *, unique=False, name=None, where=None, db=None)` and `ensure_index(...)`
+with the same parameters index the class's table in `db` when it is given, else in the
+class's database: `Prefecture.ensure_index("population", db=db)` needs no `set_db()`.
 
 ### [C15] Query builder patterns
 
@@ -1333,6 +1382,9 @@ assert broken and broken[0].row_id == dangling._id
 # Returned items are sqler.models.BrokenRef dataclasses
 ```
 
+`validate_references(*, db=None)` checks `db` when it is given, else the class's
+database: `RefPost.validate_references(db=db)` on a class bound to none.
+
 ### [C20] Index helpers
 
 ```python
@@ -1736,6 +1788,10 @@ assert deleted[0].title == "Deleted Doc"
 all_docs = Document.with_deleted().all()
 assert len(all_docs) == 3
 ```
+
+`active(*, db=None)`, `with_deleted(*, db=None)` and `only_deleted(*, db=None)` read `db`
+through `using(db)` when it is given, else the class's database:
+`Document.active(db=db).all()` on a class bound to none.
 
 ### [C37] HooksMixin auto-calling
 
@@ -2167,6 +2223,11 @@ await async_export_jsonl(User, "users.jsonl")
 await async_import_jsonl(User, "users.jsonl")
 ```
 
+Every import that takes a model class (`import_csv`, `import_json`, `import_jsonl`, their
+`_string` forms and `async_import_jsonl`) takes `db=None` as its last keyword: the rows are
+written to `db` and, with `update_existing`, read from it; without it, to the class's
+database. `import_jsonl(User, "users.jsonl", db=db)` needs no `set_db()`.
+
 ### [C41] Full-text search (FTS5)
 
 ```python
@@ -2285,6 +2346,11 @@ results = Post.search("Python")
 count = Post.search_count("Python")
 results = Post.search("C++", plain=True)
 ```
+
+On a class bound to none every search call takes the database: `Post.create_search_index(db)`,
+then `Post.search("Python", db=db)`, `search_ranked(..., db=db)`, `search_count(..., db=db)`,
+`rebuild_search_index(db=db)` and `drop_search_index(db=db)` (see "Every class call names
+its database").
 
 `fts.stats()` returns an `FTSStats`: `table_name` (the index table), `indexed_rows`, `fields`
 and `total_tokens`, an estimate made from the length of the first indexed field.
