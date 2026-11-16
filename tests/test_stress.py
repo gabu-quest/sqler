@@ -751,7 +751,6 @@ class TestMemoryAndResourceStress:
             assert TempModel.query().count() == 1
 
             db.close()
-            gc.collect()
 
     def test_query_without_fetching(self, db):
         """Test that unfetched queries don't leak resources."""
