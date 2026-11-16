@@ -12,7 +12,8 @@ Document-oriented JSON store on SQLite.
 
 ## Follow-up TODO
 
-- [ ] Deprecate `set_db()` — soft deprecation with `warnings.warn()` added; full removal deferred
+- [ ] Remove `set_db()` and `bind()`. They are deprecated and warn; a call names its database
+  with `db=` or `using(db)`.
 
 ## Layout
 
@@ -32,7 +33,10 @@ public name its sync twin has):
   `_statements.py` (the indexes, a delete by id, the checks of an ensure).
 - `models/`: the model bases (pydantic ones here), the querysets, the mixins (`mixins.py`),
   references and delete policies (`_refs.py`, `integrity.py`), optimistic-lock retry
-  (`save_retry.py`, `utils.py`).
+  (`save_retry.py`, `utils.py`). Rules every base shares: `_table_names.py` (the table a class
+  stores in, and the check of the database a call is given), `_write_rules.py` (what a write
+  does besides the row), `_compat.py` (which optional backends are installed, and the type each field
+  declares), `_host.py` (what a mixin may call on its model class, for the type checker).
   - `models/lite/`: the dataclass models, no pydantic needed.
   - `models/msgspec/`: the msgspec model.
 - `query/`: `SQLerQuery` (`query.py`), `AsyncSQLerQuery` (`async_query.py`), `SQLerField`/`F`
@@ -56,7 +60,7 @@ A safe model checks and bumps a row version on every save. `SQLerLiteModelBase` 
 
 ## Running things
 
-- Whole suite (what CI runs): `uv run pytest -q -m "not perf"`. About 13,900 tests; it takes many
+- Whole suite (what CI runs): `uv run pytest -q -m "not perf"`. About 13,800 tests; it takes many
   minutes. `pytest.ini` already adds `-m "not perf"` and sets `testpaths` to `tests` and
   `examples/fastapi/tests`.
 - On a slow disk most of a run is commits to the file databases the tests make in the temp

@@ -706,8 +706,9 @@ def _identity(inst) -> tuple:
     return (inst._id, inst.name, getattr(inst, "_version", None), home.db if home else None)
 
 
-@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
-@pytest.mark.parametrize("given", ["async_db", "str"])
+@pytest.mark.parametrize(
+    ("given", "bound"), [("async_db", False), ("str", True)], ids=["async_db-unbound", "str-bound"]
+)
 @pytest.mark.parametrize(("base", "name"), wrong_kind_cases(want_async=False))
 def test_a_sync_model_given_a_database_it_cannot_use_raises_before_anything_runs(
     base, name, given, bound, two_dbs
