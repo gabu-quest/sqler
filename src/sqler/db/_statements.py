@@ -3,6 +3,7 @@ from typing import Any, Optional, Union
 
 from sqler.db._rows import _columns_sql, _layout, _promoted_in
 from sqler.exceptions import SQLerError
+from sqler.query.query import _rewrite_promoted_refs
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -96,20 +97,31 @@ def _index_name(table: str, entries: list[tuple[str, bool]]) -> str:
 
 
 def _create_index_sql(
-    table: str, fields: Any, unique: bool, name: Optional[str], where: Optional[str], columns: Any = ()
+    table: str,
+    fields: Any,
+    unique: bool,
+    name: Optional[str],
+    where: Optional[str],
+    columns: Any = (),
+    rewrite: bool = True,
 ) -> str:
     """The ``CREATE INDEX IF NOT EXISTS`` of ``create_index``, its arguments checked first.
 
     ``fields``: see :func:`_index_entries`. Each is indexed where the table stores it: a name
     that starts with ``_`` or is one of ``columns`` (the table's promoted columns) as that
     column, any other as ``json_extract(data, '$.<field>')``; ``DESC`` after a descending one.
-    The name is :func:`_index_name` unless given; ``where`` makes it a partial index."""
+    The name is :func:`_index_name` unless given; ``where`` makes it a partial index. A
+    ``json_extract(data, '$.<field>')`` in ``where`` reads the column when ``<field>`` is one of
+    ``columns``, as a filter does (the query owner's ``_rewrite_promoted_refs``); ``rewrite=False``
+    keeps ``where`` as it is."""
     table = validate_table_name(table)
     entries = _index_entries(fields)
     if name is not None:
         validate_identifier(name)
     if where is not None:
         validate_check_expression(where)
+    if where and rewrite:
+        where = _rewrite_promoted_refs(where, columns)
     idx_name = name or _index_name(table, entries)
     unique_sql = "UNIQUE" if unique else ""
     expr = ", ".join(
@@ -168,7 +180,7 @@ def _made_by_sqler(sql: str) -> Optional[tuple[bool, str, str, list[Any], Option
     unique, name, table = bool(head.group(1)), head.group(2), head.group(3)
     where = rest[len("WHERE "):] or None
     try:
-        statement = _create_index_sql(table, fields, unique, name, where, columns)
+        statement = _create_index_sql(table, fields, unique, name, where, columns, rewrite=False)
     except (SQLerError, ValueError, TypeError):
         return None
     return (unique, name, table, fields, where, columns) if _kept_text(statement) == sql else None
@@ -189,7 +201,8 @@ def _follow_indexes(table: str, moved: list[str], promoted: list[str]) -> Any:
         if made is None:
             continue
         unique, name, made_on, fields, where, columns = made
-        if not any((f[0] if isinstance(f, tuple) else f) in moving - columns for f in fields):
+        reads_moved = any((f[0] if isinstance(f, tuple) else f) in moving - columns for f in fields)
+        if not reads_moved and (not where or _rewrite_promoted_refs(where, moving) == where):
             continue
         yield f"DROP INDEX {name};", []
         yield _create_index_sql(made_on, fields, unique, name, where, promoted), []

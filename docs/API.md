@@ -1436,18 +1436,30 @@ column, `_id` and `_version` as their column, any other field as
 index. Without `name=` the name is `idx_<table>_<field>` for one ascending field (dots as
 `_`), else each field so, with `_desc` after a descending one, joined by `__`
 (`idx_jobs_queue__priority_desc__eta`): two lists that differ in order or in a direction make
-two indexes. An empty list, a field named twice or an entry of another shape raises
+two indexes, except that a field whose own name ends in `_desc` or holds `__` can share a name
+with a list (`"x_desc"` and `[("x", "desc")]`, `"a__b"` and `["a", "b"]`): the second call is
+skipped as the name exists, so give `name=`. An empty list, a field named twice or an entry of another shape raises
 `ValueError`, a name that is no identifier the `Invalid...Error` of that name, before anything
 is sent; a list given to `add_index()` and `ensure_index()` of every model base works the same.
 
-`where=` is SQL, written as it is: name a promoted field by its column (`status = 'pending'`)
-and a field in `data` by its path (`json_extract(data, '$.kind') = 'x'`).
+`where=` is SQL, laid out as a filter is: name a field by its JSON path,
+`json_extract(data, '$.status') = 'pending'`, or, for a promoted field, by its column,
+`status = 'pending'`, and both give the same index. `json_extract(data, '$.<field>')` (any
+case, any space after the comma, as a filter takes it) reads the column when `<field>` is
+promoted in the table, at `create_index` and when the index follows a promotion; the rewrite is
+a text replace, so a string literal holding that text is rewritten too (a filter does the
+same). A `where=` that already names the column, or a field that is not promoted, is kept as
+written, byte for byte.
 
-When a field is promoted after an index over it was made (`ensure_table(promoted=...)`, the
-first save of a class with `__promoted__`, `move_promoted()`), the index is made again on the
-column in the same transaction, under its name, with its `unique` and its `where` as written.
-Only an index whose text is, byte for byte, one `create_index` makes is made again; an index
-written by hand is left as it is.
+When a field is promoted after an index over it (or over it in its `where=`) was made
+(`ensure_table(promoted=...)`, the first save of a class with `__promoted__`,
+`move_promoted()`), the index is made again on the column in the same transaction, under its
+name, with its `unique` and its `where`. Only an index whose text is, byte for byte, one
+`create_index` makes is made again; an index written by hand is left as it is. If the new
+column holds what the unique index refuses (rows without the key now hold the column's
+`DEFAULT`), the whole promotion is rolled back with the unique error. An index made by an
+earlier release over a field that was already promoted is not made again by a second
+`create_index` (the name exists): `drop_index` it and make it again.
 
 ```python
 from sqler import F, SQLerDB

@@ -332,6 +332,240 @@ def test_an_index_follows_the_promotion_a_model_save_makes():
     ]
 
 
+@dataclasses.dataclass
+class _PlainLite(SQLerLiteModel):
+    queue: str = ""
+    priority: int = 0
+    __tablename__ = "jobs"
+
+
+@dataclasses.dataclass
+class _PromotedLite(SQLerLiteModel):
+    queue: str = ""
+    priority: int = 0
+    __tablename__ = "jobs"
+    __promoted__ = {"priority": "INTEGER NOT NULL DEFAULT 0"}
+
+
+class _PlainAsync(AsyncSQLerModel):
+    queue: str = ""
+    priority: int = 0
+    __tablename__ = "jobs"
+
+
+class _PromotedAsync(AsyncSQLerModel):
+    queue: str = ""
+    priority: int = 0
+    __tablename__ = "jobs"
+    __promoted__ = {"priority": "INTEGER NOT NULL DEFAULT 0"}
+
+
+def test_an_index_follows_the_promotion_an_async_model_save_makes():
+    async def body(db):
+        await _PlainAsync(queue="a", priority=3).save(db=db)
+        await _PlainAsync.add_index(["queue", ("priority", "desc")], db=db)
+        await _PromotedAsync(queue="b", priority=1).save(db=db)
+        return [await _indexes(db), await _rows(db, "SELECT _id, priority FROM jobs ORDER BY _id")]
+
+    assert _run(AsyncSQLerDB, body) == [
+        [("idx_jobs_queue__priority_desc",
+          "CREATE INDEX idx_jobs_queue__priority_desc ON jobs (json_extract(data, '$.queue'), priority DESC) ")],
+        [(1, 3), (2, 1)],
+    ]
+
+
+def test_an_index_follows_the_promotion_a_lite_model_save_makes():
+    async def body(db):
+        _PlainLite(queue="a", priority=3).save(db=db)
+        _PlainLite.add_index(["queue", ("priority", "desc")], db=db)
+        _PromotedLite(queue="b", priority=1).save(db=db)
+        return [await _indexes(db), await _rows(db, "SELECT _id, priority FROM jobs ORDER BY _id")]
+
+    assert _run(SQLerDB, body) == [
+        [("idx_jobs_queue__priority_desc",
+          "CREATE INDEX idx_jobs_queue__priority_desc ON jobs (json_extract(data, '$.queue'), priority DESC) ")],
+        [(1, 3), (2, 1)],
+    ]
+
+
+# ----- a where names a field one way, promoted or not -------------------------------------
+
+PENDING_PATH = "json_extract(data, '$.status') = 'pending'"
+PENDING_INDEX = (
+    "idx_jobs_queue",
+    "CREATE UNIQUE INDEX idx_jobs_queue ON jobs (json_extract(data, '$.queue')) WHERE status = 'pending'",
+)
+
+
+async def _two_pending_then_a_filter_plan(db: Any) -> list:
+    """The second pending row of one queue is refused; a done one is taken; then the plan of a filter."""
+    await _v(db.insert_document("jobs", {"queue": "q", "status": "pending"}))
+    refused = None
+    try:
+        await _v(db.insert_document("jobs", {"queue": "q", "status": "pending"}))
+    except UniqueConstraintError as exc:
+        refused = type(exc).__name__
+    await _v(db.insert_document("jobs", {"queue": "q", "status": "done"}))
+    q = await _v(db.query("jobs"))
+    plan = await _plan_of_sent(db, q.filter((F("status") == "pending") & (F("queue") == "q")))
+    return [await _indexes(db), refused, plan]
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_a_where_by_json_path_follows_the_promotion_of_its_field(kind):
+    async def body(db):
+        await _v(db.create_index("jobs", "queue", unique=True, where=PENDING_PATH))
+        await _v(db.ensure_table("jobs", promoted={"status": "TEXT"}))
+        return await _two_pending_then_a_filter_plan(db)
+
+    got = _run(kind, body)
+    assert got[0] == [PENDING_INDEX]
+    assert got[1] == "UniqueConstraintError"
+    assert got[2][0].startswith("SEARCH jobs USING INDEX idx_jobs_queue")
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_a_where_by_json_path_on_an_already_promoted_field_reads_the_column(kind):
+    async def body(db):
+        await _v(db.ensure_table("jobs", promoted={"status": "TEXT"}))
+        await _v(db.create_index("jobs", "queue", unique=True, where=PENDING_PATH))
+        return await _two_pending_then_a_filter_plan(db)
+
+    got = _run(kind, body)
+    assert got[0] == [PENDING_INDEX]
+    assert got[1] == "UniqueConstraintError"
+    assert got[2][0].startswith("SEARCH jobs USING INDEX idx_jobs_queue")
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_a_where_that_names_the_column_or_an_unpromoted_field_is_left_byte_for_byte(kind):
+    async def body(db):
+        await _v(db.ensure_table("jobs", promoted={"status": "TEXT"}))
+        await _v(db.create_index("jobs", "queue", name="a", where="status = 'pending'"))
+        await _v(db.create_index("jobs", "queue", name="b", where="JSON_EXTRACT(data,'$.kind')='x'"))
+        return await _indexes(db)
+
+    assert [sql for _, sql in _run(kind, body)] == [
+        "CREATE INDEX a ON jobs (json_extract(data, '$.queue')) WHERE status = 'pending'",
+        "CREATE INDEX b ON jobs (json_extract(data, '$.queue')) WHERE JSON_EXTRACT(data,'$.kind')='x'",
+    ]
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_a_second_promotion_of_another_field_in_the_where_makes_the_index_again(kind):
+    where = "json_extract(data, '$.status') = 'pending' AND json_extract(data, '$.kind') = 'x'"
+
+    async def body(db):
+        await _v(db.create_index("jobs", "queue", where=where))
+        await _v(db.ensure_table("jobs", promoted={"status": "TEXT"}))
+        first = await _indexes(db)
+        await _v(db.ensure_table("jobs", promoted={"status": "TEXT", "kind": "TEXT"}))
+        listed = await _v(db.list_indexes("jobs"))
+        await _v(db.drop_index("idx_jobs_queue"))
+        return [first, await _indexes(db), [i["name"] for i in listed]]
+
+    assert _run(kind, body) == [
+        [("idx_jobs_queue", "CREATE INDEX idx_jobs_queue ON jobs (json_extract(data, '$.queue')) "
+          "WHERE status = 'pending' AND json_extract(data, '$.kind') = 'x'")],
+        [],
+        ["idx_jobs_queue"],
+    ]
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_a_where_with_two_promoted_fields_and_one_that_is_not(kind):
+    where = "json_extract(data,'$.status') = 'p' AND json_extract(data,'$.kind') = 'x' AND json_extract(data,'$.eta') > 0"
+
+    async def body(db):
+        await _v(db.ensure_table("jobs", promoted={"status": "TEXT", "kind": "TEXT"}))
+        await _v(db.create_index("jobs", "queue", where=where))
+        return await _indexes(db)
+
+    assert _run(kind, body) == [
+        ("idx_jobs_queue", "CREATE INDEX idx_jobs_queue ON jobs (json_extract(data, '$.queue')) "
+         "WHERE status = 'p' AND kind = 'x' AND json_extract(data,'$.eta') > 0")
+    ]
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_a_path_with_spaces_or_capitals_is_read_as_the_query_rewrite_reads_it(kind):
+    # the query owner's rewrite takes json_extract(data, '$.f') in any case, with any space after
+    # the comma, and leaves a space inside the parentheses or before the closing one; so does the index
+    async def body(db):
+        await _v(db.ensure_table("jobs", promoted={"status": "TEXT"}))
+        await _v(db.create_index("jobs", "queue", name="upper", where="JSON_EXTRACT(data,   '$.status') = 'p'"))
+        await _v(db.create_index("jobs", "queue", name="spaced", where="JSON_EXTRACT( data , '$.status' ) = 'p'"))
+        return await _indexes(db)
+
+    assert [sql[sql.index("WHERE"):] for _, sql in _run(kind, body)] == [
+        "WHERE JSON_EXTRACT( data , '$.status' ) = 'p'",
+        "WHERE status = 'p'",
+    ]
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_a_string_literal_that_holds_the_path_text_is_rewritten_like_the_query_rewrite_does(kind):
+    # a known limit shared with the filters: the rewrite is a text replace and does not see quotes
+    async def body(db):
+        await _v(db.ensure_table("jobs", promoted={"status": "TEXT"}))
+        await _v(db.create_index("jobs", "queue", where="json_extract(data,'$.kind') = \"json_extract(data,'$.status')\""))
+        return await _indexes(db)
+
+    assert _run(kind, body)[0][1].endswith("WHERE json_extract(data,'$.kind') = \"status\"")
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_a_nested_path_in_the_where_is_not_the_promoted_field_beside_it(kind):
+    async def body(db):
+        await _v(db.ensure_table("jobs", promoted={"a_b": "TEXT"}))
+        await _v(db.create_index("jobs", "queue", where="json_extract(data, '$.a.b') = 'x'"))
+        return await _indexes(db)
+
+    assert _run(kind, body)[0][1].endswith("WHERE json_extract(data, '$.a.b') = 'x'")
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_the_where_of_an_index_made_through_an_object_that_has_not_seen_the_promotion(kind, tmp_path):
+    path = tmp_path / "two.db"
+
+    async def body(db):
+        await _v(db.insert_document("jobs", {"queue": "q", "status": "pending"}))
+        await _v(db.find_document("jobs", 1))
+        other = type(db).on_disk(str(path))
+        await _v(other.connect())
+        try:
+            await _v(other.ensure_table("jobs", promoted={"status": "TEXT"}))
+        finally:
+            await _v(other.close())
+        await _v(db.create_index("jobs", "queue", where=PENDING_PATH))
+        return await _indexes(db)
+
+    assert _run(kind, body, path) == [
+        ("idx_jobs_queue", "CREATE INDEX idx_jobs_queue ON jobs (json_extract(data, '$.queue')) WHERE status = 'pending'")
+    ]
+
+
+# ----- a re-make that fails rolls the promotion back whole --------------------------------
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=KIND_IDS)
+def test_an_index_that_cannot_be_made_again_rolls_the_promotion_back_whole(kind):
+    async def body(db):
+        await _jobs(db, None, [{"kind": "a"}, {"n": 1}, {"n": 2}])
+        await _v(db.create_index("jobs", "kind", unique=True))
+        before = [await _indexes(db), await _rows(db, "SELECT _id, data FROM jobs ORDER BY _id")]
+        raised = None
+        try:
+            await _v(db.ensure_table("jobs", promoted={"kind": "TEXT DEFAULT 'x'"}))
+        except UniqueConstraintError as exc:
+            raised = type(exc).__name__
+        names = [r[1] for r in await _rows(db, "PRAGMA table_info(jobs)")]
+        after = [await _indexes(db), await _rows(db, "SELECT _id, data FROM jobs ORDER BY _id")]
+        return [raised, names, after == before]
+
+    assert _run(kind, body) == ["UniqueConstraintError", ["_id", "data"], True]
+
+
 # ----- unique over several fields ---------------------------------------------------------
 
 
