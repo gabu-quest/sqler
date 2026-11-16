@@ -118,6 +118,8 @@ TWINS = [
     ("PartialUpdateMixin", "AsyncPartialUpdateMixin"),
     ("HooksMixin", "AsyncHooksMixin"),
     ("AuditLogMixin", "AsyncAuditLogMixin"),
+    ("FTSIndex", "AsyncFTSIndex"),
+    ("SearchableMixin", "AsyncSearchableMixin"),
 ]
 
 
