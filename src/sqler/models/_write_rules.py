@@ -467,11 +467,6 @@ def _class_of(table: str):
     return cls if isinstance(cls, type) and issubclass(cls, WriteRules) else None
 
 
-def _versioned(table: str) -> bool:
-    """Whether the class registered for ``table`` keeps a version on its rows."""
-    return bool(getattr(registry.resolve(table), "_versioned_rows", False))
-
-
 def _nulled(cls, doc: dict) -> dict:
     """``doc``, a referring row's document with its reference nulled, with the update stamps
     of its class; the database's by-id writer puts each key that names a column of the table
@@ -482,17 +477,12 @@ def _nulled(cls, doc: dict) -> dict:
 
 def null_referrer(db, table: str, row_id, doc: dict) -> None:
     """``set_null``: write ``doc`` into the referring row ``row_id`` with the by-id writer a
-    save uses. A ``versioned`` row is written at the version it is at, which moves by one in
-    its column and in the document's copy, as with every other write of it: a holder who
-    loaded the row before cannot save the reference back, one who loads it after can save it."""
+    save uses. Where the table has ``_version`` the row's version moves by one, as with every
+    other write of it: a holder who loaded the row before cannot save the reference back, one
+    who loads it after can save it."""
     cls = _class_of(table)
     before = db.find_document(table, row_id) if cls is not None and cls._row_rules else None
-    doc = _nulled(cls, doc)
-    if _versioned(table):
-        version = db.find_document_with_version(table, row_id)["_version"]
-        db._upsert_versioned(table, row_id, {**doc, "_version": version + 1}, version)
-    else:
-        db._upsert(table, row_id, doc)
+    db._upsert(table, row_id, _nulled(cls, doc))
     if cls is not None:
         cls._table_written(db, table)
     if before is not None:
@@ -504,12 +494,7 @@ async def anull_referrer(db, table: str, row_id, doc: dict) -> None:
     """Async twin of :func:`null_referrer`."""
     cls = _class_of(table)
     before = await db.find_document(table, row_id) if cls is not None and cls._row_rules else None
-    doc = _nulled(cls, doc)
-    if _versioned(table):
-        version = (await db.find_document_with_version(table, row_id))["_version"]
-        await db._upsert_versioned(table, row_id, {**doc, "_version": version + 1}, version)
-    else:
-        await db._upsert(table, row_id, doc)
+    await db._upsert(table, row_id, _nulled(cls, doc))
     if cls is not None:
         cls._table_written(db, table)
     if before is not None:

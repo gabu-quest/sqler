@@ -1057,7 +1057,7 @@ async def test_a_typed_reference_holds_its_row_and_the_parent_saves_unchanged(ma
         {"_table": ct, "_id": 1}, {"_table": ct, "_id": 2}, {"_table": ct, "_id": 1}
     ]
     assert after["bag"] == {"a": {"_table": ct, "_id": 2}}
-    assert after == ({**stored[0][1], "_version": 1} if base in VERSIONED else stored[0][1])
+    assert after == stored[0][1]  # no document holds the version
     assert await rows_of(db, ct) == children
     assert len(children) == 2
     assert await rows_of(db, gt) == grand
@@ -1331,20 +1331,19 @@ async def test_a_validator_that_reshapes_the_children_keeps_each_child_its_row(
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", VERSIONED)
 async def test_a_child_holds_the_version_its_row_holds_after_a_set_update_and_saves(make_db, base, way):
-    """See the sync twin: ``update_one()`` moves the version in the column and the document."""
+    """See the sync twin: ``update_one()`` moves the version in the column, its one place."""
     db, (_, c_cls, p_cls, _), pid = await _typed_world(make_db, base)
     ct = c_cls.__tablename__
     await c_cls.query().filter(F("_id") == 2).update_one(name="u")
     await c_cls.query().filter(F("_id") == 2).update_one(name="c2")
-    assert await version_of(db, ct, 2) == 2
-    assert (await rows_of(db, ct))[1][1]["_version"] == 2
+    assert (await version_of(db, ct, 2), "_version" in (await rows_of(db, ct))[1][1]) == (2, False)
     got = await load(p_cls, pid, way)
     alone = await c_cls.from_id(2)
     assert (got.bag["a"]._version, alone._version) == (2, 2)
     await got.bag["a"].save()
     with pytest.raises(StaleVersionError):
         await alone.save()
-    assert (await version_of(db, ct, 2), (await rows_of(db, ct))[1][1]["_version"]) == (3, 3)
+    assert (await version_of(db, ct, 2), "_version" in (await rows_of(db, ct))[1][1]) == (3, False)
 
 
 # ---- a child class bound to another database, and one never bound ---------------------
@@ -1485,8 +1484,7 @@ async def test_a_child_of_a_class_never_bound_read_through_using_saves_its_row(
     assert (got.never._id, got.never.name) == (1, "never-bound")
     got.never.name = "renamed"
     await got.never.save(db=db)
-    want = {"name": "renamed", "_version": 1} if base == "safe" else {"name": "renamed"}
-    assert await rows_of(db, ut) == [(1, want)]
+    assert await rows_of(db, ut) == [(1, {"name": "renamed"})]
 
 
 # ---- typed fields of a class --------------------------------------------------------
@@ -1841,7 +1839,7 @@ async def test_a_batch_read_adds_no_version_column_and_the_child_saves(make_db, 
     got.one.name = "c2"
     await got.one.save(db=db)
     assert await version_of(db, ANcC.__tablename__, 1) == 1
-    assert await rows_of(db, ANcC.__tablename__) == [(1, {"name": "c2", "_version": 1})]
+    assert await rows_of(db, ANcC.__tablename__) == [(1, {"name": "c2"})]
 
 
 @pytest.mark.asyncio

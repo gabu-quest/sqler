@@ -543,7 +543,7 @@ async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_
             "CREATE TABLE arbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, "
             "_version INTEGER NOT NULL DEFAULT 0)",
             ("""'{"name": "a"}'""",),
-            {"name": "a", "_id": 1},
+            {"name": "a", "_id": 1, "_version": 0},  # the column is the row's version: every read gives it
         ),
         (
             "CREATE TABLE arbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, extra TEXT)",

@@ -118,28 +118,26 @@ class SQLerSafeModel(SQLerModel):
         while True:
             retry.begin_try()
             try:
-                attempt_payload = dict(payload)
-                attempt_payload["_version"] = 0 if self._id is None else self._version + 1
                 promoted = getattr(cls, "__promoted__", None)
                 if promoted:
                     db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
                 if _partial:
-                    changed = _dirty.changed_fields(self._snapshot or {}, attempt_payload)
+                    changed = _dirty.changed_fields(self._snapshot or {}, payload)
                     new_id, new_version = self._id, db._update_fields(
-                        table, self._id, attempt_payload, changed, promoted or (), self._version
+                        table, self._id, payload, changed, promoted or (), self._version
                     )
                 elif promoted:
                     new_id, new_version = db.upsert_with_version_promoted(
-                        table, self._id, attempt_payload, self._version,
+                        table, self._id, payload, self._version,
                         list(promoted.keys()),
                     )
                 else:
                     new_id, new_version = db.upsert_with_version(
-                        table, self._id, attempt_payload, self._version
+                        table, self._id, payload, self._version
                     )
                 self._id = new_id
                 self._version = new_version
-                self._snapshot = _dirty.snapshot(attempt_payload)
+                self._snapshot = _dirty.snapshot(payload)
                 if written is not None:  # rebased: the row holds the other writer's work too
                     _retry.settle(self, held, written)
                 return self

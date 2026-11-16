@@ -1041,7 +1041,8 @@ def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_int
 
 def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_writes_the_row(tmp_path):
     """The table was dropped and made again without ``_version`` after ``db`` learned it: the
-    write learns it again, gives it the column, and moves the row from version 0 to 1."""
+    write learns it again and writes the row as the table is now; a plain write adds no column,
+    so the version is a fact about the table, not the class of the row."""
     import sqlite3
 
     path = str(tmp_path / "safe.db")
@@ -1061,6 +1062,7 @@ def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_wr
         author.delete_with_policy(db=db, on_delete="set_null")
     finally:
         db.close()
-    [(data, version)] = _raw(path, "SELECT data, _version FROM wr_safe_books")
-    assert (json.loads(data), version) == ({"title": "b", "author": None, "_version": 1}, 1)
+    assert _raw(path, "SELECT name FROM pragma_table_info('wr_safe_books')") == [("_id",), ("data",)]
+    [(data,)] = _raw(path, "SELECT data FROM wr_safe_books")
+    assert json.loads(data) == {"title": "b", "author": None}
     assert _raw(path, "SELECT count(*) FROM wr_nulled_authors") == [(0,)]

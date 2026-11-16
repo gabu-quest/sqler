@@ -21,7 +21,7 @@ from sqler.exceptions import (
     UnstorableValueError,
 )
 from sqler.query import SQLerQuery
-from sqler.query.query import end_failed, is_missing_table
+from sqler.query.query import _MOVE_VERSION, _VERSION, _has_version, end_failed, is_missing_table
 from sqler.utils import (
     validate_check_expression,
     validate_column_def,
@@ -166,7 +166,7 @@ def _put(place: Any, table: str, names: tuple[str, ...], promoted: Optional[list
     if layouts.get(table) != names:
         known.pop(table, None)
     layouts[table] = names
-    (versioned.add if "_version" in names else versioned.discard)(table)
+    (versioned.add if _has_version(names) else versioned.discard)(table)
     if promoted is not None:
         known[table] = promoted
 
@@ -265,10 +265,11 @@ _MAX_VARIABLES = 999
 def _rows_sql(table: str, columns: tuple[str, ...], n: int, names: Optional[tuple[str, ...]] = None) -> str:
     """The statement that reads ``n`` ids of the validated ``table`` with ``columns``, one
     variable per id; for ``n == 0`` the ids come as one JSON array in one variable; with the
-    guard of the remembered ``names`` (:func:`_guard`) when given. Built once per shape, so a
-    one-id read builds no text."""
+    guard of the remembered ``names`` (:func:`_guard`) when given; ``_version`` read as every
+    read takes it (``_VERSION``). Built once per shape, so a one-id read builds no text."""
     ids = "SELECT value FROM json_each(?)" if n == 0 else ",".join("?" * n)
-    return f"SELECT {', '.join(columns)} FROM {table} WHERE _id IN ({ids}){_and_guard(table, names)};"
+    picks = ", ".join(_VERSION if c == "_version" else c for c in columns)
+    return f"SELECT {picks} FROM {table} WHERE _id IN ({ids}){_and_guard(table, names)};"
 
 
 def _row_documents(rows: Any, columns: list[str]) -> list[dict[str, Any]]:
@@ -322,8 +323,14 @@ def _select_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) 
 # ---- the write of one row: promoted columns, the version check, a write of some fields ----
 
 
-# a versioned row is written only while it is at the version its writer read
-_AT_VERSION = "_id = ? AND _version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?"
+# a checked write of a versioned row is made only while its column is at the version its writer read
+_AT_VERSION = f"_id = ? AND {_VERSION} = ?"
+
+
+def _unversioned(doc: dict[str, Any]) -> dict[str, Any]:
+    """``doc`` as a row of a table with the ``_version`` column stores it: without a ``_version``
+    key, which is the row's column and is moved by the write itself, never set from a document."""
+    return {k: v for k, v in doc.items() if k != "_version"} if "_version" in doc else doc
 
 
 def _split_promoted(doc: dict[str, Any], promoted_fields: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -350,9 +357,12 @@ def _split(doc: dict[str, Any], columns: Any) -> tuple[dict[str, Any], dict[str,
     return json_doc, values
 
 
-def _row(doc: dict[str, Any], columns: Any) -> tuple[tuple[str, ...], str, list[Any]]:
-    """``doc`` as one row of a table with the checked ``columns`` beside ``data``: the columns
-    whose key it holds, in the table's order; its JSON text; their values in stored form."""
+def _row(doc: dict[str, Any], columns: Any, versioned: bool = False) -> tuple[tuple[str, ...], str, list[Any]]:
+    """``doc`` as one row of a table with the checked ``columns`` beside ``data`` (``versioned``:
+    and ``_version``, :func:`_unversioned`): the columns whose key it holds, in the table's
+    order; its JSON text; their values in stored form."""
+    if versioned:
+        doc = _unversioned(doc)
     if not columns:
         return (), dumps(doc), []
     json_doc, values = _split(doc, columns)
@@ -360,7 +370,7 @@ def _row(doc: dict[str, Any], columns: Any) -> tuple[tuple[str, ...], str, list[
     return held, dumps(json_doc), [values[c] for c in held]
 
 
-def _runs(docs: list[dict[str, Any]], columns: Any, fixed: int) -> Any:
+def _runs(docs: list[dict[str, Any]], columns: Any, fixed: int, versioned: bool = False) -> Any:
     """The rows of ``docs`` (:func:`_row`) for multi-row statements: each run of consecutive
     documents that hold the same column keys, as ``(those columns, [(index in docs, JSON text,
     values)])``, cut so that one statement binds at most ``_MAX_VARIABLES`` with ``fixed``
@@ -369,7 +379,7 @@ def _runs(docs: list[dict[str, Any]], columns: Any, fixed: int) -> Any:
     run: list[tuple[int, str, list[Any]]] = []
     size = 0
     for i, doc in enumerate(docs):
-        held, text, values = _row(doc, columns)
+        held, text, values = _row(doc, columns, versioned)
         if held != keys or len(run) == size:
             if run:
                 yield keys, run
@@ -385,18 +395,19 @@ def _insert_sql(
 ) -> str:
     """The ``INSERT`` of ``n`` rows into the validated ``table`` that names ``data`` and the
     columns ``held``, nothing else (a column it does not name gets its DEFAULT, or keeps its
-    value on an update). ``versioned``: ``_version`` 0; ``upsert``: each row leads with its
-    ``_id`` and an existing row takes ``data`` and ``held``. ``guard``: the remembered names
-    whose guard (:func:`_guard`) the first row carries (:func:`_first`). Built once per shape."""
-    names = ["_id", "data", *held] if upsert else ["data", "_version", *held] if versioned else ["data", *held]
-    lead = ["?", "json(?)"] if upsert else ["json(?)", "0"] if versioned else ["json(?)"]
+    value on an update). ``upsert``: each row leads with its ``_id`` and an existing row takes
+    ``data`` and ``held``. ``versioned`` (the table has ``_version``): a new row is at 0, and an
+    existing row's version moves by one. ``guard``: the remembered names whose guard
+    (:func:`_guard`) the first row carries (:func:`_first`). Built once per shape."""
+    names = [*["_id"] * upsert, "data", *["_version"] * versioned, *held]
+    lead = [*["?"] * upsert, "json(?)", *["0"] * versioned]
     mark = f"({', '.join([*lead, *['?'] * len(held)])})"
     marks = [mark] * n
     if guard:
         marks[0] = mark.replace("json(?)", f"json({_guard(table, guard, True)})", 1)
     sql = f"INSERT INTO {table} ({', '.join(names)}) VALUES {', '.join(marks)}"
     if upsert:
-        sets = ", ".join(f"{c} = excluded.{c}" for c in ("data", *held))
+        sets = ", ".join([*(f"{c} = excluded.{c}" for c in ("data", *held)), *[_MOVE_VERSION] * versioned])
         sql += f" ON CONFLICT(_id) DO UPDATE SET {sets}"
     return sql + ";"
 
@@ -424,17 +435,20 @@ def _fields_update(
     promoted: Any,
     expected_version: Optional[int],
     layout: Any = None,
+    versioned: bool = False,
 ) -> Optional[tuple[str, list[Any], Any]]:
     """The ``UPDATE`` of row ``_id`` of the validated ``table`` that writes the ``fields`` of
     ``doc`` and leaves the row's other fields as they are, with its parameters and ``layout``;
-    ``None`` when an unversioned write has nothing to write.
+    ``None`` when an unchecked write has nothing to write.
 
     A JSON field is set in ``data`` from its JSON text, a promoted one in its column, all in
-    one statement; with ``expected_version`` the row is written only at that version and its
-    ``_version`` goes up by one; with ``layout``, the guard of those remembered names. A name in ``fields`` that ``doc`` does not hold (a key of
-    the row the model has no field for) is not written and not removed. A JSON field's name
-    is bound, never put into the SQL text."""
-    json_doc, columns = _split_promoted({k: v for k, v in doc.items() if k in fields}, promoted)
+    one statement. ``versioned`` (the table has ``_version``): the row's version moves by one,
+    and a ``_version`` key of ``doc`` is not written; with ``expected_version`` the row is
+    written only at that version. With ``layout``, the guard of those remembered names. A name
+    in ``fields`` that ``doc`` does not hold (a key of the row the model has no field for) is
+    not written and not removed. A JSON field's name is bound, never put into the SQL text."""
+    versioned = versioned or expected_version is not None
+    json_doc, columns = _split_promoted({k: v for k, v in doc.items() if k in fields and not (versioned and k == "_version")}, promoted)
     sets: list[str] = []
     params: list[Any] = []
     if json_doc:
@@ -452,10 +466,12 @@ def _fields_update(
         params.append(val)
     guard = _and_guard(table, layout)
     if expected_version is None:
-        return (f"UPDATE {table} SET {', '.join(sets)} WHERE _id = ?{guard};", [*params, _id], layout) if sets else None
-    sets.append("_version = _version + 1")
-    v = expected_version
-    return f"UPDATE {table} SET {', '.join(sets)} WHERE {_AT_VERSION}{guard};", [*params, _id, v, v, v], layout
+        if not sets:
+            return None
+        sets += [_MOVE_VERSION] * versioned
+        return f"UPDATE {table} SET {', '.join(sets)} WHERE _id = ?{guard};", [*params, _id], layout
+    sets.append(_MOVE_VERSION)
+    return f"UPDATE {table} SET {', '.join(sets)} WHERE {_AT_VERSION}{guard};", [*params, _id, expected_version], layout
 
 
 def _refuse_unwritten(gone: bool, table: str, _id: Any) -> None:
@@ -479,40 +495,40 @@ def _create_sql(table: str) -> str:
         """
 
 
-def _upsert_sql(table: str, _id: Any, doc: dict[str, Any], fields: Any, layout: Any = None) -> tuple[str, list[Any], Any]:
+def _upsert_sql(
+    table: str,
+    _id: Any,
+    doc: dict[str, Any],
+    fields: Any,
+    layout: Any = None,
+    versioned: bool = False,
+    expected_version: Optional[int] = None,
+) -> tuple[str, list[Any], Any]:
     """The ``INSERT`` of ``doc`` into the validated ``table``, or the ``UPDATE`` of row ``_id``
     with it, each key of ``fields`` in its column, with its parameters and ``layout``, the
-    remembered names whose guard it carries (:func:`_guard`)."""
-    json_doc, values = _split_promoted(doc, fields)
+    remembered names whose guard it carries (:func:`_guard`). ``versioned`` (the table has
+    ``_version``): a new row is at version 0, an update moves the row's version by one, and
+    ``doc``'s ``_version`` key is not stored (:func:`_unversioned`); with ``expected_version``
+    an update writes the row only at that version."""
+    checked = _id is not None and expected_version is not None
+    versioned = versioned or checked
+    json_doc, values = _split_promoted(_unversioned(doc) if versioned else doc, fields)
     params = [dumps(json_doc), *values.values()]
     if _id is not None:
-        params.append(_id)
-    return _write_text(table, _id is None, False, tuple(values), layout), params, layout
-
-
-def _versioned_sql(
-    table: str, _id: Any, doc: dict[str, Any], expected_version: Optional[int], fields: Any, layout: Any = None
-) -> tuple[str, list[Any], Any]:
-    """:func:`_upsert_sql` of a versioned row: a new row at version 0, or row ``_id`` written
-    only at ``expected_version``, its version moved by one."""
-    json_doc, values = _split_promoted(doc, fields)
-    params = [dumps(json_doc), *values.values()]
-    if _id is not None:
-        v = expected_version
-        params += (_id, v, v, v)
-    return _write_text(table, _id is None, True, tuple(values), layout), params, layout
+        params += (_id, expected_version) if checked else (_id,)
+    return _write_text(table, _id is None, versioned, tuple(values), layout, checked), params, layout
 
 
 @functools.lru_cache(maxsize=512)
-def _write_text(table: str, insert: bool, versioned: bool, held: tuple[str, ...], layout: Any) -> str:
-    """The text of :func:`_upsert_sql` (``versioned``: of :func:`_versioned_sql`) for the
-    columns ``held``, built once per table, statement, columns and remembered names."""
+def _write_text(table: str, insert: bool, versioned: bool, held: tuple[str, ...], layout: Any, checked: bool = False) -> str:
+    """The text of :func:`_upsert_sql` for the columns ``held``, built once per table,
+    statement, columns, remembered names and version (``checked``: written only at it)."""
     if insert:
         lead = ["data", "_version"] if versioned else ["data"]
         marks = ", ".join([f"json({_guard(table, layout, True) if layout else '?'})", *["0"] * versioned, *["?"] * len(held)])
         return f"INSERT INTO {table} ({', '.join([*lead, *held])}) VALUES ({marks});"
-    sets = ", ".join(["data = json(?)", *["_version = _version + 1"] * versioned, *(f"{col} = ?" for col in held)])
-    return f"UPDATE {table} SET {sets} WHERE {_AT_VERSION if versioned else '_id = ?'}{_and_guard(table, layout)};"
+    sets = ", ".join(["data = json(?)", *[_MOVE_VERSION] * versioned, *(f"{col} = ?" for col in held)])
+    return f"UPDATE {table} SET {sets} WHERE {_AT_VERSION if checked else '_id = ?'}{_and_guard(table, layout)};"
 
 
 # Each function below that ``yield``s is a run of statements both database classes send the
@@ -543,7 +559,7 @@ def _inserts(table: str, docs: list[dict[str, Any]], versioned: bool, columns: A
     named, so it gets its DEFAULT. Returns the ids, in order: the ids of one statement are
     contiguous, because the transaction holds the write lock from its ``BEGIN IMMEDIATE``."""
     ids: list[int] = []
-    for held, rows in _runs(docs, columns or (), 0):
+    for held, rows in _runs(docs, columns or (), 0, versioned):
         guard, layout = (yield from _first(table, layout, len(rows))), None
         params = [p for _, text, values in rows for p in (text, *values)]
         last = yield _insert_sql(table, held, len(rows), versioned=versioned, guard=guard), params, guard
@@ -551,25 +567,26 @@ def _inserts(table: str, docs: list[dict[str, Any]], versioned: bool, columns: A
     return ids
 
 
-def _bulk_upserts(table: str, docs: list[dict[str, Any]], columns: Any, layout: Any = None) -> Any:
+def _bulk_upserts(table: str, docs: list[dict[str, Any]], versioned: bool, columns: Any, layout: Any = None) -> Any:
     """``bulk_upsert``: the documents without an ``_id`` inserted as :func:`_inserts` inserts
-    them, then those with one written into their rows, made if missing. Returns the ``_id`` of
-    each document, in input order; ``docs`` are not written to (:func:`_hand_ids`)."""
+    them, then those with one written into their rows, made if missing (``versioned``: each
+    write of a row moves its version, :func:`_insert_sql`). Returns the ``_id`` of each
+    document, in input order; ``docs`` are not written to (:func:`_hand_ids`)."""
     # by their index in ``docs``, each without its ``_id`` key, which is the row's column
     inserts = [i for i, doc in enumerate(docs) if doc.get("_id") is None]
     updates = [i for i, doc in enumerate(docs) if doc.get("_id") is not None]
     bodies = [{k: v for k, v in doc.items() if k != "_id"} for doc in docs]
     assigned = [0] * len(docs)
-    for held, rows in _runs([bodies[i] for i in inserts], columns, 0):
+    for held, rows in _runs([bodies[i] for i in inserts], columns, 0, versioned):
         guard, layout = (yield from _first(table, layout, len(rows))), None
         params = [p for _, text, values in rows for p in (text, *values)]
-        last = yield _insert_sql(table, held, len(rows), guard=guard), params, guard
+        last = yield _insert_sql(table, held, len(rows), versioned=versioned, guard=guard), params, guard
         for j, (k, _, _) in enumerate(rows):
             assigned[inserts[k]] = last - len(rows) + 1 + j
-    for held, rows in _runs([bodies[i] for i in updates], columns, 1):
+    for held, rows in _runs([bodies[i] for i in updates], columns, 1, versioned):
         guard, layout = (yield from _first(table, layout, len(rows))), None
         params = [p for k, text, values in rows for p in (int(docs[updates[k]]["_id"]), text, *values)]
-        yield _insert_sql(table, held, len(rows), upsert=True, guard=guard), params, guard
+        yield _insert_sql(table, held, len(rows), versioned=versioned, upsert=True, guard=guard), params, guard
         for k, _, _ in rows:
             assigned[updates[k]] = int(docs[updates[k]]["_id"])
     return assigned
@@ -661,10 +678,12 @@ def _unkept(i: int, not_null: bool, without_key: bool) -> str:
     return sql + (f" OR t{i} IS NULL" if without_key else "")
 
 
-def _move_sql(table: str, fills: dict[str, Any]) -> tuple[str, list[Any]]:
+def _move_sql(table: str, fills: dict[str, Any], versioned: bool = False) -> tuple[str, list[Any]]:
     """The one ``UPDATE`` that takes each column's key out of every document and puts its value
     in the column: JSON null as NULL, never the column's DEFAULT. A row without the key gets the
-    column's fill (``_NO_FILL``: what it holds; ``_KEEP``: the column is not written)."""
+    column's fill (``_NO_FILL``: what it holds; ``_KEEP``: the column is not written).
+    ``versioned`` (the table has ``_version``): a row whose read the move changes, a key's value
+    put into a ``_NO_FILL`` column that held another, has its version moved by one."""
     sets, params = [], []
     for col, fill in fills.items():
         if fill is _KEEP:
@@ -673,6 +692,11 @@ def _move_sql(table: str, fills: dict[str, Any]) -> tuple[str, list[Any]]:
         sets.append(f"{col} = CASE WHEN json_type(data, ?) IS NULL THEN {absent} ELSE json_extract(data, ?) END")
         params += [_json_path(col)] if fill is _NO_FILL else [_json_path(col), fill]
         params.append(_json_path(col))
+    moved = [col for col, fill in fills.items() if fill is _NO_FILL] if versioned else []
+    if moved:
+        same = " AND ".join(f"(json_type(data, ?) IS NULL OR {col} IS json_extract(data, ?))" for col in moved)
+        sets.append(f"_version = CASE WHEN {same} THEN _version ELSE {_VERSION} + 1 END")
+        params += [_json_path(col) for col in moved for _ in range(2)]
     paths = [_json_path(col) for col in fills]
     sets.append(f"data = json_remove(data{', ?' * len(paths)})")
     sql = f"UPDATE {table} SET {', '.join(sets)}"
@@ -817,7 +841,7 @@ def _moved(table: str, column: str, keep: str) -> Any:
         if row[0]:
             raise _refused(table, column, row[0], row[1])
     yield from _record(table, [column])
-    yield _move_sql(table, {column: _NO_FILL if keep == "document" else _KEEP})
+    yield _move_sql(table, {column: _NO_FILL if keep == "document" else _KEEP}, _has_version(tuple(info)))
     from sqler.fts import _follow_promotion  # fts imports this module
 
     yield from _follow_promotion(table, [column], _promoted_in(info))
@@ -1133,8 +1157,15 @@ class SQLerDB(_TableMemory):
         return bool(now) and now != names
 
     def _memory_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]]]:
-        """The promoted columns of the validated ``table`` (:meth:`_columns_of`) and the names
-        remembered beside them, whose guard a statement built from those columns carries.
+        """The promoted columns and remembered names of :meth:`_shape_of`."""
+        return self._shape_of(table, fields)[:2]
+
+    def _shape_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]], bool]:
+        """The promoted columns of the validated ``table`` (:meth:`_columns_of`), the names
+        remembered beside them, whose guard a statement built from those columns carries
+        (``None``: none remembered, as where nothing can be remembered, a transaction that is
+        not this object's), and whether the table has ``_version`` (:func:`_has_version`), from
+        those names or the names just read.
 
         A writer splits a document by these columns. ``fields``: the columns a caller says
         the table has (a class's promoted fields); one the table lacks is added
@@ -1145,9 +1176,11 @@ class SQLerDB(_TableMemory):
         else:  # no transaction of this object's is open: the shared memory, read here (every call comes through)
             layout = self._layouts.get(table)
             columns = None if layout is None else self._promoted_columns.get(table)
+        names = layout
         if columns is None:
-            columns, layout = self._columns_of(table), self._layout_of(table)
-        return (_and_fields(columns, fields) if fields else columns), layout
+            names, columns = self._learn(table)
+            layout = self._layout_of(table)
+        return (_and_fields(columns, fields) if fields else columns), layout, _has_version(names)
 
     def _columns_of(self, table: str) -> list[str]:
         """The promoted columns of the validated ``table``, which every reader sets over the
@@ -1214,8 +1247,9 @@ class SQLerDB(_TableMemory):
         its column (:meth:`_memory_of`, with the caller's ``fields``), with the guard of what is
         remembered of it (:meth:`_sent`). A write by ``_id`` makes no table."""
 
-        def make() -> tuple[str, list[Any]]:
-            return _upsert_sql(table, _id, doc, *self._memory_of(table, fields))
+        def make() -> tuple[str, list[Any], Any]:
+            columns, layout, has = self._shape_of(table, fields)
+            return _upsert_sql(table, _id, doc, columns, layout, has)
 
         try:
             cursor = self._sent(table, make)
@@ -1267,11 +1301,12 @@ class SQLerDB(_TableMemory):
         if _id is not None and expected_version is None:
             raise ValueError("expected_version required for update")
 
-        def make() -> tuple[str, list[Any]]:
+        def make() -> tuple[str, list[Any], Any]:
             self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
             if not self._is_versioned(table) and (_id is None or self._has_version_column(table) is not None):
                 self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
-            return _versioned_sql(table, _id, doc, expected_version, *self._memory_of(table, fields))
+            columns, layout, has = self._shape_of(table, fields)
+            return _upsert_sql(table, _id, doc, columns, layout, has, expected_version)
 
         if _id is None:
             cursor = self._sent(table, make)
@@ -1284,7 +1319,6 @@ class SQLerDB(_TableMemory):
                 raise
             _refuse_unwritten(False, table, _id)  # a row at another version, as with the table there
         if cursor.rowcount <= 0:
-            self.adapter.execute(f"SELECT _version FROM {table} WHERE _id = ?;", [_id]).fetchone()
             raise StaleVersionError("Stale version: update rejected")
         return _id, expected_version + 1
 
@@ -1350,8 +1384,8 @@ class SQLerDB(_TableMemory):
         def make() -> Optional[tuple[str, list[Any]]]:
             if expected_version is not None and not self._is_versioned(table) and self._has_version_column(table) is not None:
                 self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
-            columns, layout = self._memory_of(table, promoted)
-            return _fields_update(table, _id, doc, fields, columns, expected_version, layout)
+            columns, layout, has = self._shape_of(table, promoted)
+            return _fields_update(table, _id, doc, fields, columns, expected_version, layout, has)
 
         try:
             cur = self._sent(table, make, immediate=expected_version is not None)
@@ -1390,7 +1424,7 @@ class SQLerDB(_TableMemory):
             return []
         table = validate_table_name(table)
         self._ensure_table(table)
-        return self._insert_many_chunked(table, docs, versioned=False)
+        return self._insert_many_chunked(table, docs)
 
     def insert_many_promoted(
         self, table: str, docs: list[dict[str, Any]], promoted_fields: list[str]
@@ -1412,7 +1446,7 @@ class SQLerDB(_TableMemory):
         table = validate_table_name(table)
         for field in promoted_fields:
             validate_identifier(field)
-        return self._insert_many_chunked(table, docs, versioned=False, promoted_fields=promoted_fields)
+        return self._insert_many_chunked(table, docs, promoted_fields=promoted_fields)
 
     def insert_many_with_version(
         self, table: str, docs: list[dict[str, Any]]
@@ -1431,7 +1465,7 @@ class SQLerDB(_TableMemory):
         table = validate_table_name(table)
         self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
         self._ensure_versioned_table(table)
-        ids = self._insert_many_chunked(table, docs, versioned=True)
+        ids = self._insert_many_chunked(table, docs)
         return [(id_, 0) for id_ in ids]
 
     def insert_many_with_version_promoted(
@@ -1454,7 +1488,7 @@ class SQLerDB(_TableMemory):
         for field in promoted_fields:
             validate_identifier(field)
         self._ensure_versioned_table(table)
-        ids = self._insert_many_chunked(table, docs, versioned=True, promoted_fields=promoted_fields)
+        ids = self._insert_many_chunked(table, docs, promoted_fields=promoted_fields)
         return [(id_, 0) for id_ in ids]
 
     def _insert_many_chunked(
@@ -1462,14 +1496,18 @@ class SQLerDB(_TableMemory):
         table: str,
         docs: list[dict[str, Any]],
         *,
-        versioned: bool,
         promoted_fields: list[str] | None = None,
     ) -> list[int]:
         """Internal: the multi-row INSERTs of ``docs`` into the validated ``table``, in one
         transaction (:func:`_inserts`), split as :meth:`_upsert` splits a document.
         """
+
+        def make() -> Any:
+            columns, layout, has = self._shape_of(table, promoted_fields or ())
+            return _inserts(table, docs, has, columns, layout)
+
         with self.transaction():
-            return self._sent_all(table, lambda: _inserts(table, docs, versioned, *self._memory_of(table, promoted_fields or ())))
+            return self._sent_all(table, make)
 
     def _sent_all(self, table: str, make: Any) -> Any:
         """Send the statements of the steps ``make()`` makes (each answered with its cursor's
@@ -1523,8 +1561,12 @@ class SQLerDB(_TableMemory):
         self._ensure_table(table)
         if not docs:
             return []
+        def make() -> Any:
+            columns, layout, has = self._shape_of(table)
+            return _bulk_upserts(table, docs, has, columns, layout)
+
         with self.transaction():
-            ids = self._sent_all(table, lambda: _bulk_upserts(table, docs, *self._memory_of(table)))
+            ids = self._sent_all(table, make)
         return _hand_ids(docs, ids)
 
     def find_document(self, table: str, _id: int) -> Optional[dict[str, Any]]:
@@ -1564,11 +1606,12 @@ class SQLerDB(_TableMemory):
         """The by-id read every reader of this database goes through; it writes nothing.
 
         Returns the stored rows of ``ids`` (stored order) and the columns they were read
-        with: the promoted columns of ``table`` (:meth:`_columns_of`), and ``_version`` when
-        ``versioned``, read with the guard of what is remembered (:meth:`_sent`). A missing table
-        gives ``None`` rows and is not created. A table without its ``_version`` column
-        (:meth:`_has_version_column`) gives its rows at version 0 and keeps its schema: the
-        first versioned write adds the column.
+        with: the promoted columns of ``table`` (:meth:`_columns_of`), and ``_version`` where
+        the table has it (:meth:`_shape_of`: the row's version is its column, never a key
+        of its document) or the read is ``versioned``, read with the guard of what is
+        remembered (:meth:`_sent`). A missing table gives ``None`` rows and is not created. A
+        ``versioned`` read of a table without its ``_version`` column gives its rows at
+        version 0 and keeps its schema: the first versioned write adds the column.
         """
         table = validate_table_name(table)
         n, params = _id_params(ids)
@@ -1576,9 +1619,9 @@ class SQLerDB(_TableMemory):
         columns = _row_columns((), versioned)  # of the rows given
         try:
             while True:  # the loop of :meth:`_sent`, written here: every read comes through
-                promoted, layout = self._memory_of(table)
-                columns = _row_columns(promoted, versioned)
-                read = _row_columns(promoted) if versioned and not self._has_version_column(table) else columns
+                promoted, layout, has = self._shape_of(table)
+                columns = _row_columns(promoted, has or versioned)
+                read = columns if has or not versioned else _row_columns(promoted)
                 sql = _rows_sql(table, read, n, layout)
                 try:
                     cursor = adapter._execute_judged(sql, params)
@@ -1609,7 +1652,7 @@ class SQLerDB(_TableMemory):
             layout, names = self._names(table)
             if layout:
                 self._seen(table, layout, names)
-        return ("_version" in layout) if layout else None
+        return _has_version(layout) if layout else None
 
     def delete_document(self, table: str, _id: int) -> None:
         """Delete a document by id.
@@ -1870,11 +1913,11 @@ class SQLerDB(_TableMemory):
         # fast path: check without lock
         layout, names = self._names(table)
         added: tuple[str, ...] = ()
-        if "_version" not in layout:
+        if not _has_version(layout):
             # serialize DDL; re-check inside lock
             with self._ddl_lock:
                 layout, names = self._names(table)
-                if "_version" not in layout:
+                if not _has_version(layout):
                     self.adapter.execute(f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;')
                     self.adapter.auto_commit()
                     added = ("_version",)
