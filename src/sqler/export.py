@@ -200,32 +200,6 @@ def _get_model_fields(model_class: Type["SQLerModel"]) -> list[str]:
     return fields
 
 
-def _model_to_dict(
-    model: "SQLerModel",
-    fields: Optional[list[str]] = None,
-    include_id: bool = True,
-    for_csv: bool = False,
-) -> dict[str, Any]:
-    """Convert a model instance to a dictionary.
-
-    Args:
-        model: Model instance to convert
-        fields: Fields to include (default: all)
-        include_id: Include _id field
-        for_csv: If True, serialize complex types to JSON strings
-    """
-    data = {}
-    if include_id and model._id is not None:
-        data["_id"] = model._id
-
-    model_fields = fields or _get_model_fields(type(model))
-    for field in model_fields:
-        value = getattr(model, field, None)
-        data[field] = _serialize_value(value, for_csv=for_csv)
-
-    return data
-
-
 # =============================================================================
 # Raw-row helpers (bypass Pydantic hydration for export performance)
 # =============================================================================

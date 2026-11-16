@@ -462,16 +462,6 @@ class SQLerModel(BaseModel):
     is_dirty = _dirty.is_dirty
     get_dirty_fields = _dirty.get_dirty_fields
 
-    # ----- ref integrity utils -----
-    @classmethod
-    def _find_referrers(
-        cls, db: SQLerDB, target_table: str, target_id: int
-    ) -> list[tuple[str, int, dict]]:
-        """Find all rows across all tables that reference the target row."""
-        from .integrity import find_referrers
-
-        return find_referrers(db, target_table, target_id)
-
     # ----- reference validation -----
     @classmethod
     def validate_references(cls):

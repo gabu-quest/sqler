@@ -1050,44 +1050,6 @@ def test_sqlers_own_tables_are_one_set():
     assert SQLER_TABLES == {MIGRATIONS_TABLE, _SETTLED} == {"_sqler_migrations", "_sqler_promoted"}
 
 
-def _foreign_record_table(path):
-    conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE _sqler_promoted (a TEXT, b TEXT)")
-    conn.commit()
-    conn.close()
-
-
-@pytest.mark.parametrize(
-    "touch",
-    [
-        "new table",
-        "added column",
-        "read",
-        "ensure of a promoted table",
-    ],
-)
-def test_a_table_named_like_the_record_that_is_not_it_refuses(run, touch):
-    _legacy(run.path, [{"name": "a", "status": "open"}], columns={"note": "TEXT"} if touch != "added column" else None)
-    _foreign_record_table(run.path)
-    before = _raw(run.path)
-    with pytest.raises(SchemaError, match="_sqler_promoted is not") as err:
-        if touch == "new table":
-            run.db.ensure_table("fresh", promoted={"status": "TEXT"})
-        elif touch == "added column":
-            run.db.ensure_table(TABLE, promoted={"status": "TEXT"})
-        elif touch == "read":
-            run.db.find_document(TABLE, 1)
-        else:
-            run.db.ensure_table(TABLE, promoted={"note": "TEXT"})
-    assert err.value.details == {"table": "_sqler_promoted"}
-    assert _raw(run.path) == before
-    conn = sqlite3.connect(run.path)
-    try:
-        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'fresh'").fetchall() == []
-    finally:
-        conn.close()
-
-
 def test_a_table_made_again_by_other_means_keeps_its_record(run):
     """sqler drops and renames no table, so nothing of sqler's moves a record. A table dropped
     and made again by plain SQL under a recorded name keeps that record: it counts as settled,

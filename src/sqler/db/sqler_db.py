@@ -727,7 +727,7 @@ def _settled(table: Any, names: list[str]) -> Any:
         rows = yield f"SELECT col FROM {_SETTLED} WHERE tbl = ?;", [table]
     except sqlite3.OperationalError as exc:
         if not is_missing_table(exc, _SETTLED):
-            raise _not_the_record(exc) or exc
+            raise
         rows = []
     settled = {row[0].lower() for row in rows}
     unsettled = [col for col in promoted if col.lower() not in settled]
@@ -757,40 +757,24 @@ def _record(table: str, columns: list[str], *, made: bool = False) -> Any:
     if not columns:
         return
     yield _SETTLED_DDL, []
-    try:
-        if made:
-            yield f"DELETE FROM {_SETTLED} WHERE tbl = ?;", [table]
-        yield f"INSERT OR IGNORE INTO {_SETTLED} (tbl, col) VALUES {', '.join(['(?, ?)'] * len(columns))};", [
-            v for col in columns for v in (table, col)
-        ]
-    except sqlite3.OperationalError as exc:
-        raise _not_the_record(exc) or exc
-
-
-def _not_the_record(exc: sqlite3.OperationalError) -> Optional[SchemaError]:
-    """The error for a table named ``_sqler_promoted`` that is not sqler's record, when ``exc``
-    (from a statement on it) says its columns are not the record's; else ``None``."""
-    if "no such column" not in str(exc) and "has no column named" not in str(exc):
-        return None
-    return SchemaError(
-        f"{_SETTLED} is not sqler's record of settled columns: a table of that name with other "
-        "columns is in the database. sqler keeps that name for itself; rename that table.",
-        details={"table": _SETTLED},
-    )
+    if made:
+        yield f"DELETE FROM {_SETTLED} WHERE tbl = ?;", [table]
+    yield f"INSERT OR IGNORE INTO {_SETTLED} (tbl, col) VALUES {', '.join(['(?, ?)'] * len(columns))};", [
+        v for col in columns for v in (table, col)
+    ]
 
 
 def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], model: Any) -> Any:
     """Under the write lock: create ``table`` with its ``promoted`` columns, or add the missing
     ones to it and move each row's value from its document into its column (a row without the
-    key gets what it read through ``model``), and follow its search indexes. The record is
-    written before any change, so a foreign ``_sqler_promoted`` refuses with nothing made.
+    key gets what it read through ``model``), and follow its search indexes.
     Returns its promoted columns and the names ``SELECT *`` gives for it then.
 
     Nothing is changed when a row's value cannot be kept (``SchemaError``)."""
     layout, names = _layout((yield _columns_sql(table), []))
     if not names:
         defs = [f"{col} {d}" for col, d in promoted.items()] + [f"CHECK ({c})" for c in checks.values()]
-        yield from _record(table, list(promoted), made=True)  # first: a foreign record table changes nothing
+        yield from _record(table, list(promoted), made=True)
         yield f"CREATE TABLE IF NOT EXISTS {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL{''.join(', ' + d for d in defs)});", []
         return list(promoted), ("_id", "data", *promoted)
     added = {col: d for col, d in promoted.items() if col not in names}
@@ -814,7 +798,7 @@ def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], mod
             if row[2 * i]:
                 raise _refused(table, col, row[2 * i], row[2 * i + 1])
     columns = _promoted_in(names) + list(added)
-    yield from _record(table, columns)  # before any change: a foreign record table changes nothing
+    yield from _record(table, columns)
     if added:
         for col, definition in added.items():
             yield f'ALTER TABLE "{table}" ADD COLUMN {col} {definition};', []
