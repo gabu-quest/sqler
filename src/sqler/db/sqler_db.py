@@ -817,6 +817,17 @@ def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], mod
     return columns, (*layout, *added)
 
 
+def _versioning(table: str) -> Any:
+    """Under the write lock: read the names of ``table`` and add its ``_version`` column when
+    it lacks it. Returns the names ``SELECT *`` gave before, its stored columns, and the
+    columns added (``("_version",)`` or none), as ``_TableMemory._seen`` takes them."""
+    layout, names = _layout((yield _columns_sql(table), []))
+    if _has_version(layout):
+        return layout, names, ()
+    yield f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;', []
+    return layout, names, ("_version",)
+
+
 def _moved(table: str, column: str, keep: str) -> Any:
     """``move_promoted``: take ``column``'s key out of every document of ``table``, its value going
     into the column (``keep="document"``) or not (``keep="column"``), and record the column."""
@@ -836,6 +847,139 @@ def _moved(table: str, column: str, keep: str) -> Any:
     from sqler.fts import _follow_promotion  # fts imports this module
 
     yield from _follow_promotion(table, [column], _promoted_in(info))
+
+
+# ---- a raw read (``execute_sql``): which statements it takes, and how its rows become results ----
+
+
+_READ_WORDS = ("SELECT", "EXPLAIN", "PRAGMA", "WITH")
+
+# a column is found by its name as ``sqlite3.Row`` finds it: ASCII letters in either case
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _read_only(query: str) -> None:
+    """Refuse ``query`` unless it is one read-only statement (``SELECT``, ``EXPLAIN``,
+    ``PRAGMA`` or ``WITH``; a semicolon only at its end)."""
+    stripped = query.strip()
+    first_word = stripped.split()[0].upper() if stripped else ""
+    if first_word not in _READ_WORDS:
+        raise ValueError("execute_sql only accepts read-only queries (SELECT/EXPLAIN/PRAGMA/WITH)")
+    if ";" in stripped.rstrip(";"):
+        raise ValueError("execute_sql does not allow multi-statement queries")
+
+
+def _sql_results(description: Any, rows: Any) -> list[dict[str, Any]]:
+    """The rows of a raw read as ``execute_sql`` returns them, read by the names of their
+    columns (``description``, the cursor's): with a ``data`` column, its JSON document, with
+    ``_id`` set from an ``_id`` column when there is one; with ``_id`` the only column,
+    ``{"_id": id}``; else a dict of every column by its name. A name given twice holds the
+    first column of that name, and a name is found in either case of its ASCII letters."""
+    if not rows:
+        return []
+    names = [d[0] for d in description]
+    folded = [n.translate(_ASCII_LOWER) for n in names]
+
+    def at(name: str) -> Optional[int]:
+        key = name.translate(_ASCII_LOWER)
+        return folded.index(key) if key in folded else None
+
+    if "data" in names:
+        data, rid = at("data"), at("_id") if "_id" in names else None
+        loads = json.loads
+        docs = []
+        for row in rows:
+            doc = loads(row[data])
+            if rid is not None:
+                doc["_id"] = int(row[rid])
+            docs.append(doc)
+        return docs
+    if names == ["_id"]:
+        return [{"_id": int(row[0])} for row in rows]
+    picks = [(name, at(name)) for name in names]
+    return [{name: row[i] for name, i in picks} for row in rows]
+
+
+# ---- the indexes, a delete by id, and the checks of an ensure: the statements both classes send ----
+
+
+_INDEX_EXISTS_SQL = "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;"
+
+_INDEXES_OF_SQL = """
+    SELECT name, tbl_name, sql
+    FROM sqlite_master
+    WHERE type = 'index' AND tbl_name = ? AND name NOT LIKE 'sqlite_%'
+    ORDER BY name;
+"""
+
+_ALL_INDEXES_SQL = """
+    SELECT name, tbl_name, sql
+    FROM sqlite_master
+    WHERE type = 'index' AND name NOT LIKE 'sqlite_%'
+    ORDER BY tbl_name, name;
+"""
+
+
+def _indexes_sql(table: Optional[str]) -> tuple[str, list[Any]]:
+    """The statement ``list_indexes`` sends and its parameters: the indexes of ``table``, or
+    of every table when it is empty; SQLite's own indexes are left out."""
+    return (_INDEXES_OF_SQL, [table]) if table else (_ALL_INDEXES_SQL, [])
+
+
+def _index_rows(rows: Any) -> list[dict[str, Any]]:
+    """The rows of :func:`_indexes_sql` as ``list_indexes`` returns them."""
+    indexes = []
+    for row in rows:
+        sql = row[2] or ""
+        indexes.append({"name": row[0], "table": row[1], "sql": sql, "unique": "UNIQUE" in sql.upper() if sql else False})
+    return indexes
+
+
+def _create_index_sql(table: str, field: str, unique: bool, name: Optional[str], where: Optional[str]) -> str:
+    """The ``CREATE INDEX IF NOT EXISTS`` of ``create_index``, its arguments checked first: a
+    dotted ``field`` is a JSON path in ``data``, one that starts with ``_`` a column; the name
+    is ``idx_<table>_<field>`` unless given; ``where`` makes it a partial index."""
+    validate_field_name(field) if not field.startswith("_") else validate_identifier(field)
+    if name is not None:
+        validate_identifier(name)
+    if where is not None:
+        validate_check_expression(where)
+    idx_name = name or f"idx_{table}_{field.replace('.', '_')}"
+    unique_sql = "UNIQUE" if unique else ""
+    expr = f"json_extract(data, '$.{field}')" if not field.startswith("_") else field
+    where_sql = f"WHERE {where}" if where else ""
+    return f"CREATE {unique_sql} INDEX IF NOT EXISTS {idx_name} ON {table} ({expr}) {where_sql};"
+
+
+def _drop_index_sql(name: str) -> str:
+    """The ``DROP INDEX IF EXISTS`` of ``drop_index``, its name checked first."""
+    validate_identifier(name)
+    return f"DROP INDEX IF EXISTS {name};"
+
+
+def _delete_sql(table: str) -> str:
+    """The delete of one row of ``table`` by its ``_id``."""
+    return f"DELETE FROM {table} WHERE _id = ?;"
+
+
+def _row_there_sql(table: str) -> str:
+    """The read that tells whether ``table`` has the row of an ``_id``: a checked write that
+    wrote nothing tells a gone row (``NotFoundError``) from one at another version."""
+    return f"SELECT 1 FROM {table} WHERE _id = ?;"
+
+
+def _checked_promotion(table: str, promoted: dict[str, str], checks: Optional[dict[str, str]]) -> tuple[str, dict[str, str]]:
+    """The arguments of an ensure with promoted columns, checked before anything is sent: the
+    table name, each column name and definition, each CHECK expression. Returns the table
+    name and the checks (none: empty)."""
+    table = validate_table_name(table)
+    checks = checks or {}
+    for col_name, col_def in promoted.items():
+        validate_column_name(col_name)
+        validate_column_def(col_def)
+    for chk_expr in checks.values():
+        validate_check_expression(chk_expr)
+    return table, checks
 
 
 def _keep_word(keep: Any) -> str:
@@ -1002,13 +1146,7 @@ class SQLerDB(_TableMemory):
             SchemaError: A row's value cannot be kept, a NOT NULL column has no DEFAULT,
                 or a column an earlier version promoted is not settled (``move_promoted``).
         """
-        table = validate_table_name(table)
-        checks = checks or {}
-        for col_name, col_def in promoted.items():
-            validate_column_name(col_name)
-            validate_column_def(col_def)
-        for chk_expr in checks.values():
-            validate_check_expression(chk_expr)
+        table, checks = _checked_promotion(table, promoted, checks)
 
         with self._ddl_lock:
             layout, names = self._names(table)
@@ -1394,7 +1532,7 @@ class SQLerDB(_TableMemory):
             _refuse_unwritten(True, table, _id)
         if cur.rowcount > 0:
             return expected_version + 1
-        row = self.adapter.execute(f"SELECT 1 FROM {table} WHERE _id = ?;", [_id]).fetchone()
+        row = self.adapter.execute(_row_there_sql(table), [_id]).fetchone()
         _refuse_unwritten(row is None, table, _id)
 
     # ---- batch insert helpers ----
@@ -1654,7 +1792,7 @@ class SQLerDB(_TableMemory):
             _id: Row id to delete.
         """
         self._ensure_table(table)
-        self.adapter.execute(f"DELETE FROM {table} WHERE _id = ?;", [_id])
+        self.adapter.execute(_delete_sql(table), [_id])
         self.adapter.auto_commit()
 
     def execute_sql(self, query: str, params: Optional[list[Any]] = None) -> list[dict[str, Any]]:
@@ -1662,64 +1800,24 @@ class SQLerDB(_TableMemory):
 
         Only read-only statements (SELECT, EXPLAIN, PRAGMA, WITH) are allowed.
 
-        When the result set exposes a ``data`` column alongside ``_id``, the
-        JSON payload is decoded and merged with ``_id``. For ad-hoc projections
-        (e.g. ``SELECT _id``) the method returns simple dicts keyed by the
-        selected columns so callers can hydrate with :meth:`SQLerModel.from_id`.
+        Each row is read by its column names (:func:`sqler.db.sqler_db._sql_results`): with a
+        ``data`` column, its JSON document, with ``_id`` set from an ``_id`` column; with
+        ``_id`` the only column, ``{"_id": id}``, so callers can hydrate with
+        :meth:`SQLerModel.from_id`; else a dict of every column by its name.
 
         Args:
             query: SQL SELECT statement.
             params: Optional parameter list.
 
         Returns:
-            list[dict[str, Any]]: Decoded documents with ``_id`` included.
+            list[dict[str, Any]]: One dict per row, as above; a ``data`` column whose JSON is not an object, read with an ``_id`` column, raises ``TypeError``.
 
         Raises:
             ValueError: If the query is not a read-only statement.
         """
-        stripped = query.strip()
-        first_word = stripped.split()[0].upper() if stripped else ""
-        if first_word not in ("SELECT", "EXPLAIN", "PRAGMA", "WITH"):
-            raise ValueError(
-                "execute_sql only accepts read-only queries (SELECT/EXPLAIN/PRAGMA/WITH)"
-            )
-        # Reject multi-statement queries (semicolon before the end)
-        if ";" in stripped.rstrip(";"):
-            raise ValueError(
-                "execute_sql does not allow multi-statement queries"
-            )
+        _read_only(query)
         cursor = self.adapter.execute(query, params or [])
-        rows = cursor.fetchall()
-        docs: list[dict[str, Any]] = []
-        for row in rows:
-            mapping = None
-            try:
-                mapping = row.keys()  # type: ignore[attr-defined]
-            except AttributeError:
-                mapping = None  # Row doesn't support dict-like access
-            if mapping:
-                keys = list(mapping)
-                if "data" in keys:
-                    raw = row["data"]
-                    obj = json.loads(raw)
-                    if "_id" in keys:
-                        obj["_id"] = int(row["_id"])
-                    docs.append(obj)
-                    continue
-                if keys == ["_id"]:
-                    docs.append({"_id": int(row["_id"])})
-                    continue
-                docs.append({k: row[k] for k in keys})
-                continue
-            if len(row) >= 2:
-                obj = json.loads(row[1])
-                obj["_id"] = int(row[0])
-                docs.append(obj)
-            elif len(row) == 1:
-                docs.append({"_id": int(row[0])})
-            else:
-                docs.append({})
-        return docs
+        return _sql_results(cursor.description, cursor.fetchall())
 
     def query(self, table: str) -> SQLerQuery:
         """Return a SQLerQuery that reads ``table`` through this DB, as a model's query set does.
@@ -1777,17 +1875,7 @@ class SQLerDB(_TableMemory):
             where: Optional partial-index WHERE clause.
         """
         self._ensure_table(table)
-        validate_field_name(field) if not field.startswith("_") else validate_identifier(field)
-        if name is not None:
-            validate_identifier(name)
-        if where is not None:
-            validate_check_expression(where)
-        idx_name = name or f"idx_{table}_{field.replace('.', '_')}"
-        unique_sql = "UNIQUE" if unique else ""
-        expr = f"json_extract(data, '$.{field}')" if not field.startswith("_") else field
-        where_sql = f"WHERE {where}" if where else ""
-        ddl = f"CREATE {unique_sql} INDEX IF NOT EXISTS {idx_name} ON {table} ({expr}) {where_sql};"
-        self.adapter.execute(ddl)
+        self.adapter.execute(_create_index_sql(table, field, unique, name, where))
         self.adapter.auto_commit()
 
     def drop_index(self, name: str):
@@ -1796,9 +1884,7 @@ class SQLerDB(_TableMemory):
         Args:
             name: Index name.
         """
-        validate_identifier(name)
-        ddl = f"DROP INDEX IF EXISTS {name};"
-        self.adapter.execute(ddl)
+        self.adapter.execute(_drop_index_sql(name))
         self.adapter.auto_commit()
 
     def list_indexes(self, table: Optional[str] = None) -> list[dict[str, Any]]:
@@ -1810,37 +1896,7 @@ class SQLerDB(_TableMemory):
         Returns:
             List of dicts with index info: name, table, sql, unique.
         """
-        if table:
-            query = """
-                SELECT name, tbl_name, sql
-                FROM sqlite_master
-                WHERE type = 'index' AND tbl_name = ? AND name NOT LIKE 'sqlite_%'
-                ORDER BY name;
-            """
-            cur = self.adapter.execute(query, [table])
-        else:
-            query = """
-                SELECT name, tbl_name, sql
-                FROM sqlite_master
-                WHERE type = 'index' AND name NOT LIKE 'sqlite_%'
-                ORDER BY tbl_name, name;
-            """
-            cur = self.adapter.execute(query)
-
-        indexes = []
-        for row in cur.fetchall():
-            name = row[0]
-            tbl_name = row[1]
-            sql = row[2] or ""
-            indexes.append(
-                {
-                    "name": name,
-                    "table": tbl_name,
-                    "sql": sql,
-                    "unique": "UNIQUE" in sql.upper() if sql else False,
-                }
-            )
-        return indexes
+        return _index_rows(self.adapter.execute(*_indexes_sql(table)).fetchall())
 
     def index_exists(self, name: str) -> bool:
         """Check if an index exists by name.
@@ -1851,10 +1907,7 @@ class SQLerDB(_TableMemory):
         Returns:
             True if the index exists, False otherwise.
         """
-        cur = self.adapter.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;", [name]
-        )
-        return cur.fetchone() is not None
+        return self.adapter.execute(_INDEX_EXISTS_SQL, [name]).fetchone() is not None
 
     def __enter__(self):
         """Enter context manager; begin transaction."""
@@ -1902,17 +1955,13 @@ class SQLerDB(_TableMemory):
             table: Table name.
         """
         self._ensure_table(table)
-        # fast path: check without lock
         layout, names = self._names(table)
         added: tuple[str, ...] = ()
         if not _has_version(layout):
-            # serialize DDL; re-check inside lock
-            with self._ddl_lock:
-                layout, names = self._names(table)
-                if not _has_version(layout):
-                    self.adapter.execute(f'ALTER TABLE "{table}" ADD COLUMN "_version" INTEGER NOT NULL DEFAULT 0;')
-                    self.adapter.auto_commit()
-                    added = ("_version",)
+            # the look again and the change in one transaction that holds the write lock from
+            # its start, so no other thread, connection or process changes the table between them
+            with self._ddl_lock, self:
+                layout, names, added = self._run(_versioning(table))
         self._seen(table, layout, names, added)
 
     def upsert_with_version(

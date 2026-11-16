@@ -1681,8 +1681,8 @@ PLAIN_STATEMENTS = {
 @IS_ASYNC
 def test_a_versioned_writer_on_a_table_without_columns_learns_its_columns_once(run, is_async):
     """``upsert_with_version`` and ``insert_many_with_version`` on a missing table: the first
-    call learns the columns before it makes the table (one statement more than before); every
-    later call sends what it sent before."""
+    call learns the columns before it makes the table, and looks at them again under the write
+    lock before it adds ``_version``; every later call sends what it sent before."""
     c = _call(run, is_async)
     sent = []
     for write in (
@@ -1695,7 +1695,7 @@ def test_a_versioned_writer_on_a_table_without_columns_learns_its_columns_once(r
             write()
         sent.append(_cost(one))
     if is_async:
-        assert sent == [["columns", "CREATE", "columns", "ALTER", "INSERT"], ["UPDATE"], ["INSERT"], ["INSERT"]]
+        assert sent == [["columns", "CREATE", "columns", "columns", "ALTER", "INSERT"], ["UPDATE"], ["INSERT"], ["INSERT"]]
     else:
         # the sync check for ``_version`` asks for the columns on every call, as it did before
         assert sent == [

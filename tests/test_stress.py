@@ -13,12 +13,15 @@ import sys
 
 sys.path.insert(0, "src")
 
+import asyncio
 import concurrent.futures
 import gc
 import random
+import sqlite3
 import string
 import threading
 import time
+from contextlib import closing
 from typing import Optional
 
 import pytest
@@ -26,6 +29,9 @@ from pydantic import Field
 
 from sqler import (
     PERMISSIVE_REBASE_CONFIG,
+    AsyncSQLerDB,
+    AsyncSQLerModel,
+    AsyncSQLerSafeModel,
     F,
     RebaseConfig,
     SoftDeleteMixin,
@@ -1045,6 +1051,211 @@ class TestRandomizedStress:
         # Verify counts are consistent: inserts - deletes == current count
         count = Item.query().count()
         assert count == op_counts["insert"] - op_counts["delete"]
+
+
+# ----- first saves that start together ------------------------------------------------------
+#
+# The first save of a safe model looks at its table and adds the ``_version`` column when the
+# table lacks it. The tests that force the order hold the first writer that is about to add
+# the column until a second writer is about to add it too (or ``HOLD`` seconds pass): a second
+# writer that could look at the table between the first one's look and its change reaches
+# its own change while the first is held, and its ``ALTER`` fails with "duplicate column name".
+
+HOLD = 1.0  # seconds the first writer is held at its change of the table
+ADD_VERSION = 'ADD COLUMN "_version"'
+
+
+class _AsyncHold:
+    """Holds the first task that sends ``ADD_VERSION`` (on any of the wrapped adapters) until a
+    second task sends it, or ``HOLD`` seconds pass."""
+
+    def __init__(self):
+        self.arrived = 0
+        self.second = asyncio.Event()
+
+    def wrap(self, adapter):
+        for name in ("execute", "_execute_judged"):
+            send = getattr(adapter, name)
+
+            async def held(sql, *args, _send=send, **kwargs):
+                if ADD_VERSION in sql:
+                    self.arrived += 1
+                    if self.arrived == 1:
+                        try:
+                            await asyncio.wait_for(self.second.wait(), HOLD)
+                        except TimeoutError:
+                            pass
+                    else:
+                        self.second.set()
+                return await _send(sql, *args, **kwargs)
+
+            setattr(adapter, name, held)
+
+
+class _ThreadHold:
+    """The thread twin of ``_AsyncHold``."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.arrived = 0
+        self.second = threading.Event()
+
+    def wrap(self, adapter):
+        for name in ("execute", "_execute_judged"):
+            send = getattr(adapter, name)
+
+            def held(sql, *args, _send=send, **kwargs):
+                if ADD_VERSION in sql:
+                    with self.lock:
+                        self.arrived += 1
+                        first = self.arrived == 1
+                    if first:
+                        self.second.wait(HOLD)
+                    else:
+                        self.second.set()
+                return _send(sql, *args, **kwargs)
+
+            setattr(adapter, name, held)
+
+
+def _stored(path, table="things"):
+    """The rows of ``table`` in the file at ``path`` as ``(name, _version)``, sorted, and the
+    number of its ``_version`` columns, read with the standard ``sqlite3`` module."""
+    with closing(sqlite3.connect(path)) as conn:
+        rows = sorted(conn.execute(f"SELECT json_extract(data, '$.name'), _version FROM {table}").fetchall())
+        versions = [r for r in conn.execute(f'PRAGMA table_xinfo("{table}")') if r[1] == "_version"]
+    return rows, len(versions)
+
+
+class _ASafe(AsyncSQLerSafeModel):
+    __tablename__ = "things"
+    name: str
+
+
+class _APlain(AsyncSQLerModel):
+    __tablename__ = "things"
+    name: str
+
+
+class _ASafeOther(AsyncSQLerSafeModel):
+    __tablename__ = "others"
+    name: str
+
+
+class _ASafePromoted(AsyncSQLerSafeModel):
+    __tablename__ = "things"
+    __promoted__ = {"status": "TEXT DEFAULT 'new'"}
+    name: str
+    status: str = "new"
+
+
+class _SSafe(SQLerSafeModel):
+    __tablename__ = "things"
+    name: str
+
+
+async def _saves(path, models, *, objects=1, hold=True, plain_first=False):
+    """Save ``models`` (each an unsaved instance) at once, each through the database object
+    ``i % objects`` of ``objects`` objects on the file ``path``; returns what each save gave,
+    as the type of its result or ``type: message`` of its error."""
+    dbs = [AsyncSQLerDB.on_disk(str(path)) for _ in range(objects)]
+    holder = _AsyncHold()
+    try:
+        for db in dbs:
+            await db.connect()
+            if hold:
+                holder.wrap(db.adapter)
+        if plain_first:
+            await _APlain(name="plain").save(db=dbs[0])
+        got = await asyncio.gather(
+            *(m.save(db=dbs[i % objects]) for i, m in enumerate(models)), return_exceptions=True
+        )
+    finally:
+        for db in dbs:
+            await db.close()
+    return [f"{type(r).__name__}: {r}" if isinstance(r, BaseException) else type(r).__name__ for r in got]
+
+
+def _thread_saves(path, n, *, objects):
+    """``n`` threads each save one ``_SSafe`` at once, thread ``i`` through database object
+    ``i % objects`` on the file ``path``, with the first one held at its change of the table."""
+    dbs = [SQLerDB.on_disk(str(path)) for _ in range(objects)]
+    holder = _ThreadHold()
+    for db in dbs:
+        holder.wrap(db.adapter)
+    gate = threading.Barrier(n)
+    got = [None] * n
+
+    def save(i):
+        gate.wait()
+        try:
+            got[i] = type(_SSafe(name=f"s{i}").save(db=dbs[i % objects])).__name__
+        except Exception as exc:
+            got[i] = f"{type(exc).__name__}: {exc}"
+
+    threads = [threading.Thread(target=save, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    for db in dbs:
+        db.close()
+    return got
+
+
+class TestFirstSavesTogether:
+    """First saves of a safe model that start together all succeed, and the table gets one
+    ``_version`` column: tasks on one async database, threads on one sync database, and
+    several database objects on one new file (as several processes have)."""
+
+    def test_two_tasks_on_one_new_async_database_both_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name="s0"), _ASafe(name="s1")]))
+        assert got == ["_ASafe", "_ASafe"]
+        assert _stored(path) == ([("s0", 0), ("s1", 0)], 1)
+
+    def test_two_tasks_after_a_plain_model_made_the_table_both_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name="s0"), _ASafe(name="s1")], plain_first=True))
+        assert got == ["_ASafe", "_ASafe"]
+        assert _stored(path) == ([("plain", 0), ("s0", 0), ("s1", 0)], 1)
+
+    def test_eight_tasks_on_one_new_async_database_all_save(self, tmp_path):
+        """The plain case: eight tasks started together, nothing held."""
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name=f"s{i}") for i in range(8)], hold=False))
+        assert got == ["_ASafe"] * 8
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(8)], 1)
+
+    def test_four_async_database_objects_on_one_new_file_all_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name=f"s{i}") for i in range(4)], objects=4))
+        assert got == ["_ASafe"] * 4
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(4)], 1)
+
+    def test_two_safe_models_with_two_new_tables_on_one_async_database_both_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name="s0"), _ASafeOther(name="o0")]))
+        assert got == ["_ASafe", "_ASafeOther"]
+        assert (_stored(path), _stored(path, "others")) == (([("s0", 0)], 1), ([("o0", 0)], 1))
+
+    def test_a_safe_model_with_promoted_columns_saved_first_by_four_tasks_all_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafePromoted(name=f"s{i}") for i in range(4)]))
+        assert got == ["_ASafePromoted"] * 4
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(4)], 1)
+        with closing(sqlite3.connect(path)) as conn:
+            assert conn.execute("SELECT status, COUNT(*) FROM things GROUP BY 1").fetchall() == [("new", 4)]
+
+    def test_eight_threads_on_one_new_sync_database_all_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        assert _thread_saves(path, 8, objects=1) == ["_SSafe"] * 8
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(8)], 1)
+
+    def test_four_sync_database_objects_on_one_new_file_all_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        assert _thread_saves(path, 4, objects=4) == ["_SSafe"] * 4
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(4)], 1)
 
 
 if __name__ == "__main__":
