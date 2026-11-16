@@ -809,7 +809,7 @@ def _annotations(cls: Any) -> list:
         except NameError:  # it names a class that is not defined yet
             return [(n, _NOT_YET, cls) for n in names]
         return [(n, hints[n], cls) for n in names]
-    if not isinstance(getattr(cls, "__pydantic_fields__", None), dict):
+    if not kind.pydantic:  # told as every pydantic 2 tells it (``__pydantic_fields__`` is 2.10's)
         return []  # a lite class left without ``@dataclass``: no field to read
     if not getattr(cls, "__pydantic_complete__", True) and not _resolves(cls):
         return [(n, _NOT_YET, cls) for n in cls.model_fields]
