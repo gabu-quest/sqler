@@ -6,7 +6,15 @@ from typing import Any, Optional
 
 from sqler import cache
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S, AsyncSQLiteAdapter, PoolStats
-from sqler.db._promotion import _moved, _promotion, _record, _settled, _unwritable, _versioning
+from sqler.db._promotion import (
+    _copy_layout,
+    _moved,
+    _promotion,
+    _record,
+    _settled,
+    _unwritable,
+    _versioning,
+)
 from sqler.db._raw_read import _read_only, _sql_results
 from sqler.db._rows import (
     _columns_sql,
@@ -151,6 +159,18 @@ class AsyncSQLerDB(_TableMemory):
             await self._ensure_table(table)
         if versioned:
             await self._ensure_versioned_table(table)
+
+    async def _copy_target(self, source: str, target: str, checks: Optional[dict[str, str]] = None) -> bool:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._copy_target`."""
+        layout = await self._run(_copy_layout(source, target))
+        if layout is None:
+            return False
+        made, promoted, versioned = layout
+        if made:
+            await self.ensure_table(target, promoted=promoted, checks=checks, versioned=versioned)
+        elif promoted:
+            await self.ensure_table(target, promoted=promoted)
+        return True
 
     async def _ensure_table(self, table: str) -> None:
         table = validate_table_name(table)

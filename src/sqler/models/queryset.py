@@ -257,6 +257,57 @@ class SQLerQuerySet(Generic[T]):
             return self._told(self._checked().delete())
         return len(self._written("rows", lambda q: [(doc, None) for doc in q._deleted()], on_delete))
 
+    def delete(self, on_delete: str = "restrict") -> int:
+        """Delete every matching row: :meth:`delete_all`, with the same ``on_delete``, unit and
+        result, under the name a query's ``delete()`` has.
+
+        A query with a limit or an offset is refused with ``ValueError`` before any statement:
+        :meth:`copy_to` and ``delete()`` of one query take the same rows, every row the
+        filter matches (an order changes nothing). ``delete_all()`` still deletes every
+        match whatever the limit.
+
+        Returns:
+            int: Number of rows deleted.
+        """
+        self._query._whole_rows("delete")
+        return self.delete_all(on_delete)
+
+    def copy_to(self, table: str) -> int:
+        """Copy the rows :meth:`all` would return into ``table``, as they are stored (the same
+        ``_id``, document, ``_version`` and promoted columns), in one ``INSERT ... SELECT``
+        inside the database; the rows here are unchanged.
+
+        A missing ``table`` is made in the layout of this queryset's table (its promoted
+        columns, the class's ``__checks__``, ``_version`` where it has it); an existing one
+        gets the promoted columns it lacks. Refused with ``ValueError`` before anything is
+        written: the queryset's own table, a ``table`` with a promoted column this one has
+        not, or with ``_version`` where this one has not (or the reverse), a query with a
+        limit or an offset (see :meth:`delete`), ``select()`` or ``group_by()``, and a class
+        with a field that can refer to rows of this queryset's table (its own kind, through an
+        ``Optional``, a list or a dict value): the copies would still refer to those rows,
+        and a delete of them would count the copies as referrers. A row whose
+        ``_id`` is in ``table`` already fails the statement with ``UniqueConstraintError``,
+        and nothing is copied. The making of ``table`` and the copy are one unit; inside your
+        transaction they follow its commit or rollback, so ``copy_to()`` then
+        :meth:`delete` there is one unit too. A cache of ``table`` drops its entries; no
+        audit row is written and no hook is called. A missing table here copies 0 rows and
+        makes nothing.
+
+        Returns:
+            int: Number of rows copied.
+        """
+        target = self._query._copy_target(table)
+        _write_rules.refuse_self_copy(self._model_cls, self._query._table)
+        db = self._db
+        if db is None:
+            raise RuntimeError(f"{self._model_cls.__name__}: copy_to() needs the queryset's database")
+        source = self._query._table
+        with db.transaction():
+            if not db._copy_target(source, target, getattr(self._model_cls, "__checks__", None)):
+                return 0
+            count = self._checked("rows")._copied(target)
+            return _write_rules.copied(self._model_cls, db, target, count)
+
     def _updated(self, fields: dict, n: int, op: str) -> list[dict]:
         """The documents ``update_one`` (``op`` ``=``) and ``update_n`` (``IN``) return, as
         written."""

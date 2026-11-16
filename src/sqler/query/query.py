@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Iterator, NoReturn, Optional, Self
 from sqler._stored import column_arg, json_arg
 from sqler.exceptions import NoAdapterError
 from sqler.query import SQLerExpression
-from sqler.utils import validate_field_name
+from sqler.utils import validate_field_name, validate_table_name
 
 if TYPE_CHECKING:
     from sqler.adapter.synchronous import SQLiteAdapter
@@ -134,6 +134,7 @@ class _Statements:
     _distinct: bool
     _group_by_fields: list[str]
     _having: Optional[SQLerExpression]
+    _select_fields: Optional[list[str]]
 
     _db: Any = None
     _use = ""
@@ -458,6 +459,38 @@ class _Statements:
         if returning:
             sql += f" RETURNING {self._returning()}"
         return self._squeezed(sql), params
+
+    def _whole_rows(self, call: str) -> None:
+        """Refuse, for ``call`` (``copy_to``, ``delete``), a query with a limit or an offset,
+        before any statement: a copy and a delete of one query must touch the same rows, and
+        a delete takes every row the filter matches (an order changes neither)."""
+        if self._limit is not None or self._offset is not None:
+            raise ValueError(
+                f"{call}: a query with a limit or an offset is refused: copy_to() and delete() "
+                "take every row the filter matches, so that a copy and a delete of one query "
+                "touch the same rows; narrow the rows with filter()"
+            )
+
+    def _copy_target(self, table: str) -> str:
+        """The checked target of :meth:`_copy_sql`, refused before any statement: a name
+        sqler does not take for a table, the query's own table, and a query whose rows are not
+        whole rows or not every row its filter matches (:meth:`_whole_rows`)."""
+        target = validate_table_name(table)
+        if target.lower() == self._table.lower():
+            raise ValueError(f"copy_to: {target} is the table the query reads; copy to another table")
+        self._whole_rows("copy_to")
+        for name, used in (("select()", self._select_fields), ("group_by()", self._group_by_fields or self._having)):
+            if used:
+                raise ValueError(f"copy_to: a query with {name} is refused: it copies whole rows")
+        return target
+
+    def _copy_sql(self, target: str) -> tuple[str, list[Any]]:
+        """The one ``INSERT ... SELECT`` that copies the rows the query matches into the
+        checked ``target`` as they are stored: ``_id``, ``data``, ``_version`` where the
+        table has it, and every promoted column (:meth:`_returning`)."""
+        where, params = self._where()
+        columns = self._returning()
+        return self._squeezed(f"INSERT INTO {target} ({columns}) SELECT {columns} FROM {self._table} {where}"), params
 
 
 class SQLerQuery(_Statements):
@@ -1208,6 +1241,15 @@ class SQLerQuery(_Statements):
             raise NoAdapterError("No adapter set for query")
         query, cur = self._execute(lambda q: q._delete_sql(returning=True))
         return [] if cur is None else [query._returned(row) for row in cur.fetchall()]
+
+    def _copied(self, target: str) -> int:
+        """Copy the matching rows into the checked ``target`` (:meth:`_copy_sql`) and return
+        how many; 0 when the query's table is missing. It commits nothing: run it inside a
+        transaction."""
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        _, cur = self._execute(lambda q: q._copy_sql(target))
+        return 0 if cur is None else cur.rowcount
 
 
 class PaginatedResult:

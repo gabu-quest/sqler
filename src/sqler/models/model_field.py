@@ -14,10 +14,14 @@ class SQLerModelField:
     Example:
       SQLerModelField(User, ["address", "city"]) == "Kyoto"
       -> EXISTS (
-           SELECT 1 FROM addresses r
-           WHERE r._id = json_extract(data, '$.address._id')
-             AND json_extract(r.data, '$.city') = ?
+           SELECT 1 FROM (SELECT _id AS rid, data AS rdata FROM addresses) r
+           WHERE r.rid = json_extract(data, '$.address._id')
+             AND json_extract(r.rdata, '$.city') = ?
          )
+
+    The related rows are read under names of their own (``rid``, ``rdata``), so ``data``
+    in the expression is the column of the row the query reads, in whatever table it
+    reads: the class's own, or another one (``using(db, table)``).
     """
 
     def __init__(
@@ -53,30 +57,22 @@ class SQLerModelField:
         first_literal = _json_path_literal([first])
         ref_literal = _json_path_literal([first, "_id"])
         table = _related_table(self.model, first, self.array_any)
-        outer_table = _model_table_name(self.model)
+        related = f"(SELECT _id AS rid, data AS rdata FROM {table}) r"
 
         # Check if querying for _id specifically (it's a column, not in JSON)
         is_id_field = rest == ["_id"]
         rest_literal = _json_path_literal(list(rest)) if rest and not is_id_field else None
+        if rest_literal is None:
+            where_right = f"r.rid {op} ?"
+        else:
+            where_right = f"json_extract(r.rdata, {rest_literal}) {op} ?"
 
         if self.array_any:
-            # iterate refs array: json_each over $.<first>, join related on ref._id
-            # EXISTS (SELECT 1 FROM json_each(outer.data,'$.first') a JOIN table r ON r._id = json_extract(a.value,'$._id') WHERE json_extract(r.data,'$.rest') OP ?)
-            joins = f"json_each({outer_table}.data, {first_literal}) a JOIN {table} r ON r._id = json_extract(a.value, '$._id')"
-            if rest_literal is None:
-                where_right = f"r._id {op} ?"
-            else:
-                where_right = f"json_extract(r.data, {rest_literal}) {op} ?"
+            # each entry of the outer row's array of references, joined to its related row
+            joins = f"json_each(data, {first_literal}) a JOIN {related} ON r.rid = json_extract(a.value, '$._id')"
             sql = f"EXISTS (SELECT 1 FROM {joins} WHERE {where_right})"
         else:
-            if rest_literal is None:
-                where_right = f"r._id {op} ?"
-            else:
-                where_right = f"json_extract(r.data, {rest_literal}) {op} ?"
-            sql = (
-                "EXISTS (SELECT 1 FROM "
-                f"{table} r WHERE r._id = json_extract({outer_table}.data, {ref_literal}) AND {where_right})"
-            )
+            sql = f"EXISTS (SELECT 1 FROM {related} WHERE r.rid = json_extract(data, {ref_literal}) AND {where_right})"
         return SQLerExpression(sql, [stored(val)])
 
     def __compare(self, op: str, val: Any) -> SQLerExpression:

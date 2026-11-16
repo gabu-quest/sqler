@@ -599,3 +599,14 @@ class AsyncSQLerQuery(_Statements):
         rows = await cur.fetchall()
         await cur.close()
         return [query._returned(row) for row in rows]
+
+    async def _copied(self, target: str) -> int:
+        """Async twin of :meth:`SQLerQuery._copied`."""
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        _, cur = await self._execute(lambda q: q._copy_sql(target))
+        if cur is None:
+            return 0
+        rowcount = cur.rowcount
+        await cur.close()
+        return rowcount
