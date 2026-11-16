@@ -22,6 +22,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 
 import pytest
 import pytest_asyncio
@@ -34,8 +35,7 @@ from sqler.logging import query_logger
 BOUND_S = 5.0
 PRAGMAS = ["PRAGMA busy_timeout = 2000", "PRAGMA journal_mode = WAL", "PRAGMA synchronous = OFF"]
 TXN_WORDS = {"BEGIN", "SAVEPOINT", "RELEASE", "ROLLBACK", "COMMIT", "INSERT"}
-# about a second of work in SQLite: a statement that is still running when the next is queued
-SLOW = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000000) SELECT count(*) FROM c"
+HELD = "SELECT held()"  # a statement that keeps its connection's thread until the test lets go (``Hold``)
 ENDED = "the transaction this nested transaction was part of has ended; nothing written in it was committed"
 
 
@@ -163,14 +163,84 @@ def open_at_each_end(statements: list[str]) -> list[int]:
     return out
 
 
-async def turns_until(ready) -> None:
-    """Give the loop one turn at a time until ``ready()`` holds; bounded."""
+async def turns_until(ready, what: str = "", bound_s: float = BOUND_S) -> None:
+    """Give the loop one turn at a time until ``ready()`` holds; bounded. A ``what`` names it in the failure."""
 
     async def spin() -> None:
         while not ready():
             await asyncio.sleep(0)
 
-    await asyncio.wait_for(spin(), BOUND_S)
+    try:
+        await asyncio.wait_for(spin(), bound_s)
+    except TimeoutError:
+        if not what:
+            raise
+        raise AssertionError(f"{what} did not happen within {bound_s} s") from None
+
+
+class Hold:
+    """A statement of the connection's thread that lasts until the test lets go of it.
+
+    ``install`` gives every connection of the adapter the SQL function ``held()``, which
+    waits on an event; ``hold()`` sends ``HELD`` and returns once the thread is in it, so a
+    statement sent after is queued behind it until ``release()``. A hold that is never let
+    go ends at ``bound_s`` and ``done`` then fails saying so. The state is one instance's:
+    nothing is shared between tests.
+    """
+
+    def __init__(self, t: Traced, bound_s: float = 2 * BOUND_S):
+        self._t = t
+        self._bound_s = bound_s
+        self._entered = threading.Event()
+        self._let_go = threading.Event()
+        self._released: bool | None = None
+
+    @classmethod
+    async def install(cls, t: Traced, bound_s: float = 2 * BOUND_S) -> "Hold":
+        hold = cls(t, bound_s)
+        for conn in t.adapter._all_conns:
+            await conn.create_function("held", 0, hold._wait)
+        return hold
+
+    def _wait(self) -> int:
+        self._entered.set()
+        self._released = self._let_go.wait(self._bound_s)
+        return int(self._released)
+
+    def in_flight(self) -> bool:
+        return self._entered.is_set()
+
+    def queued(self) -> int:
+        """Calls waiting for a connection's thread (aiosqlite's queue): what was sent behind the hold.
+
+        The call being run is not counted. The first call the adapter sends behind a held statement
+        queues the read of that statement's remaining rows first, in the same step: it raises the
+        count by two, and no turn of the loop sees one of the two alone.
+        """
+        return sum(conn._tx.qsize() for conn in self._t.adapter._all_conns)
+
+    async def hold(self) -> asyncio.Future:
+        """Send ``HELD`` as a task in this context and return it once the thread is in it."""
+        statement = asyncio.ensure_future(self._t.adapter.execute(HELD))
+        await turns_until(lambda: self.in_flight() or statement.done())
+        return statement
+
+    async def behind(self, work) -> asyncio.Future:
+        """Start ``work`` as a task and return it once it has queued a call behind the hold (or ended)."""
+        before = self.queued()
+        task = asyncio.ensure_future(work)
+        await turns_until(lambda: self.queued() > before or task.done())
+        return task
+
+    def release(self) -> None:
+        assert self.in_flight(), "the hold was let go before its statement was in flight"
+        self._let_go.set()
+
+    async def done(self, statement):
+        """The cursor of a held statement, which must have returned because the test let go."""
+        cursor = await asyncio.wait_for(statement, self._bound_s + BOUND_S)
+        assert self._released is True, "the hold ran out its bound: the test never let go of it"
+        return cursor
 
 
 def ending_on_top(lease) -> bool:
@@ -1122,6 +1192,47 @@ async def test_a_task_that_ends_with_its_nested_transaction_open_rolls_it_back(m
     await assert_pool_clean(t)
 
 
+# --- the hold the tests below keep a statement in flight with --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_hold_that_is_never_let_go_ends_at_its_bound_and_says_so(make_db):
+    t = await make_db()
+    hold = await Hold.install(t, bound_s=0.2)
+    statement = await hold.hold()
+    with pytest.raises(AssertionError, match="the test never let go of it"):
+        await hold.done(statement)
+
+
+@pytest.mark.asyncio
+async def test_a_wait_for_a_state_that_never_comes_fails_saying_what_it_waited_for():
+    with pytest.raises(AssertionError, match="the owner's cancellation did not happen within 0.1 s"):
+        await turns_until(lambda: False, "the owner's cancellation", bound_s=0.1)
+
+
+@pytest.mark.asyncio
+async def test_what_a_hold_counts_as_queued_is_the_calls_waiting_not_the_one_running(make_db):
+    t = await make_db()
+    hold = await Hold.install(t)
+    async with t.db.transaction():  # pins one connection to this task
+        statement = await hold.hold()
+        assert (hold.in_flight(), hold.queued()) == (True, 0)  # the held statement itself is being run
+        behind = asyncio.ensure_future(t.adapter._task_lease.get().conn.execute("SELECT 1"))  # straight onto it
+        await turns_until(lambda: hold.queued() > 0)
+        assert hold.queued() == 1
+        hold.release()
+        await (await behind).close()
+        await (await hold.done(statement)).close()
+
+
+@pytest.mark.asyncio
+async def test_a_hold_let_go_before_its_statement_was_in_flight_is_refused(make_db):
+    t = await make_db()
+    hold = await Hold.install(t)
+    with pytest.raises(AssertionError, match="let go before its statement was in flight"):
+        hold.release()
+
+
 # --- cancellation keeps the adapter's savepoint stack equal to SQLite's -------------------
 
 
@@ -1138,6 +1249,7 @@ async def nested_rollback_then_plain_write(t: Traced) -> None:
 @pytest.mark.asyncio
 async def test_a_task_cancelled_while_its_savepoint_is_in_flight(make_db):
     t = await make_db()
+    hold = await Hold.install(t)
 
     async def child() -> None:
         async with t.db.transaction():
@@ -1145,14 +1257,13 @@ async def test_a_task_cancelled_while_its_savepoint_is_in_flight(make_db):
 
     async def run() -> None:
         async with t.db.transaction():
-            slow = asyncio.ensure_future(t.adapter.execute(SLOW))
-            await asyncio.sleep(0)  # the slow statement is on the connection
-            task = asyncio.ensure_future(child())
-            await asyncio.sleep(0)  # its SAVEPOINT is queued behind the slow statement
+            slow = await hold.hold()
+            task = await hold.behind(child())  # its SAVEPOINT is queued behind the held statement
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            await (await slow).close()
+            hold.release()
+            await (await hold.done(slow)).close()
             await nested_rollback_then_plain_write(t)
 
     await asyncio.wait_for(run(), BOUND_S * 2)
@@ -1165,29 +1276,29 @@ async def test_a_task_cancelled_while_its_savepoint_is_in_flight(make_db):
 @pytest.mark.parametrize("child_raises", [False, True], ids=["release", "rollback-to"])
 async def test_a_task_cancelled_while_its_savepoint_end_is_in_flight(make_db, child_raises):
     t = await make_db()
+    hold = await Hold.install(t)
     ending = asyncio.Event()
     slow: list[asyncio.Future] = []
 
     async def child() -> None:
         async with t.db.transaction():
             await t.insert("child")
-            slow.append(asyncio.ensure_future(t.adapter.execute(SLOW)))
-            await asyncio.sleep(0)  # the slow statement is on the connection
+            slow.append(await hold.hold())
             ending.set()
             if child_raises:
                 raise Undo()
-        # the block's end is queued behind the slow statement
+        # the block's end is queued behind the held statement
 
     async def run() -> None:
         async with t.db.transaction():
             task = asyncio.ensure_future(child())
             await ending.wait()
-            for _ in range(3):
-                await asyncio.sleep(0)
+            await turns_until(lambda: hold.queued() > 0)  # the end of the child is queued behind the held statement
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            await (await slow[0]).close()
+            hold.release()
+            await (await hold.done(slow[0])).close()
             await nested_rollback_then_plain_write(t)
 
     await asyncio.wait_for(run(), BOUND_S * 2)
@@ -1824,32 +1935,35 @@ async def test_a_savepoint_that_sqlite_refuses_opened_nothing_and_leaves_no_plac
 @pytest.mark.parametrize("child_raises", [False, True], ids=["release", "rollback-to"])
 async def test_the_parent_committing_while_a_cancelled_child_end_is_being_sent_commits(make_db, child_raises):
     t = await make_db()
-    ending = asyncio.Event()
+    hold = await Hold.install(t)
+    ending, leaving = asyncio.Event(), asyncio.Event()
     slow: list[asyncio.Future] = []
 
     async def child() -> None:
         async with t.db.transaction():
             await t.insert("child")
-            slow.append(asyncio.ensure_future(t.adapter.execute(SLOW)))
-            await asyncio.sleep(0)  # the slow statement is on the connection
+            slow.append(await hold.hold())
             ending.set()
             if child_raises:
                 raise Undo()
-        # the block's end is queued behind the slow statement
+        # the block's end is queued behind the held statement
 
     async def run() -> None:
         async with t.db.transaction():
             await t.insert("parent")
             task = asyncio.ensure_future(child())
             await ending.wait()
-            for _ in range(3):
-                await asyncio.sleep(0)
+            await turns_until(lambda: hold.queued() > 0)  # the end of the child is queued behind the held statement
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-        await (await slow[0]).close()
+            leaving.set()  # the block ends in this step, before the held statement is let go
+        await (await hold.done(slow[0])).close()
 
-    await asyncio.wait_for(run(), BOUND_S * 2)
+    parent = asyncio.ensure_future(run())
+    await turns_until(lambda: leaving.is_set() or parent.done())
+    hold.release()
+    await asyncio.wait_for(parent, BOUND_S * 2)
     child_end = ["ROLLBACK TO SAVEPOINT sp_1", "RELEASE SAVEPOINT sp_1"] if child_raises else ["RELEASE SAVEPOINT sp_1"]
     assert t.steps() == ["BEGIN IMMEDIATE", "INSERT parent", "SAVEPOINT sp_1", "INSERT child", *child_end, "COMMIT"]
     assert await t.rows() == (["parent"] if child_raises else ["child", "parent"])
@@ -2033,18 +2147,13 @@ async def test_siblings_waiting_when_a_nested_end_fails_all_raise_and_send_nothi
 
 
 def block_the_loop_until(deadline: float) -> None:
-    """Hold the event loop with real work in SQLite (not a sleep) until ``deadline`` has passed.
+    """Hold the event loop, in small steps of a blocking sleep, until ``deadline`` (the loop's clock) has passed.
 
-    Nothing else runs meanwhile: no timer, no task. Runs the slow statement on a private
-    in-memory database until the loop's clock is past ``deadline`` (once, about a second).
+    Nothing else runs meanwhile: no timer, no task.
     """
     loop = asyncio.get_running_loop()
-    scratch = sqlite3.connect(":memory:")
-    try:
-        while loop.time() <= deadline:
-            scratch.execute(SLOW).fetchall()
-    finally:
-        scratch.close()
+    while loop.time() <= deadline:
+        time.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -2127,11 +2236,8 @@ async def test_a_nested_transaction_whose_deadline_passes_after_its_turn_still_o
 
 # --- a statement whose place ended before it ran waits again, where it was ------------------
 
-# its first row comes at once; the rest (about a second of work) is read before another task's statement
-LAZY = (
-    "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000000) "
-    "SELECT 1 UNION ALL SELECT count(*) FROM c"
-)
+# its first row comes at once; the second is read before another task's statement
+TWO_ROWS = "SELECT 1 UNION ALL SELECT 2"
 
 
 async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, block: bool = False) -> dict:
@@ -2150,7 +2256,7 @@ async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, blo
     clock at each point."""
     loop = asyncio.get_running_loop()
     g_in, g_end, x_asked, z_asked = (asyncio.Event() for _ in range(4))
-    held = threading.Event()  # set: the connection's thread leaves ``SELECT held()``
+    hold = await Hold.install(t)
     got: dict = {}
 
     async def grandchild() -> None:
@@ -2178,15 +2284,15 @@ async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, blo
         await t.insert("z")
 
     async def let_go(x_turn) -> None:
+        await turns_until(hold.in_flight)
         await turns_until(lambda: "x" in got if x_timeout < BOUND_S else not x_turn.future.done())
-        held.set()
+        hold.release()
 
     async with t.db.transaction():
         lease = t.adapter._task_lease.get()
-        await lease.conn.create_function("held", 0, lambda: held.wait(2 * BOUND_S))
         tz = asyncio.ensure_future(z())  # outside S
         async with t.db.transaction():
-            cur = await t.adapter.execute(LAZY)
+            cur = await t.adapter.execute(TWO_ROWS)
             tg = asyncio.ensure_future(grandchild())
             await g_in.wait()
             tx = asyncio.ensure_future(x())
@@ -2201,12 +2307,12 @@ async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, blo
                 got["unblocked_at"] = loop.time()
             fetch = asyncio.ensure_future(cur.fetchall())
             # G's insert had the rest of the read done before it; S's RELEASE is queued behind this
-            busy = asyncio.ensure_future(lease.conn.execute("SELECT held()"))
+            busy = asyncio.ensure_future(lease.conn.execute(HELD))
             going = asyncio.ensure_future(let_go(x_turn))
-        assert await fetch == [(1,), (3000000,)]
+        assert await fetch == [(1,), (2,)]
         await cur.close()
-        busy_cur = await busy
-        assert await busy_cur.fetchall() == [(1,)]  # let go by the test, not by its own bound
+        busy_cur = await hold.done(busy)  # let go by the test, not by its own bound
+        assert await busy_cur.fetchall() == [(1,)]
         await busy_cur.close()
         await going
         await asyncio.wait_for(asyncio.gather(tg, tx, tz), BOUND_S)
@@ -2555,22 +2661,28 @@ async def test_a_cancellation_while_a_raw_commit_runs_leaves_as_a_cancellation(m
     ``COMMIT`` still runs in the connection's thread and keeps ``a`` (it cannot be put back),
     and the connection comes back to the pool rolled back."""
     t = await make_db()
-    sending = asyncio.Event()
+    hold = await Hold.install(t)
+    sending, cancelled = asyncio.Event(), asyncio.Event()
 
     async def owner() -> None:
         async with t.db.transaction():
             await t.adapter.execute(INSERT, ["a"])
-            slow = asyncio.create_task(t.adapter.execute(SLOW))
-            await asyncio.sleep(0)  # its statement is queued first
+            slow = await hold.hold()
             sending.set()
             try:
                 await t.adapter.execute("COMMIT")
+            except asyncio.CancelledError:
+                cancelled.set()  # the cancellation has left the call: the COMMIT has not run
+                raise
             finally:
-                await asyncio.wait_for(slow, BOUND_S)
+                await hold.done(slow)
 
     task = asyncio.create_task(owner())
     await asyncio.wait_for(sending.wait(), BOUND_S)
+    await turns_until(lambda: hold.queued() > 0)  # the COMMIT is queued behind the held statement
     task.cancel()
+    await turns_until(cancelled.is_set, "the owner's cancellation")  # let go only after it, with the COMMIT still queued
+    hold.release()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, BOUND_S)
     await t.insert("after")
@@ -2585,18 +2697,17 @@ async def test_a_rollback_sqlite_answers_in_executemany_is_seen_with_another_tas
     any transaction and opens one of its own before the failure reaches the loop. (A raw
     ``COMMIT`` cannot go through ``executemany``: sqlite3 takes DML only there.)"""
     t = await make_db()
+    hold = await Hold.install(t)
     await t.adapter.execute("CREATE TABLE u (x UNIQUE ON CONFLICT ROLLBACK)")
     await t.adapter.auto_commit()
     with pytest.raises(TransactionStateError) as ended:
         async with t.db.transaction():
             await t.adapter.execute(INSERT, ["a"])
-            slow = asyncio.create_task(t.adapter.execute(SLOW))  # keeps the thread busy
-            await asyncio.sleep(0)
-            many = asyncio.create_task(t.adapter.executemany("INSERT INTO u VALUES (?)", [[1], [1]]))
-            await asyncio.sleep(0)
-            other = asyncio.create_task(t.adapter.execute(INSERT, ["b"]))
-            await asyncio.sleep(0)
-            await asyncio.wait_for(slow, BOUND_S)
+            slow = await hold.hold()  # keeps the thread busy
+            many = await hold.behind(t.adapter.executemany("INSERT INTO u VALUES (?)", [[1], [1]]))
+            other = await hold.behind(t.adapter.execute(INSERT, ["b"]))
+            hold.release()
+            await hold.done(slow)
             with pytest.raises(TransactionStateError) as at_many:
                 await asyncio.wait_for(many, BOUND_S)
             await asyncio.wait_for(other, BOUND_S)
@@ -2617,20 +2728,21 @@ async def test_a_raw_end_whose_await_was_cancelled_and_caught_breaks_the_transac
     the connection's thread and ends the transaction: the next statement in the block and
     the block's end raise, and nothing written after it is kept."""
     t = await make_db()
-    sending = asyncio.Event()
+    hold = await Hold.install(t)
+    sending, cancelled = asyncio.Event(), asyncio.Event()
     later: list[BaseException] = []
 
     async def owner() -> None:
         async with t.db.transaction():
             await t.adapter.execute(INSERT, ["a"])
-            slow = asyncio.create_task(t.adapter.execute(SLOW))
-            await asyncio.sleep(0)  # its statement is queued first
+            slow = await hold.hold()
             sending.set()
             try:
                 await t.adapter.execute(raw)
             except asyncio.CancelledError:
+                cancelled.set()  # the cancellation has left the call: the raw end has not run
                 asyncio.current_task().uncancel()
-            await asyncio.wait_for(slow, BOUND_S)
+            await hold.done(slow)
             try:
                 await t.adapter.execute(INSERT, ["b"])
             except TransactionStateError as exc:
@@ -2638,7 +2750,10 @@ async def test_a_raw_end_whose_await_was_cancelled_and_caught_breaks_the_transac
 
     task = asyncio.create_task(owner())
     await asyncio.wait_for(sending.wait(), BOUND_S)
+    await turns_until(lambda: hold.queued() > 0)  # the raw end is queued behind the held statement
     task.cancel()
+    await turns_until(cancelled.is_set, "the owner's cancellation")  # let go only after it, with the raw end still queued
+    hold.release()
     with pytest.raises(TransactionStateError) as ended:
         await asyncio.wait_for(task, BOUND_S)
     assert [str(e) for e in (*later, ended.value)] == [ENDED_BEHIND, ENDED_BEHIND]
@@ -2655,11 +2770,10 @@ ROLL_BACK_AT = (
     f"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {AT}) "
     f"SELECT x FROM c WHERE x < {AT} OR roll_back_at(x)"
 )
-# rows 1 and 2, then row ``SLOW_AT`` after about a second of work in SQLite
-SLOW_AT = 3000000
-SLOW_ROLL_BACK_AT = (
-    f"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {SLOW_AT}) "
-    f"SELECT x FROM c WHERE x < 3 OR (x = {SLOW_AT} AND roll_back_at(x))"
+# rows 1 and 2, then at row ``AT`` the read waits in ``held()`` (see ``Hold``) before it rolls back
+HELD_ROLL_BACK_AT = (
+    f"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {AT}) "
+    f"SELECT x FROM c WHERE x < {AT} OR (held() AND roll_back_at(x))"
 )
 
 
@@ -2724,11 +2838,12 @@ async def test_a_cancelled_lazy_fetch_whose_read_ended_the_transaction_breaks_it
     connection's thread and ends the transaction. The next statement of the block and the
     block's end raise ``TransactionStateError``, and nothing written after it is kept."""
     t = await make_db()
-    await roll_back_at(t, SLOW_AT)
+    hold = await Hold.install(t)
+    await roll_back_at(t, AT)
     fetching = asyncio.Event()
 
     async def reader() -> None:
-        cur = await t.adapter.execute(SLOW_ROLL_BACK_AT)
+        cur = await t.adapter.execute(HELD_ROLL_BACK_AT)
         assert await cur.fetchone() == (1,)
         fetching.set()
         await cur.fetchall()
@@ -2739,13 +2854,24 @@ async def test_a_cancelled_lazy_fetch_whose_read_ended_the_transaction_breaks_it
             await t.adapter.execute(INSERT, ["a"])
             task = asyncio.create_task(reader())
             await asyncio.wait_for(fetching.wait(), BOUND_S)
+            await turns_until(hold.in_flight)  # the read is in ``held()``, before its rollback
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, BOUND_S)
-            try:
-                await asyncio.wait_for(t.adapter.execute(INSERT, ["b"]), BOUND_S)
-            except TransactionStateError as exc:
-                later.append(exc)
+
+            async def next_statement() -> None:
+                try:
+                    await t.adapter.execute(INSERT, ["b"])
+                except TransactionStateError as exc:
+                    later.append(exc)
+
+            lease = t.adapter._task_lease.get()
+            assert lease.settling is not None  # the cancelled read is still being settled: anything sent waits for it
+            following = asyncio.ensure_future(next_statement())
+            await asyncio.sleep(0)  # it is waiting for the read's settling
+            assert not following.done()
+            hold.release()
+            await asyncio.wait_for(following, BOUND_S)
     assert [str(e) for e in (*later, ended.value)] == [ENDED_BEHIND, ENDED_BEHIND]
     await t.insert("after")
     assert await t.rows() == ["after"]
@@ -2822,24 +2948,28 @@ async def test_closing_while_a_cancelled_statements_wait_is_settling_leaves_noth
     adapter is closed while the wait for it settles. The close waits for it: no task is left
     running and no error is left unretrieved."""
     t = await make_db()
+    hold = await Hold.install(t)
     loop = asyncio.get_running_loop()
     unretrieved: list[dict] = []
     loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
     try:
         await t.adapter.begin_transaction()
         lease = t.adapter._task_lease.get()
-        slow = asyncio.create_task(t.adapter.execute(SLOW))
-        await asyncio.sleep(0)  # its statement is queued first
-        sibling = asyncio.create_task(t.adapter.execute(INSERT, ["b"]))
-        await asyncio.sleep(0)
+        slow = await hold.hold()
+        sibling = await hold.behind(t.adapter.execute(INSERT, ["b"]))
         sibling.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(sibling, BOUND_S)
         settling = lease.settling
         assert (settling is not None, settling.done()) == (True, False)
-        await asyncio.wait_for(t.db.close(), BOUND_S)
+        first = t.adapter._closing
+        closing = asyncio.ensure_future(t.db.close())
+        await turns_until(lambda: t.adapter._closing is not first)  # the close has begun
+        assert (closing.done(), settling.done()) == (False, False)  # it waits for the settling
+        hold.release()
+        await asyncio.wait_for(closing, BOUND_S)
         assert (settling.done(), lease.settling, t.adapter._reclaims) == (True, None, set())
-        await asyncio.wait_for(slow, BOUND_S)  # it had run before the close
+        await hold.done(slow)  # it had run before the close
         del slow, sibling, settling
         gc.collect()
         await asyncio.sleep(0)
