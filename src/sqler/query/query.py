@@ -35,7 +35,7 @@ def _rewritten(sql: str, promoted_fields: tuple[str, ...]) -> str:
 
 @functools.lru_cache(maxsize=1024)
 def _squeezed(sql: str, guard: str) -> str:
-    """:meth:`_WriteStatements._squeezed` of ``sql`` with ``guard``, done once per text."""
+    """:meth:`_Statements._squeezed` of ``sql`` with ``guard``, done once per text."""
     head, guard, tail = sql.partition(guard) if guard else (sql, "", "")
     return " ".join([*head.split(), guard, *tail.split()] if guard else head.split())
 
@@ -104,9 +104,11 @@ class InvariantViolationError(RuntimeError):
     """Raised when reading rows that violate expected invariants (e.g., NULL JSON)."""
 
 
-class _WriteStatements:
-    """The statements of a query's writing methods, sync and async: ``update``, ``update_one``,
-    ``update_n`` and ``delete`` take their SET, WHERE and picked rows from here.
+class _Statements:
+    """The statements both query classes send, sync and async, built once: the SELECT and the
+    aggregates (``_build_query``, ``_build_aggregate_query``, ``_build_grouped_aggregate_query``,
+    with ``sql``, ``params`` and ``debug``), and the SET, WHERE and picked rows of ``update``,
+    ``update_one``, ``update_n`` and ``delete``.
 
     On a versioned query (one whose table has the ``_version`` column) every update moves
     ``_version`` by one, in the same statement, and ``_version`` cannot be set: it is the
@@ -127,6 +129,11 @@ class _WriteStatements:
     _include_version: bool
     _order_fields: Optional[list[tuple[str, bool]]]
     _promoted_fields: list[str]
+    _limit: Optional[int]
+    _offset: Optional[int]
+    _distinct: bool
+    _group_by_fields: list[str]
+    _having: Optional[SQLerExpression]
 
     _db: Any = None
     _use = ""
@@ -161,6 +168,178 @@ class _WriteStatements:
         if self._promoted_fields:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         return sql
+
+    def _field_expr(self, field: str) -> str:
+        """Return the SQL expression for a field (promoted or json_extract)."""
+        if field == "_id":
+            return "_id"
+        if field == "_version":
+            return "_version"
+        if self._promoted_fields and field in self._promoted_fields:
+            return field
+        return f"json_extract(data, '$.{field}')"
+
+    def _build_grouped_aggregate_query(
+        self, func: str, field: Optional[str] = None
+    ) -> tuple[str, list[Any]]:
+        """Build a grouped aggregate query.
+
+        Returns:
+            tuple[str, list[Any]]: SQL string and parameter list.
+        """
+        group_exprs = [self._field_expr(f) for f in self._group_by_fields]
+
+        if field is None:
+            agg = f"{func}(*)"
+        else:
+            if field != "_id":
+                validate_field_name(field)
+            agg = f"{func}({self._field_expr(field)})"
+
+        select_parts = group_exprs + [agg]
+        where = self._filter_sql()
+        group_by = "GROUP BY " + ", ".join(group_exprs)
+
+        having_clause = ""
+        if self._having:
+            having_sql = self._having.sql
+            # Replace pseudo-fields like _count, _sum etc with aggregate expressions
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._count'\)",
+                "COUNT(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._sum'\)",
+                agg if func == "SUM" else "SUM(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._avg'\)",
+                agg if func == "AVG" else "AVG(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._min'\)",
+                agg if func == "MIN" else "MIN(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._max'\)",
+                agg if func == "MAX" else "MAX(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_clause = f"HAVING {having_sql}"
+
+        sql = f"SELECT {', '.join(select_parts)} FROM {self._table} {where} {group_by} {having_clause}".strip()
+        sql = self._squeezed(sql)
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
+
+        params = list(self._expression.params) if self._expression else []
+        if self._having:
+            params.extend(self._having.params)
+        return sql, params
+
+    def _build_query(self, *, include_id: bool = False) -> tuple[str, list[Any]]:
+        """Build the SELECT statement and parameters.
+
+        Args:
+            include_id: When True, select ``_id, data`` instead of only
+                ``data``.
+
+        Returns:
+            tuple[str, list[Any]]: SQL string and parameter list.
+        """
+        where = self._filter_sql()
+        order = ""
+        if self._order_fields:
+            parts = []
+            for field_name, is_desc in self._order_fields:
+                part = f"json_extract(data, '$.{field_name}')"
+                if is_desc:
+                    part += " DESC"
+                parts.append(part)
+            order = "ORDER BY " + ", ".join(parts)
+        elif self._order:
+            order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
+                " DESC" if self._desc else ""
+            )
+        limit_offset = ""
+        if self._limit is not None:
+            limit_offset = f"LIMIT {self._limit}"
+            if self._offset is not None:
+                limit_offset += f" OFFSET {self._offset}"
+        elif self._offset is not None:
+            # SQLite requires LIMIT with OFFSET, use -1 for unlimited
+            limit_offset = f"LIMIT -1 OFFSET {self._offset}"
+
+        distinct_kw = "DISTINCT " if self._distinct else ""
+        if include_id:
+            select = "_id, data" + (", _version" if self._include_version else "")
+            if self._promoted_fields:
+                select += ", " + ", ".join(self._promoted_fields)
+        else:
+            select = "data"
+        sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
+        sql = self._squeezed(sql)
+        # Rewrite meta columns (_id, _version) from json_extract to direct column
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
+        params = self._expression.params if self._expression else []
+        return sql, params
+
+    def _build_aggregate_query(
+        self, func: str, field: Optional[str] = None
+    ) -> tuple[str, list[Any]]:
+        """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX).
+
+        Args:
+            func: Aggregate function name.
+            field: Optional field to aggregate on.
+
+        Returns:
+            tuple[str, list[Any]]: SQL string and parameter list.
+        """
+        if field is not None and field != "_id":
+            validate_field_name(field)
+        where = self._filter_sql()
+        if field is None:
+            select = f"{func}(*)"
+        elif field == "_id":
+            select = f"{func}(_id)"
+        elif self._promoted_fields and field in self._promoted_fields:
+            select = f"{func}({field})"
+        else:
+            select = f"{func}(json_extract(data, '$.{field}'))"
+        sql = f"SELECT {select} FROM {self._table} {where}".strip()
+        sql = self._squeezed(sql)
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
+        params = self._expression.params if self._expression else []
+        return sql, params
+
+    @property
+    def sql(self) -> str:
+        """Return the current SELECT SQL string."""
+        return self._build_query()[0]
+
+    @property
+    def params(self) -> list[Any]:
+        """Return the current parameter list."""
+        return self._build_query()[1]
+
+    def debug(self) -> tuple[str, list[Any]]:
+        """Return (sql, params) for debugging."""
+        return self._build_query()
 
     def _write_checks(self, fields: dict, n: Optional[int] = None) -> None:
         """The refusals of an update, before any statement is sent."""
@@ -281,7 +460,7 @@ class _WriteStatements:
         return self._squeezed(sql), params
 
 
-class SQLerQuery(_WriteStatements):
+class SQLerQuery(_Statements):
     """Build and execute chainable queries against a table.
 
     Queries are immutable; chaining methods returns new query instances. By
@@ -417,14 +596,14 @@ class SQLerQuery(_WriteStatements):
         """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        _, cur = self._execute(lambda q: q._build_query(include_id=include_id, include_version=False))
+        _, cur = self._execute(lambda q: q._build_query(include_id=include_id))
         return [] if cur is None else cur.fetchall()
 
     def _iter_rows(self, *, include_id: bool = False) -> Iterator[tuple]:
         """Yield this query's rows one at a time; nothing when its table is missing."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        _, cur = self._execute(lambda q: q._build_query(include_id=include_id, include_version=False))
+        _, cur = self._execute(lambda q: q._build_query(include_id=include_id))
         if cur is None:
             return
         try:
@@ -584,84 +763,6 @@ class SQLerQuery(_WriteStatements):
         """
         return self._clone(having=expression)
 
-    def _field_expr(self, field: str) -> str:
-        """Return the SQL expression for a field (promoted or json_extract)."""
-        if field == "_id":
-            return "_id"
-        if field == "_version":
-            return "_version"
-        if self._promoted_fields and field in self._promoted_fields:
-            return field
-        return f"json_extract(data, '$.{field}')"
-
-    def _build_grouped_aggregate_query(
-        self, func: str, field: Optional[str] = None
-    ) -> tuple[str, list[Any]]:
-        """Build a grouped aggregate query.
-
-        Returns:
-            tuple[str, list[Any]]: SQL string and parameter list.
-        """
-        group_exprs = [self._field_expr(f) for f in self._group_by_fields]
-
-        if field is None:
-            agg = f"{func}(*)"
-        else:
-            if field != "_id":
-                validate_field_name(field)
-            agg = f"{func}({self._field_expr(field)})"
-
-        select_parts = group_exprs + [agg]
-        where = self._filter_sql()
-        group_by = "GROUP BY " + ", ".join(group_exprs)
-
-        having_clause = ""
-        if self._having:
-            having_sql = self._having.sql
-            # Replace pseudo-fields like _count, _sum etc with aggregate expressions
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._count'\)",
-                "COUNT(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._sum'\)",
-                agg if func == "SUM" else "SUM(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._avg'\)",
-                agg if func == "AVG" else "AVG(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._min'\)",
-                agg if func == "MIN" else "MIN(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._max'\)",
-                agg if func == "MAX" else "MAX(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_clause = f"HAVING {having_sql}"
-
-        sql = f"SELECT {', '.join(select_parts)} FROM {self._table} {where} {group_by} {having_clause}".strip()
-        sql = self._squeezed(sql)
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-
-        params = list(self._expression.params) if self._expression else []
-        if self._having:
-            params.extend(self._having.params)
-        return sql, params
-
     def _execute_grouped_aggregate(
         self, func: str, field: Optional[str] = None
     ) -> list[dict[str, Any]]:
@@ -679,104 +780,6 @@ class SQLerQuery(_WriteStatements):
             d[agg_key] = row[len(self._group_by_fields)]
             results.append(d)
         return results
-
-    def _build_query(
-        self, *, include_id: bool = False, include_version: bool = False
-    ) -> tuple[str, list[Any]]:
-        """Build the SELECT statement and parameters.
-
-        Args:
-            include_id: When True, select ``_id, data`` instead of only
-                ``data``.
-
-        Returns:
-            tuple[str, list[Any]]: SQL string and parameter list.
-        """
-        where = self._filter_sql()
-        order = ""
-        if self._order_fields:
-            parts = []
-            for field_name, is_desc in self._order_fields:
-                part = f"json_extract(data, '$.{field_name}')"
-                if is_desc:
-                    part += " DESC"
-                parts.append(part)
-            order = "ORDER BY " + ", ".join(parts)
-        elif self._order:
-            order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
-                " DESC" if self._desc else ""
-            )
-        limit_offset = ""
-        if self._limit is not None:
-            limit_offset = f"LIMIT {self._limit}"
-            if self._offset is not None:
-                limit_offset += f" OFFSET {self._offset}"
-        elif self._offset is not None:
-            # SQLite requires LIMIT with OFFSET, use -1 for unlimited
-            limit_offset = f"LIMIT -1 OFFSET {self._offset}"
-
-        distinct_kw = "DISTINCT " if self._distinct else ""
-        if include_id:
-            select = "_id, data" + (
-                ", _version" if (include_version or self._include_version) else ""
-            )
-            if self._promoted_fields:
-                select += ", " + ", ".join(self._promoted_fields)
-        else:
-            select = "data"
-        sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
-        sql = self._squeezed(sql)
-        # Rewrite meta columns (_id, _version) from json_extract to direct column
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-        params = self._expression.params if self._expression else []
-        return sql, params
-
-    def _build_aggregate_query(
-        self, func: str, field: Optional[str] = None
-    ) -> tuple[str, list[Any]]:
-        """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX).
-
-        Args:
-            func: Aggregate function name.
-            field: Optional field to aggregate on.
-
-        Returns:
-            tuple[str, list[Any]]: SQL string and parameter list.
-        """
-        if field is not None and field != "_id":
-            validate_field_name(field)
-        where = self._filter_sql()
-        if field is None:
-            select = f"{func}(*)"
-        elif field == "_id":
-            select = f"{func}(_id)"
-        elif self._promoted_fields and field in self._promoted_fields:
-            select = f"{func}({field})"
-        else:
-            select = f"{func}(json_extract(data, '$.{field}'))"
-        sql = f"SELECT {select} FROM {self._table} {where}".strip()
-        sql = self._squeezed(sql)
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-        params = self._expression.params if self._expression else []
-        return sql, params
-
-    @property
-    def sql(self) -> str:
-        """Return the current SELECT SQL string."""
-        return self._build_query()[0]
-
-    @property
-    def params(self) -> list[Any]:
-        """Return the current parameter list."""
-        return self._build_query()[1]
-
-    def debug(self) -> tuple[str, list[Any]]:
-        """Return (sql, params) for debugging."""
-        return self._build_query()
 
     def explain(self, adapter) -> list[tuple]:
         """Run EXPLAIN <sql> using the provided adapter; return raw rows."""
@@ -1005,7 +1008,7 @@ class SQLerQuery(_WriteStatements):
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        query, cur = self._execute(lambda q: q._build_query(include_id=True, include_version=False))
+        query, cur = self._execute(lambda q: q._build_query(include_id=True))
         if cur is None:
             return []
         return query._documents(cur.fetchall())
@@ -1081,7 +1084,7 @@ class SQLerQuery(_WriteStatements):
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        query, cur = self._execute(lambda q: q._build_query(include_id=True, include_version=False))
+        query, cur = self._execute(lambda q: q._build_query(include_id=True))
         if cur is None:
             return
         try:
