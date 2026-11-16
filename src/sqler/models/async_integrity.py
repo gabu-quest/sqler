@@ -8,7 +8,7 @@ import json
 from typing import TYPE_CHECKING
 
 from sqler import registry
-from sqler.models import _write_rules, integrity
+from sqler.models import _refs, _write_rules, integrity
 
 # find_ref_paths stays importable from here, as it was
 from sqler.models.integrity import (  # noqa: F401
@@ -25,7 +25,6 @@ from sqler.utils import is_ref_dict, validate_table_name
 if TYPE_CHECKING:
     from sqler.db.async_db import AsyncSQLerDB
 
-_is_valid_table_name = integrity._is_valid_table_name
 
 
 async def _aread(db: "AsyncSQLerDB", read: Read) -> Rows:
@@ -148,7 +147,7 @@ async def async_validate_references(db: "AsyncSQLerDB"):
                 if is_ref_dict(value):
                     t, i = value["_table"], value["_id"]
                     # Validate table name to prevent SQL injection
-                    if not _is_valid_table_name(t):
+                    if not _refs._is_table_name(t):
                         # Invalid table name in reference - treat as broken
                         broken.append(
                             BrokenRef(

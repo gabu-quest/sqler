@@ -32,24 +32,6 @@ Read = tuple[str, str, list]
 Rows = Union[list, sqlite3.OperationalError, None]
 
 
-def _is_valid_table_name(table: str) -> bool:
-    """Check if a table name is valid (safe for SQL use).
-
-    Args:
-        table: Table name to validate.
-
-    Returns:
-        bool: True if the table name is valid.
-    """
-    from sqler.exceptions import InvalidTableNameError
-
-    try:
-        validate_table_name(table)
-    except InvalidTableNameError:
-        return False
-    return True
-
-
 # ----- which tables can refer to a table --------------------------------------------------
 
 # the position of a class whose annotations are not all known yet: a reference anywhere
@@ -450,7 +432,7 @@ def validate_references(db: "SQLerDB"):
                 if is_ref_dict(value):
                     t, i = value["_table"], value["_id"]
                     # Validate table name to prevent SQL injection
-                    if not _is_valid_table_name(t):
+                    if not _refs._is_table_name(t):
                         # Invalid table name in reference - treat as broken
                         broken.append(
                             BrokenRef(

@@ -10,7 +10,6 @@ from __future__ import annotations
 from functools import lru_cache
 
 from sqler.exceptions import NotBoundError
-from sqler.query.query import is_missing_table
 
 
 def _pluralize(word: str) -> str:
@@ -194,8 +193,6 @@ def _instance_binding(inst: object, db=None):
     return db, home.table
 
 
-# the one check, in the query layer; the old name stays for its callers here
-_is_missing_table = is_missing_table
 
 
 def _read_document(db, table: str, rid, versioned: bool = False):
