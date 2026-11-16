@@ -1098,7 +1098,15 @@ before it raises `sqlite3.OperationalError: database is locked`. Pass it to
 `SQLiteAdapter(...)`, `AsyncSQLiteAdapter(...)`, their `on_disk()` and `in_memory()`, or
 `SQLerDB`/`AsyncSQLerDB` `.on_disk()` and `.in_memory()`; it is SQLite's `busy_timeout` on
 every connection the adapter opens (every connection of an async pool), and on a plain
-sync `":memory:"` database also the wait for another thread's transaction. The async
+sync `":memory:"` database also the wait for another thread's transaction. On a
+shared-cache in-memory database (the default of `in_memory()`), where SQLite calls no busy
+handler, the adapter waits for another connection's table lock itself, sync and async
+alike: the statement goes through once the lock is released, or raises
+`sqlite3.OperationalError: database table is locked` once `timeout_ms` has passed, and is
+never run twice. `timeout_ms=0` waits for nothing. `executescript()`, and `executemany()`
+given rows from an iterator rather than a list or tuple, raise at once: their earlier
+statements or rows have run or been taken and cannot be sent again. The async
+adapter's `close()` ends such a wait with `NotConnectedError`. The async
 adapter has a second wait, `acquire_timeout` (seconds): the wait for a connection of its
 own pool and for a turn in a transaction tasks share; `timeout_ms` is the wait for a lock
 another connection or process holds. A `PRAGMA busy_timeout = N` in `pragmas` says the same thing:
@@ -1106,8 +1114,7 @@ without `timeout_ms` it sets the number, and beside a `timeout_ms` that differs 
 raises `ValueError`. `connect()` on the async adapter opens its pool once: on a connected
 adapter, or beside another `connect()` or a statement's own connect, it opens nothing more;
 a `connect()` that fails closes every connection it opened and raises the error that made it
-fail. A shared-cache in-memory database does not wait: SQLite calls no busy
-handler for its table locks, so such a statement raises "database table is locked" at once.
+fail.
 
 ### Async transactions shared by tasks
 

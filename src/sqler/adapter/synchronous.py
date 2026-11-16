@@ -5,7 +5,7 @@ import time
 import uuid
 import weakref
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from typing import Any, ContextManager, NoReturn, Optional, Self
 
@@ -118,12 +118,23 @@ def _roll_back(conn: sqlite3.Connection, shared: Optional["_SharedConnection"], 
 
 
 def _end_outermost(
-    conn: sqlite3.Connection, commit: bool, shared: Optional["_SharedConnection"], local: "_ThreadState"
+    conn: sqlite3.Connection,
+    commit: bool,
+    shared: Optional["_SharedConnection"],
+    local: "_ThreadState",
+    timeout_ms: int,
 ) -> None:
-    """Commit or roll back the thread's outermost transaction on ``conn``."""
+    """Commit or roll back the thread's outermost transaction on ``conn``; a commit waits
+    for another connection's shared-cache lock (``_through_lock``)."""
     if commit:
         local.read_ahead()
-        conn.commit()
+        try:
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            if exc.sqlite_errorcode != _SHARED_CACHE_LOCK:
+                raise
+            # a failed commit leaves the transaction as it was
+            _through_lock(exc, timeout_ms, conn.commit)
         return
     _roll_back(conn, shared, local)
     if shared is not None and shared.unended is not None:
@@ -151,6 +162,58 @@ def _lock_wait(timeout_ms: Optional[int]) -> tuple[int, bool]:
     if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 0 <= timeout_ms < 2**31:
         raise ValueError(f"timeout_ms must be a whole number of milliseconds from 0 to 2**31 - 1, not {timeout_ms!r}")
     return timeout_ms, True
+
+
+# What ``sqlite_errorcode`` holds when another connection's shared-cache lock stops a statement.
+_SHARED_CACHE_LOCK = sqlite3.SQLITE_LOCKED_SHAREDCACHE
+# The sleeps of SQLite's own busy handler, in milliseconds; the last one repeats.
+_LOCK_PAUSES_MS = (1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100)
+
+
+def _through_lock(
+    error: sqlite3.OperationalError,
+    timeout_ms: int,
+    send: Any,
+    *args: Any,
+    closed: Optional[Callable[[], bool]] = None,
+) -> Any:
+    """``send(*args)`` raised ``error``: wait out another connection's shared-cache lock.
+
+    SQLite calls no busy handler for a shared-cache lock (``SQLITE_LOCKED_SHAREDCACHE``, the
+    table locks of a shared-cache in-memory database), so ``busy_timeout`` does not reach it.
+    For that error alone ``send(*args)`` is sent again, with the pauses SQLite's busy handler
+    makes between its tries, until it goes through (its result is returned) or ``timeout_ms``
+    has passed since the first try failed (SQLite's last error is raised). Every other error,
+    a lock of the same connection (plain ``SQLITE_LOCKED``) among them, and every error with
+    ``timeout_ms`` 0, is raised as it is. ``closed``: asked before each try; once it answers
+    True the wait ends with ``NotConnectedError``.
+
+    A statement that meets this lock has changed nothing: SQLite takes a statement's table
+    locks in its prologue, before it reads or writes a row, and a failed statement is undone
+    as a whole. Only a ``send`` whose first try changed nothing when it raised may come here.
+
+    The sync adapter's senders compare the code themselves and call this for that error
+    alone: any other error leaves their ``except`` with no call made, so an interrupt
+    pending as the statement failed is raised where it was before the wait existed.
+    """
+    if error.sqlite_errorcode != _SHARED_CACHE_LOCK or timeout_ms <= 0:
+        raise error
+    deadline = time.monotonic() + timeout_ms / 1000
+    tries = 0
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise error
+        time.sleep(min(_LOCK_PAUSES_MS[min(tries, len(_LOCK_PAUSES_MS) - 1)] / 1000, left))
+        tries += 1
+        if closed is not None and closed():
+            raise NotConnectedError("the adapter was closed while a statement waited for another connection's lock")
+        try:
+            return send(*args)
+        except sqlite3.OperationalError as exc:
+            if exc.sqlite_errorcode != _SHARED_CACHE_LOCK:
+                raise
+            error = exc
 
 
 def _agreed_lock_wait(timeout_ms: int, given: bool, busy: int) -> int:
@@ -609,11 +672,10 @@ class SQLiteAdapter(AdapterABC):
             timeout_ms: How long a statement waits for another connection's lock, in
                 milliseconds (SQLite's ``busy_timeout`` on every connection the adapter
                 opens; on a plain ``":memory:"`` adapter, also the wait for another
-                thread's transaction). It does not reach a shared-cache in-memory
-                database: SQLite calls no busy handler for a table lock there, so a
-                statement that meets one raises ``sqlite3.OperationalError`` ("database
-                table is locked") at once.
-                Not given: a ``busy_timeout`` pragma in ``pragmas``, else 5000. Given
+                thread's transaction; on a shared-cache in-memory database, the wait for
+                another connection's table lock, after which the statement raises
+                ``sqlite3.OperationalError`` ("database table is locked")). 0 waits for
+                nothing. Not given: a ``busy_timeout`` pragma in ``pragmas``, else 5000. Given
                 beside such a pragma, the two must agree (``connect()`` raises
                 ``ValueError`` otherwise).
 
@@ -721,14 +783,25 @@ class SQLiteAdapter(AdapterABC):
         conn.row_factory = sqlite3.Row
         try:
             cur = conn.cursor()
+
+            def send(pragma: str) -> sqlite3.Cursor:
+                # A connection reads the schema with its first statement; on a shared-cache
+                # database a table another connection has made and not committed locks it.
+                try:
+                    return cur.execute(pragma)
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode != _SHARED_CACHE_LOCK:
+                        raise
+                    return _through_lock(exc, self.timeout_ms, cur.execute, pragma)
+
             # not connect(timeout=): Python truncates the seconds to milliseconds (1.001 s waits 1000 ms)
-            cur.execute(f"PRAGMA busy_timeout = {self.timeout_ms}")
+            send(f"PRAGMA busy_timeout = {self.timeout_ms}")
             for pragma in self.pragmas:
-                cur.execute(pragma)
+                send(pragma)
             conn.commit()
             if self.pragmas:
                 # SQLite has read the pragmas: its busy_timeout is the one number
-                busy = cur.execute("PRAGMA busy_timeout").fetchone()[0]
+                busy = send("PRAGMA busy_timeout").fetchone()[0]
                 self.timeout_ms = _agreed_lock_wait(self.timeout_ms, self._timeout_given, busy)
         except BaseException:
             conn.close()  # a connection that could not be set up is not left open
@@ -867,9 +940,19 @@ class SQLiteAdapter(AdapterABC):
             if params is not None:
                 if isinstance(params, list):
                     params = tuple(params)
-                _SEND(cursor, query, params)
+                try:
+                    _SEND(cursor, query, params)
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode != _SHARED_CACHE_LOCK:
+                        raise
+                    _through_lock(exc, self.timeout_ms, _SEND, cursor, query, params)
             else:
-                _SEND(cursor, query)
+                try:
+                    _SEND(cursor, query)
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode != _SHARED_CACHE_LOCK:
+                        raise
+                    _through_lock(exc, self.timeout_ms, _SEND, cursor, query)
             if cursor.description is not None:
                 if not read_all:
                     local.unread.append(weakref.ref(cursor))
@@ -906,7 +989,9 @@ class SQLiteAdapter(AdapterABC):
 
         Inside an explicit transaction the rows are part of it (a rollback
         removes them); outside one they are committed, and a failure stores
-        none of the rows.
+        none of the rows. ``param_list`` given as a list or tuple waits for a
+        shared-cache table lock as ``execute`` does; any other iterable raises
+        at once, as its rows cannot be sent a second time.
         """
         shared = self._shared
         if shared is None:
@@ -923,9 +1008,25 @@ class SQLiteAdapter(AdapterABC):
         inside = self._local.txn_depth > 0
         try:
             cursor = conn.cursor()
-            cursor.executemany(query, param_list or [])
+            rows = param_list or []
+            try:
+                cursor.executemany(query, rows)
+            except sqlite3.OperationalError as exc:
+                if exc.sqlite_errorcode != _SHARED_CACHE_LOCK:
+                    raise
+                # The lock is met by the first row's statement, before any row is written:
+                # the statement's table locks, once taken, are held to the end of the
+                # transaction. A list or tuple is sent again whole; an iterator has given up
+                # rows that cannot be sent again, and raises as it is.
+                wait = self.timeout_ms if isinstance(rows, (list, tuple)) else 0
+                _through_lock(exc, wait, cursor.executemany, query, rows)
             if not inside:
-                conn.commit()
+                try:
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode != _SHARED_CACHE_LOCK:
+                        raise
+                    _through_lock(exc, self.timeout_ms, conn.commit)
         except BaseException as exc:
             if inside:
                 self._still_open(conn, exc)
@@ -943,7 +1044,10 @@ class SQLiteAdapter(AdapterABC):
         """Run a script of statements and commit.
 
         Raises ``QueryError`` inside an explicit transaction: SQLite's driver commits
-        the open transaction before it runs a script, which would end it unseen.
+        the open transaction before it runs a script, which would end it unseen. A
+        script that meets another connection's shared-cache table lock raises
+        ``sqlite3.OperationalError`` at once: the statements before the one that met
+        it have run, so the script is not sent again.
         """
         if self._txn_depth > 0:
             if self._local.broken is not None:
@@ -1001,7 +1105,12 @@ class SQLiteAdapter(AdapterABC):
 
     def _commit(self, conn: sqlite3.Connection) -> None:
         try:
-            conn.commit()
+            try:
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                if exc.sqlite_errorcode != _SHARED_CACHE_LOCK:
+                    raise
+                _through_lock(exc, self.timeout_ms, conn.commit)
         except BaseException as exc:
             self._end_failed_implicit_transaction(conn)
             converted = unique_violation_from(exc)
@@ -1044,7 +1153,14 @@ class SQLiteAdapter(AdapterABC):
         depth = self._txn_depth  # nested: a savepoint
         if depth == 0 and conn.in_transaction:
             raise TransactionStateError(_PENDING)
-        conn.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT sp_{depth}")
+        statement = "BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT sp_{depth}"
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:
+            if exc.sqlite_errorcode != _SHARED_CACHE_LOCK:
+                raise
+            # a failed BEGIN opened nothing
+            _through_lock(exc, self.timeout_ms, conn.execute, statement)
         self._txn_depth = depth + 1
 
     def end_transaction(self, *, commit: bool = True) -> None:
@@ -1076,12 +1192,12 @@ class SQLiteAdapter(AdapterABC):
                 local.txn_depth = 0
                 local.broken = None
                 if shared is None:
-                    _end_outermost(local.conn, commit and failed is None, None, local)
+                    _end_outermost(local.conn, commit and failed is None, None, local, self.timeout_ms)
                 else:
                     with shared.lock:
                         conn = shared.take(local)
                         try:
-                            _end_outermost(conn, commit and failed is None, shared, local)
+                            _end_outermost(conn, commit and failed is None, shared, local, self.timeout_ms)
                         finally:
                             shared.give(local)
             except BaseException:

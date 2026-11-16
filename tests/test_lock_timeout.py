@@ -9,6 +9,9 @@ the measured wait are the same.
 import sqlite3
 import threading
 import time
+import uuid
+from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 from sqler import SQLerDB
@@ -216,42 +219,324 @@ def test_timeout_ms_and_a_pragma_that_disagree_raise_at_connect_naming_both(path
     adapter.close()
 
 
-# ---- a shared-cache in-memory database: no busy handler ----
+
+# ---- a shared-cache in-memory database: the same wait ----
+#
+# SQLite calls no busy handler for a shared-cache table lock (SQLITE_LOCKED_SHAREDCACHE): the
+# adapter waits for it itself, up to ``timeout_ms``. A holder keeps its lock until its
+# ``release()``; ``pauses.first`` is set when the waiter starts to wait.
 
 
-@pytest.mark.parametrize("statement", ["INSERT INTO t VALUES ('mine')", "SELECT v FROM t"])
-def test_a_shared_cache_memory_database_raises_at_once_on_another_connections_table_lock(statement):
-    """SQLite calls no busy handler for a shared-cache table lock: ``timeout_ms`` does not reach it."""
-    adapter = SQLiteAdapter.in_memory(shared=True, timeout_ms=2000)
+@pytest.fixture
+def pauses(monkeypatch):
+    """The pauses of the adapter's lock wait: ``count``, and ``first``, set at the first."""
+    real = time.sleep
+    seen = SimpleNamespace(count=0, first=threading.Event())
+
+    def pause(seconds: float) -> None:
+        seen.count += 1
+        seen.first.set()
+        real(seconds)
+
+    monkeypatch.setattr(time, "sleep", pause)
+    return seen
+
+
+def _shared(timeout_ms: int = 5000, name: Optional[str] = None, seed: bool = True) -> SQLiteAdapter:
+    """A shared-cache in-memory adapter; ``seed``: ``t`` made holding 'a' and 'b', ``u`` holding 'x' and 'y'."""
+    adapter = SQLiteAdapter.in_memory(shared=True, name=name, timeout_ms=timeout_ms)
     adapter.connect()
-    adapter.execute("CREATE TABLE t (v TEXT)")
+    if seed:
+        adapter.executescript(
+            "CREATE TABLE t (v TEXT); CREATE TABLE u (v TEXT);"
+            "INSERT INTO t VALUES ('a'), ('b'); INSERT INTO u VALUES ('x'), ('y');"
+        )
+    return adapter
+
+
+class _Holder:
+    """A thread holding a lock on ``adapter``'s database until ``release()``.
+
+    ``write``: a transaction that has written 'held' into ``t`` (committed at the release).
+    ``read``: a SELECT over ``table`` with one of its rows read, its statement open.
+    ``create``: a transaction that has made a table ``made`` (committed at the release); the
+    schema is locked, which the first statement of another thread's new connection meets.
+    """
+
+    def __init__(self, adapter: SQLiteAdapter, kind: str, table: str = "t"):
+        self.held, self.done = threading.Event(), threading.Event()
+        self.thread = threading.Thread(target=self._run, args=(adapter, kind, table))
+        self.thread.start()
+        assert self.held.wait(10)
+
+    def _run(self, adapter: SQLiteAdapter, kind: str, table: str) -> None:
+        if kind == "write":
+            adapter.begin_transaction()
+            adapter.execute("INSERT INTO t VALUES ('held')")
+            self.held.set()
+            self.done.wait(30)
+            adapter.end_transaction(commit=True)
+        elif kind == "create":
+            adapter.begin_transaction()
+            adapter.execute("CREATE TABLE made (v TEXT)")
+            self.held.set()
+            self.done.wait(30)
+            adapter.end_transaction(commit=True)
+        else:
+            cursor = adapter.execute(f"SELECT v FROM {table}")
+            cursor.fetchone()
+            self.held.set()
+            self.done.wait(30)
+            cursor.close()
+
+    def release(self) -> None:
+        self.done.set()
+        self.thread.join(10)
+        assert not self.thread.is_alive()
+
+
+class _Waiter:
+    """``work()`` in a thread of its own: ``result`` or ``error``, and ``finished``."""
+
+    def __init__(self, work):
+        self.result: object = None
+        self.error: Optional[BaseException] = None
+        self.finished = threading.Event()
+        self.thread = threading.Thread(target=self._run, args=(work,))
+        self.thread.start()
+
+    def _run(self, work) -> None:
+        try:
+            self.result = work()
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            self.finished.set()
+
+    def join(self) -> None:
+        self.thread.join(30)
+        assert not self.thread.is_alive()
+
+
+def _values(adapter: SQLiteAdapter, table: str = "t") -> list[str]:
+    return [row[0] for row in adapter.execute(f"SELECT v FROM {table} ORDER BY rowid").fetchall()]
+
+
+def _insert_mine(adapter: SQLiteAdapter) -> None:
+    adapter.execute("INSERT INTO t VALUES ('mine')")
     adapter.auto_commit()
-    held, done = threading.Event(), threading.Event()
-    outcome: list[object] = []
 
-    def holder() -> None:
-        adapter.begin_transaction()
-        adapter.execute("INSERT INTO t VALUES ('held')")
-        held.set()
-        done.wait(10)
-        adapter.end_transaction(commit=False)
 
-    def other() -> None:
+def _select(adapter: SQLiteAdapter) -> list[str]:
+    return [row[0] for row in adapter.execute("SELECT v FROM t ORDER BY rowid").fetchall()]
+
+
+def _many(adapter: SQLiteAdapter) -> None:
+    adapter.executemany("INSERT INTO t VALUES (?)", [["m1"], ["m2"], ["m3"]])
+
+
+def _many_inside(adapter: SQLiteAdapter) -> None:
+    adapter.begin_transaction()
+    adapter.executemany("INSERT INTO t VALUES (?)", [["m1"], ["m2"], ["m3"]])
+    adapter.end_transaction(commit=True)
+
+
+def _begin(adapter: SQLiteAdapter) -> None:
+    adapter.begin_transaction()
+    adapter.execute("INSERT INTO t VALUES ('mine')")
+    adapter.end_transaction(commit=True)
+
+
+def _inside(adapter: SQLiteAdapter) -> None:
+    adapter.begin_transaction()
+    adapter.execute("INSERT INTO u VALUES ('mine')")
+    adapter.execute("INSERT INTO t VALUES ('mine')")  # meets the reader's lock on t
+    adapter.end_transaction(commit=True)
+
+
+# (the lock held, what the waiter does, what it returns, t at the end, u at the end)
+WAITS = {
+    "insert": ("write", _insert_mine, None, ["a", "b", "held", "mine"], ["x", "y"]),
+    "select": ("write", _select, ["a", "b", "held"], ["a", "b", "held"], ["x", "y"]),
+    "executemany": ("read", _many, None, ["a", "b", "m1", "m2", "m3"], ["x", "y"]),
+    "executemany-inside-a-transaction": ("read", _many_inside, None, ["a", "b", "m1", "m2", "m3"], ["x", "y"]),
+    "begin_transaction": ("write", _begin, None, ["a", "b", "held", "mine"], ["x", "y"]),
+    "inside-a-transaction": ("read", _inside, None, ["a", "b", "mine"], ["x", "y", "mine"]),
+    "a-threads-first-statement": ("create", _insert_mine, None, ["a", "b", "mine"], ["x", "y"]),
+}
+
+
+@pytest.mark.parametrize("case", list(WAITS))
+def test_a_statement_that_meets_another_connections_table_lock_waits_for_it_and_runs_once(case, pauses):
+    kind, work, returned, t_rows, u_rows = WAITS[case]
+    adapter = _shared()
+    try:
+        holder = _Holder(adapter, kind)
+        waiter = _Waiter(lambda: work(adapter))
+        try:
+            assert pauses.first.wait(10)  # it waits ...
+            assert not waiter.finished.is_set()  # ... and has not finished while the lock is held
+        finally:
+            holder.release()
+        waiter.join()
+        assert (waiter.error, waiter.result) == (None, returned)
+        assert (_values(adapter, "t"), _values(adapter, "u")) == (t_rows, u_rows)
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("kind", ["write", "read"])
+def test_a_lock_that_is_not_released_raises_sqlites_error_once_timeout_ms_has_passed(kind, clock_tick):
+    adapter = _shared(timeout_ms=200)
+    try:
+        holder = _Holder(adapter, kind)
+        try:
+            start = time.monotonic()
+            with pytest.raises(sqlite3.OperationalError) as raised:
+                adapter.execute("INSERT INTO t VALUES ('mine')")
+            elapsed = time.monotonic() - start
+            in_transaction = adapter._conn().in_transaction  # the failed write left nothing open
+        finally:
+            holder.release()
+        assert (str(raised.value).split(":")[0], raised.value.sqlite_errorcode) == (
+            "database table is locked",
+            sqlite3.SQLITE_LOCKED_SHAREDCACHE,
+        )
+        assert elapsed >= 0.2 - clock_tick
+        assert in_transaction is False
+        assert _values(adapter) == (["a", "b", "held"] if kind == "write" else ["a", "b"])
+    finally:
+        adapter.close()
+
+
+def test_timeout_ms_zero_raises_the_shared_cache_lock_at_once(pauses):
+    adapter = _shared(timeout_ms=0)
+    try:
+        holder = _Holder(adapter, "write")
+        try:
+            with pytest.raises(sqlite3.OperationalError) as raised:
+                adapter.execute("INSERT INTO t VALUES ('mine')")
+        finally:
+            holder.release()
+        assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
+        assert _values(adapter) == ["a", "b", "held"]
+    finally:
+        adapter.close()
+
+
+def test_a_lock_of_the_same_connection_is_raised_at_once(pauses):
+    """SQLite's plain SQLITE_LOCKED (a table the connection itself is reading) is no other
+    connection's lock: no wait ends it."""
+    adapter = _shared()
+    try:
+        reading = adapter._conn().execute("SELECT v FROM t")  # a statement of the thread's own connection
+        assert reading.fetchone()[0] == "a"
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            adapter.execute("DROP TABLE t")
+        reading.close()
+        assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED, 0)
+        assert _values(adapter) == ["a", "b"]
+    finally:
+        adapter.close()
+
+
+def test_executemany_with_rows_from_an_iterator_raises_at_once(pauses):
+    """An iterator has given up the rows it was asked for: they cannot be sent a second time."""
+    adapter = _shared()
+    try:
+        holder = _Holder(adapter, "read")
+        try:
+            with pytest.raises(sqlite3.OperationalError) as raised:
+                adapter.executemany("INSERT INTO t VALUES (?)", iter([["m1"], ["m2"]]))
+        finally:
+            holder.release()
+        assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
+        assert _values(adapter) == ["a", "b"]
+    finally:
+        adapter.close()
+
+
+def test_executescript_that_meets_the_lock_raises_at_once_with_its_earlier_statements_run(pauses):
+    """The statements before the one that met the lock have run: the script is not sent again."""
+    adapter = _shared()
+    try:
+        holder = _Holder(adapter, "read")
+        try:
+            with pytest.raises(sqlite3.OperationalError) as raised:
+                adapter.executescript("INSERT INTO u VALUES ('s1'); INSERT INTO t VALUES ('s2');")
+        finally:
+            holder.release()
+        assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
+        assert (_values(adapter, "t"), _values(adapter, "u")) == (["a", "b"], ["x", "y", "s1"])
+    finally:
+        adapter.close()
+
+
+def test_two_threads_that_each_hold_what_the_other_wants_both_end_after_timeout_ms(clock_tick):
+    """A holds the write transaction (it wrote t) and wants u; B reads u through a second adapter
+    on the same database and wants t. Neither can go on: each raises once its wait has passed."""
+    name = f"lock-cycle-{uuid.uuid4().hex}"
+    first, second = _shared(timeout_ms=300, name=name), _shared(timeout_ms=300, name=name, seed=False)
+    wrote, reading = threading.Event(), threading.Event()
+    a_done, b_done = threading.Event(), threading.Event()  # each keeps its lock until both have ended
+
+    def timed(work) -> tuple[Optional[int], float]:
         start = time.monotonic()
         try:
-            adapter.execute(statement)
+            work()
         except sqlite3.OperationalError as exc:
-            outcome.append((str(exc).split(":")[0], time.monotonic() - start < 1.0))
+            return exc.sqlite_errorcode, time.monotonic() - start
+        return None, time.monotonic() - start
 
-    thread = threading.Thread(target=holder)
-    thread.start()
+    def a() -> tuple[Optional[int], float]:
+        first.begin_transaction()
+        first.execute("INSERT INTO t VALUES ('a-wrote')")
+        wrote.set()
+        assert reading.wait(10)
+        try:
+            return timed(lambda: first.execute("INSERT INTO u VALUES ('a-wants')"))
+        finally:
+            a_done.set()
+            b_done.wait(30)
+            first.end_transaction(commit=False)
+
+    def b() -> tuple[Optional[int], float]:
+        assert wrote.wait(10)
+        cursor = second.execute("SELECT v FROM u")
+        cursor.fetchone()
+        reading.set()
+        try:
+            return timed(lambda: first.execute("INSERT INTO t VALUES ('b-wants')"))
+        finally:
+            b_done.set()
+            a_done.wait(30)
+            cursor.close()
+
     try:
-        assert held.wait(10)
-        reader = threading.Thread(target=other)
-        reader.start()
-        reader.join(10)
+        threads = [_Waiter(a), _Waiter(b)]
+        for thread in threads:
+            thread.join()
+        assert [(w.error, w.result[0]) for w in threads] == [(None, sqlite3.SQLITE_LOCKED_SHAREDCACHE)] * 2
+        assert [w.result[1] >= 0.3 - clock_tick for w in threads] == [True, True]
+        assert (_values(first, "t"), _values(first, "u")) == (["a", "b"], ["x", "y"])
     finally:
-        done.set()
-        thread.join(10)
-        adapter.close()
-    assert outcome == [("database table is locked", True)]
+        second.close()
+        first.close()
+
+
+def test_a_waiter_whose_adapter_is_closed_while_it_waits_ends_with_an_error(pauses):
+    name = f"lock-close-{uuid.uuid4().hex}"
+    holding, waiting = _shared(name=name), _shared(timeout_ms=60_000, name=name, seed=False)
+    try:
+        holder = _Holder(holding, "write")
+        try:
+            waiter = _Waiter(lambda: waiting.execute("INSERT INTO t VALUES ('mine')"))
+            assert pauses.first.wait(10)
+            waiting.close()
+            waiter.join()  # it does not wait on for the 60 s it was given
+        finally:
+            holder.release()
+        assert type(waiter.error) is sqlite3.ProgrammingError  # Python's own, for a closed connection
+        assert _values(holding) == ["a", "b", "held"]
+    finally:
+        holding.close()

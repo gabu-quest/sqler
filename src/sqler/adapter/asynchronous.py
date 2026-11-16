@@ -10,7 +10,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial, reduce
-from typing import Any, List, NoReturn, Optional, Self
+from typing import Any, Callable, List, NoReturn, Optional, Self
 
 import aiosqlite
 
@@ -35,6 +35,7 @@ from .synchronous import (
     _agreed_lock_wait,
     _broken,
     _lock_wait,
+    _through_lock,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,10 +47,10 @@ DEFAULT_ACQUIRE_TIMEOUT_S: Optional[float] = 30.0
 # the sqlite3 connection that thread owns. ``connect()`` checks them (``_check_aiosqlite``).
 _AIOSQLITE_PRIVATE = ("Connection._execute", "Connection._conn")
 # The two calls aiosqlite does not document, with the number of positional arguments this
-# module passes: the queue takes itself, a function and that function's arguments (four at
+# module passes: the queue takes itself, a function and that function's arguments (five at
 # most), and a cursor is built from a connection and a sqlite3 cursor, as
 # ``Connection.execute`` builds the one it returns. ``connect()`` checks them, too.
-_AIOSQLITE_CALLS = {"Connection._execute": 6, "Cursor": 2}
+_AIOSQLITE_CALLS = {"Connection._execute": 7, "Cursor": 2}
 
 
 def _check_aiosqlite() -> None:
@@ -209,19 +210,35 @@ class _Sent:
         self._open: Optional[bool] = None
 
 
+def _no_cursor() -> None:
+    """The cursor reference of a statement no cursor reads: there is none."""
+    return None
+
+
 class _InThread:
     """What the adapter queues on a connection's thread (``_in_thread``), named as the call it makes there."""
 
+    # Each sender below waits out another connection's shared-cache table lock in the
+    # connection's thread (``_through_lock``, up to the adapter's ``timeout_ms``), as SQLite's
+    # busy handler waits there for a file lock: nothing queued behind the statement runs
+    # before it. The wait ends early once ``close()`` of the adapter has begun.
+
     @staticmethod
-    def execute(db: sqlite3.Connection, cursor: "weakref.ref[_Cursor]", sql: str, params) -> sqlite3.Cursor:
+    def execute(
+        db: sqlite3.Connection, cursor: "weakref.ref[_Cursor]", sql: str, params, adapter: "AsyncSQLiteAdapter"
+    ) -> sqlite3.Cursor:
         """Send a cursor's statement; a read ahead queued behind it finds it there.
 
         The cursor is held weakly: the thread keeps its last call until the next one, and a
         cursor nobody else holds has no reader, so it must not stay in ``_unread`` for it.
+        A statement no cursor reads (``BEGIN IMMEDIATE``) is sent with ``_no_cursor``.
         """
         held = cursor()
         try:
-            raw = db.execute(sql, params)
+            try:
+                raw = db.execute(sql, params)
+            except sqlite3.OperationalError as exc:
+                raw = _through_lock(exc, adapter.timeout_ms, db.execute, sql, params, closed=adapter._closed_under(db))
         finally:
             if held is not None:
                 held._open = db.in_transaction
@@ -230,11 +247,37 @@ class _InThread:
         return raw
 
     @staticmethod
-    def executemany(db: sqlite3.Connection, sent: _Sent, sql: str, param_list) -> sqlite3.Cursor:
+    def executemany(
+        db: sqlite3.Connection, sent: _Sent, sql: str, param_list, adapter: "AsyncSQLiteAdapter"
+    ) -> sqlite3.Cursor:
+        """``executemany``; a list or tuple of rows waits for a shared-cache lock as ``execute`` does
+        (the first row's statement meets it, before any row is written), an iterator raises at once."""
         try:
-            return db.executemany(sql, param_list)
+            try:
+                return db.executemany(sql, param_list)
+            except sqlite3.OperationalError as exc:
+                wait = adapter.timeout_ms if isinstance(param_list, (list, tuple)) else 0
+                return _through_lock(exc, wait, db.executemany, sql, param_list, closed=adapter._closed_under(db))
         finally:
             sent._open = db.in_transaction
+
+    @staticmethod
+    def set_up(db: sqlite3.Connection, pragma: str, adapter: "AsyncSQLiteAdapter") -> Optional[tuple]:
+        """Send a pragma of a new connection's set-up; its first row. A connection reads the
+        schema with its first statement, and a table another connection has made and not
+        committed locks it."""
+        try:
+            return db.execute(pragma).fetchone()
+        except sqlite3.OperationalError as exc:
+            return _through_lock(exc, adapter.timeout_ms, db.execute, pragma).fetchone()
+
+    @staticmethod
+    def commit(db: sqlite3.Connection, adapter: "AsyncSQLiteAdapter") -> None:
+        """Commit; a failed commit leaves the transaction as it was, so it is sent again."""
+        try:
+            db.commit()
+        except sqlite3.OperationalError as exc:
+            _through_lock(exc, adapter.timeout_ms, db.commit, closed=adapter._closed_under(db))
 
     @staticmethod
     def fetch(db: sqlite3.Connection, cursor: "weakref.ref[_Cursor]", fetch, *args) -> Any:
@@ -462,10 +505,10 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
     connection of this adapter's pool (running out raises ``ConnectionPoolExhaustedError``)
     and for a turn in a transaction tasks share (see below). ``timeout_ms`` is the wait for
     a lock another connection or process holds: SQLite's ``busy_timeout`` on every
-    connection, the same number and the same rules as ``SQLiteAdapter``'s ``timeout_ms``. It
-    does not reach a shared-cache in-memory database: SQLite calls no busy handler for a
-    table lock there, so a statement that meets one raises ``sqlite3.OperationalError``
-    ("database table is locked") at once.
+    connection, the same number and the same rules as ``SQLiteAdapter``'s ``timeout_ms``; on
+    a shared-cache in-memory database, the wait for another connection's table lock, after
+    which the statement raises ``sqlite3.OperationalError`` ("database table is locked"). 0
+    waits for nothing.
 
     Tasks started inside a transaction share its connection, which has one stack of
     savepoints. A context's place is its innermost savepoint still open on that stack,
@@ -523,6 +566,8 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         self._wait_total_ms = 0.0
         self._wait_max_ms = 0.0
         self._waiting = 0  # tasks waiting for a free connection right now (private, for tests)
+        # the sqlite3 connections close() is closing: a statement waiting for a lock on one stops
+        self._ending: set[sqlite3.Connection] = set()
 
     async def _open(self) -> aiosqlite.Connection:
         conn = aiosqlite.connect(self.path, uri=True)
@@ -534,15 +579,13 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         conn = await conn
         try:
             # not connect(timeout=): Python truncates the seconds to milliseconds (1.001 s waits 1000 ms)
-            await conn.execute(f"PRAGMA busy_timeout = {self.timeout_ms}")
+            await _in_thread(conn, _InThread.set_up, f"PRAGMA busy_timeout = {self.timeout_ms}", self)
             for pragma in self.pragmas:
-                await conn.execute(pragma)
+                await _in_thread(conn, _InThread.set_up, pragma, self)
             await conn.commit()
             if self.pragmas:
                 # SQLite has read the pragmas: its busy_timeout is the one number
-                cur = await conn.execute("PRAGMA busy_timeout")
-                busy = (await cur.fetchone())[0]
-                await cur.close()
+                busy = (await _in_thread(conn, _InThread.set_up, "PRAGMA busy_timeout", self))[0]
                 self.timeout_ms = _agreed_lock_wait(self.timeout_ms, self._timeout_given, busy)
         except BaseException:
             await _close_all([conn])  # a connection that could not be set up is not left open
@@ -914,9 +957,20 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         if lease is not None:
             self._pool.put_nowait(lease.conn)
 
+    def _closed_under(self, db: sqlite3.Connection) -> Callable[[], bool]:
+        """For a statement waiting for a lock on ``db``: whether ``close()`` has begun to close ``db``.
+        Read in the connection's thread; the set changes only in the event loop's."""
+        ending = self._ending
+        return lambda: db in ending
+
     async def close(self) -> None:
         closing, self._closing = self._closing, asyncio.Event()
         closing.set()  # tasks waiting for a connection or a turn raise NotConnectedError
+        for conn in self._all_conns:  # a statement waiting for a lock on one stops waiting
+            try:
+                self._ending.add(conn._conn)
+            except ValueError:  # aiosqlite: the connection is closed already
+                pass
         for lease in list(self._leases):
             self._give_back(lease)
         for conn in list(self._unread):
@@ -935,6 +989,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             # in the pool of an adapter that says it is connected
             self._connected = False
             await _close_all(conns)
+            self._ending.clear()
 
     async def execute(self, query: str, params: Optional[List[Any]] = None) -> aiosqlite.Cursor:
         """Execute a SQL query with optional parameters and return cursor."""
@@ -971,7 +1026,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         self._unread.setdefault(conn, weakref.WeakSet()).add(wrapped)
         lease.last = held = weakref.ref(wrapped)
         try:
-            sent = _in_thread(conn, _InThread.execute, held, query, params or [])
+            sent = _in_thread(conn, _InThread.execute, held, query, params or [], self)
             cursor = aiosqlite.Cursor(conn, await sent)
         except BaseException as exc:  # a cancellation counts as a failure
             self._forget(wrapped)
@@ -1006,14 +1061,19 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
 
         Inside an explicit transaction the rows are part of it (a rollback removes
         them); outside one they are committed and the connection is returned.
+        ``param_list`` given as a list or tuple waits for a shared-cache table lock as
+        ``execute`` does; any other iterable raises at once, as its rows cannot be sent
+        a second time.
         """
         conn = await self._acquire()
         lease = self._txn()
         sent = _Sent()
         try:
-            raw = await _in_thread(self._read_ahead(conn), _InThread.executemany, sent, query, param_list)
+            raw = await _in_thread(
+                self._read_ahead(conn), _InThread.executemany, sent, query, param_list, self
+            )
             if lease is None:
-                await self._read_ahead(conn).commit()
+                await _in_thread(self._read_ahead(conn), _InThread.commit, self)
         except BaseException as exc:
             await self._release_after_failure(exc, sent)
             converted = unique_violation_from(exc)
@@ -1029,7 +1089,10 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         """Run a script of statements, commit, and return the connection.
 
         Raises ``QueryError`` inside an explicit transaction: SQLite's driver commits
-        the open transaction before it runs a script, which would end it unseen.
+        the open transaction before it runs a script, which would end it unseen. A
+        script that meets another connection's shared-cache table lock raises
+        ``sqlite3.OperationalError`` at once: the statements before the one that met
+        it have run, so the script is not sent again.
         """
         if self._txn() is not None:
             raise QueryError(
@@ -1040,7 +1103,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         conn = await self._acquire()
         try:
             cursor = await self._read_ahead(conn).executescript(script)
-            await self._read_ahead(conn).commit()
+            await _in_thread(self._read_ahead(conn), _InThread.commit, self)
         except BaseException as exc:
             await self._release_after_failure(exc)
             converted = unique_violation_from(exc)
@@ -1063,7 +1126,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         conn = self._pinned()
         if conn is None:
             return
-        await self._read_ahead(conn).commit()
+        await _in_thread(self._read_ahead(conn), _InThread.commit, self)
 
     async def auto_commit(self) -> None:
         """Commit only if NOT inside an explicit transaction, then release connection."""
@@ -1224,7 +1287,10 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             if conn.in_transaction:  # raw work not committed yet: it stays as it is, pinned
                 raise TransactionStateError(_PENDING)
             try:
-                await self._read_ahead(conn).execute("BEGIN IMMEDIATE")
+                # a BEGIN that meets a lock opens nothing: it is sent again (``_InThread.execute``)
+                await _in_thread(
+                    self._read_ahead(conn), _InThread.execute, _no_cursor, "BEGIN IMMEDIATE", (), self
+                )
             except BaseException as exc:
                 await self._release_after_failure(exc)  # a failed BEGIN leaves no transaction to end
                 raise
@@ -1362,7 +1428,10 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             self._start_reclaim(conn)
             return
         try:
-            await (self._read_ahead(conn).commit() if commit else self._read_ahead(conn).rollback())
+            if commit:
+                await _in_thread(self._read_ahead(conn), _InThread.commit, self)
+            else:
+                await self._read_ahead(conn).rollback()
         except BaseException as exc:
             # a failed rollback is not raised (the caller may be handling an exception already),
             # but the connection is rolled back again or replaced, never reused as is
@@ -1385,7 +1454,7 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             return
         try:
             if exc_type is None:
-                await self._read_ahead(conn).commit()
+                await _in_thread(self._read_ahead(conn), _InThread.commit, self)
             else:
                 await self._read_ahead(conn).rollback()
         except BaseException as exc:
