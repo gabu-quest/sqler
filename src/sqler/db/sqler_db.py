@@ -1687,7 +1687,7 @@ class SQLerDB(_TableMemory):
         return docs
 
     def query(self, table: str) -> SQLerQuery:
-        """Return a SQLerQuery bound to this DB's adapter.
+        """Return a SQLerQuery that reads ``table`` through this DB, as a model's query set does.
 
         Args:
             table: Table name.
@@ -1695,7 +1695,7 @@ class SQLerDB(_TableMemory):
         Returns:
             SQLerQuery: Query object you can chain and execute.
         """
-        return SQLerQuery(table=validate_table_name(table), adapter=self.adapter)
+        return SQLerQuery(table=validate_table_name(table), adapter=self.adapter)._clone(db=self)
 
     def close(self):
         """Close the underlying adapter connection."""

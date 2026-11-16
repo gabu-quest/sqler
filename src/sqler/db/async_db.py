@@ -871,10 +871,10 @@ class AsyncSQLerDB(_TableMemory):
         return _row_documents(rows, columns)[0] if rows else None
 
     async def query(self, table: str):
-        """Convenience: return an AsyncSQLerQuery bound to this adapter."""
+        """Return an AsyncSQLerQuery that reads ``table`` through this DB, as a model's query set does."""
         from sqler.query.async_query import AsyncSQLerQuery
 
-        return AsyncSQLerQuery(table=validate_table_name(table), adapter=self.adapter)
+        return AsyncSQLerQuery(table=validate_table_name(table), adapter=self.adapter)._clone(db=self)
 
     def transaction(self) -> "AsyncTransaction":
         """Return a context manager for explicit transactions.
