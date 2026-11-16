@@ -439,6 +439,10 @@ async def test_results_match_the_sync_runner(db, tmp_path):
     s3, a3 = srunner.rollback(), await arunner.rollback()
     assert shape(a3) == shape(s3)
 
+    srunner.migrate(), await arunner.migrate()
+    s4, a4 = srunner.reset(), await arunner.reset()
+    assert shape(a4) == shape(s4) == (True, [], [(1, "a")], 0, 0, None, None)
+
     stables = {r[0] for r in sdb.adapter.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert (await _tables(db)) == stables
 

@@ -1,4 +1,5 @@
-"""The package's public names: the thread-pooled database is gone, ``PoolStats`` stays.
+"""The package's public names: the thread-pooled database is gone, ``PoolStats`` stays, and
+an async class has every public name its sync twin has.
 
 ``sqler.PoolStats`` is the class the async pool's ``pool_stats()`` returns. The
 removed names are checked in a fresh interpreter, so a module imported earlier in
@@ -97,3 +98,33 @@ def test_poolstats_pickles_under_its_module_path():
     assert sqler.PoolStats.__module__ == "sqler.adapter.asynchronous"
     assert pickle.loads(pickle.dumps(stats)) == stats
 
+
+# ---- an async class has every public name of its sync twin ----------------------------------
+
+TWINS = [
+    ("SQLerDB", "AsyncSQLerDB"),
+    ("SQLiteAdapter", "AsyncSQLiteAdapter"),
+    ("SQLerQuery", "AsyncSQLerQuery"),
+    ("SQLerQuerySet", "AsyncSQLerQuerySet"),
+    ("SQLerModel", "AsyncSQLerModel"),
+    ("SQLerSafeModel", "AsyncSQLerSafeModel"),
+    ("SQLerLiteModel", "AsyncSQLerLiteModel"),
+    ("SQLerLiteSafeModel", "AsyncSQLerLiteSafeModel"),
+    ("MigrationRunner", "AsyncMigrationRunner"),
+    ("Migration", "AsyncMigration"),
+    ("TrackedModel", "AsyncTrackedModel"),
+    ("PartialUpdateMixin", "AsyncPartialUpdateMixin"),
+    ("HooksMixin", "AsyncHooksMixin"),
+    ("AuditLogMixin", "AsyncAuditLogMixin"),
+]
+
+
+@pytest.mark.parametrize("sync_name, async_name", TWINS)
+def test_an_async_class_has_every_public_name_of_its_sync_twin(sync_name, async_name):
+    assert {sync_name, async_name} <= set(sqler.__all__)
+    sync_cls, async_cls = getattr(sqler, sync_name), getattr(sqler, async_name)
+    theirs = {n for n in dir(async_cls) if not n.startswith("_")}
+    missing = sorted(
+        n for n in dir(sync_cls) if not n.startswith("_") and n not in theirs and "a" + n not in theirs
+    )
+    assert missing == []
