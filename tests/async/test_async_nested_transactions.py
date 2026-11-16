@@ -2138,15 +2138,19 @@ async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, blo
     """X, started in the owner's nested transaction S, sends a plain insert while the
     grandchild G's nested transaction is open in S, and waits. Z, started in the
     transaction outside S, asks after X and waits. G ends: X has its turn in S (Z's place
-    is not the top). Before X runs, the owner ends S, whose RELEASE is queued behind the
-    rest of a long read of the owner's: X's place is now the transaction, under S's end
-    being sent, so X waits again; Z asked after it.
+    is not the top). Before X runs, the owner ends S, whose RELEASE is queued behind a
+    statement of the owner's that the connection stays in (``SELECT held()``): X's place is
+    now the transaction, under S's end being sent, so X waits again; Z asked after it.
 
     X asks with ``acquire_timeout = x_timeout`` (Z with ``BOUND_S``). G holds until
     ``hold_s`` after X asked. With ``block`` the loop is held past X's deadline after X has
-    its turn and before it runs. Returns X's outcome and the clock at each point."""
+    its turn and before it runs. The connection is let go once X has waited again, and with
+    a bound X cannot keep (``x_timeout`` under ``BOUND_S``) only once X has given up: how
+    long the machine takes over a statement decides nothing. Returns X's outcome and the
+    clock at each point."""
     loop = asyncio.get_running_loop()
     g_in, g_end, x_asked, z_asked = (asyncio.Event() for _ in range(4))
+    held = threading.Event()  # set: the connection's thread leaves ``SELECT held()``
     got: dict = {}
 
     async def grandchild() -> None:
@@ -2173,8 +2177,13 @@ async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, blo
         z_asked.set()
         await t.insert("z")
 
+    async def let_go(x_turn) -> None:
+        await turns_until(lambda: "x" in got if x_timeout < BOUND_S else not x_turn.future.done())
+        held.set()
+
     async with t.db.transaction():
         lease = t.adapter._task_lease.get()
+        await lease.conn.create_function("held", 0, lambda: held.wait(2 * BOUND_S))
         tz = asyncio.ensure_future(z())  # outside S
         async with t.db.transaction():
             cur = await t.adapter.execute(LAZY)
@@ -2185,16 +2194,21 @@ async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, blo
             await turns_until(lambda: loop.time() >= got["asked_at"] + hold_s)
             g_end.set()
             await until_a_nested_end_is_sent(lease)  # x has its turn in S and has not run yet
-            assert "x" not in got
+            x_turn = next(turn for turn in lease.turns if turn.task is tx)
+            assert (x_turn.future.done(), "x" in got) == (True, False)
             if block:
                 block_the_loop_until(got["asked_at"] + x_timeout)
                 got["unblocked_at"] = loop.time()
             fetch = asyncio.ensure_future(cur.fetchall())
             # G's insert had the rest of the read done before it; S's RELEASE is queued behind this
-            busy = asyncio.ensure_future(lease.conn.execute(SLOW))
+            busy = asyncio.ensure_future(lease.conn.execute("SELECT held()"))
+            going = asyncio.ensure_future(let_go(x_turn))
         assert await fetch == [(1,), (3000000,)]
         await cur.close()
-        await (await busy).close()
+        busy_cur = await busy
+        assert await busy_cur.fetchall() == [(1,)]  # let go by the test, not by its own bound
+        await busy_cur.close()
+        await going
         await asyncio.wait_for(asyncio.gather(tg, tx, tz), BOUND_S)
         assert (lease.turns, lease.savepoints) == ([], [])
     await assert_pool_clean(t)
