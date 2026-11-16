@@ -5,7 +5,8 @@ from typing import Any, List, Sequence, Type, Union
 from sqler._stored import stored
 from sqler.models._table_names import _model_table_name
 from sqler.models.model import SQLerModel
-from sqler.query.expression import SQLerExpression
+from sqler.query.expression import Related, SQLerExpression
+from sqler.query.query import SQLerQuery, related_rows
 
 
 class SQLerModelField:
@@ -14,14 +15,17 @@ class SQLerModelField:
     Example:
       SQLerModelField(User, ["address", "city"]) == "Kyoto"
       -> EXISTS (
-           SELECT 1 FROM (SELECT _id AS rid, data AS rdata FROM addresses) r
+           SELECT 1 FROM (SELECT _id AS rid FROM addresses rt
+                          WHERE json_extract(rt.data, '$.city') = ?) r
            WHERE r.rid = json_extract(data, '$.address._id')
-             AND json_extract(r.rdata, '$.city') = ?
          )
 
-    The related rows are read under names of their own (``rid``, ``rdata``), so ``data``
-    in the expression is the column of the row the query reads, in whatever table it
-    reads: the class's own, or another one (``using(db, table)``).
+    The condition on the related row is a query on the related table: a query with a
+    database behind it lays it out as that database remembers the table (a promoted
+    ``city`` is read from its column; ``sqler.query.query.related_rows``), as it lays out
+    its own. The related rows give only ``rid``, so ``data`` outside them is the column of
+    the row the query reads, in whatever table it reads: the class's own, or another one
+    (``using(db, table)``).
     """
 
     def __init__(
@@ -57,23 +61,25 @@ class SQLerModelField:
         first_literal = _json_path_literal([first])
         ref_literal = _json_path_literal([first, "_id"])
         table = _related_table(self.model, first, self.array_any)
-        related = f"(SELECT _id AS rid, data AS rdata FROM {table}) r"
 
-        # Check if querying for _id specifically (it's a column, not in JSON)
+        # the condition on a related row, as a query on its table writes it; ``_id`` is a column
         is_id_field = rest == ["_id"]
-        rest_literal = _json_path_literal(list(rest)) if rest and not is_id_field else None
-        if rest_literal is None:
-            where_right = f"r.rid {op} ?"
+        if rest and not is_id_field:
+            where = f"json_extract(data, {_json_path_literal(list(rest))}) {op} ?"
         else:
-            where_right = f"json_extract(r.rdata, {rest_literal}) {op} ?"
+            where = f"_id {op} ?"
+        # its rows as a query on that table with no database behind it reads them; a query
+        # with a database behind it lays them out as that database remembers the table
+        rows = related_rows(table, SQLerQuery(table, expression=SQLerExpression(where))._where()[0])
 
         if self.array_any:
             # each entry of the outer row's array of references, joined to its related row
-            joins = f"json_each(data, {first_literal}) a JOIN {related} ON r.rid = json_extract(a.value, '$._id')"
-            sql = f"EXISTS (SELECT 1 FROM {joins} WHERE {where_right})"
+            sql = f"EXISTS (SELECT 1 FROM json_each(data, {first_literal}) a JOIN {rows} r ON r.rid = json_extract(a.value, '$._id'))"
         else:
-            sql = f"EXISTS (SELECT 1 FROM {related} WHERE r.rid = json_extract(data, {ref_literal}) AND {where_right})"
-        return SQLerExpression(sql, [stored(val)])
+            sql = f"EXISTS (SELECT 1 FROM {rows} r WHERE r.rid = json_extract(data, {ref_literal}))"
+        made = SQLerExpression(sql, [stored(val)])
+        made.related = (Related(table, where, rows),)
+        return made
 
     def __compare(self, op: str, val: Any) -> SQLerExpression:
         return self._build_exists(op, val)

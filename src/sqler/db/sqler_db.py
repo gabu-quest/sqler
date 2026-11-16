@@ -311,7 +311,8 @@ class SQLerDB(_TableMemory):
         """Send the statement ``make()`` builds from what this object remembers of ``table``
         and return its cursor; ``None`` when ``make()`` returns ``None`` (nothing to send).
         ``make()`` gives ``(sql, params, names)``: ``names`` are the remembered names the
-        statement was built from, whose guard it carries (:func:`_guard`), ``None`` for none.
+        statement was built from, whose guard it carries (:func:`_guard`), ``None`` for none;
+        a query whose filter reads other tables adds the names of each (:meth:`_others_moved`).
 
         SQLite refuses the statement when the table no longer has those names. When the names
         the table has now differ (:meth:`_has_moved`), nothing has been ended and the statement is
@@ -329,13 +330,15 @@ class SQLerDB(_TableMemory):
             step = make()
             if step is None:
                 return None
-            sql, params, names = step
+            sql, params, names, *others = step
             try:
                 if immediate and not adapter.in_transaction:
                     return self._sent_immediate(sql, params)
                 return adapter._execute_judged(sql, params)
             except Exception as exc:
-                if isinstance(exc, sqlite3.OperationalError) and self._has_moved(table, names):
+                if isinstance(exc, sqlite3.OperationalError) and (
+                    self._has_moved(table, names) or self._others_moved(others)
+                ):
                     continue
                 end_failed(adapter, exc, table, sql)
 
@@ -352,6 +355,13 @@ class SQLerDB(_TableMemory):
             self.adapter.__exit__(type(exc), exc, exc.__traceback__)  # rolls back what is still open
             raise
         return cursor
+
+    def _others_moved(self, others: list) -> bool:
+        """Whether one of the other tables a refused statement read has moved
+        (:meth:`_has_moved`): ``others`` is empty, or holds the ``((table, names), ...)`` a
+        query's ``make()`` gives after its names, those of the related tables its filter
+        reads through a reference, each laid out from its own names."""
+        return any(self._has_moved(other, names) for other, names in (others[0] if others else ()))
 
     def _has_moved(self, table: str, names: Optional[tuple[str, ...]]) -> bool:
         """Whether ``table`` has other names now than ``names``, those a refused statement was

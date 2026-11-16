@@ -735,7 +735,10 @@ deleted with it, or lose the reference. A class that refers only to other tables
 above.
 
 A filter through a reference field works on a queryset of any table, also one read with
-`using(db, table)`:
+`using(db, table)`, and finds the same rows whichever class keeps the field in a promoted
+column: the condition on the related row is laid out as the database remembers the related
+table, as a query on that table is, also when a field of it is promoted after the queryset
+ran:
 
 ```python
 from typing import Optional

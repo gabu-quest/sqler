@@ -168,7 +168,7 @@ ROWS = list(SYNC)
 def _check_sql(sql: str, outer: str, related: str, any_: bool) -> None:
     """The filter reads the related table, and the outer row's ``data`` by no table name: it
     is the row of whatever table the query reads (``outer`` is the class's own)."""
-    related_rows = f"(SELECT _id AS rid, data AS rdata FROM {related}) r"
+    related_rows = f"(SELECT _id AS rid FROM {related} rt WHERE json_extract(rt.data, '$.name') = ?) r"
     if any_:
         expected = f"FROM json_each(data, '$.items') a JOIN {related_rows} ON "
     else:
@@ -233,8 +233,8 @@ def test_a_field_that_admits_no_model_class_keeps_the_table_of_its_name(base, p)
     holder = _model(base, f"Dn{p}Blobbed", {"blob": dict}, f"dn_{p.lower()}_blobbed")
     expr = holder.ref("blob").field("name") == "red"
     assert expr.sql == (
-        "EXISTS (SELECT 1 FROM (SELECT _id AS rid, data AS rdata FROM blobs) r WHERE r.rid = "
-        "json_extract(data, '$.blob._id') AND json_extract(r.rdata, '$.name') = ?)"
+        "EXISTS (SELECT 1 FROM (SELECT _id AS rid FROM blobs rt WHERE json_extract(rt.data, "
+        "'$.name') = ?) r WHERE r.rid = json_extract(data, '$.blob._id'))"
     )
 
 

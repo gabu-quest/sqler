@@ -264,13 +264,22 @@ class AsyncSQLerDB(_TableMemory):
             step = await make()
             if step is None:
                 return None
-            sql, params, names = step
+            sql, params, names, *others = step
             try:
                 return await adapter._execute_judged(sql, params)
             except Exception as exc:
-                if isinstance(exc, sqlite3.OperationalError) and await self._has_moved(table, names):
+                if isinstance(exc, sqlite3.OperationalError) and (
+                    await self._has_moved(table, names) or await self._others_moved(others)
+                ):
                     continue
                 await aend_failed(adapter, exc, table, sql)
+
+    async def _others_moved(self, others: list) -> bool:
+        """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._others_moved`."""
+        for other, names in others[0] if others else ():
+            if await self._has_moved(other, names):
+                return True
+        return False
 
     async def _has_moved(self, table: str, names: Optional[tuple[str, ...]]) -> bool:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._has_moved`. Outside a transaction
