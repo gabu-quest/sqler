@@ -35,7 +35,7 @@ from sqler.db.async_db import _aselect_rows
 from sqler.db.sqler_db import _in_order, _row_columns, _row_documents, _select_rows
 from sqler.exceptions import InvalidTableNameError
 from sqler.models import _dirty
-from sqler.models._table_names import _default_table_name, _Home, _set_home, _unchecked_table_name
+from sqler.models._table_names import _Home, _set_home, _unchecked_table_name
 from sqler.utils import is_ref_dict, validate_table_name
 
 # What a row its class refuses raises, on every base (pydantic's ``ValidationError`` is a
@@ -716,9 +716,13 @@ def _set(inst: Any, name: str, value: Any) -> None:
 
 # ---- typed references -----------------------------------------------------------------
 
-# {model class: its typed fields}; the class is held weakly, so one nothing else holds leaves it
-# (a class with a typed field that refers to itself is held by that field's position)
-_TYPED: "weakref.WeakKeyDictionary[type, dict[str, Position]]" = weakref.WeakKeyDictionary()
+# {model class: (its typed fields, the ``registry.state()`` they hold for)}; the state is None
+# unless a name came from the registry, where a class defined later can be meant too. The
+# class is held weakly, so one nothing else holds leaves it (a class with a typed field that
+# refers to itself is held by that field's position)
+_TYPED: "weakref.WeakKeyDictionary[type, tuple[dict[str, Position], Optional[int]]]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 # the annotation of a field of a pydantic or msgspec class whose annotations are not resolved yet
@@ -753,6 +757,10 @@ def typed_fields(cls: Any) -> dict[str, Position]:
     its value type in each value. Found once per class; an answer is not kept while a
     name in an annotation cannot be found yet (a class defined before the class it
     refers to).
+
+    A name in a string annotation is what the module of the class calls that. A name the
+    module does not have (a class imported only under ``TYPE_CHECKING``) means every model
+    class of that name, those defined later too.
     """
     return _typed_fields(cls)[0]
 
@@ -765,20 +773,24 @@ def known_typed_fields(cls: Any) -> Optional[dict[str, Position]]:
 
 
 def _typed_fields(cls: Any) -> tuple[dict[str, Position], bool]:
-    typed = _TYPED.get(cls)  # it holds model classes only
-    if typed is not None:
-        return typed, True
+    kept = _TYPED.get(cls)  # it holds model classes only
+    if kept is not None and (kept[1] is None or kept[1] == registry.state()):
+        return kept[0], True
     if not _is_model_class(cls):
         return {}, True
-    typed, complete = {}, True
+    typed: dict[str, Position] = {}
+    complete, state, now = True, None, registry.state()
     for name, ann, owner in _annotations(cls):
         at: dict = {}
-        complete &= _shape(ann, owner, at)
+        names = _Names(owner)
+        complete &= _shape(ann, names, at)
+        if names.registered:
+            state = now
         position = _position(at)
         if position is not None:
             typed[name] = position
     if complete:
-        _TYPED[cls] = typed
+        _TYPED[cls] = (typed, state)
     return typed, complete
 
 
@@ -844,7 +856,7 @@ def _is_model_class(x: Any) -> bool:
     return isinstance(x, type) and _kind(x).model
 
 
-def _shape(ann: Any, owner: Any, at: dict, within: tuple = ()) -> bool:
+def _shape(ann: Any, names: "_Names", at: dict, within: tuple = ()) -> bool:
     """Gather in ``at`` what ``ann`` puts at a place: the model classes admitted there
     (``admits``), and what it puts in each entry of a list there (``item``) and in each
     value of a dict there (``value``). False when a name is not found.
@@ -866,7 +878,7 @@ def _shape(ann: Any, owner: Any, at: dict, within: tuple = ()) -> bool:
         ann = ann.__forward_arg__
     if isinstance(ann, str):
         terms, _ = _parse(_TOKENS.findall(_LITERALS.sub("", ann)), 0)
-        return _shape_terms(terms, owner, at, within)
+        return _shape_terms(terms, names, at, within)
     if _is_model_class(ann):
         at.setdefault("admits", []).append(ann)
         return True
@@ -874,16 +886,16 @@ def _shape(ann: Any, owner: Any, at: dict, within: tuple = ()) -> bool:
     if origin is typing.Literal or not args:
         return True  # a ``Literal`` holds values, not annotations
     if origin in (typing.Union, types.UnionType):
-        return all([_shape(arg, owner, at, within) for arg in args])
+        return all([_shape(arg, names, at, within) for arg in args])
     if origin is typing.Annotated:
-        return _shape(args[0], owner, at, within)
+        return _shape(args[0], names, at, within)
     if isinstance(origin, type) and issubclass(origin, collections.abc.Mapping):
-        return len(args) != 2 or _shape(args[1], owner, at.setdefault("value", {}), within)
+        return len(args) != 2 or _shape(args[1], names, at.setdefault("value", {}), within)
     if isinstance(origin, type) and issubclass(origin, collections.abc.Collection):
         item = at.setdefault("item", {})
         if origin is tuple and Ellipsis not in args:
             at["fixed"] = True  # ``tuple[Child, Child]``: one entry per place
-        return all([_shape(arg, owner, item, within) for arg in args if arg is not Ellipsis])
+        return all([_shape(arg, names, item, within) for arg in args if arg is not Ellipsis])
     return True  # ``type[Child]``, a ``Callable``: not a place a stored model is
 
 
@@ -907,41 +919,52 @@ def _parse(tokens: list, i: int) -> tuple[list, int]:
     return terms, i
 
 
-def _shape_terms(terms: list, owner: Any, at: dict, within: tuple = ()) -> bool:
+def _shape_terms(terms: list, names: "_Names", at: dict, within: tuple = ()) -> bool:
     """:func:`_shape` of the terms of a string annotation (:func:`_parse`)."""
     complete = True
     for name, args in terms:
         if name in _UNION_NAMES:
             for arg in args[:1] if name == "Annotated" else args:
-                complete &= _shape_terms(arg, owner, at, within)
+                complete &= _shape_terms(arg, names, at, within)
         elif name in _ITEM_NAMES:
             if name in ("tuple", "Tuple") and args and _ANY_LENGTH not in args:
                 at["fixed"] = True
             for arg in args:
-                complete &= _shape_terms(arg, owner, at.setdefault("item", {}), within)
+                complete &= _shape_terms(arg, names, at.setdefault("item", {}), within)
         elif name in _VALUE_NAMES:
             if len(args) == 2:
-                complete &= _shape_terms(args[1], owner, at.setdefault("value", {}), within)
+                complete &= _shape_terms(args[1], names, at.setdefault("value", {}), within)
         elif name and name not in _NOT_A_MODEL:  # "" is what is left of "typing.Literal[...]"
-            found = _named(name, owner)
-            if found is None:
-                complete = False
+            found = names.here(name)
+            if found is None:  # not a name of the module: every model class called that
+                classes = names.anywhere(name)
+                at.setdefault("admits", []).extend(classes)
+                complete &= bool(classes)
             elif _is_model_class(found):
                 at.setdefault("admits", []).append(found)
             elif name not in within:  # a name the module gives to an annotation
-                complete &= _shape(found, owner, at, within + (name,))
+                complete &= _shape(found, names, at, within + (name,))
     return complete
 
 
-def _named(name: str, owner: Any) -> Any:
-    """What ``name`` in a string annotation of ``owner`` is, or None when it is not found."""
-    space = vars(sys.modules.get(owner.__module__, builtins))
-    found = space.get(name, getattr(builtins, name, None))
-    if found is None:
-        found = registry.resolve(_default_table_name(name)) or registry.resolve_class_name(name)
-        if found is None or found.__name__ != name:
-            return None
-    return found
+class _Names:
+    """What the names in a string annotation of the class ``owner`` are."""
+
+    __slots__ = ("owner", "registered")
+
+    def __init__(self, owner: Any) -> None:
+        self.owner = owner
+        self.registered = False  # whether the registry was asked: its answer can grow
+
+    def here(self, name: str) -> Any:
+        """What the owner's module, or the builtins, call ``name``; None when neither does."""
+        space = vars(sys.modules.get(self.owner.__module__, builtins))
+        return space.get(name, getattr(builtins, name, None))
+
+    def anywhere(self, name: str) -> tuple[type, ...]:
+        """Every registered model class called ``name``; none when it is not found yet."""
+        self.registered = True
+        return registry.classes_named(name)
 
 
 def read_rows(adapter: Any, db: Any, table: str, ids: list, versioned: bool) -> Optional[tuple]:
