@@ -695,6 +695,10 @@ class AsyncMigrationRunner:
             target_version=target_version,
         )
 
+    async def reset(self) -> MigrationResult:
+        """Rollback all migrations (reset to version 0), as the sync runner's ``reset()``."""
+        return await self.rollback(target_version=0)
+
     async def status(self) -> dict[str, Any]:
         """Get migration status summary (the same fields as the sync runner)."""
         applied = await self.applied_migrations()

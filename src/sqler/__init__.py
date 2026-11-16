@@ -159,6 +159,7 @@ from .ops import (
     vacuum,
 )
 from .query import F, SQLerExpression, SQLerField, SQLerQuery
+from .query.async_query import AsyncSQLerQuery
 from .query.query import PaginatedResult
 from .registry import register, resolve, tables
 from .tracking import (
@@ -224,6 +225,7 @@ __all__ = [
     "NO_REBASE_CONFIG",
     # Query
     "SQLerQuery",
+    "AsyncSQLerQuery",
     "SQLerExpression",
     "SQLerField",
     "F",  # Alias for SQLerField (Django-like syntax)

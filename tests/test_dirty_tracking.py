@@ -74,6 +74,48 @@ class DtPydSafeLinked(SQLerSafeModel):
     one: Optional[DtPydSafeChild] = None
 
 
+class DtAPydChild(AsyncSQLerModel):
+    name: str = ""
+
+
+class DtAPydPlain(AsyncSQLerModel):
+    title: str = ""
+    n: int = 0
+    tags: list[str] = []
+    meta: dict = {}
+    grid: list[list[int]] = []
+    x: float = 0.0
+    big: int = 0
+    opt: Optional[str] = None
+
+
+class DtAPydLinked(AsyncSQLerModel):
+    title: str = ""
+    n: int = 0
+    one: Optional[DtAPydChild] = None
+
+
+class DtAPydSafeChild(AsyncSQLerSafeModel):
+    name: str = ""
+
+
+class DtAPydSafePlain(AsyncSQLerSafeModel):
+    title: str = ""
+    n: int = 0
+    tags: list[str] = []
+    meta: dict = {}
+    grid: list[list[int]] = []
+    x: float = 0.0
+    big: int = 0
+    opt: Optional[str] = None
+
+
+class DtAPydSafeLinked(AsyncSQLerSafeModel):
+    title: str = ""
+    n: int = 0
+    one: Optional[DtAPydSafeChild] = None
+
+
 @dataclass
 class DtLiteChild(SQLerLiteModel):
     name: str = ""
@@ -187,6 +229,8 @@ KINDS = {
     "pydsafe": (DtPydSafeChild, DtPydSafePlain, DtPydSafeLinked, False),
     "lite": (DtLiteChild, DtLitePlain, DtLiteLinked, False),
     "litesafe": (DtLiteSafeChild, DtLiteSafePlain, DtLiteSafeLinked, False),
+    "apyd": (DtAPydChild, DtAPydPlain, DtAPydLinked, True),
+    "apydsafe": (DtAPydSafeChild, DtAPydSafePlain, DtAPydSafeLinked, True),
     "alite": (DtALiteChild, DtALitePlain, DtALiteLinked, True),
     "alitesafe": (DtALiteSafeChild, DtALiteSafePlain, DtALiteSafeLinked, True),
     "msgspec": (None, DtMsgPlain, None, False),
@@ -503,62 +547,6 @@ def test_save_many_leaves_models_not_dirty(kind):
     assert out == [(False, set()), (False, set()), {"tags"}]
 
 
-# ---- 5. the async pydantic bases keep a snapshot that shares nothing ---------------------
-
-
-class DtAsyncPlain(AsyncSQLerModel):
-    title: str = ""
-    tags: list[str] = []
-    meta: dict = {}
-
-
-class DtAsyncSafePlain(AsyncSQLerSafeModel):
-    title: str = ""
-    tags: list[str] = []
-    meta: dict = {}
-
-
-@pytest.mark.parametrize("cls", [DtAsyncPlain, DtAsyncSafePlain])
-def test_async_pydantic_snapshot_is_the_row_and_shares_nothing(cls):
-    async def scenario():
-        db = AsyncSQLerDB.in_memory()
-        await db.connect()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            cls.set_db(db, f"dt_{cls.__name__.lower()}")
-        await cls(title="a", tags=["x"], meta={"k": {"d": 1}}).save()
-        got = (await cls.query().all())[0]
-        got.tags.append("y")
-        got.meta["k"]["d"] = 2
-        snap = got._snapshot
-        await db.close()
-        return snap
-
-    assert asyncio.run(scenario()) == {"title": "a", "tags": ["x"], "meta": {"k": {"d": 1}}}
-
-
-@pytest.mark.parametrize("way", ("save", "save_many"))
-@pytest.mark.parametrize("cls", [DtAsyncPlain, DtAsyncSafePlain])
-def test_async_pydantic_snapshot_after_a_save_is_what_was_written(cls, way):
-    async def scenario():
-        db = AsyncSQLerDB.in_memory()
-        await db.connect()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            cls.set_db(db, f"dt_{cls.__name__.lower()}_{way}")
-        row = cls(title="a", tags=["x"], meta={"k": {"d": 1}})
-        if way == "save":
-            await row.save()
-        else:
-            await cls.save_many([row])
-        row.tags.append("y")
-        snap = row._snapshot
-        await db.close()
-        return snap
-
-    assert asyncio.run(scenario()) == {"title": "a", "tags": ["x"], "meta": {"k": {"d": 1}}}
-
-
 # ---- 6. the snapshot is data: nothing done to a child changes its parent's snapshot ------
 
 
@@ -582,6 +570,14 @@ class DtALiteSafeMany(AsyncSQLerLiteSafeModel):
     many: list[DtALiteSafeChild] = field(default_factory=list)
 
 
+class DtAPydMany(AsyncSQLerModel):
+    many: list[DtAPydChild] = []
+
+
+class DtAPydSafeMany(AsyncSQLerSafeModel):
+    many: list[DtAPydSafeChild] = []
+
+
 class DtPydMany(SQLerModel):
     many: list[DtPydChild] = []
 
@@ -595,6 +591,8 @@ MANY = {
     "pydsafe": DtPydSafeMany,
     "lite": DtLiteMany,
     "litesafe": DtLiteSafeMany,
+    "apyd": DtAPydMany,
+    "apydsafe": DtAPydSafeMany,
     "alite": DtALiteMany,
     "alitesafe": DtALiteSafeMany,
 }

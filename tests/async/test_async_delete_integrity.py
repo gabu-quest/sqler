@@ -233,6 +233,18 @@ async def test_async_validate_references_broken(async_db: AsyncSQLerDB):
     assert our_broken[0].table == "integrity_user9"
     assert our_broken[0].target_table == "integrity_address9"
     assert our_broken[0].target_id == a._id
+    # the class method of the async base gives the same, as the sync base's does
+    assert await IntegrityUser.validate_references() == broken
+
+
+@pytest.mark.asyncio
+async def test_all_and_first_on_the_async_class_give_its_rows(async_db: AsyncSQLerDB):
+    IntegrityAddress.set_db(async_db, "integrity_address_all")
+    assert (await IntegrityAddress.all(), await IntegrityAddress.first()) == ([], None)
+    for city in ("Kyoto", "Osaka"):
+        await IntegrityAddress(city=city).save()
+    rows, first = await IntegrityAddress.all(), await IntegrityAddress.first()
+    assert ([(r._id, r.city) for r in rows], (first._id, first.city)) == ([(1, "Kyoto"), (2, "Osaka")], (1, "Kyoto"))
 
 
 @pytest.mark.asyncio

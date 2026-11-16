@@ -156,6 +156,25 @@ class AsyncSQLerModel(BaseModel):
         return cls._queryset(db, table)
 
     @classmethod
+    async def all(cls: Type[TAModel]) -> list[TAModel]:
+        """Return all instances from the database."""
+        return await cls.query().all()
+
+    @classmethod
+    async def first(cls: Type[TAModel]) -> Optional[TAModel]:
+        """Return the first instance or ``None``."""
+        return await cls.query().first()
+
+    @classmethod
+    async def validate_references(cls):
+        """The broken references of every table of the bound database, as
+        :func:`sqler.models.async_validate_references` gives them."""
+        from .async_integrity import async_validate_references
+
+        db, _ = cls._require_binding()
+        return await async_validate_references(db)
+
+    @classmethod
     def using(
         cls: Type[TAModel], db: AsyncSQLerDB, table: Optional[str] = None
     ) -> AsyncSQLerQuerySet[TAModel]:
@@ -439,7 +458,15 @@ class AsyncSQLerModel(BaseModel):
         self._snapshot = _dirty.snapshot(row)
         return self
 
+    # ----- dirty tracking -----
+    is_dirty = _dirty.is_dirty
+    get_dirty_fields = _dirty.get_dirty_fields
+
     async def _adump_with_relations(self) -> dict:
+        """The document ``save()`` writes (nothing in it waits; the name is the async saves')."""
+        return self._dump_with_relations()
+
+    def _dump_with_relations(self) -> dict:
         """The document ``save()`` writes: each field in stored form, a related model (async
         or sync) as the reference to its row."""
         return {
