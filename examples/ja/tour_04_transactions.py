@@ -86,11 +86,10 @@ def _(SQLerModel, db):
         name: str
         balance: int
 
-    Account.set_db(db)
 
     # 初期口座を作成
-    _alice = Account(name="Alice", balance=1000).save()
-    _bob = Account(name="Bob", balance=500).save()
+    _alice = Account(name="Alice", balance=1000).save(db=db)
+    _bob = Account(name="Bob", balance=500).save(db=db)
     print(f"作成: Alice ({_alice.balance}), Bob ({_bob.balance})")
     return (Account,)
 
@@ -113,18 +112,18 @@ def _(Account, db):
     # 成功するトランザクション
     with db.transaction():
         # Alice から Bob へ 200 を送金
-        _a = Account.from_id(1)
-        _b = Account.from_id(2)
+        _a = Account.from_id(1, db=db)
+        _b = Account.from_id(2, db=db)
 
         _a.balance -= 200
-        _a.save()
+        _a.save(db=db)
 
         _b.balance += 200
-        _b.save()
+        _b.save(db=db)
 
     # 送金を確認
-    _alice_after = Account.from_id(1)
-    _bob_after = Account.from_id(2)
+    _alice_after = Account.from_id(1, db=db)
+    _bob_after = Account.from_id(2, db=db)
     print(f"送金後: Alice ({_alice_after.balance}), Bob ({_bob_after.balance})")
     return
 
@@ -144,18 +143,18 @@ def _(mo):
 @app.cell
 def _(Account, db):
     # 変更前の残高を確認
-    _before_alice = Account.from_id(1)
-    _before_bob = Account.from_id(2)
+    _before_alice = Account.from_id(1, db=db)
+    _before_bob = Account.from_id(2, db=db)
     print(f"変更前: Alice ({_before_alice.balance}), Bob ({_before_bob.balance})")
 
     try:
         with db.transaction():
-            _a = Account.from_id(1)
-            _b = Account.from_id(2)
+            _a = Account.from_id(1, db=db)
+            _b = Account.from_id(2, db=db)
 
             # Alice から引き落とし
             _a.balance -= 300
-            _a.save()
+            _a.save(db=db)
             print(f"  Alice から引き落とし: {_a.balance}")
 
             # Bob への入金前にエラーをシミュレート
@@ -163,14 +162,14 @@ def _(Account, db):
 
             # この行は実行されない
             _b.balance += 300
-            _b.save()
+            _b.save(db=db)
 
     except ValueError as _e:
         print(f"  エラーをキャッチ: {_e}")
 
     # ロールバックを確認 - 残高は変わっていないはず
-    _after_alice = Account.from_id(1)
-    _after_bob = Account.from_id(2)
+    _after_alice = Account.from_id(1, db=db)
+    _after_bob = Account.from_id(2, db=db)
     print(f"変更後: Alice ({_after_alice.balance}), Bob ({_after_bob.balance})")
     print("トランザクションがロールバックされました - お金は失われていません！")
     return
@@ -194,14 +193,14 @@ def _(mo):
 @app.cell
 def _(Account, db):
     # 失敗するトランザクション内で新しい口座を作成
-    _initial_count = Account.query().count()
+    _initial_count = Account.using(db).count()
     print(f"初期口座数: {_initial_count}")
 
     try:
         with db.transaction():
             # 新しい口座を作成
             _charlie = Account(name="Charlie", balance=750)
-            _charlie.save()
+            _charlie.save(db=db)
             print("  トランザクション内で Charlie を作成")
 
             raise RuntimeError("おっと！すべてを中止！")
@@ -210,7 +209,7 @@ def _(Account, db):
         print("  トランザクションが中止されました！")
 
     # Charlie は存在しないはず - トランザクションがロールバックされた
-    _final_count = Account.query().count()
+    _final_count = Account.using(db).count()
     print(f"最終口座数: {_final_count}")
     return
 
@@ -230,23 +229,23 @@ def _(mo):
 @app.cell
 def _(Account, F, db):
     print("バッチ操作前:")
-    for _acc in Account.query().all():
+    for _acc in Account.using(db).all():
         print(f"  {_acc.name}: {_acc.balance}")
 
     with db.transaction():
         # 新しい口座を作成
-        Account(name="Diana", balance=300).save()
-        Account(name="Eve", balance=450).save()
+        Account(name="Diana", balance=300).save(db=db)
+        Account(name="Eve", balance=450).save(db=db)
 
         # 既存のものを更新
-        _alice = Account.query().filter(F("name") == "Alice").first()
+        _alice = Account.using(db).filter(F("name") == "Alice").first()
         _alice.balance += 100
-        _alice.save()
+        _alice.save(db=db)
 
         # すべて一緒にコミット
 
     print("\nバッチ操作後:")
-    for _acc in Account.query().all():
+    for _acc in Account.using(db).all():
         print(f"  {_acc.name}: {_acc.balance}")
     return
 
@@ -267,22 +266,22 @@ def _(mo):
 @app.cell
 def _(Account, F, db):
     # 開始残高を取得
-    _alice = Account.query().filter(F("name") == "Alice").first()
+    _alice = Account.using(db).filter(F("name") == "Alice").first()
     _starting = _alice.balance
     print(f"開始残高: {_starting}")
 
     with db.transaction():
         # 外側のトランザクション
         _alice.balance += 50
-        _alice.save()
+        _alice.save(db=db)
         print(f"外側で +50 後: {_alice.balance}")
 
         try:
             with db.transaction():
                 # 内側のトランザクション（セーブポイント）
-                _alice.refresh()
+                _alice.refresh(db=db)
                 _alice.balance += 100
-                _alice.save()
+                _alice.save(db=db)
                 print(f"内側で +100 後: {_alice.balance}")
 
                 # 内側のトランザクションが失敗
@@ -292,14 +291,14 @@ def _(Account, F, db):
             print("内側のトランザクションがロールバック")
 
         # 外側のトランザクションは継続
-        _alice.refresh()
+        _alice.refresh(db=db)
         print(f"内側ロールバック後: {_alice.balance}")
 
         _alice.balance += 25
-        _alice.save()
+        _alice.save(db=db)
 
     # 最終結果
-    _final = Account.query().filter(F("name") == "Alice").first()
+    _final = Account.using(db).filter(F("name") == "Alice").first()
     print(f"最終残高: {_final.balance}")
     print(f"純変化: +{_final.balance - _starting}（外側 +50 と +25、内側 +100 はロールバック）")
     return
@@ -347,9 +346,9 @@ def _(Account, F, db):
     db.adapter.begin_transaction()
 
     try:
-        _alice = Account.query().filter(F("name") == "Alice").first()
+        _alice = Account.using(db).filter(F("name") == "Alice").first()
         _alice.balance += 1000
-        _alice.save()
+        _alice.save(db=db)
 
         # 手動でコミット
         db.adapter.end_transaction(commit=True)
@@ -359,7 +358,7 @@ def _(Account, F, db):
         db.adapter.end_transaction(commit=False)
         print("手動でロールバック")
 
-    _final = Account.query().filter(F("name") == "Alice").first()
+    _final = Account.using(db).filter(F("name") == "Alice").first()
     print(f"Alice の残高: {_final.balance}")
     return
 

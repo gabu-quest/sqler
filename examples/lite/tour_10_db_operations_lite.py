@@ -169,13 +169,12 @@ def _(SQLerLiteModel, dataclass, db):
         name: str
         email: str
 
-    User.set_db(db)
 
     # Create some data
     for _i in range(10):
-        User(name=f"User{_i}", email=f"user{_i}@example.com").save()
+        User(name=f"User{_i}", email=f"user{_i}@example.com").save(db=db)
 
-    print(f"Created {User.query().count()} users")
+    print(f"Created {User.using(db).count()} users")
     return (User,)
 
 
@@ -283,11 +282,11 @@ def _(User, db, get_stats, vacuum):
 
     # Delete some records
     for _i in range(5):
-        _user = User.from_id(_i + 1)
+        _user = User.from_id(_i + 1, db=db)
         if _user:
-            _user.delete()
+            _user.delete(db=db)
 
-    print(f"Deleted 5 users, now have {User.query().count()} users")
+    print(f"Deleted 5 users, now have {User.using(db).count()} users")
 
     # Vacuum to reclaim space
     _duration = vacuum(db)
@@ -317,33 +316,32 @@ def _(SQLerLiteModel, dataclass, db):
         name: str
         price: float
 
-    Product.set_db(db)
 
     # Create many products
     for _i in range(25):
-        Product(name=f"Product {_i}", price=_i * 10.0).save()
+        Product(name=f"Product {_i}", price=_i * 10.0).save(db=db)
 
-    print(f"Created {Product.query().count()} products")
+    print(f"Created {Product.using(db).count()} products")
     return (Product,)
 
 
 @app.cell
-def _(Product):
+def _(Product, db):
     # Manual pagination with limit/offset
     _page_size = 5
 
     print("Manual pagination (limit/offset):")
     for _page in range(3):
         _offset = _page * _page_size
-        _results = Product.query().limit(_page_size).offset(_offset).all()
+        _results = Product.using(db).limit(_page_size).offset(_offset).all()
         print(f"  Page {_page + 1}: {[p.name for p in _results]}")
     return
 
 
 @app.cell
-def _(Product):
+def _(Product, db):
     # Using paginate() for convenience (returns dicts)
-    _page = Product.query().paginate(page=1, per_page=5)
+    _page = Product.using(db).paginate(page=1, per_page=5)
 
     print("\nUsing paginate():")
     print(f"  Total items: {_page.total}")
@@ -354,7 +352,7 @@ def _(Product):
 
     # Get next page
     if _page.has_next:
-        _page2 = Product.query().paginate(page=2, per_page=5)
+        _page2 = Product.using(db).paginate(page=2, per_page=5)
         print(f"\nPage 2: {[p['name'] for p in _page2.items]}")
     return
 
@@ -370,14 +368,14 @@ def _(mo):
 
 
 @app.cell
-def _(F, Product, query_logger):
+def _(F, Product, db, query_logger):
     # Enable the global query logger (used by adapters)
     query_logger.enable()
     query_logger.clear()  # Clear any previous logs
 
     # Run some queries - these get logged automatically
-    Product.query().filter(F("price") > 100).all()
-    Product.query().count()
+    Product.using(db).filter(F("price") > 100).all()
+    Product.using(db).count()
 
     # Get logged queries
     print("Recent queries:")

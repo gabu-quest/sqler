@@ -80,11 +80,10 @@ def _(SQLerModel, db):
         name: str
         balance: int
 
-    Account.set_db(db)
 
     # Create initial accounts
-    _alice = Account(name="Alice", balance=1000).save()
-    _bob = Account(name="Bob", balance=500).save()
+    _alice = Account(name="Alice", balance=1000).save(db=db)
+    _bob = Account(name="Bob", balance=500).save(db=db)
     print(f"Created: Alice ({_alice.balance}), Bob ({_bob.balance})")
     return (Account,)
 
@@ -105,18 +104,18 @@ def _(Account, db):
     # Successful transaction
     with db.transaction():
         # Transfer 200 from Alice to Bob
-        _a = Account.from_id(1)
-        _b = Account.from_id(2)
+        _a = Account.from_id(1, db=db)
+        _b = Account.from_id(2, db=db)
 
         _a.balance -= 200
-        _a.save()
+        _a.save(db=db)
 
         _b.balance += 200
-        _b.save()
+        _b.save(db=db)
 
     # Verify the transfer
-    _alice_after = Account.from_id(1)
-    _bob_after = Account.from_id(2)
+    _alice_after = Account.from_id(1, db=db)
+    _bob_after = Account.from_id(2, db=db)
     print(f"After transfer: Alice ({_alice_after.balance}), Bob ({_bob_after.balance})")
     return
 
@@ -134,18 +133,18 @@ def _(mo):
 @app.cell
 def _(Account, db):
     # Check balances before
-    _before_alice = Account.from_id(1)
-    _before_bob = Account.from_id(2)
+    _before_alice = Account.from_id(1, db=db)
+    _before_bob = Account.from_id(2, db=db)
     print(f"Before: Alice ({_before_alice.balance}), Bob ({_before_bob.balance})")
 
     try:
         with db.transaction():
-            _a = Account.from_id(1)
-            _b = Account.from_id(2)
+            _a = Account.from_id(1, db=db)
+            _b = Account.from_id(2, db=db)
 
             # Deduct from Alice
             _a.balance -= 300
-            _a.save()
+            _a.save(db=db)
             print(f"  Deducted from Alice: {_a.balance}")
 
             # Simulate an error before crediting Bob
@@ -153,14 +152,14 @@ def _(Account, db):
 
             # This line never executes
             _b.balance += 300
-            _b.save()
+            _b.save(db=db)
 
     except ValueError as _e:
         print(f"  Error caught: {_e}")
 
     # Verify rollback - balances should be unchanged
-    _after_alice = Account.from_id(1)
-    _after_bob = Account.from_id(2)
+    _after_alice = Account.from_id(1, db=db)
+    _after_bob = Account.from_id(2, db=db)
     print(f"After: Alice ({_after_alice.balance}), Bob ({_after_bob.balance})")
     print("Transaction was rolled back - no money lost!")
     return
@@ -182,14 +181,14 @@ def _(mo):
 @app.cell
 def _(Account, db):
     # Create a new account inside a failed transaction
-    _initial_count = Account.query().count()
+    _initial_count = Account.using(db).count()
     print(f"Initial account count: {_initial_count}")
 
     try:
         with db.transaction():
             # Create new account
             _charlie = Account(name="Charlie", balance=750)
-            _charlie.save()
+            _charlie.save(db=db)
             print("  Created Charlie inside transaction")
 
             raise RuntimeError("Oops! Abort everything!")
@@ -198,7 +197,7 @@ def _(Account, db):
         print("  Transaction aborted!")
 
     # Charlie should NOT exist - the transaction was rolled back
-    _final_count = Account.query().count()
+    _final_count = Account.using(db).count()
     print(f"Final account count: {_final_count}")
     return
 
@@ -216,23 +215,23 @@ def _(mo):
 @app.cell
 def _(Account, F, db):
     print("Before batch operation:")
-    for _acc in Account.query().all():
+    for _acc in Account.using(db).all():
         print(f"  {_acc.name}: {_acc.balance}")
 
     with db.transaction():
         # Create new accounts
-        Account(name="Diana", balance=300).save()
-        Account(name="Eve", balance=450).save()
+        Account(name="Diana", balance=300).save(db=db)
+        Account(name="Eve", balance=450).save(db=db)
 
         # Update existing
-        _alice = Account.query().filter(F("name") == "Alice").first()
+        _alice = Account.using(db).filter(F("name") == "Alice").first()
         _alice.balance += 100
-        _alice.save()
+        _alice.save(db=db)
 
         # All committed together
 
     print("\nAfter batch operation:")
-    for _acc in Account.query().all():
+    for _acc in Account.using(db).all():
         print(f"  {_acc.name}: {_acc.balance}")
     return
 
@@ -251,22 +250,22 @@ def _(mo):
 @app.cell
 def _(Account, F, db):
     # Get starting balance
-    _alice = Account.query().filter(F("name") == "Alice").first()
+    _alice = Account.using(db).filter(F("name") == "Alice").first()
     _starting = _alice.balance
     print(f"Starting balance: {_starting}")
 
     with db.transaction():
         # Outer transaction
         _alice.balance += 50
-        _alice.save()
+        _alice.save(db=db)
         print(f"After outer +50: {_alice.balance}")
 
         try:
             with db.transaction():
                 # Inner transaction (savepoint)
-                _alice.refresh()
+                _alice.refresh(db=db)
                 _alice.balance += 100
-                _alice.save()
+                _alice.save(db=db)
                 print(f"After inner +100: {_alice.balance}")
 
                 # Inner transaction fails
@@ -276,14 +275,14 @@ def _(Account, F, db):
             print("Inner transaction rolled back")
 
         # Outer transaction continues
-        _alice.refresh()
+        _alice.refresh(db=db)
         print(f"After inner rollback: {_alice.balance}")
 
         _alice.balance += 25
-        _alice.save()
+        _alice.save(db=db)
 
     # Final result
-    _final = Account.query().filter(F("name") == "Alice").first()
+    _final = Account.using(db).filter(F("name") == "Alice").first()
     print(f"Final balance: {_final.balance}")
     print(f"Net change: +{_final.balance - _starting} (outer +50 and +25, inner +100 rolled back)")
     return
@@ -327,9 +326,9 @@ def _(Account, F, db):
     db.adapter.begin_transaction()
 
     try:
-        _alice = Account.query().filter(F("name") == "Alice").first()
+        _alice = Account.using(db).filter(F("name") == "Alice").first()
         _alice.balance += 1000
-        _alice.save()
+        _alice.save(db=db)
 
         # Manually commit
         db.adapter.end_transaction(commit=True)
@@ -339,7 +338,7 @@ def _(Account, F, db):
         db.adapter.end_transaction(commit=False)
         print("Manually rolled back")
 
-    _final = Account.query().filter(F("name") == "Alice").first()
+    _final = Account.using(db).filter(F("name") == "Alice").first()
     print(f"Alice's balance: {_final.balance}")
     return
 

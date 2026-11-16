@@ -9,12 +9,11 @@ class User(SQLerModel):
 
 def main():
     db = SQLerDB.in_memory()
-    User.set_db(db)
 
-    User(name="Alice", age=30).save()
-    User(name="Bob", age=20).save()
+    User(name="Alice", age=30).save(db=db)
+    User(name="Bob", age=20).save(db=db)
 
-    adults = User.query().filter(F("age") >= 18).order_by("age").all()
+    adults = User.using(db).filter(F("age") >= 18).order_by("age").all()
     print([u.name for u in adults])
 
     db.close()

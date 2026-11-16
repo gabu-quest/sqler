@@ -178,15 +178,14 @@ def _(Optional, SQLerLiteModel, dataclass, datetime, db, timezone):
         created_at: Optional[str] = None
         updated_at: Optional[str] = None
 
-        def save(self) -> Self:
+        def save(self, *, db=None) -> Self:
             """Override save to set timestamps automatically."""
             now = datetime.now(timezone.utc).isoformat()
             if self._id is None:
                 self.created_at = now
             self.updated_at = now
-            return super().save()
+            return super().save(db=db)
 
-    Post.set_db(db)
     print("Post model with timestamps ready!")
     print("\nTimestamp pattern provides:")
     print("  - created_at: Set once on creation")
@@ -195,12 +194,12 @@ def _(Optional, SQLerLiteModel, dataclass, datetime, db, timezone):
 
 
 @app.cell
-def _(Post):
+def _(Post, db):
     import time
 
     # Create a post
     post = Post(title="Hello World", content="My first post")
-    post.save()
+    post.save(db=db)
 
     print(f"Created post: '{post.title}'")
     print(f"  created_at: {post.created_at}")
@@ -209,7 +208,7 @@ def _(Post):
     # Wait a moment and update
     time.sleep(0.1)
     post.content = "Updated content!"
-    post.save()
+    post.save(db=db)
 
     print("\nAfter update:")
     print(f"  created_at: {post.created_at} (unchanged)")
@@ -244,21 +243,20 @@ def _(Optional, SQLerLiteModel, dataclass, datetime, db, timezone):
             """Check if this document is soft-deleted."""
             return self.deleted_at is not None
 
-        def soft_delete(self):
+        def soft_delete(self, *, db=None):
             """Mark as deleted without removing from database."""
             self.deleted_at = datetime.now(timezone.utc).isoformat()
-            self.save()
+            self.save(db=db)
 
-        def restore(self):
+        def restore(self, *, db=None):
             """Restore a soft-deleted document."""
             self.deleted_at = None
-            self.save()
+            self.save(db=db)
 
-        def hard_delete(self):
+        def hard_delete(self, *, db=None):
             """Permanently delete the document."""
-            self.delete()
+            self.delete(db=db)
 
-    Document.set_db(db)
     print("Document model with soft delete pattern ready!")
     print("\nSoft delete pattern provides:")
     print("  - deleted_at: Optional[str] field")
@@ -270,50 +268,50 @@ def _(Optional, SQLerLiteModel, dataclass, datetime, db, timezone):
 
 
 @app.cell
-def _(Document, F):
+def _(Document, F, db):
     # Create some documents
     doc1 = Document(name="report.pdf", content="Annual report")
-    doc1.save()
+    doc1.save(db=db)
     doc2 = Document(name="notes.txt", content="Meeting notes")
-    doc2.save()
+    doc2.save(db=db)
     doc3 = Document(name="draft.doc", content="Draft proposal")
-    doc3.save()
+    doc3.save(db=db)
 
     print("Created 3 documents")
-    print(f"Total in database: {Document.query().count()}")
+    print(f"Total in database: {Document.using(db).count()}")
 
     # Soft delete one document
-    doc2.soft_delete()
+    doc2.soft_delete(db=db)
     print(f"\nSoft deleted '{doc2.name}'")
     print(f"  is_deleted: {doc2.is_deleted}")
     print(f"  deleted_at: {doc2.deleted_at}")
 
     # The document still exists in the database!
-    print(f"\nTotal in database: {Document.query().count()}")
+    print(f"\nTotal in database: {Document.using(db).count()}")
 
     # Filter to get only active documents
-    active = Document.query().filter(F("deleted_at").is_null()).all()
+    active = Document.using(db).filter(F("deleted_at").is_null()).all()
     print(f"Active documents: {[d.name for d in active]}")
 
     # Filter to get only deleted documents
-    deleted = Document.query().filter(F("deleted_at").is_not_null()).all()
+    deleted = Document.using(db).filter(F("deleted_at").is_not_null()).all()
     print(f"Deleted documents: {[d.name for d in deleted]}")
     return active, deleted, doc1, doc2, doc3
 
 
 @app.cell
-def _(Document, doc2):
+def _(Document, db, doc2):
     # Restore a soft-deleted document
     print(f"Before restore: is_deleted = {doc2.is_deleted}")
 
-    doc2.restore()
+    doc2.restore(db=db)
 
     print(f"After restore: is_deleted = {doc2.is_deleted}")
     print(f"deleted_at: {doc2.deleted_at}")
 
     # Now hard delete (permanent)
-    doc2.hard_delete()
-    print(f"\nAfter hard_delete: Document count = {Document.query().count()}")
+    doc2.hard_delete(db=db)
+    print(f"\nAfter hard_delete: Document count = {Document.using(db).count()}")
     return
 
 
@@ -337,7 +335,7 @@ def _(SQLerLiteModel, dataclass, db):
         name: str
         email: str
 
-        def save(self):
+        def save(self, *, db=None):
             """Override save with before/after logic."""
             # Before save: normalize email
             original = self.email
@@ -346,25 +344,24 @@ def _(SQLerLiteModel, dataclass, db):
                 print(f"  [before save] Normalized email: {original} -> {self.email}")
 
             # Actual save
-            result = super().save()
+            result = super().save(db=db)
 
             # After save: log
             print(f"  [after save] Saved user {self.name} (id={self._id})")
 
             return result
 
-        def delete(self):
+        def delete(self, *, db=None):
             """Override delete with before/after logic."""
             # Before delete: confirm
             print(f"  [before delete] About to delete: {self.name}")
 
             # Actual delete
-            super().delete()
+            super().delete(db=db)
 
             # After delete: log
             print(f"  [after delete] Deleted user {self.name}")
 
-    User.set_db(db)
     print("User model with hooks pattern ready!")
     print("\nHooks pattern provides:")
     print("  - Override save() for before/after save logic")
@@ -373,19 +370,19 @@ def _(SQLerLiteModel, dataclass, db):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     print("Creating user with messy email...")
     user = User(name="Alice", email="  ALICE@Example.COM  ")
-    user.save()  # Hooks are called automatically!
+    user.save(db=db)  # Hooks are called automatically!
 
     print(f"\nFinal email: {user.email}")
     return (user,)
 
 
 @app.cell
-def _(user):
+def _(db, user):
     print("\nDeleting user...")
-    user.delete()  # Delete hooks are called automatically!
+    user.delete(db=db)  # Delete hooks are called automatically!
     return
 
 
@@ -409,31 +406,30 @@ def _(SQLerLiteModel, dataclass, db):
         data: str
         locked: bool = False
 
-        def delete(self):
+        def delete(self, *, db=None):
             """Prevent deletion of locked records."""
             if self.locked:
                 print("  [before delete] BLOCKED: Record is locked!")
                 raise RuntimeError("Cannot delete locked record")
-            super().delete()
+            super().delete(db=db)
 
-    ProtectedRecord.set_db(db)
 
     # Create a locked record
     record = ProtectedRecord(data="Important data", locked=True)
-    record.save()
+    record.save(db=db)
     print(f"Created locked record: {record.data}")
 
     # Try to delete it
     print("\nAttempting to delete locked record...")
     try:
-        record.delete()  # This will be blocked
+        record.delete(db=db)  # This will be blocked
         print("Deleted (unexpected!)")
     except RuntimeError as exc:
         e = exc
         print(f"Delete blocked: {e}")
 
     # Verify it still exists
-    still_exists = ProtectedRecord.from_id(record._id)
+    still_exists = ProtectedRecord.from_id(record._id, db=db)
     print(f"Record still exists: {still_exists is not None}")
     return (ProtectedRecord, e, record, still_exists)
 
@@ -467,7 +463,7 @@ def _(Optional, SQLerLiteModel, dataclass, datetime, db, timezone):
             """Check if this task is soft-deleted."""
             return self.deleted_at is not None
 
-        def save(self):
+        def save(self, *, db=None):
             """Set timestamps and log before/after save."""
             # Before save: set timestamps
             now = datetime.now(timezone.utc).isoformat()
@@ -477,28 +473,27 @@ def _(Optional, SQLerLiteModel, dataclass, datetime, db, timezone):
             print(f"  [before save] Task: {self.title}")
 
             # Actual save
-            result = super().save()
+            result = super().save(db=db)
 
             # After save: log
             print(f"  [after save] Saved with id={self._id}")
 
             return result
 
-        def soft_delete(self):
+        def soft_delete(self, *, db=None):
             """Mark as deleted without removing from database."""
             self.deleted_at = datetime.now(timezone.utc).isoformat()
-            self.save()
+            self.save(db=db)
 
-        def restore(self):
+        def restore(self, *, db=None):
             """Restore a soft-deleted task."""
             self.deleted_at = None
-            self.save()
+            self.save(db=db)
 
-        def hard_delete(self):
+        def hard_delete(self, *, db=None):
             """Permanently delete the task."""
-            self.delete()
+            self.delete(db=db)
 
-    Task.set_db(db)
     print("Task model with combined pattern ready!")
     print("\nCombined pattern provides:")
     print("  - Timestamps: created_at, updated_at")
@@ -508,10 +503,10 @@ def _(Optional, SQLerLiteModel, dataclass, datetime, db, timezone):
 
 
 @app.cell
-def _(Task):
+def _(Task, db):
     # Create a task
     task = Task(title="Learn SQLer", description="Complete all tutorials", priority=1)
-    task.save()
+    task.save(db=db)
 
     print(f"\nTask: {task.title}")
     print(f"  priority: {task.priority}")
@@ -520,7 +515,7 @@ def _(Task):
 
     # Soft delete the task
     print("\nSoft deleting task...")
-    task.soft_delete()
+    task.soft_delete(db=db)
     print(f"  is_deleted: {task.is_deleted}")
     print(f"  deleted_at: {task.deleted_at}")
     return (task,)
@@ -537,26 +532,26 @@ def _(mo):
 
 
 @app.cell
-def _(F, Task):
+def _(F, Task, db):
     # Create more tasks for querying
-    Task(title="Task A", priority=1).save()
-    Task(title="Task B", priority=2).save()
+    Task(title="Task A", priority=1).save(db=db)
+    Task(title="Task B", priority=2).save(db=db)
     task_c = Task(title="Task C", priority=3)
-    task_c.save()
-    task_c.soft_delete()
+    task_c.save(db=db)
+    task_c.soft_delete(db=db)
 
     print("Query patterns for soft-deletable models:\n")
 
     # All records (including deleted)
-    all_tasks = Task.query().all()
+    all_tasks = Task.using(db).all()
     print(f"All tasks: {len(all_tasks)}")
 
     # Only active (not deleted)
-    active_tasks = Task.query().filter(F("deleted_at").is_null()).all()
+    active_tasks = Task.using(db).filter(F("deleted_at").is_null()).all()
     print(f"Active tasks: {[t.title for t in active_tasks]}")
 
     # Only deleted
-    deleted_tasks = Task.query().filter(F("deleted_at").is_not_null()).all()
+    deleted_tasks = Task.using(db).filter(F("deleted_at").is_not_null()).all()
     print(f"Deleted tasks: {[t.title for t in deleted_tasks]}")
     return active_tasks, all_tasks, deleted_tasks, task_c
 
@@ -580,12 +575,12 @@ def _(mo):
         created_by: Optional[str] = None
         updated_by: Optional[str] = None
 
-        def save(self):
+        def save(self, *, db=None):
             current_user = get_current_user()  # Your auth logic
             if self._id is None:
                 self.created_by = current_user
             self.updated_by = current_user
-            return super().save()
+            return super().save(db=db)
     ```
 
     For full change history, consider storing snapshots in a separate audit table.

@@ -97,26 +97,25 @@ def _(SQLerModel, TimestampMixin, datetime, db, timezone):
         title: str
         content: str
 
-        def save(self) -> Self:
+        def save(self, *, db=None) -> Self:
             """Override save to set timestamps automatically."""
             now = datetime.now(timezone.utc)
             if self._id is None:
                 self.created_at = now
             self.updated_at = now
-            return super().save()
+            return super().save(db=db)
 
-    Post.set_db(db)
     print("Post model with TimestampMixin ready!")
     return (Post,)
 
 
 @app.cell
-def _(Post):
+def _(Post, db):
     import time
 
     # Create a post
     post = Post(title="Hello World", content="My first post")
-    post.save()
+    post.save(db=db)
 
     print(f"Created post: '{post.title}'")
     print(f"  created_at: {post.created_at}")
@@ -125,7 +124,7 @@ def _(Post):
     # Wait a moment and update
     time.sleep(0.1)
     post.content = "Updated content!"
-    post.save()
+    post.save(db=db)
 
     print("\nAfter update:")
     print(f"  created_at: {post.created_at} (unchanged)")
@@ -146,13 +145,12 @@ def _(mo):
 
 
 @app.cell
-def _(SQLerModel, SoftDeleteMixin, db):
+def _(SQLerModel, SoftDeleteMixin):
     class Document(SoftDeleteMixin, SQLerModel):
         _table = "documents"
         name: str
         content: str
 
-    Document.set_db(db)
     print("Document model with SoftDeleteMixin ready!")
     print("\nSoftDeleteMixin provides:")
     print("  - deleted_at: Optional[datetime] field")
@@ -164,47 +162,47 @@ def _(SQLerModel, SoftDeleteMixin, db):
 
 
 @app.cell
-def _(Document, F):
+def _(Document, F, db):
     # Create some documents
-    doc1 = Document(name="report.pdf", content="Annual report").save()
-    doc2 = Document(name="notes.txt", content="Meeting notes").save()
-    doc3 = Document(name="draft.doc", content="Draft proposal").save()
+    doc1 = Document(name="report.pdf", content="Annual report").save(db=db)
+    doc2 = Document(name="notes.txt", content="Meeting notes").save(db=db)
+    doc3 = Document(name="draft.doc", content="Draft proposal").save(db=db)
 
     print("Created 3 documents")
-    print(f"Total in database: {Document.query().count()}")
+    print(f"Total in database: {Document.using(db).count()}")
 
     # Soft delete one document
-    doc2.soft_delete()
+    doc2.soft_delete(db=db)
     print(f"\nSoft deleted '{doc2.name}'")
     print(f"  is_deleted: {doc2.is_deleted}")
     print(f"  deleted_at: {doc2.deleted_at}")
 
     # The document still exists in the database!
-    print(f"\nTotal in database: {Document.query().count()}")
+    print(f"\nTotal in database: {Document.using(db).count()}")
 
     # Filter to get only active documents
-    active = Document.query().filter(F("deleted_at").is_null()).all()
+    active = Document.using(db).filter(F("deleted_at").is_null()).all()
     print(f"Active documents: {[d.name for d in active]}")
 
     # Filter to get only deleted documents
-    deleted = Document.query().filter(F("deleted_at").is_not_null()).all()
+    deleted = Document.using(db).filter(F("deleted_at").is_not_null()).all()
     print(f"Deleted documents: {[d.name for d in deleted]}")
     return (doc2,)
 
 
 @app.cell
-def _(Document, doc2):
+def _(Document, db, doc2):
     # Restore a soft-deleted document
     print(f"Before restore: is_deleted = {doc2.is_deleted}")
 
-    doc2.restore()
+    doc2.restore(db=db)
 
     print(f"After restore: is_deleted = {doc2.is_deleted}")
     print(f"deleted_at: {doc2.deleted_at}")
 
     # Now hard delete (permanent)
-    doc2.hard_delete()
-    print(f"\nAfter hard_delete: Document count = {Document.query().count()}")
+    doc2.hard_delete(db=db)
+    print(f"\nAfter hard_delete: Document count = {Document.using(db).count()}")
     return
 
 
@@ -223,7 +221,7 @@ def _(mo):
 
 
 @app.cell
-def _(HooksMixin, SQLerModel, db):
+def _(HooksMixin, SQLerModel):
     class User(HooksMixin, SQLerModel):
         _table = "users"
         name: str
@@ -250,25 +248,24 @@ def _(HooksMixin, SQLerModel, db):
             """Log after deletion."""
             print(f"  [after_delete] Deleted user {self.name}")
 
-    User.set_db(db)
     print("User model with HooksMixin ready!")
     return (User,)
 
 
 @app.cell
-def _(User):
+def _(User, db):
     print("Creating user with messy email...")
     user = User(name="Alice", email="  ALICE@Example.COM  ")
-    user.save()  # Hooks are called automatically!
+    user.save(db=db)  # Hooks are called automatically!
 
     print(f"\nFinal email: {user.email}")
     return (user,)
 
 
 @app.cell
-def _(user):
+def _(db, user):
     print("\nDeleting user...")
-    user.delete()  # Delete hooks are called automatically!
+    user.delete(db=db)  # Delete hooks are called automatically!
     return
 
 
@@ -296,22 +293,21 @@ def _(HooksMixin, SQLerModel, db):
                 return False  # Abort the delete
             return True
 
-    ProtectedRecord.set_db(db)
 
     # Create a locked record
-    _record = ProtectedRecord(data="Important data", locked=True).save()
+    _record = ProtectedRecord(data="Important data", locked=True).save(db=db)
     print(f"Created locked record: {_record.data}")
 
     # Try to delete it
     print("\nAttempting to delete locked record...")
     try:
-        _record.delete()  # This will be blocked
+        _record.delete(db=db)  # This will be blocked
         print("Deleted (unexpected!)")
     except RuntimeError as _e:
         print(f"Delete blocked: {_e}")
 
     # Verify it still exists
-    _still_exists = ProtectedRecord.from_id(_record._id)
+    _still_exists = ProtectedRecord.from_id(_record._id, db=db)
     print(f"Record still exists: {_still_exists is not None}")
     return
 
@@ -327,7 +323,7 @@ def _(mo):
 
 
 @app.cell
-def _(FullMixin, SQLerModel, datetime, db, timezone):
+def _(FullMixin, SQLerModel, datetime, timezone):
 
     class Task(FullMixin, SQLerModel):
         _table = "tasks"
@@ -347,7 +343,6 @@ def _(FullMixin, SQLerModel, datetime, db, timezone):
         def after_save(self) -> None:
             print(f"  [after_save] Saved with id={self._id}")
 
-    Task.set_db(db)
     print("Task model with FullMixin ready!")
     print("\nFullMixin provides:")
     print("  - TimestampMixin: created_at, updated_at")
@@ -357,10 +352,10 @@ def _(FullMixin, SQLerModel, datetime, db, timezone):
 
 
 @app.cell
-def _(Task):
+def _(Task, db):
     # Create a task
     task = Task(title="Learn SQLer", description="Complete all tutorials", priority=1)
-    task.save()
+    task.save(db=db)
 
     print(f"\nTask: {task.title}")
     print(f"  priority: {task.priority}")
@@ -369,7 +364,7 @@ def _(Task):
 
     # Soft delete the task
     print("\nSoft deleting task...")
-    task.soft_delete()
+    task.soft_delete(db=db)
     print(f"  is_deleted: {task.is_deleted}")
     print(f"  deleted_at: {task.deleted_at}")
     return
@@ -386,25 +381,25 @@ def _(mo):
 
 
 @app.cell
-def _(F, Task):
+def _(F, Task, db):
     # Create more tasks for querying
-    Task(title="Task A", priority=1).save()
-    Task(title="Task B", priority=2).save()
-    task_c = Task(title="Task C", priority=3).save()
-    task_c.soft_delete()
+    Task(title="Task A", priority=1).save(db=db)
+    Task(title="Task B", priority=2).save(db=db)
+    task_c = Task(title="Task C", priority=3).save(db=db)
+    task_c.soft_delete(db=db)
 
     print("Query patterns for soft-deletable models:\n")
 
     # All records (including deleted)
-    all_tasks = Task.query().all()
+    all_tasks = Task.using(db).all()
     print(f"All tasks: {len(all_tasks)}")
 
     # Only active (not deleted)
-    active_tasks = Task.query().filter(F("deleted_at").is_null()).all()
+    active_tasks = Task.using(db).filter(F("deleted_at").is_null()).all()
     print(f"Active tasks: {[t.title for t in active_tasks]}")
 
     # Only deleted
-    deleted_tasks = Task.query().filter(F("deleted_at").is_not_null()).all()
+    deleted_tasks = Task.using(db).filter(F("deleted_at").is_not_null()).all()
     print(f"Deleted tasks: {[t.title for t in deleted_tasks]}")
     return
 
@@ -427,12 +422,11 @@ def _(AuditMixin, SQLerModel, db):
         title: str
         content: str
 
-    Article.set_db(db)
 
     # Set the current user (typically done in middleware)
     AuditMixin.set_current_user("alice@example.com")
 
-    article = Article(title="Hello World", content="First post!").save()
+    article = Article(title="Hello World", content="First post!").save(db=db)
     print(f"Created by: {article.created_by}")
     print(f"Updated by: {article.updated_by}")
     print(f"Created at: {article.created_at}")
@@ -440,7 +434,7 @@ def _(AuditMixin, SQLerModel, db):
     # Different user updates the article
     AuditMixin.set_current_user("bob@example.com")
     article.content = "Updated content"
-    article.save()
+    article.save(db=db)
 
     print("\nAfter update by Bob:")
     print(f"  Created by: {article.created_by} (unchanged)")
@@ -467,27 +461,26 @@ def _(AuditLogMixin, AuditMixin, SQLerModel, db):
         price: float
         in_stock: bool = True
 
-    Product.set_db(db)
 
     # Set user for audit log
     AuditMixin.set_current_user("admin@shop.com")
 
     # Create a product
-    prod = Product(name="Widget", price=29.99).save()
+    prod = Product(name="Widget", price=29.99).save(db=db)
     print(f"Created: {prod.name} @ ${prod.price}")
 
     # Make some changes
     prod.price = 24.99
-    prod.save()
+    prod.save(db=db)
     print(f"Updated price to ${prod.price}")
 
     prod.in_stock = False
-    prod.save()
+    prod.save(db=db)
     print("Marked out of stock")
 
     # View the audit log
     print("\n--- Audit Log ---")
-    logs = prod.get_audit_log()
+    logs = prod.get_audit_log(db=db)
     for log in logs:
         print(f"{log['action']} at {log['timestamp'][:19]} by {log['user']}")
         if log["changes"]:

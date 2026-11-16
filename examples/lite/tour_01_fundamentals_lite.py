@@ -142,7 +142,7 @@ def _(mo):
 
 
 @app.cell
-def _(SQLerLiteModel, dataclass, db):
+def _(SQLerLiteModel, dataclass):
     @dataclass
     class User(SQLerLiteModel):
         __tablename__ = "users"
@@ -152,10 +152,9 @@ def _(SQLerLiteModel, dataclass, db):
         age: int = 0
         is_active: bool = True
 
-    # Register the model with the database (creates the table)
-    User.set_db(db)
+    # The first save creates the table; the class is not bound to a database
     print("User table created!")
-    print(f"Table name: {User._table}")
+    print(f"Table name: {User.__tablename__}")
     return (User,)
 
 
@@ -171,16 +170,16 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # Create some users
     alice = User(name="Alice", email="alice@example.com", age=30)
     bob = User(name="Bob", email="bob@example.com", age=25)
     charlie = User(name="Charlie", email="charlie@example.com", age=35, is_active=False)
 
     # Save them to the database
-    alice.save()
-    bob.save()
-    charlie.save()
+    alice.save(db=db)
+    bob.save(db=db)
+    charlie.save(db=db)
 
     print(f"Created Alice with ID: {alice._id}")
     print(f"Created Bob with ID: {bob._id}")
@@ -194,7 +193,7 @@ def _(mo):
     ## 4. Reading Records (SELECT)
 
     SQLer provides multiple ways to fetch records:
-    - `Model.from_id(id)` - Fetch a single record by ID
+    - `Model.from_id(id, db=db)` - Fetch a single record by ID
     - `Model.filter(...)` - Start a filtered query
     - `Model.all()` - Fetch all records
     """)
@@ -202,13 +201,13 @@ def _(mo):
 
 
 @app.cell
-def _(User, alice):
+def _(User, alice, db):
     # Fetch by ID
-    fetched_alice = User.from_id(alice._id)
+    fetched_alice = User.from_id(alice._id, db=db)
     print(f"Fetched: {fetched_alice.name}, {fetched_alice.email}")
 
     # Fetch all users
-    all_users = User.all()
+    all_users = User.using(db).all()
     print(f"\nAll users ({len(all_users)}):")
     for u in all_users:
         print(f"  - {u.name} (age: {u.age}, active: {u.is_active})")
@@ -227,13 +226,13 @@ def _(mo):
 
 
 @app.cell
-def _(User, bob):
+def _(User, bob, db):
     # Update Bob's age
     bob.age = 26
-    bob.save()
+    bob.save(db=db)
 
     # Verify the update
-    updated_bob = User.from_id(bob._id)
+    updated_bob = User.from_id(bob._id, db=db)
     print(f"Bob's new age: {updated_bob.age}")
     return (updated_bob,)
 
@@ -249,12 +248,12 @@ def _(mo):
 
 
 @app.cell
-def _(User, charlie):
+def _(User, charlie, db):
     # Delete Charlie
-    charlie.delete()
+    charlie.delete(db=db)
 
     # Verify deletion
-    remaining = User.all()
+    remaining = User.using(db).all()
     print(f"Remaining users: {[u.name for u in remaining]}")
     return (remaining,)
 
@@ -271,18 +270,18 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # Add more users for querying examples
-    User(name="Diana", email="diana@example.com", age=28).save()
-    User(name="Eve", email="eve@corp.com", age=32).save()
-    User(name="Frank", email="frank@corp.com", age=28, is_active=False).save()
+    User(name="Diana", email="diana@example.com", age=28).save(db=db)
+    User(name="Eve", email="eve@corp.com", age=32).save(db=db)
+    User(name="Frank", email="frank@corp.com", age=28, is_active=False).save(db=db)
 
     # Filter by exact match
-    active_users = User.filter(F("is_active") == True).all()
+    active_users = User.using(db).filter(F("is_active") == True).all()
     print(f"Active users: {[u.name for u in active_users]}")
 
     # Filter by age
-    users_28 = User.filter(F("age") == 28).all()
+    users_28 = User.using(db).filter(F("age") == 28).all()
     print(f"Users aged 28: {[u.name for u in users_28]}")
     return active_users, users_28
 
@@ -298,17 +297,17 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # Greater than
-    older_than_28 = User.filter(F("age") > 28).all()
+    older_than_28 = User.using(db).filter(F("age") > 28).all()
     print(f"Older than 28: {[u.name for u in older_than_28]}")
 
     # Less than or equal
-    young_or_28 = User.filter(F("age") <= 28).all()
+    young_or_28 = User.using(db).filter(F("age") <= 28).all()
     print(f"28 or younger: {[u.name for u in young_or_28]}")
 
     # String substring match (using LIKE)
-    corp_users = User.filter(F("email").like("%corp%")).all()
+    corp_users = User.using(db).filter(F("email").like("%corp%")).all()
     print(f"Corporate emails: {[u.name for u in corp_users]}")
     return corp_users, older_than_28, young_or_28
 
@@ -324,21 +323,21 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # Between (inclusive)
-    age_range = User.filter(F("age").between(27, 30)).all()
+    age_range = User.using(db).filter(F("age").between(27, 30)).all()
     print(f"Age 27-30: {[u.name for u in age_range]}")
 
     # Starts with
-    a_names = User.filter(F("name").startswith("A")).all()
+    a_names = User.using(db).filter(F("name").startswith("A")).all()
     print(f"Names starting with A: {[u.name for u in a_names]}")
 
     # In list
-    specific_ages = User.filter(F("age").in_list([28, 32])).all()
+    specific_ages = User.using(db).filter(F("age").in_list([28, 32])).all()
     print(f"Age 28 or 32: {[u.name for u in specific_ages]}")
 
     # Not equal
-    not_alice = User.filter(F("name") != "Alice").all()
+    not_alice = User.using(db).filter(F("name") != "Alice").all()
     print(f"Not Alice: {[u.name for u in not_alice]}")
     return a_names, age_range, not_alice, specific_ages
 
@@ -354,9 +353,9 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # Multiple filters (AND)
-    active_and_young = User.filter(F("is_active") == True).filter(F("age") < 30).all()
+    active_and_young = User.using(db).filter(F("is_active") == True).filter(F("age") < 30).all()
     print(f"Active AND under 30: {[u.name for u in active_and_young]}")
     return (active_and_young,)
 
@@ -372,17 +371,17 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # Order by age (ascending - default)
-    by_age_asc = User.query().order_by("age").all()
+    by_age_asc = User.using(db).order_by("age").all()
     print(f"By age (asc): {[(u.name, u.age) for u in by_age_asc]}")
 
     # Order by age (descending)
-    by_age_desc = User.query().order_by("age", desc=True).all()
+    by_age_desc = User.using(db).order_by("age", desc=True).all()
     print(f"By age (desc): {[(u.name, u.age) for u in by_age_desc]}")
 
     # Limit results
-    top_2_oldest = User.query().order_by("age", desc=True).limit(2).all()
+    top_2_oldest = User.using(db).order_by("age", desc=True).limit(2).all()
     print(f"Top 2 oldest: {[(u.name, u.age) for u in top_2_oldest]}")
     return by_age_asc, by_age_desc, top_2_oldest
 
@@ -398,13 +397,13 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # Count
-    total = User.count()
+    total = User.using(db).count()
     print(f"Total users: {total}")
 
     # Count with filter
-    active_count = User.filter(F("is_active") == True).count()
+    active_count = User.using(db).filter(F("is_active") == True).count()
     print(f"Active users: {active_count}")
     return active_count, total
 
@@ -420,17 +419,17 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # First (safe - returns None if not found)
-    oldest = User.query().order_by("age", desc=True).first()
+    oldest = User.using(db).order_by("age", desc=True).first()
     print(f"Oldest user: {oldest.name if oldest else 'None'}")
 
     # First with filter
-    first_corp = User.filter(F("email").like("%corp%")).first()
+    first_corp = User.using(db).filter(F("email").like("%corp%")).first()
     print(f"First corp user: {first_corp.name if first_corp else 'None'}")
 
     # First when no match
-    no_match = User.filter(F("name") == "Nobody").first()
+    no_match = User.using(db).filter(F("name") == "Nobody").first()
     print(f"No match result: {no_match}")
     return first_corp, no_match, oldest
 
@@ -445,7 +444,7 @@ def _(mo):
     | Operation | Method |
     |-----------|--------|
     | Create | `Model(...).save()` |
-    | Read one | `Model.from_id(id)` |
+    | Read one | `Model.from_id(id, db=db)` |
     | Read all | `Model.all()` |
     | Update | Modify + `.save()` |
     | Delete | `.delete()` |

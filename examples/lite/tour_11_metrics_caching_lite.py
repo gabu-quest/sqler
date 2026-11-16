@@ -166,13 +166,12 @@ def _(SQLerLiteModel, dataclass, db):
         email: str
         active: bool = True
 
-    User.set_db(db)
 
     # Create sample users
     for _i in range(10):
-        User(name=f"User{_i}", email=f"user{_i}@example.com", active=_i % 2 == 0).save()
+        User(name=f"User{_i}", email=f"user{_i}@example.com", active=_i % 2 == 0).save(db=db)
 
-    print(f"Created {User.query().count()} users")
+    print(f"Created {User.using(db).count()} users")
     return (User,)
 
 
@@ -188,16 +187,16 @@ def _(mo):
 
 
 @app.cell
-def _(F, User, metrics):
+def _(F, User, db, metrics):
     # Enable the global metrics collector
     metrics.reset()  # Clear any previous metrics
     metrics.enable(slow_threshold_ms=50)
 
     # Run some queries
-    User.query().all()
-    User.query().filter(F("active") == True).all()
-    User.query().count()
-    User.query().filter(F("name") == "User1").first()
+    User.using(db).all()
+    User.using(db).filter(F("active") == True).all()
+    User.using(db).count()
+    User.using(db).filter(F("name") == "User1").first()
 
     print("Metrics collector enabled!")
     print("  Slow query threshold: 50ms")
@@ -287,13 +286,13 @@ def _(mo):
 
 
 @app.cell
-def _(F, User, cache):
+def _(F, User, cache, db):
     # Manual caching
     _key = "active_users"
 
     if not cache.has(_key):
         print("Cache MISS - fetching from database...")
-        _users = User.query().filter(F("active") == True).all()
+        _users = User.using(db).filter(F("active") == True).all()
         cache.set(_key, _users, ttl_seconds=30, table="users")
     else:
         print("Cache HIT!")
@@ -342,11 +341,11 @@ def _(mo):
 
 
 @app.cell
-def _(User, cache, cached_query):
+def _(User, cache, cached_query, db):
     @cached_query(ttl_seconds=60, table="users", cache=cache)
     def get_user_count():
         print("  (executing query...)")
-        return User.query().count()
+        return User.using(db).count()
 
     # First call - hits database
     print("First call:")
@@ -417,7 +416,6 @@ def _(SQLerLiteModel, cache, dataclass, db):
         name: str
         price: float
 
-    Product.set_db(db)
 
     # Cache some product data
     cache.set("all_products", "cached data", table="products")
@@ -425,7 +423,7 @@ def _(SQLerLiteModel, cache, dataclass, db):
 
     # With Lite models, manually invalidate cache after save/delete
     prod = Product(name="Widget", price=29.99)
-    prod.save()
+    prod.save(db=db)
     cache.invalidate_table("products")  # manual invalidation
 
     print(f"After save + manual invalidation - 'all_products' cached: {cache.has('all_products')}")
@@ -447,13 +445,12 @@ def _(mo):
 
 
 @app.cell
-def _():
+def _(db):
     print("Connections per thread and per task:")
     print("")
     print("  # One SQLerDB for every thread")
     print("  db = SQLerDB.on_disk('app.db')")
-    print("  User.set_db(db)")
-    print("  threads = [threading.Thread(target=lambda: User.query().all()) for _ in range(10)]")
+    print("  threads = [threading.Thread(target=lambda: User.using(db).all()) for _ in range(10)]")
     print("")
     print("  # Async: a pool of connections, and its numbers")
     print("  adb = AsyncSQLerDB.on_disk('app.db')")
@@ -480,7 +477,7 @@ def _(mo):
 
 
 @app.cell
-def _(MetricsCollector, User):
+def _(MetricsCollector, User, db):
     # Create collector with custom labels
     _collector = MetricsCollector()
     _collector.enable(
@@ -489,7 +486,7 @@ def _(MetricsCollector, User):
     )
 
     # Run a query
-    User.query().count()
+    User.using(db).count()
 
     # Export shows labels
     _prom = _collector.prometheus_export()

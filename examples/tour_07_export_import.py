@@ -69,7 +69,6 @@ def _(SQLerModel, db):
         age: int
         active: bool = True
 
-    User.set_db(db)
 
     # Create sample data
     users_data = [
@@ -80,9 +79,9 @@ def _(SQLerModel, db):
         ("Eve", "eve@example.com", 32),
     ]
     for name, email, age in users_data:
-        User(name=name, email=email, age=age).save()
+        User(name=name, email=email, age=age).save(db=db)
 
-    print(f"Created {User.query().count()} users")
+    print(f"Created {User.using(db).count()} users")
     return (User,)
 
 
@@ -97,9 +96,9 @@ def _(mo):
 
 
 @app.cell
-def _(User, export_csv_string):
+def _(User, db, export_csv_string):
     # Export all users to CSV
-    csv_data = export_csv_string(User.query())
+    csv_data = export_csv_string(User.using(db))
 
     print("CSV Export:")
     print(csv_data)
@@ -107,9 +106,9 @@ def _(User, export_csv_string):
 
 
 @app.cell
-def _(F, User, export_csv_string):
+def _(F, User, db, export_csv_string):
     # Export filtered results
-    active_users = User.query().filter(F("age") > 28)
+    active_users = User.using(db).filter(F("age") > 28)
     csv_filtered = export_csv_string(active_users)
 
     print("CSV Export (age > 28):")
@@ -128,9 +127,9 @@ def _(mo):
 
 
 @app.cell
-def _(User, export_json_string):
+def _(User, db, export_json_string):
     # Export all users to JSON
-    json_data = export_json_string(User.query(), indent=2)
+    json_data = export_json_string(User.using(db), indent=2)
 
     print("JSON Export:")
     print(json_data)
@@ -148,14 +147,14 @@ def _(mo):
 
 
 @app.cell
-def _(User, export_csv_string, export_json_string):
+def _(User, db, export_csv_string, export_json_string):
     # Export only specific fields
-    csv_partial = export_csv_string(User.query(), fields=["name", "email"])
+    csv_partial = export_csv_string(User.using(db), fields=["name", "email"])
     print("CSV with selected fields:")
     print(csv_partial)
 
     # JSON with selected fields
-    json_partial = export_json_string(User.query(), fields=["name", "age"], indent=2)
+    json_partial = export_json_string(User.using(db), fields=["name", "age"], indent=2)
     print("\nJSON with selected fields:")
     print(json_partial)
     return
@@ -184,7 +183,6 @@ def _(SQLerModel, db):
         price: float
         category: str
 
-    Product.set_db(db)
 
     # Simulate CSV data (in real usage, this would come from a file)
     csv_content = """name,price,category
@@ -198,11 +196,11 @@ def _(SQLerModel, db):
     imported = []
     for row in reader:
         p = Product(name=row["name"], price=float(row["price"]), category=row["category"])
-        p.save()
+        p.save(db=db)
         imported.append(p)
 
     print(f"Imported {len(imported)} products")
-    for p in Product.query().all():
+    for p in Product.using(db).all():
         print(f"  {p.name}: ${p.price} ({p.category})")
     return (ImpResult,)
 
@@ -227,7 +225,6 @@ def _(SQLerModel, db):
         total: float
         status: str = "pending"
 
-    Order.set_db(db)
 
     # Simulate JSON data
     json_content = """[
@@ -239,10 +236,10 @@ def _(SQLerModel, db):
     # Parse and import
     orders_data = json.loads(json_content)
     for order_dict in orders_data:
-        Order(**order_dict).save()
+        Order(**order_dict).save(db=db)
 
-    print(f"Imported {Order.query().count()} orders")
-    for o in Order.query().all():
+    print(f"Imported {Order.using(db).count()} orders")
+    for o in Order.using(db).all():
         print(f"  {o.customer}: ${o.total} ({o.status})")
     return
 
@@ -270,7 +267,7 @@ def _():
     print("  - size_bytes: file size")
 
     # Example (would work in native Python):
-    # result = export_csv(User.query(), "/tmp/users.csv")
+    # result = export_csv(User.using(db), "/tmp/users.csv")
     # print(f"Exported {result.count} records to {result.path}")
     # print(f"File size: {result.size_bytes} bytes")
     return
@@ -313,12 +310,12 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # JSONL format: one JSON object per line
     # Great for streaming large datasets
 
     jsonl_data = []
-    for user in User.query().all():
+    for user in User.using(db).all():
         record = {"name": user.name, "email": user.email, "age": user.age}
         jsonl_data.append(str(record).replace("'", '"'))
 

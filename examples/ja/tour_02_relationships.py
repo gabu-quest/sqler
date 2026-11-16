@@ -74,7 +74,7 @@ def _(mo):
 
 
 @app.cell
-def _(SQLerModel, db):
+def _(SQLerModel):
     class Author(SQLerModel):
         _table = "authors"
         name: str
@@ -87,8 +87,6 @@ def _(SQLerModel, db):
         author: Author | None = None  # Author へのリレーション
 
     # 両方のモデルを登録
-    Author.set_db(db)
-    Book.set_db(db)
     print("モデルを登録しました！")
     return Author, Book
 
@@ -107,25 +105,25 @@ def _(mo):
 
 
 @app.cell
-def _(Author, Book):
+def _(Author, Book, db):
     # まず著者を作成して保存
     alice = Author(name="Alice Smith", country="USA")
-    alice.save()
+    alice.save(db=db)
 
     bob = Author(name="Bob Jones", country="UK")
-    bob.save()
+    bob.save(db=db)
 
     print(f"著者を作成: Alice (id={alice._id}), Bob (id={bob._id})")
 
     # 著者リレーション付きの本を作成
     book1 = Book(title="Python マスター", year=2023, author=alice)
-    book1.save()
+    book1.save(db=db)
 
     book2 = Book(title="Web 開発", year=2024, author=alice)
-    book2.save()
+    book2.save(db=db)
 
     book3 = Book(title="データベース設計", year=2022, author=bob)
-    book3.save()
+    book3.save(db=db)
 
     print("\n本を作成:")
     print(f"  - {book1.title} by {book1.author.name}")
@@ -148,9 +146,9 @@ def _(mo):
 
 
 @app.cell
-def _(Book):
+def _(Book, db):
     # すべての本をクエリ - リレーションは自動的にハイドレート
-    all_books = Book.query().all()
+    all_books = Book.using(db).all()
 
     print("ハイドレートされた著者付きの全ての本:")
     for _b in all_books:
@@ -210,9 +208,9 @@ def _(mo):
 
 
 @app.cell
-def _(Book):
+def _(Book, db):
     # 特定の国の著者による本を検索
-    usa_books = Book.query().filter(
+    usa_books = Book.using(db).filter(
         Book.ref("author").field("country") == "USA"
     ).all()
 
@@ -223,9 +221,9 @@ def _(Book):
 
 
 @app.cell
-def _(Book):
+def _(Book, db):
     # 特定の著者名で本を検索
-    alice_books = Book.query().filter(
+    alice_books = Book.using(db).filter(
         Book.ref("author").field("name") == "Alice Smith"
     ).all()
 
@@ -267,9 +265,9 @@ def _(mo):
 
 
 @app.cell
-def _(Book):
+def _(Book, db):
     # 型ヒントに関わらず、フィールドは保存された参照を保持する
-    raw_books = Book.query().resolve(False).all()
+    raw_books = Book.using(db).resolve(False).all()
     print(f"book.author = {raw_books[0].author}")
     print(f"type = {type(raw_books[0].author).__name__}")
     return
@@ -296,19 +294,18 @@ def _(Author, SQLerModel, db):
         # 柔軟な型指定：Author オブジェクトまたは生の参照辞書を受け入れる
         author: Author | dict | None = None
 
-    Article.set_db(db)
 
     # 記事を作成
-    writer = Author.from_id(1)  # 既存の著者を取得
-    Article(title="resolve(False) を理解する", author=writer).save()
+    writer = Author.from_id(1, db=db)  # 既存の著者を取得
+    Article(title="resolve(False) を理解する", author=writer).save(db=db)
 
-    raw_articles = Article.query().resolve(False).all()
+    raw_articles = Article.using(db).resolve(False).all()
     print("ハイドレーションなし:")
     print(f"   article.author = {raw_articles[0].author}")
     print(f"   type = {type(raw_articles[0].author).__name__}")
 
     # 通常のハイドレーションも機能します
-    hydrated = Article.query().all()
+    hydrated = Article.using(db).all()
     print(f"\n   ハイドレーション時: author.name = {hydrated[0].author.name}")
     return (Article,)
 
@@ -345,18 +342,18 @@ def _(mo):
 
 
 @app.cell
-def _(Book, alice, book1):
+def _(Book, alice, book1, db):
     print(f"更新前: {book1.author.name}")
 
     # 著者を更新
     alice.name = "Alice Smith-Johnson"
-    alice.save()
+    alice.save(db=db)
 
     # 本はまだメモリ内の古いデータを持っている
     print(f"本はまだ表示: {book1.author.name}")
 
     # 本をリフレッシュして更新データを取得
-    book1.refresh()
+    book1.refresh(db=db)
     print(f"リフレッシュ後: {book1.author.name}")
     return
 
@@ -387,17 +384,15 @@ def _(Author, SQLerModel, db):
         editor: Author | None = None
         publisher: Publisher | None = None
 
-    Publisher.set_db(db)
-    Magazine.set_db(db)
 
     # データを作成
-    pub = Publisher(name="TechMedia", location="San Francisco").save()
+    pub = Publisher(name="TechMedia", location="San Francisco").save(db=db)
 
     # 既存の著者を編集者として再利用
-    editor = Author.from_id(1)  # Alice
+    editor = Author.from_id(1, db=db)  # Alice
 
     mag = Magazine(title="コード週刊", issue=42, editor=editor, publisher=pub)
-    mag.save()
+    mag.save(db=db)
 
     print(f"雑誌を作成: {mag.title} #{mag.issue}")
     print(f"  編集者: {mag.editor.name}")
@@ -426,12 +421,11 @@ def _(SQLerModel, db):
         name: str
         parent: Optional["Category"] = None
 
-    Category.set_db(db)
 
     # カテゴリツリーを作成
-    root = Category(name="電子機器").save()
-    computers = Category(name="コンピュータ", parent=root).save()
-    laptops = Category(name="ラップトップ", parent=computers).save()
+    root = Category(name="電子機器").save(db=db)
+    computers = Category(name="コンピュータ", parent=root).save(db=db)
+    laptops = Category(name="ラップトップ", parent=computers).save(db=db)
 
     print("カテゴリ階層:")
     print(f"  {root.name}")
@@ -439,7 +433,7 @@ def _(SQLerModel, db):
     print(f"        └── {laptops.name}")
 
     # リレーションが機能することを確認
-    fetched = Category.from_id(laptops._id)
+    fetched = Category.from_id(laptops._id, db=db)
     print(f"\n'{fetched.name}' を取得、親は '{fetched.parent.name}'")
     return Category, Optional, computers, fetched, laptops, root
 

@@ -19,13 +19,13 @@ class Post(TimestampMixin, SQLerModel):
     title: str
     content: str
 
-    def save(self) -> Self:
+    def save(self, *, db=None) -> Self:
         """Override save to set timestamps automatically."""
         now = datetime.now(timezone.utc)
         if self._id is None:
             self.created_at = now
         self.updated_at = now
-        return super().save()
+        return super().save(db=db)
 
 
 # Example 2: SoftDeleteMixin - Soft delete instead of permanent deletion
@@ -77,66 +77,62 @@ class Task(FullMixin, SQLerModel):
 
 def main():
     db = SQLerDB.in_memory()
-    Post.set_db(db)
-    Document.set_db(db)
-    User.set_db(db)
-    Task.set_db(db)
 
     print("=== TimestampMixin Example ===")
     post = Post(title="Hello World", content="My first post")
-    post.save()
+    post.save(db=db)
     print(f"Post created at: {post.created_at}")
     print(f"Post updated at: {post.updated_at}")
 
     # Update the post - updated_at changes
     post.content = "Updated content"
-    post.save()
+    post.save(db=db)
     print(f"After update - updated at: {post.updated_at}")
 
     print("\n=== SoftDeleteMixin Example ===")
-    doc = Document(name="Important.txt", content="Do not delete").save()
+    doc = Document(name="Important.txt", content="Do not delete").save(db=db)
     print(f"Document created: {doc.name} (id={doc._id})")
 
     # Soft delete the document
-    doc.soft_delete()
+    doc.soft_delete(db=db)
     print(f"Document soft deleted: is_deleted={doc.is_deleted}")
     print(f"Deleted at: {doc.deleted_at}")
 
     # The document still exists in the database
-    all_docs = Document.query().all()
+    all_docs = Document.using(db).all()
     print(f"Total documents (including deleted): {len(all_docs)}")
 
     # Filter out soft-deleted documents using is_null()
-    active_docs = Document.query().filter(F("deleted_at").is_null()).all()
+    active_docs = Document.using(db).filter(F("deleted_at").is_null()).all()
     print(f"Active documents: {len(active_docs)}")
 
     # Restore the document
-    doc.restore()
+    doc.restore(db=db)
     print(f"Document restored: is_deleted={doc.is_deleted}")
 
     # Hard delete permanently removes the document
-    doc.hard_delete()
+    doc.hard_delete(db=db)
     print("Document hard deleted (permanent)")
 
     print("\n=== HooksMixin Example (Auto-Hooks!) ===")
     user = User(name="Alice", email="  ALICE@Example.COM  ")
     print("Creating user with messy email...")
     # Hooks are called automatically!
-    user.save()
+    user.save(db=db)
     print(f"Saved user: {user.name} <{user.email}>")
 
     print("\nDeleting user...")
-    user.delete()
+    user.delete(db=db)
 
     print("\n=== FullMixin Example (All Combined!) ===")
     task = Task(title="Learn SQLer", description="Read the docs", priority=1)
-    task.save()
+    task.save(db=db)
     print(f"Task: {task.title}")
     print(f"Created: {task.created_at}")
     print(f"Updated: {task.updated_at}")
 
     # Soft delete the task
-    task.soft_delete()
+    task.soft_delete(db=db)
     print(f"Task soft deleted: {task.is_deleted}")
 
     db.close()
