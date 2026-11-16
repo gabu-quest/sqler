@@ -2682,10 +2682,12 @@ SQLer provides a unified exception hierarchy under `sqler.exceptions`:
 - **Query errors**
   - `NoAdapterError` — query executed without adapter
   - `InvariantViolationError` — malformed row invariant (e.g., NULL JSON)
-  - `QueryTimeoutError` — query exceeded timeout
+  - `QueryTimeoutError` — for a query that exceeded a timeout. Nothing in sqler raises it today;
+    you can raise it yourself.
 - **Concurrency errors** — all are a `ConcurrencyError`, so `except ConcurrencyError` catches them
   - `StaleVersionError` — optimistic check failed (HTTP 409)
-  - `DeadlockError` — deadlock detected
+  - `DeadlockError` — for a deadlock. Nothing in sqler raises it today; a locked database
+    that stays locked raises `sqlite3.OperationalError`.
   - `LockTimeoutError` — unable to acquire lock
   - `TransactionStateError` — a transaction can no longer be trusted to commit what it was told to (see "Nested transactions whose end fails")
 - **Integrity errors**
@@ -2701,8 +2703,10 @@ SQLer provides a unified exception hierarchy under `sqler.exceptions`:
     `(index, message)` pairs) for a batch that partly failed. Nothing in sqler raises it today;
     you can raise it yourself.
 - **Hook errors**
-  - `BeforeSaveError`, `AfterSaveError` — save hook failures
-  - `BeforeDeleteError`, `AfterDeleteError` — delete hook failures
+  - `BeforeSaveError`, `AfterSaveError`, `BeforeDeleteError`, `AfterDeleteError` — for hook
+    failures. Nothing in sqler raises them today: an exception a hook raises reaches the caller
+    as it is, and a `before_save()` or `before_delete()` that returns `False` raises
+    `RuntimeError`.
 
 All exceptions inherit from `SQLerError` for unified catching. SQLite exceptions (`sqlite3.*`) bubble with context.
 

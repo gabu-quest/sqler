@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
@@ -306,33 +306,3 @@ def is_ref_dict(value: object) -> bool:
         return False
     table, rid = value.get("_table"), value.get("_id")
     return isinstance(table, str) and isinstance(rid, int) and not isinstance(rid, bool)
-
-
-def format_model_context(
-    *,
-    model: Optional[str] = None,
-    table: Optional[str] = None,
-    id_: Optional[int] = None,
-    operation: Optional[str] = None,
-) -> str:
-    """Format context information for error messages.
-
-    Args:
-        model: Model class name.
-        table: Table name.
-        id_: Row ID.
-        operation: Operation being performed (e.g., "save", "delete").
-
-    Returns:
-        str: Formatted context string.
-    """
-    parts = []
-    if operation:
-        parts.append(f"during {operation}")
-    if model:
-        parts.append(f"model={model}")
-    if table:
-        parts.append(f"table={table}")
-    if id_ is not None:
-        parts.append(f"id={id_}")
-    return " ".join(parts) if parts else ""
