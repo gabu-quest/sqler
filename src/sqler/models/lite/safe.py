@@ -146,6 +146,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         retry = _retry.SaveRetry(rebase_config)
 
         payload, written = held, None
+        version, base = self._version, snap  # the model keeps its own until a write succeeds
         while True:
             retry.begin_try()
             try:
@@ -153,18 +154,18 @@ class SQLerLiteSafeModel(SQLerLiteModel):
                 if promoted:
                     db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
                 if _partial:
-                    changed = _dirty.changed_fields(self._snapshot or {}, payload)
+                    changed = _dirty.changed_fields(base or {}, payload)
                     new_id, new_version = self._id, db._update_fields(
-                        table, self._id, payload, changed, promoted or (), self._version
+                        table, self._id, payload, changed, promoted or (), version
                     )
                 elif promoted:
                     new_id, new_version = db.upsert_with_version_promoted(
-                        table, self._id, payload, self._version,
+                        table, self._id, payload, version,
                         list(promoted.keys()),
                     )
                 else:
                     new_id, new_version = db.upsert_with_version(
-                        table, self._id, payload, self._version
+                        table, self._id, payload, version
                     )
                 object.__setattr__(self, "_id", new_id)
                 object.__setattr__(self, "_version", new_version)
@@ -188,8 +189,7 @@ class SQLerLiteSafeModel(SQLerLiteModel):
                     raise
                 payload = _retry.rebase(latest_doc, held, snap, delta, stale)
                 written = retry.build(stale, lambda: cls.model_validate(cls._resolve_relations(payload, db=db)))
-                object.__setattr__(self, "_version", latest_doc.get("_version", 0))
-                object.__setattr__(self, "_snapshot", _dirty.snapshot(latest_doc))
+                version, base = latest_doc.get("_version", 0), _dirty.snapshot(latest_doc)
 
             _retry.sleep(delay)
 

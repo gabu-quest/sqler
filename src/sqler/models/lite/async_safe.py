@@ -129,6 +129,7 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         retry = _retry.SaveRetry(rebase_config)
 
         payload, written = held, None
+        version, base = self._version, snap  # the model keeps its own until a write succeeds
         while True:
             retry.begin_try()
             try:
@@ -136,18 +137,18 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
                 if promoted:
                     await db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
                 if _partial:
-                    changed = _dirty.changed_fields(self._snapshot or {}, payload)
+                    changed = _dirty.changed_fields(base or {}, payload)
                     new_id, new_version = self._id, await db._update_fields(
-                        table, self._id, payload, changed, promoted or (), self._version
+                        table, self._id, payload, changed, promoted or (), version
                     )
                 elif promoted:
                     new_id, new_version = await db.upsert_with_version_promoted(
-                        table, self._id, payload, self._version,
+                        table, self._id, payload, version,
                         list(promoted.keys()),
                     )
                 else:
                     new_id, new_version = await db.upsert_with_version(
-                        table, self._id, payload, self._version
+                        table, self._id, payload, version
                     )
                 object.__setattr__(self, "_id", new_id)
                 object.__setattr__(self, "_version", new_version)
@@ -169,8 +170,7 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
                     return cls.model_validate(await cls._aresolve_relations(payload, db=db))
 
                 written = await retry.abuild(stale, build)
-                object.__setattr__(self, "_version", latest_doc.get("_version", 0))
-                object.__setattr__(self, "_snapshot", _dirty.snapshot(latest_doc))
+                version, base = latest_doc.get("_version", 0), _dirty.snapshot(latest_doc)
             except sqlite3.OperationalError as e:
                 if not _retry.is_lock_error(e):
                     raise

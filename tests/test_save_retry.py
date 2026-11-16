@@ -1083,6 +1083,57 @@ def test_rebase_onto_a_row_the_class_cannot_load_raises_stale_and_writes_nothing
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_a_save_that_raises_on_its_second_rebase_leaves_the_model_as_it_was(kind):
+    # two other writers get in during one save: the first changes a dict key (merged), the
+    # second the title this writer changed too (cannot be merged)
+    async def steps(rows, mine, theirs):
+        db = rows.db
+        real = db.upsert_with_version
+        writes = [
+            "json_set(data, '$.meta.k1', 1, '$._version', _version + 1)",
+            "json_set(data, '$.title', 'third', '$._version', _version + 1)",
+        ]
+
+        def bump():
+            return f"UPDATE rb_doc SET data = {writes.pop(0)}, _version = _version + 1 WHERE _id = 1;"
+
+        async def wrapped(table, _id, payload, version):
+            if writes and table == "rb_doc":
+                await _aw(db.adapter.execute(bump()))
+                await _aw(db.adapter.commit())
+            return await _aw(real(table, _id, payload, version))
+
+        if rows.kind in ("async", "lite_async"):
+            db.upsert_with_version = wrapped
+        else:
+
+            def sync_wrapped(table, _id, payload, version):
+                if writes and table == "rb_doc":
+                    db.adapter.execute(bump())
+                    db.adapter.commit()
+                return real(table, _id, payload, version)
+
+            db.upsert_with_version = sync_wrapped
+        mine.title = "mine"
+        mine.count += 1
+        with pytest.raises(StaleVersionError, match="^Stale version: update rejected$"):
+            await _aw(mine.save())
+        del db.upsert_with_version
+        row = await rows.row()
+        return (
+            (row["title"], row["count"], row["meta"], row["_version"]),
+            (mine.title, mine.count, dict(mine.meta), mine._version),
+            (mine._snapshot["title"], mine._snapshot["count"], mine._snapshot["meta"]),
+        )
+
+    assert _rebase(kind, steps) == (
+        ("third", 10, {"k1": 1}, 2),
+        ("mine", 11, {}, 0),
+        ("first", 10, {}),
+    )
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_two_rebases_inside_one_save_keep_both_foreign_saves(kind):
     async def steps(rows, mine, theirs):
         theirs.title = "theirs"
