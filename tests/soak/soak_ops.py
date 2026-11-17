@@ -401,12 +401,17 @@ class Worker:
             inst.note = f"p{self.rng.randrange(10**6)}"
         else:
             inst.n += 1
-        self.intent("partial_safe" if partial else "change_safe", ids=[[TABLE[name], _id]], fx=[self.plan(name, inst)])
+        # a partial save with no changed field sends nothing (its documented contract), so the
+        # row keeps its version: the journal holds no write for it
+        writes = not partial or bool(inst.changed_fields)
+        fx = [self.plan(name, inst)] if writes else []
+        self.intent("partial_safe" if partial else "change_safe", ids=[[TABLE[name], _id]], fx=fx)
         if partial:
             yield lambda: inst.save_partial(db=self.db)
         else:
             yield lambda: inst.save(db=self.db)
-        self.put(name, inst)
+        if writes:
+            self.put(name, inst)
 
     def op_partial_safe(self):
         return (yield from self.op_change_safe(partial=True))
