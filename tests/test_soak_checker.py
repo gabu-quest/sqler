@@ -572,3 +572,18 @@ def test_kill_with_ops_is_refused(capsys):
         soak.parse(["--ops", "5", "--seed", "1", "--kill", "--workload", "procs2"])
     assert stop.value.code == 2
     assert "--kill needs --minutes: the kills are placed in the run's time" in capsys.readouterr().err
+
+
+def test_a_lock_waited_out_for_the_whole_timeout_is_counted_and_does_not_fail_the_run():
+    """SQLite's busy handler polls with no queue: on a loaded machine one writer can wait out the
+    5 s timeout while every transaction holds the lock for milliseconds. Such an error is counted
+    as waited; a lock error raised at once still fails the run."""
+    total = Stats()
+    total.errors = {"OperationalError locked after waiting": 2, "LockTimeoutError": 1}
+    code, lines = _summary(total)
+    assert code == 0
+    assert " errors=0 waited=3 " in lines[-1] and lines[-1].startswith("SOAK PASS ")
+    total.errors["OperationalError locked at once"] = 1
+    code, lines = _summary(total)
+    assert code == 1
+    assert " errors=1 " in lines[-1] and lines[-1].startswith("SOAK FAIL ")
