@@ -32,9 +32,13 @@ By default the first writes make the tables and one writer promotes ``stage`` of
 class while the others run (the database's own ``ensure_table``). ``--precreate`` makes every
 table and promotes ``stage`` before the writers start, so no schema changes while they write.
 
-A ``database is locked`` that reaches a caller is an error either way; the summary names it
-"locked at once" when the operation raised it in under a second (no wait for the busy timeout
-of 5 s was made) and "locked after waiting" otherwise.
+A ``database is locked`` that reaches a caller in under a second ("locked at once": no wait
+for the busy timeout of 5 s was made) is an error and fails the run. One raised after the
+wait ("locked after waiting", or ``LockTimeoutError`` from a safe save's retry) is SQLite's
+documented answer when the lock stays busy for the whole timeout: SQLite's busy handler polls
+with no queue, so on a loaded machine one waiter can lose the lock to newer writers for 5 s
+while every transaction holds it for milliseconds. The summary counts those as ``waited=`` and
+they do not fail the run; the operation wrote nothing, and the checker still holds every row.
 
 Expected and not counted as errors: a ``StaleVersionError`` of a shared counter when the rebase
 rule gives up (the worker reads the row again: "conflicts retried"); the
@@ -71,6 +75,7 @@ from soak_ops import (  # noqa: E402
     PROMOTED_LATER,
     SAFE,
     TABLE,
+    WAITED_OUT,
     Journal,
     Stats,
     Worker,
@@ -842,10 +847,12 @@ def summarize(args: Any, root: str, results: dict, interrupted: bool, out: Any) 
         empty = [k for k, v in checked.items() if not v]
         if empty and not interrupted:
             print(f"soak [{name}] note: invariants that checked no row: {', '.join(empty)}", file=out)
-    errors = sum(total.errors.values())
+    waited = {k: v for k, v in total.errors.items() if k in WAITED_OUT}
+    failing = {k: v for k, v in total.errors.items() if k not in WAITED_OUT}
+    errors = sum(failing.values())
     for item in total.first:
         failed_lines.append(
-            f"ERROR {item['error']} worker={item['worker']} seed={item['seed']} op#{item['op_no']} "
+            f"{'WAITED' if item['error'] in WAITED_OUT else 'ERROR'} {item['error']} worker={item['worker']} seed={item['seed']} op#{item['op_no']} "
             f"{item['op']}: {item['text']}"
         )
     no_kills = bool(getattr(args, "kill", False)) and kills == 0 and not interrupted
@@ -861,7 +868,8 @@ def summarize(args: Any, root: str, results: dict, interrupted: bool, out: Any) 
     print(
         f"SOAK {verdict} seed={args.seed} storage={args.storage} {how} "
         f"workloads={','.join(results)} ops={total.ops} conflicts={total.conflicts} "
-        f"errors={errors}{(' ' + json.dumps(total.errors, sort_keys=True)) if errors else ''} "
+        f"errors={errors}{(' ' + json.dumps(failing, sort_keys=True)) if errors else ''} "
+        f"waited={sum(waited.values())}{(' ' + json.dumps(waited, sort_keys=True)) if waited else ''} "
         f"expected={sum(total.expected.values())} checks={checks} violations={violations} "
         f"tolerated={tolerated} kills={kills} rows={rows} dir={root}",
         file=out,

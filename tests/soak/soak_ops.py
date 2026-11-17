@@ -66,6 +66,8 @@ TABLE = {
 ARCHIVE = "soak_task_archive"
 #: An operation that raised "locked" sooner than this waited for no lock (the busy timeout is 5 s).
 LOCK_WAIT_S = 1.0
+#: Errors raised after the whole busy timeout was waited out: counted, not failing a run (soak.py).
+WAITED_OUT = frozenset({"OperationalError locked after waiting", "LockTimeoutError"})
 PROMOTED_LATER = {"prio": "INTEGER NOT NULL DEFAULT 0", "stage": "TEXT"}
 
 
