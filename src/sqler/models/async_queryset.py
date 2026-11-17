@@ -160,7 +160,8 @@ class AsyncSQLerQuerySet(Generic[T]):
 
     async def update(self, **fields) -> int:
         """Update matching rows with the given field values; the class's rules apply as in
-        :meth:`SQLerQuerySet.update` (version, stamps, audit rows; no hook is called).
+        :meth:`SQLerQuerySet.update` (version, stamps, audit rows, the entries of a search index kept by hand; no hook
+        is called).
 
         Args:
             **fields: Field names and values to update in the JSON data.
@@ -169,7 +170,7 @@ class AsyncSQLerQuerySet(Generic[T]):
             int: Number of rows updated.
         """
         fields = _write_rules.stamped(self._model_cls, fields)
-        if not _write_rules.row_rules(self._model_cls):
+        if not _write_rules.needs_rows(self._model_cls):
             return self._told(await self._checked("update").update(**fields))
         return len(await self._written("update", lambda q: q._changed(fields)))
 
@@ -246,7 +247,7 @@ class AsyncSQLerQuerySet(Generic[T]):
         """The documents ``update_one`` (``op`` ``=``) and ``update_n`` (``IN``) return, as
         written."""
         fields = _write_rules.stamped(self._model_cls, fields)
-        if not _write_rules.row_rules(self._model_cls):
+        if not _write_rules.needs_rows(self._model_cls):
             return self._told(await self._checked("update")._update_picked(fields, n, op))
         return [after for _, after in await self._written("update", lambda q: q._changed(fields, n))]
 

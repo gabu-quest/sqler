@@ -1112,7 +1112,7 @@ def test_a_refill_after_another_object_changed_the_table_leaves_one_row_for_the_
     try:
         a.adapter.execute("UPDATE t SET name = 'second' WHERE _id = 1;")
         a.adapter.auto_commit()
-        index._refill(1)
+        index._refill([1])
     finally:
         a.close()
     assert sqlite3.connect(path).execute("SELECT rowid, name FROM t_search").fetchall() == [(1, "second")]

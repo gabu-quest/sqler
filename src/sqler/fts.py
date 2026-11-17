@@ -32,6 +32,7 @@ On an ``AsyncSQLerDB`` the same calls are awaited, on ``AsyncFTSIndex`` and
 ``AsyncSearchableMixin``.
 """
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -400,22 +401,23 @@ class _SearchIndex:
         only when its row is gone from the table; without it the entry is deleted."""
         _id = model_or_id._id if hasattr(model_or_id, "_id") else model_or_id
         if self.content_sync:
-            yield ("_refill", _id)
+            yield ("_refill", [_id])
             return
-        yield ("_delete_entry", self._get_db(), _id)
+        yield ("_delete_entry", self._get_db(), [_id])
 
-    def _follow_steps(self, db: Any, table: str, _id: int | None, *, deleted: bool) -> Any:
-        """Keep the entry of ``_id`` after its row was written to, or deleted from, ``table``
-        of ``db``, in that database (so in the caller's transaction on it). A row of another
-        table, or a database that has no table of this index, has no entry to keep."""
-        if table != self.table:
+    def _follow_steps(self, db: Any, table: str, ids: list, *, deleted: bool) -> Any:
+        """Keep the entries of ``ids`` after their rows were written to, or deleted from,
+        ``table`` of ``db``, in that database (so in the caller's transaction on it). A row of
+        another table, or a database that has no table of this index, has no entry to keep;
+        no id, nothing to keep."""
+        if table != self.table or not ids:
             return
         if db is not self._get_db() and not (yield ("_has_index_table", db)):
             return
         if deleted:
-            yield ("_delete_entry", db, _id)
+            yield ("_delete_entry", db, ids)
         else:
-            yield ("_refill", _id, db)
+            yield ("_refill", ids, db)
 
     # ---- the writes of the index ----
 
@@ -426,8 +428,16 @@ class _SearchIndex:
     def _clear_sql(self) -> str:
         return f"DELETE FROM {self.index_table};"
 
-    def _forget_sql(self) -> str:
-        return f"DELETE FROM {self.index_table} WHERE rowid = ?;"
+    @staticmethod
+    def _picked(ids: list) -> tuple[str, list[Any]]:
+        """The test of an id that picks ``ids`` and its parameters: one id is ``= ?``, more
+        are their JSON list (one statement for any number of rows)."""
+        if len(ids) == 1:
+            return "= ?", list(ids)
+        return "IN (SELECT value FROM json_each(?))", [json.dumps(ids)]
+
+    def _forget_sql(self, picked: str) -> str:
+        return f"DELETE FROM {self.index_table} WHERE rowid {picked};"
 
     def _fill_step(
         self, columns: Any, layout: Optional[tuple[str, ...]], rows: str, params: list[Any]
@@ -666,12 +676,13 @@ class FTSIndex(_SearchIndex):
         db.adapter.execute(self._clear_sql())
         self._filled(db, "", [])
 
-    def _refill(self, _id: int | None, db: Optional["SQLerDB"] = None) -> None:
-        """Make the index row of ``_id`` what its stored row says: none when it has no row.
-        ``db`` is the database to do it in, else the index's."""
+    def _refill(self, ids: list, db: Optional["SQLerDB"] = None) -> None:
+        """Make the index row of each of ``ids`` what its stored row says: none when it has
+        no row. ``db`` is the database to do it in, else the index's."""
         db = db if db is not None else self._get_db()
-        db.adapter.execute(self._forget_sql(), [_id])
-        self._filled(db, "t._id = ?", [_id])
+        picked, params = self._picked(ids)
+        db.adapter.execute(self._forget_sql(picked), params)
+        self._filled(db, f"t._id {picked}", params)
         db.adapter.auto_commit()
 
     def rebuild(self, db: Optional["SQLerDB"] = None) -> int:
@@ -703,7 +714,7 @@ class FTSIndex(_SearchIndex):
         """
         if model._id is None:
             raise ValueError("Cannot index unsaved model")
-        self._refill(model._id)
+        self._refill([model._id])
 
     def remove(self, model_or_id: Union["SQLerModel", int]) -> None:
         """Remove a document from the index.
@@ -716,15 +727,16 @@ class FTSIndex(_SearchIndex):
         """
         self._run(self._remove_steps(model_or_id))
 
-    def _delete_entry(self, db: "SQLerDB", _id: int | None) -> None:
-        db.adapter.execute(self._forget_sql(), [_id])
+    def _delete_entry(self, db: "SQLerDB", ids: list) -> None:
+        picked, params = self._picked(ids)
+        db.adapter.execute(self._forget_sql(picked), params)
         db.adapter.auto_commit()
 
-    def _follow(self, db: "SQLerDB", table: str, _id: int | None, *, deleted: bool) -> None:
-        """Keep the entry of ``_id`` after its row was written to, or deleted from, ``table``
-        of ``db``, in that database (so in the caller's transaction on it). A row of another
-        table, or a database that has no table of this index, has no entry to keep."""
-        self._run(self._follow_steps(db, table, _id, deleted=deleted))
+    def _follow(self, db: "SQLerDB", table: str, ids: list, *, deleted: bool) -> None:
+        """Keep the entries of ``ids`` after their rows were written to, or deleted from,
+        ``table`` of ``db``, in that database (so in the caller's transaction on it). A row of
+        another table, or a database that has no table of this index, has no entry to keep."""
+        self._run(self._follow_steps(db, table, ids, deleted=deleted))
 
     def search(
         self,
@@ -1019,11 +1031,12 @@ class AsyncFTSIndex(_SearchIndex):
         await _sent_now(db.adapter, self._clear_sql())
         await self._filled(db, "", [])
 
-    async def _refill(self, _id: int | None, db: Optional[AsyncSQLerDB] = None) -> None:
+    async def _refill(self, ids: list, db: Optional[AsyncSQLerDB] = None) -> None:
         """Async twin of :meth:`FTSIndex._refill`."""
         db = db if db is not None else self._get_db()
-        await _sent_now(db.adapter, self._forget_sql(), [_id])
-        await self._filled(db, "t._id = ?", [_id])
+        picked, params = self._picked(ids)
+        await _sent_now(db.adapter, self._forget_sql(picked), params)
+        await self._filled(db, f"t._id {picked}", params)
         await db.adapter.auto_commit()
 
     async def rebuild(self, db: Optional[AsyncSQLerDB] = None) -> int:
@@ -1047,19 +1060,20 @@ class AsyncFTSIndex(_SearchIndex):
         """Async twin of :meth:`FTSIndex.index`."""
         if model._id is None:
             raise ValueError("Cannot index unsaved model")
-        await self._refill(model._id)
+        await self._refill([model._id])
 
     async def remove(self, model_or_id: Any) -> None:
         """Async twin of :meth:`FTSIndex.remove`."""
         await self._run(self._remove_steps(model_or_id))
 
-    async def _delete_entry(self, db: AsyncSQLerDB, _id: int | None) -> None:
-        await _sent_now(db.adapter, self._forget_sql(), [_id])
+    async def _delete_entry(self, db: AsyncSQLerDB, ids: list) -> None:
+        picked, params = self._picked(ids)
+        await _sent_now(db.adapter, self._forget_sql(picked), params)
         await db.adapter.auto_commit()
 
-    async def _follow(self, db: AsyncSQLerDB, table: str, _id: int | None, *, deleted: bool) -> None:
+    async def _follow(self, db: AsyncSQLerDB, table: str, ids: list, *, deleted: bool) -> None:
         """Async twin of :meth:`FTSIndex._follow`."""
-        await self._run(self._follow_steps(db, table, _id, deleted=deleted))
+        await self._run(self._follow_steps(db, table, ids, deleted=deleted))
 
     async def search(
         self,
@@ -1315,8 +1329,10 @@ class SearchableMixin(WriteRules, _SearchHost):
         given, else in the class's database."""
         return cls._search_index(db).count(query, plain=plain)
 
-    # ``save()`` and ``delete()`` keep an index kept by hand (no ``content_sync``; with it the
-    # triggers do) in the write's own unit: the row and its entry commit together or not at all.
+    # Every write of the class's rows (``save()``, ``delete()``, ``save_many()`` and a queryset's
+    # ``update()``, ``update_one()``, ``update_n()`` and ``delete_all()``) keeps an index kept by
+    # hand (no ``content_sync``; with it the triggers do) in the write's own unit: the rows and
+    # their entries commit together or not at all.
 
     @classmethod
     def _keeps_row(cls) -> bool:
@@ -1324,10 +1340,10 @@ class SearchableMixin(WriteRules, _SearchHost):
         return index is not None and not index.content_sync
 
     @classmethod
-    def _row_kept(cls, db, table: str, _id: Any, deleted: bool) -> None:
+    def _row_kept(cls, db, table: str, ids: list, deleted: bool) -> None:
         index = cls._fts_index
         if index is not None and not index.content_sync:
-            index._follow(db, table, _id, deleted=deleted)
+            index._follow(db, table, ids, deleted=deleted)
 
 
 class AsyncSearchableMixin(WriteRules, _AsyncSearchHost):
@@ -1426,7 +1442,7 @@ class AsyncSearchableMixin(WriteRules, _AsyncSearchHost):
         return index is not None and not index.content_sync
 
     @classmethod
-    async def _arow_kept(cls, db, table: str, _id: Any, deleted: bool) -> None:
+    async def _arow_kept(cls, db, table: str, ids: list, deleted: bool) -> None:
         index = cls._fts_index
         if index is not None and not index.content_sync:
-            await index._follow(db, table, _id, deleted=deleted)
+            await index._follow(db, table, ids, deleted=deleted)
