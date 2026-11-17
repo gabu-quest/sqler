@@ -58,6 +58,16 @@ BASES = {
 }
 SAFE = {"pydantic-safe", "async-pydantic-safe", "lite-safe", "async-lite-safe"}
 PYDANTIC = ["pydantic", "async-pydantic"]
+# One base of every other kind: lite, lite async, msgspec, msgspec async, and a safe base.
+OTHER_KINDS = ["lite", "async-lite", "msgspec", "async-msgspec", "pydantic-safe"]
+
+
+def _refusal_rows(*cases: Any) -> list:
+    """The rows of a refusal test. A refusal is written once, behind the two query set classes
+    every base reaches: every case runs on one sync and one async pydantic base, and the first
+    case on one base of each other kind, which proves that kind's query set reaches it."""
+    return [(k, c) for k in PYDANTIC for c in cases] + [(k, cases[0]) for k in OTHER_KINDS]
+
 
 _names = itertools.count()
 
@@ -296,7 +306,7 @@ async def test_a_copy_of_a_missing_table_copies_0_and_makes_nothing(kind):
 # ----- refusals ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["ct'archive", "ct archive", "ct;archive", ""])
+@pytest.mark.parametrize("kind,name", _refusal_rows("ct'archive", "ct archive", "ct;archive", ""))
 @pytest.mark.asyncio
 async def test_a_target_name_sqler_does_not_take_is_refused_before_any_statement(kind, name):
     db = await _db(kind)
@@ -311,7 +321,7 @@ async def test_a_target_name_sqler_does_not_take_is_refused_before_any_statement
         await _close(db)
 
 
-@pytest.mark.parametrize("name", ["ct_jobs", "CT_JOBS"])
+@pytest.mark.parametrize("kind,name", _refusal_rows("ct_jobs", "CT_JOBS"))
 @pytest.mark.asyncio
 async def test_the_source_table_as_target_is_refused(kind, name):
     db = await _db(kind)
@@ -325,19 +335,23 @@ async def test_the_source_table_as_target_is_refused(kind, name):
         await _close(db)
 
 
+_WHOLE_ROWS = [
+    (lambda q: q.limit(2), "a limit or an offset"),
+    (lambda q: q.offset(1), "a limit or an offset"),
+    (lambda q: q.order_by("n").limit(2).offset(1), "a limit or an offset"),
+    (lambda q: q.select("n"), r"select\(\)"),
+    (lambda q: q.group_by("done"), r"group_by\(\)"),
+]
+
+
 @pytest.mark.parametrize(
-    "shape,word",
-    [
-        (lambda q: q.limit(2), "a limit or an offset"),
-        (lambda q: q.offset(1), "a limit or an offset"),
-        (lambda q: q.order_by("n").limit(2).offset(1), "a limit or an offset"),
-        (lambda q: q.select("n"), r"select\(\)"),
-        (lambda q: q.group_by("done"), r"group_by\(\)"),
-    ],
-    ids=["limit", "offset", "limit-offset", "select", "group_by"],
+    "kind,case",
+    _refusal_rows(*_WHOLE_ROWS),
+    ids=lambda v: v if isinstance(v, str) else None,
 )
 @pytest.mark.asyncio
-async def test_copy_to_refuses_a_query_whose_rows_are_not_its_whole_matches(kind, shape, word):
+async def test_copy_to_refuses_a_query_whose_rows_are_not_its_whole_matches(kind, case):
+    shape, word = case
     db = await _db(kind)
     try:
         cls = _job(kind)
@@ -480,9 +494,7 @@ async def test_delete_deletes_every_match_and_returns_the_count(kind):
         await _close(db)
 
 
-@pytest.mark.parametrize(
-    "shape", [lambda q: q.limit(2), lambda q: q.offset(1)], ids=["limit", "offset"]
-)
+@pytest.mark.parametrize("kind,shape", _refusal_rows(lambda q: q.limit(2), lambda q: q.offset(1)))
 @pytest.mark.asyncio
 async def test_delete_refuses_a_limit_or_an_offset(kind, shape):
     db = await _db(kind)
