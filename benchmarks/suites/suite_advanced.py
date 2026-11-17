@@ -122,11 +122,9 @@ class FullTextSearch:
                             )
                             article.save()
 
-                        # no triggers and an empty index after create(), as the
-                        # baseline's: both arms then time the same rebuild and searches
-                        fts = FTSIndex(
-                            BenchmarkArticle, fields=["title", "content"], content_sync=False
-                        )
+                        # create() adds the triggers and fills the index; the timed
+                        # rebuild() clears and fills it again, as the baseline's does
+                        fts = FTSIndex(BenchmarkArticle, fields=["title", "content"])
                         fts.create()
 
                         def do_rebuild(fts=fts):

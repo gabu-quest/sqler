@@ -113,22 +113,9 @@ class Audited(AsyncAuditLogMixin, AsyncSQLerModel):
 
 
 class SearchS(AsyncSearchableMixin, AsyncSQLerModel):
-    """Search index with ``content_sync=True``: its triggers follow every write."""
+    """Search index: its triggers follow every write."""
 
     __tablename__ = "soak_search_s"
-    owner: str
-    key: str
-    body: str = ""
-    n: int = 0
-
-    class FTS:
-        fields = ["body"]
-
-
-class SearchM(AsyncSearchableMixin, AsyncSQLerModel):
-    """Search index with ``content_sync=False``: the mixin's ``save()``/``delete()`` keep it."""
-
-    __tablename__ = "soak_search_m"
     owner: str
     key: str
     body: str = ""
@@ -158,16 +145,13 @@ MODELS = {
     "promo": Promo,
     "audit": Audited,
     "search_s": SearchS,
-    "search_m": SearchM,
     "task": Task,
 }
 
 
 async def open_search_indexes(db) -> None:
-    """Make (or find) both search indexes on ``db`` and hold them on their classes."""
+    """Make (or find) the search index on ``db`` and hold it on its class."""
     from sqler import AsyncFTSIndex
 
-    SearchS._fts_index = AsyncFTSIndex(SearchS, ["body"], content_sync=True, db=db)
+    SearchS._fts_index = AsyncFTSIndex(SearchS, ["body"], db=db)
     await SearchS._fts_index.create(db)
-    SearchM._fts_index = AsyncFTSIndex(SearchM, ["body"], content_sync=False, db=db)
-    await SearchM._fts_index.create(db)

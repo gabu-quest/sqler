@@ -61,7 +61,6 @@ TABLE = {
     "promo": "soak_promo",
     "audit": "soak_audit",
     "search_s": "soak_search_s",
-    "search_m": "soak_search_m",
     "task": "soak_task",
 }
 ARCHIVE = "soak_task_archive"
@@ -271,7 +270,7 @@ class Worker:
             base["crew"] = None if inst.crew is None else ref(TABLE["crew"], inst.crew._id)
         elif name == "promo":
             base.update(prio=inst.prio, stage=inst.stage)
-        elif name in ("search_s", "search_m"):
+        elif name == "search_s":
             base["body"] = inst.body
         elif name == "task":
             base["done"] = inst.done
@@ -630,7 +629,7 @@ class Worker:
         self.fx.append(["del", TABLE["audit"], _id, 1])
 
     def op_new_search(self):
-        name = self.rng.choice(("search_s", "search_m"))
+        name = "search_s"
         if len(self.live[name]) > CAP:
             return (yield from self.op_delete_search(name))
         key = self.key()
@@ -641,7 +640,7 @@ class Worker:
         self.put(name, inst)
 
     def op_change_search(self):
-        name = self.rng.choice(("search_s", "search_m"))
+        name = "search_s"
         got = self.pick(name)
         if got is None:
             return (yield from self.op_new_search())
@@ -653,7 +652,7 @@ class Worker:
         self.put(name, inst)
 
     def op_delete_search(self, name: Optional[str] = None):
-        name = name or self.rng.choice(("search_s", "search_m"))
+        name = name or "search_s"
         got = self.pick(name)
         if got is None:
             return (yield from self.op_new_search())
@@ -664,7 +663,7 @@ class Worker:
         self.fx.append(["del", TABLE[name], _id, 0])
 
     def op_many_search_s(self):
-        """``save_many`` of the content_sync class (its triggers index the rows)."""
+        """``save_many`` of the search class (its triggers index the rows)."""
         insts = []
         for _ in range(self.rng.randint(2, 4)):
             key = self.key()

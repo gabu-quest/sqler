@@ -241,7 +241,7 @@ uv run --frozen python tests/soak/soak.py --minutes 2 --seed 7 --storage file
   a run that made none fails. A killed worker's unfinished call must be stored wholly or not
   at all: every call the soak makes is one unit by the package's documents (one statement, or
   one transaction: `docs/API.md` on delete policies, promotion, the audit log and
-  `content_sync`), so the checker accepts no third state. `--precreate` makes every table
+  search indexes), so the checker accepts no third state. `--precreate` makes every table
   before the writers start. `--ops N` runs N operations a worker instead of minutes; `--only
   a,b` runs only those operations, to narrow a finding.
 - The operations are the ordinary ones over every model base: saves, partial saves,

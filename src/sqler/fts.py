@@ -32,14 +32,12 @@ On an ``AsyncSQLerDB`` the same calls are awaited, on ``AsyncFTSIndex`` and
 ``AsyncSearchableMixin``.
 """
 
-import json
 import re
 import sqlite3
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Optional, Tuple, Type
 
 from sqler._fts_sql import (
-    _HAS_INDEX_TABLE_SQL,
     _HAS_TABLE_SQL,
     _SYNC_TRIGGERS,
     _drop_trigger_sql,
@@ -179,7 +177,6 @@ class _SearchIndex:
         *,
         index_name: Optional[str] = None,
         tokenizer: str = "porter unicode61",
-        content_sync: bool = True,
         db: Any = None,
     ):
         """Create an FTS index configuration.
@@ -189,10 +186,6 @@ class _SearchIndex:
             fields: Fields to include in the index
             index_name: Custom index table name (default: {table}_fts)
             tokenizer: FTS5 tokenizer (default: porter unicode61)
-            content_sync: ``create()`` adds triggers that update the index on every
-                insert, update and delete of the table, whoever writes. With
-                ``False`` the index changes only through ``index()``, ``remove()``
-                and ``rebuild()``.
             db: Database holding the model's rows. Needed when the class was never
                 bound with ``set_db()``; a ``db`` given to ``create()``,
                 ``drop()`` or ``rebuild()`` replaces it.
@@ -207,7 +200,6 @@ class _SearchIndex:
         self.model_class = model_class
         self.fields = fields
         self.tokenizer = tokenizer  # checked by the setter
-        self.content_sync = content_sync
 
         self.index_table = index_name  # Set later if needed
 
@@ -314,10 +306,6 @@ class _SearchIndex:
             f"({', '.join(self.fields)}, tokenize='{self.tokenizer}');"
         )
 
-    def _stale_triggers(self, stored: dict) -> list[str]:
-        """Without ``content_sync``: the triggers of this index that exist, to be dropped."""
-        return [name for name in self._trigger_names() if stored.get(name.lower(), ("",))[0] == "trigger"]
-
     def _promoted(self) -> Any:
         return getattr(self.model_class, "__promoted__", None) or {}
 
@@ -327,7 +315,7 @@ class _SearchIndex:
         return {"promoted": promoted or None, "checks": getattr(self.model_class, "__checks__", None)}
 
     def _triggers(self, columns: Any) -> dict[str, str]:
-        """The statement of each trigger of this content_sync index (see :func:`_trigger_sql`),
+        """The statement of each trigger of this index (see :func:`_trigger_sql`),
         for a table whose promoted columns are ``columns``."""
         return _trigger_sql(self.index_table, self.table, self.fields, columns)
 
@@ -359,8 +347,7 @@ class _SearchIndex:
     #
     # Each ``*_steps`` method yields ``(call, *args)``, the call it needs next, and gets back what
     # the call returns. The class names every call a method of its own (``_read``, ``_send``,
-    # ``_columns``, ``_ensure``, ``_trigger_sql``, ``_fill``, ``_refill``, ``_delete_entry``,
-    # ``_has_index_table``), and its ``_run`` makes them, awaited or not.
+    # ``_columns``, ``_ensure``, ``_trigger_sql``, ``_fill``), and its ``_run`` makes them, awaited or not.
 
     def _make_steps(self, db: Any, *, write: bool) -> Any:
         """What ``create()`` finds and what it does: whether anything differs from the
@@ -372,13 +359,6 @@ class _SearchIndex:
         changed = self.index_table.lower() not in stored
         if changed and write:
             yield ("_send", db, self._create_sql())
-
-        if not self.content_sync:
-            stale = self._stale_triggers(stored)
-            if write:
-                for name in stale:
-                    yield ("_send", db, _drop_trigger_sql(name))
-            return changed or bool(stale)
 
         table, promoted = self.table, self._promoted()
         if table.lower() not in stored or (promoted and _lacks_columns(promoted, (yield ("_columns", db, table)))):
@@ -396,29 +376,6 @@ class _SearchIndex:
             yield ("_fill", db)
         return changed
 
-    def _remove_steps(self, model_or_id: Any) -> Any:
-        """``remove()``: with ``content_sync`` the triggers own the index, so the entry goes
-        only when its row is gone from the table; without it the entry is deleted."""
-        _id = model_or_id._id if hasattr(model_or_id, "_id") else model_or_id
-        if self.content_sync:
-            yield ("_refill", [_id])
-            return
-        yield ("_delete_entry", self._get_db(), [_id])
-
-    def _follow_steps(self, db: Any, table: str, ids: list, *, deleted: bool) -> Any:
-        """Keep the entries of ``ids`` after their rows were written to, or deleted from,
-        ``table`` of ``db``, in that database (so in the caller's transaction on it). A row of
-        another table, or a database that has no table of this index, has no entry to keep;
-        no id, nothing to keep."""
-        if table != self.table or not ids:
-            return
-        if db is not self._get_db() and not (yield ("_has_index_table", db)):
-            return
-        if deleted:
-            yield ("_delete_entry", db, ids)
-        else:
-            yield ("_refill", ids, db)
-
     # ---- the writes of the index ----
 
     def _drop_sqls(self) -> list[str]:
@@ -427,17 +384,6 @@ class _SearchIndex:
 
     def _clear_sql(self) -> str:
         return f"DELETE FROM {self.index_table};"
-
-    @staticmethod
-    def _picked(ids: list) -> tuple[str, list[Any]]:
-        """The test of an id that picks ``ids`` and its parameters: one id is ``= ?``, more
-        are their JSON list (one statement for any number of rows)."""
-        if len(ids) == 1:
-            return "= ?", list(ids)
-        return "IN (SELECT value FROM json_each(?))", [json.dumps(ids)]
-
-    def _forget_sql(self, picked: str) -> str:
-        return f"DELETE FROM {self.index_table} WHERE rowid {picked};"
 
     def _fill_step(
         self, columns: Any, layout: Optional[tuple[str, ...]], rows: str, params: list[Any]
@@ -554,9 +500,6 @@ class FTSIndex(_SearchIndex):
         fts = FTSIndex(Article, fields=["title", "content"])
         fts.create()
 
-        # Add to index (automatic on model.save() if configured)
-        fts.index(article)
-
         # Search
         results = fts.search("python")
 
@@ -580,28 +523,24 @@ class FTSIndex(_SearchIndex):
         *,
         index_name: Optional[str] = None,
         tokenizer: str = "porter unicode61",
-        content_sync: bool = True,
         db: Optional["SQLerDB"] = None,
     ):
-        super().__init__(
-            model_class, fields, index_name=index_name, tokenizer=tokenizer, content_sync=content_sync, db=db
-        )
+        super().__init__(model_class, fields, index_name=index_name, tokenizer=tokenizer, db=db)
 
     def create(self, db: Optional["SQLerDB"] = None) -> None:
         """Make the index what this definition says, or refuse.
 
-        - No index table: it is created. With ``content_sync`` the model's table is
-          created first when it is missing (a trigger needs its table), then the three
-          triggers, and the index is filled from the rows already in the table.
+        - No index table: it is created. The model's table is created first when it is
+          missing (a trigger needs its table), then the three triggers, and the index is
+          filled from the rows already in the table.
         - An index table with the same fields in the same order and the same tokenizer
           (compared as definitions, not as statement text, so an index made by an older
           sqler counts) is kept.
         - An index table with other fields, another order or another tokenizer: raises
           ``SchemaError`` and changes nothing; ``drop()`` then ``create()`` changes it.
-        - With ``content_sync``, a trigger that is missing or is not the one this
+        - A trigger that is missing or is not the one this
           definition writes now (a field promoted to a column since, an older sqler) is
           replaced, and the index is filled again from the table.
-        - Without ``content_sync``, triggers of this index are dropped.
 
         All of it is one transaction: a ``create()`` that fails leaves everything as it
         was. A ``create()`` that finds everything as defined writes nothing.
@@ -640,11 +579,8 @@ class FTSIndex(_SearchIndex):
     def _ensure(self, db: "SQLerDB", table: str, args: dict[str, Any]) -> None:
         db.ensure_table(table, **args)
 
-    def _has_index_table(self, db: "SQLerDB") -> bool:
-        return db.adapter.execute(_HAS_INDEX_TABLE_SQL, [self.index_table]).fetchone() is not None
-
     def _trigger_sql(self, db: "SQLerDB") -> dict[str, str]:
-        """The statement of each trigger of this content_sync index (see :func:`_trigger_sql`),
+        """The statement of each trigger of this index (see :func:`_trigger_sql`),
         built from the table as it is: the database sends the check of the names it remembers
         (``_check_sql``) first, in the caller's transaction, and learns the table again if
         SQLite refuses it."""
@@ -676,15 +612,6 @@ class FTSIndex(_SearchIndex):
         db.adapter.execute(self._clear_sql())
         self._filled(db, "", [])
 
-    def _refill(self, ids: list, db: Optional["SQLerDB"] = None) -> None:
-        """Make the index row of each of ``ids`` what its stored row says: none when it has
-        no row. ``db`` is the database to do it in, else the index's."""
-        db = db if db is not None else self._get_db()
-        picked, params = self._picked(ids)
-        db.adapter.execute(self._forget_sql(picked), params)
-        self._filled(db, f"t._id {picked}", params)
-        db.adapter.auto_commit()
-
     def rebuild(self, db: Optional["SQLerDB"] = None) -> int:
         """Rebuild the entire index from source data.
 
@@ -702,41 +629,6 @@ class FTSIndex(_SearchIndex):
         self._fill(db)
         db.adapter.auto_commit()
         return db.adapter.execute(self._count_all_sql()).fetchone()[0]
-
-    def index(self, model: "SQLerModel") -> None:
-        """Make the index entry of a saved row what the table holds for it.
-
-        The row is read from the table, as the triggers and ``rebuild()`` read it. With
-        ``content_sync`` the triggers already did this: calling it changes nothing.
-
-        Args:
-            model: Model instance to index
-        """
-        if model._id is None:
-            raise ValueError("Cannot index unsaved model")
-        self._refill([model._id])
-
-    def remove(self, model_or_id: Union["SQLerModel", int]) -> None:
-        """Remove a document from the index.
-
-        With ``content_sync`` the triggers own the index: the entry goes only when its row
-        is gone from the table, so the index stays equal to the table.
-
-        Args:
-            model_or_id: Model instance or _id to remove
-        """
-        self._run(self._remove_steps(model_or_id))
-
-    def _delete_entry(self, db: "SQLerDB", ids: list) -> None:
-        picked, params = self._picked(ids)
-        db.adapter.execute(self._forget_sql(picked), params)
-        db.adapter.auto_commit()
-
-    def _follow(self, db: "SQLerDB", table: str, ids: list, *, deleted: bool) -> None:
-        """Keep the entries of ``ids`` after their rows were written to, or deleted from,
-        ``table`` of ``db``, in that database (so in the caller's transaction on it). A row of
-        another table, or a database that has no table of this index, has no entry to keep."""
-        self._run(self._follow_steps(db, table, ids, deleted=deleted))
 
     def search(
         self,
@@ -949,12 +841,9 @@ class AsyncFTSIndex(_SearchIndex):
         *,
         index_name: Optional[str] = None,
         tokenizer: str = "porter unicode61",
-        content_sync: bool = True,
         db: Optional[AsyncSQLerDB] = None,
     ):
-        super().__init__(
-            model_class, fields, index_name=index_name, tokenizer=tokenizer, content_sync=content_sync, db=db
-        )
+        super().__init__(model_class, fields, index_name=index_name, tokenizer=tokenizer, db=db)
 
     async def create(self, db: Optional[AsyncSQLerDB] = None) -> None:
         """Async twin of :meth:`FTSIndex.create`."""
@@ -989,12 +878,6 @@ class AsyncFTSIndex(_SearchIndex):
 
     async def _ensure(self, db: AsyncSQLerDB, table: str, args: dict[str, Any]) -> None:
         await db.ensure_table(table, **args)
-
-    async def _has_index_table(self, db: AsyncSQLerDB) -> bool:
-        if await _afetch_all(db.adapter, _HAS_INDEX_TABLE_SQL, [self.index_table]):
-            return True
-        await db.adapter.auto_commit()
-        return False
 
     async def _trigger_sql(self, db: AsyncSQLerDB) -> dict[str, str]:
         """Async twin of :meth:`FTSIndex._trigger_sql`."""
@@ -1031,14 +914,6 @@ class AsyncFTSIndex(_SearchIndex):
         await _sent_now(db.adapter, self._clear_sql())
         await self._filled(db, "", [])
 
-    async def _refill(self, ids: list, db: Optional[AsyncSQLerDB] = None) -> None:
-        """Async twin of :meth:`FTSIndex._refill`."""
-        db = db if db is not None else self._get_db()
-        picked, params = self._picked(ids)
-        await _sent_now(db.adapter, self._forget_sql(picked), params)
-        await self._filled(db, f"t._id {picked}", params)
-        await db.adapter.auto_commit()
-
     async def rebuild(self, db: Optional[AsyncSQLerDB] = None) -> int:
         """Async twin of :meth:`FTSIndex.rebuild`."""
         if db:
@@ -1055,25 +930,6 @@ class AsyncFTSIndex(_SearchIndex):
         count = (await _afetch_all(adapter, self._count_all_sql(), []))[0][0]
         await adapter.auto_commit()
         return count
-
-    async def index(self, model: Any) -> None:
-        """Async twin of :meth:`FTSIndex.index`."""
-        if model._id is None:
-            raise ValueError("Cannot index unsaved model")
-        await self._refill([model._id])
-
-    async def remove(self, model_or_id: Any) -> None:
-        """Async twin of :meth:`FTSIndex.remove`."""
-        await self._run(self._remove_steps(model_or_id))
-
-    async def _delete_entry(self, db: AsyncSQLerDB, ids: list) -> None:
-        picked, params = self._picked(ids)
-        await _sent_now(db.adapter, self._forget_sql(picked), params)
-        await db.adapter.auto_commit()
-
-    async def _follow(self, db: AsyncSQLerDB, table: str, ids: list, *, deleted: bool) -> None:
-        """Async twin of :meth:`FTSIndex._follow`."""
-        await self._run(self._follow_steps(db, table, ids, deleted=deleted))
 
     async def search(
         self,
@@ -1206,7 +1062,6 @@ def _index_on(cls: Any, kind: type, db: Any) -> Any:
         held.fields,
         index_name=held._index_table,
         tokenizer=held.tokenizer,
-        content_sync=held.content_sync,
         db=db,
     )
 
@@ -1329,21 +1184,6 @@ class SearchableMixin(WriteRules, _SearchHost):
         given, else in the class's database."""
         return cls._search_index(db).count(query, plain=plain)
 
-    # Every write of the class's rows (``save()``, ``delete()``, ``save_many()`` and a queryset's
-    # ``update()``, ``update_one()``, ``update_n()`` and ``delete_all()``) keeps an index kept by
-    # hand (no ``content_sync``; with it the triggers do) in the write's own unit: the rows and
-    # their entries commit together or not at all.
-
-    @classmethod
-    def _keeps_row(cls) -> bool:
-        index = cls._fts_index
-        return index is not None and not index.content_sync
-
-    @classmethod
-    def _row_kept(cls, db, table: str, ids: list, deleted: bool) -> None:
-        index = cls._fts_index
-        if index is not None and not index.content_sync:
-            index._follow(db, table, ids, deleted=deleted)
 
 
 class AsyncSearchableMixin(WriteRules, _AsyncSearchHost):
@@ -1433,16 +1273,3 @@ class AsyncSearchableMixin(WriteRules, _AsyncSearchHost):
     ) -> int:
         """Async twin of :meth:`SearchableMixin.search_count`."""
         return await (await cls._search_index(db)).count(query, plain=plain)
-
-    # as :class:`SearchableMixin`: the entry is kept in the write's own unit
-
-    @classmethod
-    def _keeps_row(cls) -> bool:
-        index = cls._fts_index
-        return index is not None and not index.content_sync
-
-    @classmethod
-    async def _arow_kept(cls, db, table: str, ids: list, deleted: bool) -> None:
-        index = cls._fts_index
-        if index is not None and not index.content_sync:
-            await index._follow(db, table, ids, deleted=deleted)

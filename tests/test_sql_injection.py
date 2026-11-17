@@ -1128,7 +1128,6 @@ class TestFtsAndIntegrityReviewFixes:
         idx.create(d)
         m = doc(body="hello world")
         m.save()
-        idx.index(m)
         with pytest.raises(TypeError, match="max_tokens"):
             idx.snippet("hello", m, max_tokens=bad)
         assert idx.snippet("hello", m, max_tokens=5) == "<b>hello</b> world"

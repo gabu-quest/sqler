@@ -359,17 +359,8 @@ def _write_ways(a, key):
 PROMOTING = ("promoting model save", "promoting save_many")
 
 
-def _searched(a, key):
-    """What a search through a manual index ``a`` fills now finds: the key of each hit."""
-    field = "name" if key == "_version" else key
-    index = FTSIndex(SceneRow, [field], index_name="t_search", content_sync=False, db=a)
-    index.create(a)
-    index.rebuild(a)
-    return [hit.model_dump().get(key) for hit in index.search("x" if key == "_version" else "old")]
-
-
 def _searched_in_sync(a, key):
-    """What a content_sync index ``a`` makes now finds after ``a`` writes a second row like
+    """What a search index ``a`` makes now finds after ``a`` writes a second row like
     row 1: the triggers ``a`` installs read the key where the table stores it."""
     field = "name" if key == "_version" else key
     index = FTSIndex(SceneRow, [field], index_name="t_synced", db=a)
@@ -384,7 +375,6 @@ READS = {
     "from_id": lambda a, key: SceneRow.from_id(1, db=a).model_dump().get(key),
     "query all": lambda a, key: next(r for r in SceneRow.using(a).all() if r._id == 1).model_dump().get(key),
     "count": lambda a, key: SceneRow.using(a).filter(F(key) == (7 if key == "_version" else "old")).count(),
-    "search": _searched,
     "search in sync": _searched_in_sync,
 }
 
@@ -461,7 +451,7 @@ def test_a_read_after_another_object_changed_the_table_returns_the_column(tmp_pa
         a.close()
     old = 7 if key == "_version" else "old"
     model = None if key == "_version" else old
-    expected = {"find_document": old, "from_id": model, "query all": model, "count": 1, "search": [model]}
+    expected = {"find_document": old, "from_id": model, "query all": model, "count": 1}
     assert got == {**expected, "search in sync": [model, model]}[way]
 
 
@@ -1091,7 +1081,7 @@ def test_a_statement_refused_after_another_statement_learned_the_table_is_built_
 
 
 def _searchable(tmp_path):
-    """``a`` with ``t`` learned and a manual search index of ``name`` holding row 1; then
+    """``a`` with ``t`` learned and a search index of ``name`` holding row 1; then
     ``b`` promotes ``name``, and row 1 is changed by ``a``'s raw statement, committed."""
 
     class Named(SQLerModel):
@@ -1099,23 +1089,12 @@ def _searchable(tmp_path):
         __tablename__ = "t"
 
     a, b, path = _two(tmp_path)
-    index = FTSIndex(Named, ["name"], index_name="t_search", content_sync=False, db=a)
+    index = FTSIndex(Named, ["name"], index_name="t_search", db=a)
     index.create(a)
     index.rebuild(a)
     b.ensure_table("t", promoted={"name": "TEXT"})
     b.close()
     return a, index, path
-
-
-def test_a_refill_after_another_object_changed_the_table_leaves_one_row_for_the_document(tmp_path):
-    a, index, path = _searchable(tmp_path)
-    try:
-        a.adapter.execute("UPDATE t SET name = 'second' WHERE _id = 1;")
-        a.adapter.auto_commit()
-        index._refill([1])
-    finally:
-        a.close()
-    assert sqlite3.connect(path).execute("SELECT rowid, name FROM t_search").fetchall() == [(1, "second")]
 
 
 def test_a_rebuild_after_another_object_changed_the_table_leaves_a_row_per_document(tmp_path):

@@ -356,11 +356,10 @@ class SQLiteFTSBaseline:
     def create(self) -> None:
         """Create standalone FTS5 virtual table (empty), with no triggers.
 
-        Matches sqler's ``FTSIndex(..., content_sync=False).create()``, the
-        form the search benchmark uses: it creates only the virtual table and
-        leaves it empty; population happens via rebuild(). (With
-        ``content_sync=True`` sqler's create() also adds triggers and fills
-        the index, which this baseline does not do.) Previously this method
+        Creates only the virtual table and leaves it empty; population happens via
+        rebuild(). (sqler's ``FTSIndex.create()`` also adds triggers and fills the
+        index, which this baseline does not do; the benchmark times ``rebuild()`` and
+        the searches, which are the same work.) Previously this method
         also populated the index, which left extra tombstones after
         rebuild cycles — making the baseline ~7% slower than it should be.
         """

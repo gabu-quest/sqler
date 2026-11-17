@@ -189,9 +189,8 @@ class SQLerQuerySet(Generic[T]):
         A set-based write meets the rules of the class as ``save()`` does, but for its
         hooks: on a versioned class each row's version moves; a class that stamps sets
         ``updated_at`` (and ``updated_by``) on each row, at the statement's one time, unless
-        the caller names the field; an audit log gets an ``update`` row per row changed, and a
-        search index kept by hand (``content_sync=False``) the new entry of each, in one
-        transaction with the write. It calls no hook; use a loop of ``save()`` where a hook
+        the caller names the field; an audit log gets an ``update`` row per row changed, in one
+        transaction with the write. A search index follows by its triggers. It calls no hook; use a loop of ``save()`` where a hook
         must run.
 
         Args:
@@ -201,7 +200,7 @@ class SQLerQuerySet(Generic[T]):
             int: Number of rows updated.
         """
         fields = _write_rules.stamped(self._model_cls, fields)
-        if not _write_rules.needs_rows(self._model_cls):
+        if not _write_rules.row_rules(self._model_cls):
             return self._told(self._checked("update").update(**fields))
         return len(self._written("update", lambda q: q._changed(fields)))
 
@@ -246,10 +245,9 @@ class SQLerQuerySet(Generic[T]):
         ``restrict`` raises ``ReferentialIntegrityError`` and deletes nothing while a row
         outside the set refers to a row in it; ``set_null`` nulls those references;
         ``cascade`` deletes those rows too. An audit log gets a ``delete`` row per row
-        deleted, with the row as it was stored, and a search index kept by hand
-        (``content_sync=False``) loses the entry of each. The rows, the policy, the audit rows
-        and the entries are one unit. It calls no hook. A class no class can refer to, with no
-        row rules and no index kept by hand, sends its one ``DELETE``. A queryset built without a database raises ``RuntimeError`` where
+        deleted, with the row as it was stored. The rows, the policy and the audit rows are one
+        unit. It calls no hook. A class no class can refer to, with no row rules, sends its
+        one ``DELETE``. A queryset built without a database raises ``RuntimeError`` where
         the delete would be such a unit, as a set-based update with row rules does.
 
         Returns:
@@ -314,7 +312,7 @@ class SQLerQuerySet(Generic[T]):
         """The documents ``update_one`` (``op`` ``=``) and ``update_n`` (``IN``) return, as
         written."""
         fields = _write_rules.stamped(self._model_cls, fields)
-        if not _write_rules.needs_rows(self._model_cls):
+        if not _write_rules.row_rules(self._model_cls):
             return self._told(self._checked("update")._update_picked(fields, n, op))
         return [after for _, after in self._written("update", lambda q: q._changed(fields, n))]
 

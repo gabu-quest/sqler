@@ -197,7 +197,7 @@ raise as `FTSIndex` does), and on `save()`, `delete()`, `refresh()`, `using()`, 
 and `bind()` (these two let `None` through, as before).
 
 The search calls given `db` use an index of the class's definition (the class's index's
-fields, name, tokenizer and `content_sync`, else its `FTS` configuration) on that database,
+fields, name and tokenizer, else its `FTS` configuration) on that database,
 and never create it: `create_search_index(db)` does. On a database that does not have the
 index they raise what a search of a missing index raises, `sqlite3.OperationalError`
 ("no such table"); the class's own index, made on another database, is not used.
@@ -719,9 +719,8 @@ The target table:
 statement): both take every row the filter matches, so a copy and a delete of one query take
 the same rows. An `order_by()` changes nothing. `copy_to()` also refuses `select()` and
 `group_by()`: it copies whole rows. A cached query of the target's table drops its entries,
-and a search index made with `content_sync=True` on the target finds the copied rows (one
-made with `content_sync=False` finds them after its `rebuild()`); `copy_to()` writes no audit
-row, sets no timestamp and calls no hook.
+and a search index on the target finds the copied rows (its triggers write them);
+`copy_to()` writes no audit row, sets no timestamp and calls no hook.
 
 A copied row refers to what the original referred to: its references name the rows they
 named, in their tables. A later delete of a referenced row counts the copy as a referrer
@@ -1690,8 +1689,7 @@ A read writes no record. An ensure records what it found settled; when the datab
 takes no write then (opened read-only, or another connection holds the write lock past
 the busy timeout) the table is used all the same and the next ensure writes the record. A
 column that has to be added, or values that have to move, still need the write lock.
-`execute_sql()` runs your own SQL and is not checked. A search index made with
-`content_sync` on the table gets its triggers made again, inside the promotion, so that it
+`execute_sql()` runs your own SQL and is not checked. A search index on the table gets its triggers made again, inside the promotion, so that it
 reads a moved field from its column and still finds the rows.
 
 ```python
@@ -2425,46 +2423,33 @@ is syntax, so `C++`, `it's`, `foo-bar`, `AT&T` and `100%` work, `OR` and `NOT` a
 and the pieces of `foo-bar` must stand next to each other. Text with no word in it (empty,
 spaces, `*`) finds nothing. It never raises `SearchQueryError`.
 
-**`content_sync=True`** (the default): `create()` creates the model's table if it is
-missing and adds three triggers (`<index>_ai`, `<index>_au`, `<index>_ad`) that update the
-index on every insert, update and delete of the table, whoever writes: `save()`,
-`update()`, `bulk_upsert()`, the document methods, raw SQL, another connection. The index
-change commits or rolls back with the write. `index()` and `remove()` change nothing then:
-an entry leaves only with its row. **`content_sync=False`** adds no trigger: the index
-changes only through `index()`, `remove()`, `rebuild()` and the mixin's writes: `save()`,
-`delete()` (`delete_with_policy()` too), `save_many()`, and a queryset's `update()`,
-`update_one()`, `update_n()` and `delete_all()` (`delete()` too), each of which keeps the entry
-of every row it writes or deletes. The mixin keeps the entry in the database the row is
-written to or deleted from, and only for a row of the index's table: a database that has no
-table of this index, and a queryset on another table (`using(db, table)`), are left alone. The
-rows and their entries are one unit (a transaction of their own, or a savepoint inside the
-caller's): when a write fails, none of it is kept, and the instances are put back as a failed
-save of a class with an audit log leaves them. A queryset's `update()` of such a class reads
-the rows it changes and then writes exactly those, as one with an audit log does (two
-statements where a class without the index sends one), and `delete_all()` takes the deleted
-rows back from its one `DELETE`; then the entries of those rows are written. Rows a delete's
-policy nulls or deletes in such a class (`set_null`, `cascade`) keep their entries in the
-policy's unit too. `copy_to()` into its table keeps no entry: `rebuild()` that index after it.
+**One way to keep an index:** `create()` creates the model's table if it is missing and
+adds three triggers (`<index>_ai`, `<index>_au`, `<index>_ad`) that update the index on every
+insert, update and delete of the table, whoever writes: `save()`, `update()`,
+`bulk_upsert()`, the document methods, raw SQL, another connection. The index change
+commits or rolls back with the write. An entry leaves only with its row. There is no
+`content_sync` argument (passing it raises `TypeError`), and `FTSIndex` has no `index()` or
+`remove()`: `rebuild()` repairs an index that a program wrote around. `copy_to()` into the
+table needs nothing: the triggers index the copied rows.
 
 **What a trigger costs:** each insert and delete of a row writes its index row as well;
 an update writes it only when the row id or the stored value of an indexed field changed,
 so an update of other fields costs one comparison of the indexed values per row.
 
-**`create()`** makes the index what its definition (fields, their order, tokenizer,
-`content_sync`) says, or refuses, in one transaction:
+**`create()`** makes the index what its definition (fields, their order, tokenizer)
+says, or refuses, in one transaction:
 
-- No index table: it is created; with `content_sync=True` the triggers are added and the
+- No index table: it is created, the triggers are added and the
   index is filled from the rows already in the table.
 - An index table with the same fields in the same order and the same tokenizer is kept,
   however its statement is spelled (an index made by an older sqler is the same index).
 - An index table with other fields, another order or another tokenizer: `create()` raises
   `SchemaError`, naming the index, what it has and what was asked, and changes nothing.
   To change an index, call `drop()` then `create()`.
-- With `content_sync=True`, a trigger that is missing or is not the one the definition
+- A trigger that is missing or is not the one the definition
   writes now (a field promoted to a column since, an older sqler) is replaced, and the
   index is filled again from the table. So an index made by an older sqler, without
   triggers, gets them and its missing rows on the first `create()` after the upgrade.
-- With `content_sync=False`, triggers of the index are dropped.
 
 A `create()` that fails leaves the index and its triggers as they were; one that finds
 everything as defined writes nothing (it does not wait for another writer's lock).
@@ -2474,7 +2459,7 @@ triggers, and every later write to the table then fails; `drop()` removes both, 
 
 Every way in indexes a field as it is stored: a promoted column from its column, any other
 field from `data` (a list or dict as its JSON text, a number as the number, `None` as
-nothing). `index(model)` reads the saved row, not the instance's unsaved values.
+nothing).
 
 `FTSIndex` and `SearchableMixin` work on a `SQLerDB`; `AsyncFTSIndex` and
 `AsyncSearchableMixin` are their twins for an `AsyncSQLerDB` (below). An index given a
@@ -2517,14 +2502,11 @@ and a container of text such as `list[str]`, which is indexed as its JSON text. 
 class names the fields itself.
 
 **On an `AsyncSQLerDB`** the same calls are awaited: `AsyncFTSIndex` has every public call of
-`FTSIndex` (`create`, `drop`, `rebuild`, `index`, `remove`, `search`, `search_ranked`,
+`FTSIndex` (`create`, `drop`, `rebuild`, `search`, `search_ranked`,
 `search_with_highlights`, `snippet`, `count`, `stats`, `optimize`) as a coroutine of the same
 name, arguments and result, and `AsyncSearchableMixin` the mixin's, on every async base. Both
 send the statements the sync ones send, so an index made through a `SQLerDB` is searched
-through an `AsyncSQLerDB` on the same file, and the reverse. With `content_sync=False` the
-mixin's `await save()`, `await delete()`, `await save_many()` and an async queryset's
-`update()`, `update_one()`, `update_n()` and `delete_all()` change the index in one unit with
-the write, as the sync mixin does.
+through an `AsyncSQLerDB` on the same file, and the reverse.
 
 ```python
 import asyncio

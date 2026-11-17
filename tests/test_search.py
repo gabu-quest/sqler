@@ -130,7 +130,7 @@ class TestFTSIndex:
         assert count == 1
 
     def test_fts_index_single_document(self):
-        """Index a single document after creation."""
+        """A document saved after creation is indexed by the triggers."""
         fts = FTSIndex(self.Article, fields=["title", "content"])
         fts.create(self.db)
         fts.rebuild()
@@ -140,7 +140,6 @@ class TestFTSIndex:
             title="Rust Programming", content="Systems programming with Rust", author="Charlie"
         )
         new_article.save()
-        fts.index(new_article)
 
         results = fts.search("Rust")
         assert len(results) == 1
@@ -241,13 +240,13 @@ class SearchArticle(SQLerModel):
     body: str = ""
 
 
-def _articles_index(content_sync=True, db=None):
+def _articles_index(db=None):
     db = db or SQLerDB.in_memory(shared=False)
     SearchArticle.set_db(db, "articles")
-    index = FTSIndex(SearchArticle, ["title", "body"], db=db, content_sync=content_sync)
+    index = FTSIndex(SearchArticle, ["title", "body"], db=db)
     index.create()
     for title, body in ARTICLES:
-        index.index(SearchArticle(title=title, body=body).save())
+        SearchArticle(title=title, body=body).save()
     return db, index
 
 
@@ -476,7 +475,7 @@ def test_plain_defaults_to_false(articles):
 
 
 # =============================================================================
-# content_sync=True: create() adds triggers and the index follows every write
+# create() adds triggers and the index follows every write
 # =============================================================================
 
 
@@ -501,9 +500,7 @@ def _index_rows(db, index):
 
 def _table_rows(db, index):
     """What rebuild() makes of the table, read back without changing the index."""
-    other = FTSIndex(
-        index.model_class, index.fields, db=db, index_name="compare_fts", content_sync=False
-    )
+    other = FTSIndex(index.model_class, index.fields, db=db, index_name="compare_fts")
     other.create()
     other.rebuild()
     rows = _index_rows(db, other)
@@ -513,7 +510,7 @@ def _table_rows(db, index):
 
 @pytest.fixture
 def synced():
-    db, index = _articles_index(content_sync=True)
+    db, index = _articles_index()
     yield db, index
     db.close()
 
@@ -722,12 +719,12 @@ def test_a_name_that_is_not_an_identifier_is_refused_before_any_trigger(kwargs, 
     db = SQLerDB.in_memory(shared=False)
     SearchArticle.set_db(db, "articles")
     with pytest.raises(error):
-        FTSIndex(SearchArticle, db=db, content_sync=True, **kwargs).create()
+        FTSIndex(SearchArticle, db=db, **kwargs).create()
     assert _triggers(db) == []
     db.close()
 
 
-# --- one writer of the index per mode ---
+# --- one writer of the index: its triggers ---
 
 
 def test_with_triggers_the_mixin_does_not_write_the_index_itself(posts):
@@ -736,77 +733,6 @@ def test_with_triggers_the_mixin_does_not_write_the_index_itself(posts):
         post.delete()
     assert [log.sql for log in sent if "posts_fts" in log.sql] == []
     assert posts.search_count("quiet") == 0
-
-
-def test_with_triggers_index_and_remove_leave_the_index_equal_to_the_table(synced):
-    db, index = synced
-    before = _index_rows(db, index)
-    kept = SearchArticle.query().first()
-    index.index(kept)
-    index.remove(kept)
-    index.remove(kept._id)
-    assert _index_rows(db, index) == before == _table_rows(db, index)
-    kept.delete()
-    index.remove(kept._id)
-    assert _index_rows(db, index) == _table_rows(db, index)
-
-
-def test_an_index_made_without_triggers_gets_them_on_the_next_create():
-    db, old = _articles_index(content_sync=False)
-    assert _triggers(db) == []
-    FTSIndex(SearchArticle, ["title", "body"], db=db).create()
-    assert _triggers(db) == ["articles_fts_ad", "articles_fts_ai", "articles_fts_au"]
-    SearchArticle(title="after upgrade", body="").save()
-    assert old.count("upgrade") == 1
-    db.close()
-
-
-# --- content_sync=False keeps today's manual index ---
-
-
-def test_content_sync_false_adds_no_trigger_and_index_is_manual():
-    db, index = _articles_index(content_sync=False)
-    assert _triggers(db) == []
-    a = SearchArticle(title="manual entry", body="").save()
-    assert index.count("manual") == 0
-    index.index(a)
-    assert index.count("manual") == 1
-    index.remove(a)
-    assert index.count("manual") == 0
-    assert index.rebuild() == 5
-    assert index.count("manual") == 1
-    db.close()
-
-
-def test_content_sync_false_on_a_missing_table_creates_no_table():
-    db = SQLerDB.in_memory(shared=False)
-
-    class SearchAbsent(SQLerModel):
-        title: str = ""
-
-    FTSIndex(SearchAbsent, ["title"], db=db, content_sync=False).create()
-    tables = [r[0] for r in db.adapter.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-    assert "searchabsents" not in tables
-    db.close()
-
-
-def test_content_sync_false_mixin_hooks_index_on_save_and_delete():
-    db = SQLerDB.in_memory(shared=False)
-
-    class ManualPost(SearchableMixin, SQLerModel):
-        title: str = ""
-
-        class FTS:
-            fields = ["title"]
-
-    ManualPost.set_db(db, "manual_posts")
-    ManualPost._fts_index = FTSIndex(ManualPost, ["title"], db=db, content_sync=False)
-    ManualPost._fts_index.create()
-    post = ManualPost(title="hooked").save()
-    assert ManualPost.search_count("hooked") == 1
-    post.delete()
-    assert ManualPost.search_count("hooked") == 0
-    db.close()
 
 
 # --- the index reads a field where it is stored ---
@@ -820,13 +746,10 @@ class SearchPromoted(SQLerModel):
     meta: dict = {}
 
 
-@pytest.mark.parametrize("content_sync", [True, False])
-def test_trigger_rebuild_and_index_give_the_same_text_for_a_row(content_sync):
+def test_trigger_and_rebuild_give_the_same_text_for_a_row():
     db = SQLerDB.in_memory(shared=False)
     SearchPromoted.set_db(db, "promoted")
-    index = FTSIndex(
-        SearchPromoted, ["title", "tags", "n", "meta"], db=db, content_sync=content_sync
-    )
+    index = FTSIndex(SearchPromoted, ["title", "tags", "n", "meta"], db=db)
     index.create()
     rows = [
         SearchPromoted(title="promoted title", tags=["red", "blue"], n=42, meta={"k": "deep"}),
@@ -849,9 +772,6 @@ def test_trigger_rebuild_and_index_give_the_same_text_for_a_row(content_sync):
     # the promoted column holds the title: data does not
     in_data = db.adapter.execute("SELECT json_extract(data, '$.title') FROM promoted").fetchall()
     assert [tuple(row) for row in in_data] == [(None,)] * 5
-    assert _index_rows(db, index) == (expected if content_sync else [])
-    for r in rows:
-        index.index(r)
     assert _index_rows(db, index) == expected
     assert index.rebuild() == 5
     assert _index_rows(db, index) == expected
@@ -922,6 +842,10 @@ def test_an_index_made_by_the_released_version_heals_on_the_first_create():
     assert _triggers(db) == SYNC_TRIGGERS
     assert _titles(index, "python") == [PYTHON]
     assert _index_rows(db, index) == [(i + 1, t, b) for i, (t, b) in enumerate(ARTICLES)]
+    # and from then on it follows the table: a new row is found, a deleted one is not
+    SearchArticle(title="after upgrade", body="").save()
+    SearchArticle.from_id(3).delete()
+    assert (_titles(index, "upgrade"), _titles(index, "python")) == (["after upgrade"], [])
     # the index table itself was kept: its stored statement is still the released one
     assert db.adapter.execute(
         "SELECT sql FROM sqlite_master WHERE name = 'articles_fts'"
@@ -934,8 +858,9 @@ def test_an_index_of_the_same_fields_and_tokenizer_is_the_same_index_whatever_it
     db = _table_with(ARTICLES)
     _commit(db, RELEASED_CREATE)
     before = _schema(db)
-    FTSIndex(SearchArticle, ["title", "body"], db=db, tokenizer=tokenizer, content_sync=False).create()
-    assert _schema(db) == before
+    FTSIndex(SearchArticle, ["title", "body"], db=db, tokenizer=tokenizer).create()
+    # the index table is kept as it was; the triggers are what a create() adds
+    assert [row for row in _schema(db) if row[0] != "trigger"] == before
     db.close()
 
 
@@ -1040,17 +965,6 @@ def test_a_field_promoted_after_create_is_read_from_its_column_after_the_next_cr
     db.close()
 
 
-def test_create_without_content_sync_drops_the_triggers_of_its_index():
-    db, index = _articles_index()
-    rows = _index_rows(db, index)
-    FTSIndex(SearchArticle, ["title", "body"], db=db, content_sync=False).create()
-    assert _triggers(db) == []
-    assert _index_rows(db, index) == rows
-    SearchArticle(title="manual only", body="").save()
-    assert index.count("manual") == 0
-    db.close()
-
-
 def test_create_after_a_raw_drop_of_the_index_repairs_and_refills():
     db, index = _articles_index()
     _commit(db, "DROP TABLE articles_fts")
@@ -1076,22 +990,26 @@ def test_create_after_a_raw_drop_of_the_source_table_leaves_an_empty_index():
     db.close()
 
 
-@pytest.mark.parametrize("content_sync", [True, False])
-def test_create_on_a_table_with_no_rows_gives_an_empty_index(content_sync):
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_content_sync_is_not_an_argument_of_an_index_or_create_search_index(is_async):
+    index_class, mixin = (AsyncFTSIndex, AsyncSearchableMixin) if is_async else (FTSIndex, SearchableMixin)
+
+    class Doc(mixin, AsyncSQLerModel if is_async else SQLerModel):
+        title: str = ""
+
+    with pytest.raises(TypeError, match="content_sync"):
+        index_class(Doc, ["title"], content_sync=False)
+    with pytest.raises(TypeError, match="content_sync"):
+        Doc.create_search_index(content_sync=False)
+
+
+def test_create_on_a_table_with_no_rows_gives_an_empty_index():
     db = _table_with([])
     _commit(db, "CREATE TABLE IF NOT EXISTS articles (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)")
-    index = FTSIndex(SearchArticle, ["title", "body"], db=db, content_sync=content_sync)
+    index = FTSIndex(SearchArticle, ["title", "body"], db=db)
     index.create()
     assert _index_rows(db, index) == []
-    assert _triggers(db) == (SYNC_TRIGGERS if content_sync else [])
-    db.close()
-
-
-def test_create_without_content_sync_fills_nothing():
-    db = _table_with(ARTICLES)
-    index = FTSIndex(SearchArticle, ["title", "body"], db=db, content_sync=False)
-    index.create()
-    assert _index_rows(db, index) == []
+    assert _triggers(db) == SYNC_TRIGGERS
     db.close()
 
 
@@ -1139,38 +1057,16 @@ def test_create_inside_a_transaction_that_rolls_back_leaves_nothing_of_the_index
 # --- a create() that finds everything as defined writes nothing ---
 
 
-@pytest.mark.parametrize("content_sync", [True, False])
-def test_a_create_that_finds_everything_as_defined_writes_nothing(tmp_path, content_sync):
+def test_a_create_that_finds_everything_as_defined_writes_nothing(tmp_path):
     path = str(tmp_path / "defined.db")
     db = _table_with(ARTICLES, SQLerDB.on_disk(path))
-    FTSIndex(SearchArticle, ["title", "body"], db=db, content_sync=content_sync).create()
+    FTSIndex(SearchArticle, ["title", "body"], db=db).create()
     before = _written(db)
     other = sqlite3.connect(path, timeout=0)
     other.execute("BEGIN IMMEDIATE")  # holds the write lock: a create() that writes fails at once
     db.adapter.execute("PRAGMA busy_timeout = 0")
     try:
-        FTSIndex(SearchArticle, ["title", "body"], db=db, content_sync=content_sync).create()
-    finally:
-        other.rollback()
-        other.close()
-    assert _written(db) == before
-    db.close()
-
-
-def test_a_table_named_like_a_trigger_does_not_make_a_manual_create_write(tmp_path):
-    """content_sync=False drops the index's triggers; a table that only has such a name is none."""
-    path = str(tmp_path / "named.db")
-    db = _table_with(ARTICLES, SQLerDB.on_disk(path))
-    index = FTSIndex(SearchArticle, ["title", "body"], db=db, content_sync=False)
-    index.create()
-    db.adapter.execute(f"CREATE TABLE {index.index_table}_ai (n INTEGER)")
-    db.adapter.commit()
-    before = _written(db)
-    other = sqlite3.connect(path, timeout=0)
-    other.execute("BEGIN IMMEDIATE")  # holds the write lock: a create() that writes fails at once
-    db.adapter.execute("PRAGMA busy_timeout = 0")
-    try:
-        index.create()
+        FTSIndex(SearchArticle, ["title", "body"], db=db).create()
     finally:
         other.rollback()
         other.close()
@@ -1277,18 +1173,6 @@ def test_an_index_on_an_async_database_raises_type_error_before_anything_is_sent
 # --- the entry of a row is kept in the database the row is written to ---
 
 
-def _manual_post_class(db, table="mposts", fields=("title",), promoted=None):
-    class MPost(SearchableMixin, SQLerModel):
-        title: str = ""
-
-    if promoted:
-        MPost.__promoted__ = promoted
-    MPost.set_db(db, table)
-    MPost._fts_index = FTSIndex(MPost, list(fields), db=db, content_sync=False)
-    MPost._fts_index.create()
-    return MPost
-
-
 def _entries(index, db):
     """The index rows of ``index`` as ``db`` holds them, or None when it has no index table."""
     try:
@@ -1305,155 +1189,6 @@ def two_dbs():
     yield a, b
     a.close()
     b.close()
-
-
-def test_manual_index_follows_a_row_written_and_deleted_in_another_database(two_dbs):
-    a, b = two_dbs
-    Post = _manual_post_class(a)
-    Post(title="apple").save()
-    other = Post(title="zebra")
-    other.save(db=b)
-    assert (other._id, _entries(Post._fts_index, a)) == (1, [(1, "apple")])
-    row = Post.using(b).all()[0]
-    row.title = "zebra crossing"
-    row.save()
-    assert _entries(Post._fts_index, a) == [(1, "apple")]
-    row.delete()
-    assert Post.using(b).count() == 0
-    assert _entries(Post._fts_index, a) == [(1, "apple")]
-    assert [m.title for m in Post.search("apple")] == ["apple"]
-
-
-def test_manual_index_delete_in_another_database_that_rolls_back_changes_neither(two_dbs):
-    a, b = two_dbs
-    Post = _manual_post_class(a)
-    Post(title="apple").save()
-    Post(title="zebra").save(db=b)
-    row = Post.using(b).all()[0]
-    with pytest.raises(RuntimeError, match="undo"):
-        with b.transaction():
-            row.delete()
-            raise RuntimeError("undo")
-    assert [r.title for r in Post.using(b).all()] == ["zebra"]
-    assert _entries(Post._fts_index, a) == [(1, "apple")]
-
-
-def test_manual_index_of_a_second_object_on_the_same_file_stays_right(tmp_path):
-    path = str(tmp_path / "one.db")
-    a, same = SQLerDB.on_disk(path), SQLerDB.on_disk(path)
-    try:
-        Post = _manual_post_class(a)
-        first = Post(title="apple")
-        first.save(db=same)
-        assert _entries(Post._fts_index, a) == [(1, "apple")]
-        row = Post.using(same).all()[0]
-        row.title = "pear"
-        row.save()
-        assert _entries(Post._fts_index, a) == [(1, "pear")]
-        with same.transaction():
-            row.title = "plum"
-            row.save()
-            assert _entries(Post._fts_index, same) == [(1, "plum")]
-        assert _entries(Post._fts_index, a) == [(1, "plum")]
-        with pytest.raises(RuntimeError, match="undo"):
-            with same.transaction():
-                row.delete()
-                raise RuntimeError("undo")
-        assert _entries(Post._fts_index, a) == [(1, "plum")]
-        Post.using(same).all()[0].delete()
-        assert _entries(Post._fts_index, a) == []
-    finally:
-        same.close()
-        a.close()
-
-
-def test_manual_index_another_database_with_its_own_index_table_is_kept_by_its_own_rows(two_dbs):
-    a, b = two_dbs
-    Post = _manual_post_class(a)
-    Post(title="apple").save()
-    FTSIndex(Post, ["title"], db=b, content_sync=False).create()
-    row = Post(title="zebra")
-    row.save(db=b)
-    assert _entries(Post._fts_index, b) == [(1, "zebra")]
-    row.title = "zebra crossing"
-    row.save()
-    assert _entries(Post._fts_index, b) == [(1, "zebra crossing")]
-    row.delete()
-    assert _entries(Post._fts_index, b) == []
-    assert _entries(Post._fts_index, a) == [(1, "apple")]
-
-
-def test_manual_index_another_database_without_the_index_table_gets_nothing_written(two_dbs):
-    a, b = two_dbs
-    Post = _manual_post_class(a)
-    row = Post(title="zebra")
-    with query_logger.capture() as sent:
-        row.save(db=b)
-    assert _entries(Post._fts_index, b) is None
-    # the one statement more: does that database have the index table
-    assert [q.sql for q in sent if "lower(name)" in q.sql] == [
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?);"
-    ]
-    with query_logger.capture() as sent:
-        row.delete()
-    assert [q.sql for q in sent if "lower(name)" in q.sql] == [
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?);"
-    ]
-    assert _entries(Post._fts_index, b) is None
-    assert _entries(Post._fts_index, a) == []
-
-
-def test_manual_index_a_row_of_another_table_touches_no_index(two_dbs):
-    a, _ = two_dbs
-    Post = _manual_post_class(a)
-    Post(title="apple").save()
-    a.ensure_table("elsewhere")
-    a.insert_document("elsewhere", {"title": "other row"})
-    read = Post.using(a, table="elsewhere").all()[0]
-    assert (read._id, read.title) == (1, "other row")
-    read.title = "edited"
-    with query_logger.capture() as sent:
-        read.save()
-        read.delete()
-    assert [q.sql for q in sent if "mposts_fts" in q.sql] == []
-    assert _entries(Post._fts_index, a) == [(1, "apple")]
-
-
-def test_manual_index_delete_of_a_row_never_saved_raises_what_it_raised(two_dbs):
-    a, _ = two_dbs
-    Post = _manual_post_class(a)
-    with pytest.raises(ValueError) as err:
-        Post(title="nobody").delete()
-    assert str(err.value) == "Cannot delete unsaved model (missing _id)"
-
-
-def test_manual_index_with_a_promoted_field_follows_the_row_in_another_database(two_dbs):
-    a, b = two_dbs
-    Post = _manual_post_class(a, table="pposts", promoted={"title": "TEXT"})
-    Post(title="apple").save()
-    FTSIndex(Post, ["title"], db=b, content_sync=False).create()
-    row = Post(title="zebra")
-    row.save(db=b)
-    assert _entries(Post._fts_index, b) == [(1, "zebra")]
-    row.delete()
-    assert _entries(Post._fts_index, b) == []
-    assert _entries(Post._fts_index, a) == [(1, "apple")]
-
-
-def test_manual_index_in_the_same_database_sends_the_statements_it_sent(two_dbs):
-    a, _ = two_dbs
-    Post = _manual_post_class(a)
-    with query_logger.capture() as sent:
-        row = Post(title="apple").save()
-    saved = [q.sql for q in sent if "mposts_fts" in q.sql]
-    with query_logger.capture() as sent:
-        row.delete()
-    deleted = [q.sql for q in sent if "mposts_fts" in q.sql]
-    assert saved == [
-        "DELETE FROM mposts_fts WHERE rowid = ?;",
-        "INSERT INTO mposts_fts(rowid, title) SELECT t._id, json_extract(t.data, '$.title') FROM mposts AS t WHERE t._id = ? AND CASE WHEN 1 THEN 1 ELSE (SELECT (`_id`, `data`) IN (SELECT * FROM mposts) FROM mposts) END;",
-    ]
-    assert deleted == ["DELETE FROM mposts_fts WHERE rowid = ?;"]
 
 
 def test_synced_index_in_another_database_is_left_to_its_triggers(two_dbs):
@@ -1610,36 +1345,6 @@ async def _rebuild_missing_table(t):
     return await _v(t.Index(t.model("nodocs"), ["title"], db=t.db).rebuild())
 
 
-async def _manual(t):
-    manual = t.Index(t.Model, ["title"], index_name="man_fts", content_sync=False, db=t.db)
-    await _v(manual.create())
-    return manual
-
-
-async def _index(t):
-    manual = await _manual(t)
-    first = await _v(t.Model.from_id(1, db=t.db))
-    await _v(manual.index(first))
-    return await t.titles(manual.search("apple"))
-
-
-async def _index_unsaved(t):
-    return await _v(t.ix.index(t.Model(title="x")))
-
-
-async def _remove(t):
-    manual = await _manual(t)
-    for row_id in (1, 2):
-        await _v(manual.index(await _v(t.Model.from_id(row_id, db=t.db))))
-    await _v(manual.remove(1))
-    return await t.titles(manual.search("apple"))
-
-
-async def _remove_synced(t):
-    await _v(t.ix.remove(1))
-    return await t.titles(t.ix.search("apple"))
-
-
 def _search(text, **kwargs):
     async def call(t):
         return await t.titles(t.ix.search(text, **kwargs))
@@ -1744,7 +1449,7 @@ async def _bound_table(t):
 
 async def _mixin_create(t):
     index = await _v(t.Model.create_search_index(t.db))
-    return [index.fields, index.index_table, index.content_sync, await _v(index.count("apple"))]
+    return [index.fields, index.index_table, await _v(index.count("apple"))]
 
 
 async def _mixin_default_fields(t):
@@ -1796,23 +1501,15 @@ async def _mixin_search_count(t):
     return [await _v(t.Model.search_count("apple", db=t.db)), await _v(t.Model.search_count("fruit*", db=t.db))]
 
 
-async def _mixin_manual(t):
-    t.Model._fts_index = t.Index(t.Model, ["title"], index_name="man_fts", content_sync=False, db=t.db)
-    await _v(t.Model._fts_index.create())
-    return t.Model._fts_index
-
-
 async def _mixin_save(t):
-    manual = await _mixin_manual(t)
     row = await t.save(t.Model, title="yellow apple")
-    return [row._id, await t.titles(manual.search("apple"))]
+    return [row._id, await t.titles(t.ix.search("apple"))]
 
 
 async def _mixin_delete(t):
-    manual = await _mixin_manual(t)
     row = await t.save(t.Model, title="yellow apple")
     await _v(row.delete(db=t.db))
-    return [row._id, await t.titles(manual.search("apple"))]
+    return [row._id, await t.titles(t.ix.search("apple"))]
 
 
 SEARCH_SQL_REFUSED = (
@@ -1837,10 +1534,6 @@ TWIN_CALLS = [
     ("rebuild", "rebuild", _rebuild, [3, 2]),
     ("rebuild-empty-table", "rebuild", _rebuild_empty_table, [0, 0]),
     ("rebuild-missing-table", "rebuild", _rebuild_missing_table, 0),
-    ("index", "index", _index, ["red apple"]),
-    ("index-unsaved", "index", _index_unsaved, ("raised", ValueError, "Cannot index unsaved model")),
-    ("remove", "remove", _remove, ["green apple pie"]),
-    ("remove-synced", "remove", _remove_synced, ["red apple", "green apple pie"]),
     ("search", "search", _search("apple"), ["red apple", "green apple pie"]),
     ("search-limit-offset", "search", _search("apple", limit=1, offset=1), ["green apple pie"]),
     ("search-or", "search", _search("apple OR sky"), ["red apple", "green apple pie", "blue sky"]),
@@ -1874,7 +1567,7 @@ TWIN_CALLS = [
     ("stats", "stats", _stats, FTSStats("twindocs_fts", 3, 6, ["title", "body"])),
     ("optimize", "optimize", _optimize, [None, 2]),
     ("create_search_index", "create_search_index", _mixin_create,
-     [["title", "body"], "twindocs_fts", True, 2]),
+     [["title", "body"], "twindocs_fts", 2]),
     ("create_search_index-default-fields", "create_search_index", _mixin_default_fields,
      [(["title", "body"], "porter unicode61"), ["title", "body"], ["red apple"]]),
     ("rebuild_search_index", "rebuild_search_index", _mixin_rebuild, 3),
@@ -1886,8 +1579,8 @@ TWIN_CALLS = [
     ("mixin-search_ranked", "search_ranked", _mixin_search_ranked,
      [("blue sky", -0.4806), ("red apple", -0.0), ("green apple pie", -0.0)]),
     ("search_count", "search_count", _mixin_search_count, [2, 2]),
-    ("save", "save", _mixin_save, [4, ["yellow apple"]]),
-    ("delete", "delete", _mixin_delete, [None, []]),
+    ("save", "save", _mixin_save, [4, ["red apple", "green apple pie", "yellow apple"]]),
+    ("delete", "delete", _mixin_delete, [None, ["red apple", "green apple pie"]]),
 ]
 
 
@@ -2156,62 +1849,6 @@ def test_an_index_made_through_one_database_object_is_searched_through_the_other
     assert asyncio.run(run()) == [both, both, [refusal, refusal]]
 
 
-# ----- content_sync=False follows an awaited write --------------------------------------------
-
-
-class AsyncManualDoc(AsyncSearchableMixin, AsyncSQLerModel):
-    __tablename__ = "amdocs"
-    title: str = ""
-
-
-def _manual_run(body):
-    async def run():
-        db = AsyncSQLerDB.in_memory(shared=False)
-        await db.connect()
-        AsyncManualDoc._fts_index = AsyncFTSIndex(AsyncManualDoc, ["title"], db=db, content_sync=False)
-        await AsyncManualDoc._fts_index.create()
-        try:
-            return await body(db, AsyncManualDoc._fts_index)
-        finally:
-            AsyncManualDoc._fts_index = None
-            await db.close()
-
-    return asyncio.run(run())
-
-
-def test_async_manual_index_follows_an_awaited_save_and_delete_after_the_write():
-    async def body(db, index):
-        with query_logger.capture() as sent:
-            row = await AsyncManualDoc(title="red apple").save(db=db)
-            after_save = await index.count("apple")
-            await row.delete(db=db)
-        writes = [
-            f"{q.sql.split()[0]} {q.sql.split()[2].split('(')[0]}" for q in sent if q.sql.startswith(("INSERT", "DELETE"))
-        ]
-        return [after_save, await index.count("apple"), writes]
-
-    assert _manual_run(body) == [
-        1,
-        0,
-        ["INSERT amdocs", "DELETE amdocs_fts", "INSERT amdocs_fts", "DELETE amdocs", "DELETE amdocs_fts"],
-    ]
-
-
-def test_async_manual_index_step_is_in_the_transaction_of_the_write():
-    async def body(db, index):
-        inside = None
-        try:
-            async with db.transaction():
-                await AsyncManualDoc(title="red apple").save(db=db)
-                inside = await index.count("apple")
-                raise KeyError("leave")
-        except KeyError:
-            pass
-        return [inside, await index.count("apple"), await index.stats()]
-
-    assert _manual_run(body) == [1, 0, FTSStats("amdocs_fts", 0, 0, ["title"])]
-
-
 # ----- eight tasks create the index at once on a new async database -------------------------
 
 
@@ -2255,29 +1892,7 @@ def test_eight_tasks_creating_the_index_at_once_all_succeed_with_one_index(where
     assert asyncio.run(run()) == [one] * 20
 
 
-# ----- a save or delete of an index kept by hand is one unit with its index write ----------
-#
-# The row write and the index write commit together or not at all: when the index write fails,
-# the row, the index and the instance are as before the call (the instance as a failed save of
-# a class with an audit log leaves it).
-
-
-def _deny_index_writes(index_table):
-    def deny(action, arg1, *rest):
-        if arg1 == index_table and action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_DELETE, sqlite3.SQLITE_UPDATE):
-            return sqlite3.SQLITE_DENY
-        return sqlite3.SQLITE_OK
-
-    return deny
-
-
-async def _set_authorizer(db, fn):
-    """``fn`` as the authorizer of every connection the database object holds."""
-    if isinstance(db, AsyncSQLerDB):
-        for conn in db.adapter._all_conns:
-            await conn._execute(conn._conn.set_authorizer, fn)
-    else:
-        db.adapter._conn().set_authorizer(fn)
+# ----- the stored rows and entries, as a connection of its own reads them -------------------
 
 
 def _stored(path, table, index_table):
@@ -2291,162 +1906,10 @@ def _stored(path, table, index_table):
     return rows, entries
 
 
-def _identity(inst):
-    return (inst._id, getattr(inst, "_version", None), inst._snapshot)
-
-
-@pytest.mark.parametrize("call", ["save-new", "save-changed", "delete"])
-@pytest.mark.parametrize("base, is_async, lite", SEARCH_BASES, ids=BASE_IDS)
-def test_a_failed_index_write_leaves_the_row_the_index_and_the_instance_as_they_were(base, is_async, lite, call, tmp_path):
-    mixin = AsyncSearchableMixin if is_async else SearchableMixin
-    Doc = _base_model(base, lite, mixin, "unitdocs", ["title"])
-    path = str(tmp_path / "unit.db")
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        try:
-            Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
-            await _v(Doc._fts_index.create(db))
-            kept = await _v(Doc(title="old apple").save(db=db))
-            target = Doc(title="new pear") if call == "save-new" else kept
-            if call == "save-changed":
-                target.title = "new pear"
-            before = _identity(target)
-            await _set_authorizer(db, _deny_index_writes("unitdocs_fts"))
-            with pytest.raises(sqlite3.DatabaseError) as raised:
-                await _v(target.delete(db=db) if call == "delete" else target.save(db=db))
-            await _set_authorizer(db, None)
-            return str(raised.value), _identity(target) == before, target._id, _stored(path, "unitdocs", "unitdocs_fts")
-        finally:
-            await _v(db.close())
-
-    message, same, _id, stored = asyncio.run(run())
-    assert (message, same, _id, stored) == (
-        "not authorized",
-        True,
-        None if call == "save-new" else 1,
-        ([(1, "old apple")], [(1, "old apple")]),
-    )
-
-
-@pytest.mark.parametrize("base, is_async, lite", SEARCH_BASES, ids=BASE_IDS)
-def test_an_index_kept_by_hand_follows_save_and_delete_when_the_base_is_named_first(base, is_async, lite, tmp_path):
-    mixin = AsyncSearchableMixin if is_async else SearchableMixin
-    Doc = _base_model(base, lite, mixin, "orderdocs", ["title"], mixin_first=False)
-    path = str(tmp_path / "order.db")
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        try:
-            Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
-            await _v(Doc._fts_index.create(db))
-            kept = await _v(Doc(title="old apple").save(db=db))
-            gone = await _v(Doc(title="plum").save(db=db))
-            kept.title = "new pear"
-            await _v(kept.save(db=db))
-            await _v(gone.delete(db=db))
-        finally:
-            await _v(db.close())
-        return _stored(path, "orderdocs", "orderdocs_fts")
-
-    assert asyncio.run(run()) == ([(1, "new pear")], [(1, "new pear")])
-
-
-@pytest.mark.parametrize("call", ["save", "delete"])
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_a_failed_index_write_of_an_audited_search_class_keeps_no_audit_row(is_async, call, tmp_path):
-    from sqler import AsyncAuditLogMixin, AuditLogMixin
-
-    if is_async:
-        class Doc(AsyncAuditLogMixin, AsyncSearchableMixin, AsyncSQLerModel):
-            __tablename__ = "auditdocs"
-            title: str = ""
-    else:
-        class Doc(AuditLogMixin, SearchableMixin, SQLerModel):
-            __tablename__ = "auditdocs"
-            title: str = ""
-
-    path = str(tmp_path / "audit.db")
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        try:
-            Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
-            await _v(Doc._fts_index.create(db))
-            doc = await _v(Doc(title="old apple").save(db=db))
-            doc.title = "new pear"
-            await _set_authorizer(db, _deny_index_writes("auditdocs_fts"))
-            with pytest.raises(sqlite3.DatabaseError, match="^not authorized$"):
-                await _v(doc.delete(db=db) if call == "delete" else doc.save(db=db))
-            await _set_authorizer(db, None)
-        finally:
-            await _v(db.close())
-        raw = sqlite3.connect(path)
-        try:
-            audit = raw.execute("SELECT action, record_id FROM auditdocs_audit ORDER BY rowid").fetchall()
-        finally:
-            raw.close()
-        return audit, _stored(path, "auditdocs", "auditdocs_fts")
-
-    assert asyncio.run(run()) == ([("create", 1)], ([(1, "old apple")], [(1, "old apple")]))
-
-
-@pytest.mark.parametrize("nested", [False, True], ids=["transaction", "nested"])
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_a_save_and_delete_inside_the_callers_transaction_begin_nothing_and_commit_nothing_early(is_async, nested, tmp_path):
-    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
-                      AsyncSearchableMixin if is_async else SearchableMixin, "txndocs", ["title"])
-    path = str(tmp_path / "txn.db")
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        seen_inside = None
-        try:
-            Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
-            await _v(Doc._fts_index.create(db))
-            gone = await _v(Doc(title="gone plum").save(db=db))
-
-            async def body():
-                nonlocal seen_inside
-                await _v(Doc(title="red apple").save(db=db))
-                await _v(gone.delete(db=db))
-                seen_inside = _stored(path, "txndocs", "txndocs_fts")  # another connection
-
-            with query_logger.capture() as sent:
-                if is_async:
-                    async with db.transaction():
-                        if nested:
-                            async with db.transaction():
-                                await body()
-                        else:
-                            await body()
-                else:
-                    with db.transaction():
-                        if nested:
-                            with db.transaction():
-                                await body()
-                        else:
-                            await body()
-            statements = [q.sql.split()[0].upper() for q in sent if q.sql.split()[0].upper() in ("BEGIN", "COMMIT", "SAVEPOINT", "RELEASE")]
-        finally:
-            await _v(db.close())
-        return seen_inside, statements, _stored(path, "txndocs", "txndocs_fts")
-
-    seen_inside, statements, after = asyncio.run(run())
-    assert seen_inside == ([(1, "gone plum")], [(1, "gone plum")])
-    assert after == ([(2, "red apple")], [(2, "red apple")])
-    assert statements == []
-
-
-# ----- the bulk and set-based writes of a class whose index is kept by hand ----------------
+# ----- the bulk and set-based writes of a class with a search index ----------------------
 #
 # ``save_many()`` and a queryset's ``update()``, ``update_one()``, ``update_n()`` and
-# ``delete_all()`` keep the entries of every row they write or delete, as ``save()`` and
-# ``delete()`` do, in one unit with the rows. Every case starts from three rows saved one by
+# ``delete_all()`` leave the index equal to the table, by its triggers. Every case starts from three rows saved one by
 # one: 1 "old apple" (n 0), 2 "plum" (n 1), 3 "fig" (n 1).
 
 BULK_CALLS = ["save_many", "update", "update_one", "update_n", "delete_all"]
@@ -2486,8 +1949,8 @@ def _bulk_call(Doc, db, call, table=None):
 
 
 async def _seeded(Doc, db, is_async):
-    """A hand-kept index on ``db`` and the three rows every case starts from."""
-    Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
+    """A search index on ``db`` and the three rows every case starts from."""
+    Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], db=db)
     await _v(Doc._fts_index.create(db))
     for title, n in (("old apple", 0), ("plum", 1), ("fig", 1)):
         await _v(Doc(title=title, n=n).save(db=db))
@@ -2498,7 +1961,7 @@ async def _hits(Doc, db, text):
 
 
 @pytest.mark.parametrize("base, is_async, lite, call", BULK_CASES)
-def test_a_bulk_write_of_an_index_kept_by_hand_leaves_the_index_what_the_table_holds(base, is_async, lite, call, tmp_path):
+def test_a_bulk_write_leaves_the_index_what_the_table_holds(base, is_async, lite, call, tmp_path):
     mixin = AsyncSearchableMixin if is_async else SearchableMixin
     Doc = _base_model(base, lite, mixin, "bulkdocs", ["title"])
     path = str(tmp_path / "bulk.db")
@@ -2516,194 +1979,6 @@ def test_a_bulk_write_of_an_index_kept_by_hand_leaves_the_index_what_the_table_h
 
     rows, pear, plum = BULK_AFTER[call]
     assert asyncio.run(run()) == ((rows, rows), (pear, plum))
-
-
-@pytest.mark.parametrize("base, is_async, lite, call", BULK_CASES)
-def test_a_bulk_write_whose_index_write_fails_leaves_the_rows_and_the_index_as_they_were(base, is_async, lite, call, tmp_path):
-    mixin = AsyncSearchableMixin if is_async else SearchableMixin
-    Doc = _base_model(base, lite, mixin, "bulkfail", ["title"])
-    path = str(tmp_path / "bulkfail.db")
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        try:
-            await _seeded(Doc, db, is_async)
-            await _set_authorizer(db, _deny_index_writes("bulkfail_fts"))
-            with pytest.raises(sqlite3.DatabaseError) as raised:
-                await _v(_bulk_call(Doc, db, call))
-            await _set_authorizer(db, None)
-        finally:
-            await _v(db.close())
-        return str(raised.value), _stored(path, "bulkfail", "bulkfail_fts")
-
-    assert asyncio.run(run()) == ("not authorized", (SEEDED, SEEDED))
-
-
-@pytest.mark.parametrize("call", [c for c in BULK_CALLS if c != "save_many"])
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_a_set_write_on_another_table_changes_its_rows_and_leaves_the_index_of_the_class(is_async, call, tmp_path):
-    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
-                      AsyncSearchableMixin if is_async else SearchableMixin, "homedocs", ["title"])
-    path = str(tmp_path / "other.db")
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        try:
-            await _seeded(Doc, db, is_async)
-            await _v(Doc.using(db).copy_to("awaydocs"))
-            await _v(_bulk_call(Doc, db, call, table="awaydocs"))
-        finally:
-            await _v(db.close())
-        raw = sqlite3.connect(path)
-        try:
-            away = raw.execute("SELECT _id, json_extract(data, '$.title') FROM awaydocs ORDER BY _id").fetchall()
-        finally:
-            raw.close()
-        return away, _stored(path, "homedocs", "homedocs_fts")
-
-    assert asyncio.run(run()) == (BULK_AFTER[call][0], (SEEDED, SEEDED))
-
-
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_a_bulk_write_that_writes_no_row_leaves_the_index(is_async, tmp_path):
-    """``save_many([])`` and an ``update()`` that matches no row write nothing."""
-    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
-                      AsyncSearchableMixin if is_async else SearchableMixin, "nonedocs", ["title"])
-    path = str(tmp_path / "none.db")
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        try:
-            await _seeded(Doc, db, is_async)
-            saved = await _v(Doc.save_many([], db=db))
-            updated = await _v(Doc.using(db).filter(F("title") == "absent").update(title="red pear"))
-            deleted = await _v(Doc.using(db).filter(F("title") == "absent").delete_all())
-        finally:
-            await _v(db.close())
-        return saved, updated, deleted, _stored(path, "nonedocs", "nonedocs_fts")
-
-    assert asyncio.run(run()) == ([], 0, 0, (SEEDED, SEEDED))
-
-
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_a_delete_all_inside_the_callers_transaction_that_rolls_back_leaves_the_index(is_async, tmp_path):
-    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
-                      AsyncSearchableMixin if is_async else SearchableMixin, "rbdocs", ["title"])
-    path = str(tmp_path / "rb.db")
-
-    class Undo(Exception):
-        pass
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        seen_inside = None
-        try:
-            await _seeded(Doc, db, is_async)
-
-            async def body():
-                nonlocal seen_inside
-                deleted = await _v(Doc.using(db).filter(F("n") == 1).delete_all())
-                inner = await _v(db.adapter.execute("SELECT rowid, title FROM rbdocs_fts ORDER BY rowid"))
-                rows = await _v(inner.fetchall())
-                seen_inside = deleted, [tuple(r) for r in rows]
-                raise Undo
-
-            with pytest.raises(Undo):
-                if is_async:
-                    async with db.transaction():
-                        await body()
-                else:
-                    with db.transaction():
-                        await body()
-        finally:
-            await _v(db.close())
-        return seen_inside, _stored(path, "rbdocs", "rbdocs_fts")
-
-    assert asyncio.run(run()) == ((2, [(1, "old apple")]), (SEEDED, SEEDED))
-
-
-@pytest.mark.parametrize("fails", [False, True], ids=["written", "index-write-fails"])
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_a_set_write_of_an_audited_class_with_an_index_kept_by_hand_keeps_both(is_async, fails, tmp_path):
-    from sqler import AsyncAuditLogMixin, AuditLogMixin
-
-    if is_async:
-        class Doc(AsyncAuditLogMixin, AsyncSearchableMixin, AsyncSQLerModel):
-            __tablename__ = "bauditdocs"
-            title: str = ""
-            n: int = 0
-    else:
-        class Doc(AuditLogMixin, SearchableMixin, SQLerModel):
-            __tablename__ = "bauditdocs"
-            title: str = ""
-            n: int = 0
-
-    path = str(tmp_path / "baudit.db")
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        try:
-            await _seeded(Doc, db, is_async)
-            if fails:
-                await _set_authorizer(db, _deny_index_writes("bauditdocs_fts"))
-                with pytest.raises(sqlite3.DatabaseError, match="^not authorized$"):
-                    await _v(Doc.using(db).filter(F("title") == "plum").update(title="red pear"))
-                with pytest.raises(sqlite3.DatabaseError, match="^not authorized$"):
-                    await _v(Doc.using(db).filter(F("title") == "fig").delete_all())
-                await _set_authorizer(db, None)
-            else:
-                await _v(Doc.using(db).filter(F("title") == "plum").update(title="red pear"))
-                await _v(Doc.using(db).filter(F("title") == "fig").delete_all())
-        finally:
-            await _v(db.close())
-        raw = sqlite3.connect(path)
-        try:
-            audit = raw.execute("SELECT action, record_id FROM bauditdocs_audit ORDER BY rowid").fetchall()
-        finally:
-            raw.close()
-        return audit, _stored(path, "bauditdocs", "bauditdocs_fts")
-
-    created = [("create", 1), ("create", 2), ("create", 3)]
-    if fails:
-        expected = (created, (SEEDED, SEEDED))
-    else:
-        after = [(1, "old apple"), (2, "red pear")]
-        expected = ([*created, ("update", 2), ("delete", 3)], (after, after))
-    assert asyncio.run(run()) == expected
-
-
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_a_set_write_through_a_promoted_field_keeps_the_index_kept_by_hand(is_async, tmp_path):
-    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
-                      AsyncSearchableMixin if is_async else SearchableMixin, "promodocs", ["title"])
-    Doc.__promoted__ = {"title": "TEXT"}
-    path = str(tmp_path / "promo.db")
-
-    async def run():
-        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
-        await _v(db.connect())
-        try:
-            await _seeded(Doc, db, is_async)
-            await _v(Doc.using(db).filter(F("title") == "plum").update(title="red pear"))
-            await _v(Doc.using(db).filter(F("title") == "fig").delete_all())
-            found = await _hits(Doc, db, "pear"), await _hits(Doc, db, "plum")
-        finally:
-            await _v(db.close())
-        raw = sqlite3.connect(path)
-        try:
-            rows = raw.execute("SELECT _id, title FROM promodocs ORDER BY _id").fetchall()
-            entries = raw.execute("SELECT rowid, title FROM promodocs_fts ORDER BY rowid").fetchall()
-        finally:
-            raw.close()
-        return rows, entries, found
-
-    after = [(1, "old apple"), (2, "red pear")]
-    assert asyncio.run(run()) == (after, after, ([2], []))
 
 
 class PolicyPost(SQLerModel):
@@ -2730,7 +2005,7 @@ class AsyncPolicyNote(AsyncSearchableMixin, AsyncSQLerModel):
 
 @pytest.mark.parametrize("policy", ["cascade", "set_null"])
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_rows_a_delete_policy_changes_keep_their_entries_kept_by_hand(is_async, policy, tmp_path):
+def test_rows_a_delete_policy_changes_keep_their_entries(is_async, policy, tmp_path):
     """A cascade removes the referring rows' entries; a nulled reference keeps the entry of
     the row it leaves."""
     Post, Note = (AsyncPolicyPost, AsyncPolicyNote) if is_async else (PolicyPost, PolicyNote)
@@ -2740,7 +2015,7 @@ def test_rows_a_delete_policy_changes_keep_their_entries_kept_by_hand(is_async, 
         db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
         await _v(db.connect())
         try:
-            Note._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Note, ["title"], content_sync=False, db=db)
+            Note._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Note, ["title"], db=db)
             await _v(Note._fts_index.create(db))
             post = await _v(Post(name="p").save(db=db))
             await _v(Note(title="old apple", post=post).save(db=db))
