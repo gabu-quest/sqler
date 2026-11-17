@@ -32,7 +32,6 @@ succeeds :func:`settle` brings the model up to what was written.
 from __future__ import annotations
 
 import asyncio
-import functools
 import random
 import sqlite3
 import time
@@ -40,7 +39,7 @@ from typing import Any, Callable, Generator, Optional
 
 from sqler.exceptions import LockTimeoutError, StaleVersionError
 
-from . import _dirty, _refs
+from . import _dirty, _refs, _write_rules
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     RebaseConfig,
@@ -224,17 +223,10 @@ def _try(cls: Any, inst: Any, db: Any, table: str, partial: bool, payload: dict,
     then the write of ``payload`` at ``version`` (only the fields changed since ``base`` when
     ``partial``)."""
     promoted = getattr(cls, "__promoted__", None)
-    if partial:
-        changed = _dirty.changed_fields(base or {}, payload)
-        write: Step = db._update_fields, (table, inst._id, payload, changed, promoted or (), version)
-    elif promoted:
-        write = db.upsert_with_version_promoted, (table, inst._id, payload, version, list(promoted.keys()))
-    else:
-        return ((db.upsert_with_version, (table, inst._id, payload, version)),)
+    write = _write_rules.versioned_write(db, table, inst._id, payload, base, partial, promoted, version)
     if not promoted:
         return (write,)
-    ensure = functools.partial(db._ensure_promoted, model=cls)
-    return (ensure, (table, promoted, getattr(cls, "__checks__", None))), write
+    return (_write_rules.ensure_columns, (cls, db, table, promoted)), write
 
 
 def _landed(inst: Any, assign: Callable[[Any, str, Any], None], partial: bool, payload: dict, result: Any) -> Any:

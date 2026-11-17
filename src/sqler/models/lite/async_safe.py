@@ -15,7 +15,7 @@ from typing import (
     TypeVar,
 )
 
-from sqler.models import _dirty
+from sqler.models import _dirty, _write_rules
 from sqler.models import save_retry as _retry
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.utils import (
@@ -87,19 +87,12 @@ class AsyncSQLerLiteSafeModel(AsyncSQLerLiteModel):
         """Write new instances in one batch at ``_version=0``; each takes its ``_id``,
         ``_version`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
-
         if promoted:
-            checks = getattr(cls, "__checks__", None)
-            await db._ensure_promoted(table, promoted, checks, model=cls)
+            await _write_rules.ensure_columns(cls, db, table, promoted)
         await db._ensure_versioned_table(table)
-
         payloads = [await inst._adump_with_relations() for inst in instances]
-
-        if promoted:
-            promoted_fields = list(promoted.keys())
-            id_version_pairs = await db.insert_many_with_version_promoted(table, payloads, promoted_fields)
-        else:
-            id_version_pairs = await db.insert_many_with_version(table, payloads)
+        insert, args = _write_rules.rows_insert(db, table, payloads, promoted, versioned=True)
+        id_version_pairs = await insert(*args)
 
         for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             object.__setattr__(inst, "_id", id_)

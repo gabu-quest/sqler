@@ -16,7 +16,7 @@ import msgspec
 import msgspec.structs
 
 from sqler import _stored, registry
-from sqler.models import _dirty, _refs, _table_names
+from sqler.models import _dirty, _refs, _table_names, _write_rules
 from sqler.models._compat import field_types
 from sqler.utils import validate_field_name, validate_table_name
 
@@ -370,8 +370,7 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
         Raises:
             LookupError: The row no longer exists (``doc`` is ``None``).
         """
-        if doc is None:
-            raise LookupError(f"Row {self._id} not found for refresh")
+        doc = _write_rules.refresh_row(doc, self._id)
         own = {(table, self._id): self}
         return _refs.load(type(self), [doc], db, table, self._refreshed, own)
 

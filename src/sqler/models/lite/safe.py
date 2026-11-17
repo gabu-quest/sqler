@@ -16,7 +16,7 @@ from typing import (
     TypeVar,
 )
 
-from sqler.models import _dirty
+from sqler.models import _dirty, _write_rules
 from sqler.models import save_retry as _retry
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.utils import (
@@ -103,19 +103,12 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         """Write new instances in one batch at ``_version=0``; each takes its ``_id``,
         ``_version`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
-
         if promoted:
-            checks = getattr(cls, "__checks__", None)
-            db._ensure_promoted(table, promoted, checks, model=cls)
+            _write_rules.ensure_columns(cls, db, table, promoted)
         db._ensure_versioned_table(table)
-
         payloads = [inst._dump_with_relations() for inst in instances]
-
-        if promoted:
-            promoted_fields = list(promoted.keys())
-            id_version_pairs = db.insert_many_with_version_promoted(table, payloads, promoted_fields)
-        else:
-            id_version_pairs = db.insert_many_with_version(table, payloads)
+        insert, args = _write_rules.rows_insert(db, table, payloads, promoted, versioned=True)
+        id_version_pairs = insert(*args)
 
         for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             object.__setattr__(inst, "_id", id_)
