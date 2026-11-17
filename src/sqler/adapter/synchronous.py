@@ -779,7 +779,13 @@ class SQLiteAdapter(AdapterABC):
             raise
 
     def _open(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, uri=True, check_same_thread=False)
+        # A write outside an explicit transaction opens Python's implicit transaction with
+        # BEGIN IMMEDIATE, not a plain BEGIN: the write lock is taken first, where SQLite waits
+        # for it (busy_timeout). After a plain BEGIN a read by the write itself (FTS5 reads its
+        # config when a schema change makes the statement prepare again) opens a read
+        # transaction, and a read transaction that must become a write one gets "database is
+        # locked" at once, without the wait. Reads and DDL open no implicit transaction.
+        conn = sqlite3.connect(self.path, uri=True, check_same_thread=False, isolation_level="IMMEDIATE")
         conn.row_factory = sqlite3.Row
         try:
             cur = conn.cursor()

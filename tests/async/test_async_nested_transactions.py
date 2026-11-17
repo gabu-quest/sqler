@@ -648,7 +648,7 @@ async def test_a_plain_write_of_a_task_that_outlived_its_transaction_is_committe
     assert await asyncio.wait_for(task, BOUND_S) is False
     await assert_pool_clean(t)
     end = "ROLLBACK" if parent_raises else "COMMIT"
-    assert t.statements() == ["BEGIN IMMEDIATE", "INSERT INTO t (v)", end, "BEGIN", "INSERT INTO t (v)", "COMMIT"]
+    assert t.statements() == ["BEGIN IMMEDIATE", "INSERT INTO t (v)", end, "BEGIN IMMEDIATE", "INSERT INTO t (v)", "COMMIT"]
     assert await t.rows() == (["late"] if parent_raises else ["late", "parent"])
 
 
@@ -734,8 +734,8 @@ async def test_a_sibling_writing_in_the_loop_turn_the_parent_exits_is_never_left
     assert await asyncio.wait_for(task, BOUND_S) is False
     await assert_pool_clean(t)
     assert t.steps_by_connection() == [
-        ["BEGIN", "INSERT sibling", "COMMIT"],
         ["BEGIN IMMEDIATE", "INSERT parent", "COMMIT"],
+        ["BEGIN IMMEDIATE", "INSERT sibling", "COMMIT"],
     ]
     assert await t.rows() == ["parent", "sibling"]
 
@@ -1659,7 +1659,7 @@ async def test_a_plain_waiter_given_its_turn_that_runs_after_the_transaction_end
     await asyncio.wait_for(th, BOUND_S)
     await assert_pool_clean(t)
     assert t.steps_by_connection() == [
-        ["BEGIN", "INSERT x", "COMMIT"],
+        ["BEGIN IMMEDIATE", "INSERT x", "COMMIT"],
         ["BEGIN IMMEDIATE", "SAVEPOINT sp_1", "INSERT h", "RELEASE SAVEPOINT sp_1", "COMMIT"],
     ]
     assert await t.rows() == ["h", "x"]

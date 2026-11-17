@@ -171,7 +171,7 @@ def test_another_threads_plain_insert_waits_and_survives_the_rollback(db):
     thread.join(10)
     assert (raised, _rows(db)) == ([], ["b"])
     # the waiter's insert was sent after the holder's end
-    assert sent == ["BEGIN IMMEDIATE", "INSERT INTO t VALUES ('a')", "ROLLBACK", "BEGIN ", "INSERT INTO t VALUES ('b')", "COMMIT"]
+    assert sent == ["BEGIN IMMEDIATE", "INSERT INTO t VALUES ('a')", "ROLLBACK", "BEGIN IMMEDIATE", "INSERT INTO t VALUES ('b')", "COMMIT"]
 
 
 def test_another_thread_waits_for_a_statement_and_its_commit(db):
@@ -193,7 +193,7 @@ def test_another_thread_waits_for_a_statement_and_its_commit(db):
     thread.join(10)
     assert (raised, _rows(db)) == ([], ["b"])
     # the waiter's insert was sent after the holder's end
-    assert sent == ["BEGIN ", "INSERT INTO t VALUES ('x')", "ROLLBACK", "BEGIN ", "INSERT INTO t VALUES ('b')", "COMMIT"]
+    assert sent == ["BEGIN IMMEDIATE", "INSERT INTO t VALUES ('x')", "ROLLBACK", "BEGIN IMMEDIATE", "INSERT INTO t VALUES ('b')", "COMMIT"]
 
 
 # ---- the wait is bounded ----
