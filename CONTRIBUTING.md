@@ -218,6 +218,59 @@ uv run pytest --cov=sqler --cov-report=html
 uv run pytest -m "not perf"
 ```
 
+### The soak (concurrent writers for minutes or hours)
+
+`tests/soak/` holds a soak that is not part of the default test run. It runs writers at the
+same time for as long as you ask and then checks every row of the database against what the
+writers were told they had written:
+
+```bash
+uv run --frozen python tests/soak/soak.py --minutes 2 --seed 7 --storage file
+```
+
+- Workloads (`--workload NAME` runs one, and may be given more than once): `threads` (8
+  threads on one `SQLerDB`), `tasks` (8 asyncio tasks on one `AsyncSQLerDB`), `procs2` and
+  `procs4` (2 or 4 processes on one file, sync and async database objects mixed). By default
+  every workload the storage allows runs, one after another, sharing `--minutes`.
+- `--storage memory` runs the thread and task workloads on an in-memory database;
+  `--storage file` runs them all on a file in a new folder under `--dir` (default: the
+  system's temp folder). The harness only opens a database it made, and refuses a folder
+  another run is using.
+- `--kill` (process workloads, with `--minutes`) kills a writer process with SIGKILL 20 times
+  in the run and starts another in its place; `kills=` in the summary is the number made, and
+  a run that made none fails. A killed worker's unfinished call must be stored wholly or not
+  at all: every call the soak makes is one unit by the package's documents (one statement, or
+  one transaction: `docs/API.md` on delete policies, promotion, the audit log and
+  `content_sync`), so the checker accepts no third state. `--precreate` makes every table
+  before the writers start. `--ops N` runs N operations a worker instead of minutes; `--only
+  a,b` runs only those operations, to narrow a finding.
+- The operations are the ordinary ones over every model base: saves, partial saves,
+  `save_many()`, deletes under each delete policy, queryset `update()` and `delete()`,
+  references, promoted columns (one promoted while writers run), both search index settings,
+  the audit log, transactions that commit and that roll back, a shared counter incremented
+  with the retry helper, and `copy_to()` into an archive table.
+- Every few seconds (`--checkpoint`) the writers pause and the checker runs; it runs once
+  more at the end. It fails on a missing, changed, deleted or unknown row, a wrong version,
+  a lost counter increment, a missing or extra audit row, a dangling reference, a promoted
+  value in the wrong place, an index over two fields that is not on where the table stores
+  them, a search index that misses a row or finds a deleted one, anything
+  left by a rolled-back write, an archived row in both tables or in neither, and an unclean
+  `PRAGMA integrity_check` or `foreign_key_check`.
+- Exit status 0 with a `SOAK PASS` line; 1 with `SOAK FAIL`, after at most 40 lines of
+  detail (the first 20 violations of each check, then the first 20 errors in full: worker,
+  operation, seed); every error a
+  caller should not see is counted by type in the summary line, also those of a killed
+  process (each worker writes its errors beside its journal before it goes on). 2 for a
+  refused invocation. Ctrl-C stops the writers and still runs the checker.
+
+To re-run a failing seed, run the same command with the same `--seed`, `--workload` and
+`--ops` or `--minutes`: each worker started at the beginning gets the same operations again,
+though the interleaving between workers (and so the row ids) differs from run to run. Two
+things do not repeat: a worker started in place of a killed one has a new name and so other
+operations, and in a timed run without `--precreate` the promotion comes at a time, not at an
+operation number. `tests/test_soak_checker.py`
+(in the default run) proves that the checker sees each kind of damage.
+
 ## Documentation
 
 - Update README.md if you change the public API
