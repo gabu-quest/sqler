@@ -1111,7 +1111,7 @@ def test_a_search_index_finds_rows_whose_field_was_promoted(run):
     After.set_db(run.db)  # the promotion moves the values out of the documents
     assert (found("open"), found("done")) == ([1], [2])
     after = FTSIndex(After, ["status"], db=run.db, index_name="tickets_fts")
-    assert after._make(run.db, write=False) is False  # the triggers are the ones create() writes now
+    assert after._run(after._make_steps(run.db, write=False)) is False  # the triggers are the ones create() writes now
     row = After.from_ids([2], db=run.db)[0]
     row.status = "open"
     row.save()

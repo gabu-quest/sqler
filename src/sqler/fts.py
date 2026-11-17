@@ -35,8 +35,18 @@ On an ``AsyncSQLerDB`` the same calls are awaited, on ``AsyncFTSIndex`` and
 import re
 import sqlite3
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Optional, Tuple, Type, Union
 
+from sqler._fts_sql import (
+    _HAS_INDEX_TABLE_SQL,
+    _HAS_TABLE_SQL,
+    _SYNC_TRIGGERS,
+    _drop_trigger_sql,
+    _fill_sql,
+    _plain_query,
+    _stored_definition,
+    _trigger_sql,
+)
 from sqler.db._guard import _check_sql, _guard
 from sqler.db.async_db import AsyncSQLerDB, _afetch_all
 from sqler.db.sqler_db import SQLerDB
@@ -49,7 +59,8 @@ if TYPE_CHECKING:
     from sqler.models import SQLerModel
     from sqler.models._host import ModelHost
 
-    # SearchableMixin reads the fields and the save, delete and from_ids of a pydantic model;
+    # SearchableMixin runs on every sync model base (its fields are read with ``field_types``); the
+    # type checker is told it is ``SQLerModel``, which has the save, delete and from_ids it calls.
     # AsyncSearchableMixin awaits what its model's save and delete return
     _SearchHost = SQLerModel
     _AsyncSearchHost = ModelHost
@@ -74,137 +85,6 @@ def _check_tokenizer(tokenizer: object) -> str:
 
 # What SQLite says of a MATCH string it cannot read as an FTS5 query.
 _REFUSED_QUERY = ("fts5: ", "unterminated string", "no such column: ", "unknown special query: ")
-
-# The triggers that keep a content_sync index equal to its table: name suffix -> event.
-_SYNC_TRIGGERS = {"ai": "INSERT", "au": "UPDATE", "ad": "DELETE"}
-
-# The arguments of a stored ``fts5(...)``: runs of anything but a comma, a quoted run whole.
-_FTS5_ARG = re.compile(r"""(?:'[^']*'|"[^"]*"|`[^`]*`|\[[^\]]*\]|[^,'"`\[])+""")
-_FTS5_BODY = re.compile(r"(?is)\s*CREATE\s+VIRTUAL\s+TABLE\s+\S+\s+USING\s+fts5\s*\((.*)\)\s*;?\s*")
-
-
-def _unquote(word: str) -> str:
-    """An FTS5 argument word without its quotes (a doubled quote inside is one)."""
-    if len(word) >= 2 and word[0] + word[-1] in ("''", '""', "``", "[]"):
-        return word[1:-1].replace(word[0] * 2, word[0]) if word[0] != "[" else word[1:-1]
-    return word
-
-
-def _stored_definition(sql: Optional[str]) -> Optional[tuple[list[str], str, list[str]]]:
-    """What a stored ``CREATE VIRTUAL TABLE ... USING fts5(...)`` defines: its columns, its
-    tokenizer with single spaces (``unicode61``, FTS5's default, when it names none) and
-    any other argument as written. ``None`` when the statement is not an FTS5 table.
-
-    This compares what the index is, not how its statement is spelled: the released
-    version's statement, with its line breaks, defines the same index as today's.
-    """
-    found = _FTS5_BODY.fullmatch(sql or "")
-    if found is None:
-        return None
-    columns, tokenizer, other = [], "unicode61", []
-    for arg in (a.strip() for a in _FTS5_ARG.findall(found.group(1))):
-        key, eq, value = arg.partition("=")
-        if eq and key.strip().lower() == "tokenize":
-            tokenizer = " ".join(_unquote(value.strip()).split())
-        elif eq or len(arg.split()) != 1:
-            other.append(arg)  # content=, prefix=, a column with UNINDEXED: not sqler's index
-        else:
-            columns.append(_unquote(arg))
-    return columns, tokenizer, other
-
-
-# ---- the statements of a content_sync index, from its names and its table's promoted columns ----
-
-
-def _values_sql(fields: list[str], promoted: Any, row: str) -> list[str]:
-    """Each field of the stored row ``row`` where it is stored: a promoted column by its
-    name, any other field from ``data`` with ``json_extract``."""
-    return [f"{row}.{f}" if f in promoted else f"json_extract({row}.data, '$.{f}')" for f in fields]
-
-
-def _fill_sql(idx: str, fields: list[str], promoted: Any, row: str) -> str:
-    """The ``INSERT`` of the index row of the stored row ``row`` (``new`` in a trigger, an
-    alias of the table in a select). The triggers, ``rebuild()``, ``create()``, ``index()``
-    and a promotion all use it, so they give the same text for a row."""
-    return f"INSERT INTO {idx}(rowid, {', '.join(fields)}) SELECT {row}._id, {', '.join(_values_sql(fields, promoted, row))}"
-
-
-def _trigger_sql(idx: str, table: str, fields: list[str], promoted: Any) -> dict[str, str]:
-    """The statement of each trigger of a content_sync index, as SQLite stores it.
-
-    Every name in it is checked by the caller: the fields, the index name and the table. The
-    update trigger fires only when the row id or the stored value of an indexed field changed,
-    compared so that ``1`` and ``1.0`` differ as they do in the index: the fields read from
-    ``data`` as one ``json_array()``, a promoted column with ``quote()`` (a column may hold a
-    blob, which JSON cannot).
-    """
-    in_data = [f for f in fields if f not in promoted]
-    changed = ["old._id IS NOT new._id"]
-    if in_data:
-        old, new = (
-            "json_array(" + ", ".join(f"json_extract({row}.data, '$.{f}')" for f in in_data) + ")"
-            for row in ("old", "new")
-        )
-        changed.append(f"{old} IS NOT {new}")
-    changed += [f"quote(old.{f}) IS NOT quote(new.{f})" for f in fields if f in promoted]
-    forget = f"DELETE FROM {idx} WHERE rowid = old._id;"
-    fill = f"{_fill_sql(idx, fields, promoted, 'new')};"
-    body = {
-        "INSERT": f"BEGIN DELETE FROM {idx} WHERE rowid = new._id; {fill} END",
-        "UPDATE": f"WHEN {' OR '.join(changed)} BEGIN {forget} {fill} END",
-        "DELETE": f"BEGIN {forget} END",
-    }
-    return {
-        f"{idx}_{suffix}": f"CREATE TRIGGER {idx}_{suffix} AFTER {event} ON {table} {body[event]}"
-        for suffix, event in _SYNC_TRIGGERS.items()
-    }
-
-
-def _follow_promotion(table: str, moved: list[str], promoted: list[str]) -> Any:
-    """After the values of ``moved`` left the documents of ``table`` for their columns: each
-    content_sync index on ``table`` with a field among them gets the triggers that read those
-    fields from their columns, and is filled again from the table. ``promoted``: every promoted
-    column of the table now.
-
-    A run of statements the database classes send (see ``sqler.db._promotion._promotion``), in
-    the transaction of the promotion: an index made before it would index NULL for a moved field.
-    """
-    rows = yield (
-        "SELECT type, name, sql FROM sqlite_master WHERE type = 'table' OR (type = 'trigger' AND tbl_name = ?);",
-        [table],
-    )
-    triggers = {name.lower() for kind, name, _ in rows if kind == "trigger"}
-    moving = {c.lower() for c in moved}
-    for kind, idx, sql in rows:
-        found = _stored_definition(sql) if kind == "table" else None
-        if found is None or found[2] or not {f"{idx}_{s}".lower() for s in _SYNC_TRIGGERS} <= triggers:
-            continue
-        fields = found[0]
-        if not moving & {f.lower() for f in fields}:
-            continue
-        try:
-            for name in (idx, *fields):
-                validate_identifier(name)
-        except SchemaError:
-            continue  # not an index sqler made: sqler names nothing it cannot check
-        for name, statement in _trigger_sql(idx, table, fields, promoted).items():
-            yield f"DROP TRIGGER IF EXISTS {name};", []
-            yield statement, []
-        yield f"DELETE FROM {idx};", []
-        yield f"{_fill_sql(idx, fields, promoted, 't')} FROM {table} AS t;", []
-
-
-def _plain_query(text: str) -> str:
-    """The FTS5 query that finds every word of ``text``.
-
-    Each run of characters between spaces becomes one FTS5 string, with ``"`` doubled
-    inside it (a NUL counts as a space: SQLite ends the query text there). FTS5 hands a
-    string to the tokenizer as text and reads no syntax in it, so no character of
-    ``text`` is an operator; strings side by side must all match. Text with no run gives
-    ``""``, which matches nothing.
-    """
-    runs = text.replace("\x00", " ").split()
-    return " ".join('"' + run.replace('"', '""') + '"' for run in runs) or '""'
 
 
 @dataclass
@@ -243,20 +123,10 @@ def _check_search_field(name: str) -> None:
     validate_identifier(name)
 
 
-
 # ---- what the sync and the async index share: the statements, the checks, the results ----
 #
 # ``FTSIndex`` and ``AsyncFTSIndex`` each hold only their order of database calls; every
 # statement they send and every rule without I/O is here, written once.
-
-# Whether the model's table exists (``rebuild()``), and whether a database has a table of
-# this index's name (the mixin's ``content_sync=False`` step in another database).
-_HAS_TABLE_SQL = "SELECT name FROM sqlite_master WHERE type='table' AND name=?;"
-_HAS_INDEX_TABLE_SQL = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?);"
-
-
-def _drop_trigger_sql(name: str) -> str:
-    return f"DROP TRIGGER IF EXISTS {name};"
 
 
 def _check_step(table: str, layout: Optional[tuple[str, ...]]) -> Optional[tuple[str, list[Any], Any]]:
@@ -265,12 +135,12 @@ def _check_step(table: str, layout: Optional[tuple[str, ...]]) -> Optional[tuple
     return (_check_sql(table, layout), [], layout) if layout else None
 
 
-def _search_error(query: str, exc: sqlite3.OperationalError, sql: str, params: list) -> Optional[SearchQueryError]:
-    """The ``SearchQueryError`` of a ``MATCH`` statement SQLite refused for its query; ``None``
-    when ``exc`` is about something else, which is raised as it is."""
+def _raise_search_error(query: str, exc: sqlite3.OperationalError, sql: str, params: list) -> NoReturn:
+    """Raise, for the ``MATCH`` statement ``exc`` came from, the ``SearchQueryError`` of a query
+    SQLite refused; ``exc`` is raised as it is when it is about something else."""
     if not str(exc).startswith(_REFUSED_QUERY):
-        return None
-    return SearchQueryError(f"search query {query!r} refused by SQLite: {exc}", sql=sql, params=params)
+        raise exc
+    raise SearchQueryError(f"search query {query!r} refused by SQLite: {exc}", sql=sql, params=params) from exc
 
 
 def _is_text(annotation: Any) -> bool:
@@ -484,6 +354,69 @@ class _SearchIndex:
                 f"To change it, call drop() then create()."
             )
 
+    # ---- the runs both classes send: what is read, what is decided, what is done ----
+    #
+    # Each ``*_steps`` method yields ``(call, *args)``, the call it needs next, and gets back what
+    # the call returns. The class names every call a method of its own (``_read``, ``_send``,
+    # ``_columns``, ``_ensure``, ``_trigger_sql``, ``_fill``, ``_refill``, ``_delete_entry``,
+    # ``_has_index_table``), and its ``_run`` makes them, awaited or not.
+
+    def _make_steps(self, db: Any, *, write: bool) -> Any:
+        """What ``create()`` finds and what it does: whether anything differs from the
+        definition, and with ``write`` the statements that make it so (the caller holds the
+        transaction). A definition the index table does not have raises SchemaError, before
+        any statement.
+        """
+        stored = self._found((yield ("_read", db, *self._lookup())))
+        changed = self.index_table.lower() not in stored
+        if changed and write:
+            yield ("_send", db, self._create_sql())
+
+        if not self.content_sync:
+            stale = self._stale_triggers(stored)
+            if write:
+                for name in stale:
+                    yield ("_send", db, _drop_trigger_sql(name))
+            return changed or bool(stale)
+
+        table, promoted = self.table, self._promoted()
+        if table.lower() not in stored or (promoted and _lacks_columns(promoted, (yield ("_columns", db, table)))):
+            # a trigger needs its table, and reads a promoted field from its column
+            if not write:
+                return True
+            yield ("_ensure", db, table, self._table_args(promoted))
+        differing = self._differing(stored, (yield ("_trigger_sql", db)))
+        if write:
+            for name, sql in differing:
+                yield ("_send", db, _drop_trigger_sql(name))
+                yield ("_send", db, sql)
+        changed = changed or bool(differing)
+        if changed and write:
+            yield ("_fill", db)
+        return changed
+
+    def _remove_steps(self, model_or_id: Any) -> Any:
+        """``remove()``: with ``content_sync`` the triggers own the index, so the entry goes
+        only when its row is gone from the table; without it the entry is deleted."""
+        _id = model_or_id._id if hasattr(model_or_id, "_id") else model_or_id
+        if self.content_sync:
+            yield ("_refill", _id)
+            return
+        yield ("_delete_entry", self._get_db(), _id)
+
+    def _follow_steps(self, db: Any, table: str, _id: int | None, *, deleted: bool) -> Any:
+        """Keep the entry of ``_id`` after its row was written to, or deleted from, ``table``
+        of ``db``, in that database (so in the caller's transaction on it). A row of another
+        table, or a database that has no table of this index, has no entry to keep."""
+        if table != self.table:
+            return
+        if db is not self._get_db() and not (yield ("_has_index_table", db)):
+            return
+        if deleted:
+            yield ("_delete_entry", db, _id)
+        else:
+            yield ("_refill", _id, db)
+
     # ---- the writes of the index ----
 
     def _drop_sqls(self) -> list[str]:
@@ -670,43 +603,35 @@ class FTSIndex(_SearchIndex):
             self._db = db
         db = self._get_db()
 
-        if self._make(db, write=False):
+        if self._run(self._make_steps(db, write=False)):
             with db.transaction():
-                self._make(db, write=True)
+                self._run(self._make_steps(db, write=True))
 
-    def _make(self, db: "SQLerDB", *, write: bool) -> bool:
-        """What ``create()`` finds and what it does: whether anything differs from the
-        definition, and with ``write`` the statements that make it so (the caller holds
-        the transaction). A definition the index table does not have raises SchemaError,
-        before any statement.
-        """
-        stored = self._found(db.adapter.execute(*self._lookup()).fetchall())
-        changed = self.index_table.lower() not in stored
-        if changed and write:
-            db.adapter.execute(self._create_sql())
+    def _run(self, steps: Any) -> Any:
+        """Make each call ``steps`` yields (see ``_SearchIndex._make_steps``), answer it with
+        what it returns, and return what ``steps`` returns."""
+        try:
+            call = next(steps)
+            while True:
+                name, *args = call
+                call = steps.send(getattr(self, name)(*args))
+        except StopIteration as done:
+            return done.value
 
-        if not self.content_sync:
-            stale = self._stale_triggers(stored)
-            if write:
-                for name in stale:
-                    db.adapter.execute(_drop_trigger_sql(name))
-            return changed or bool(stale)
+    def _read(self, db: "SQLerDB", sql: str, params: list[Any]) -> list:
+        return db.adapter.execute(sql, params).fetchall()
 
-        table, promoted = self.table, self._promoted()
-        if table.lower() not in stored or (promoted and _lacks_columns(promoted, db._columns_of(table))):
-            # a trigger needs its table, and reads a promoted field from its column
-            if not write:
-                return True
-            db.ensure_table(table, **self._table_args(promoted))
-        differing = self._differing(stored, self._trigger_sql(db))
-        if write:
-            for name, sql in differing:
-                db.adapter.execute(_drop_trigger_sql(name))
-                db.adapter.execute(sql)
-        changed = changed or bool(differing)
-        if changed and write:
-            self._fill(db)
-        return changed
+    def _send(self, db: "SQLerDB", sql: str) -> None:
+        db.adapter.execute(sql)
+
+    def _columns(self, db: "SQLerDB", table: str) -> Any:
+        return db._columns_of(table)
+
+    def _ensure(self, db: "SQLerDB", table: str, args: dict[str, Any]) -> None:
+        db.ensure_table(table, **args)
+
+    def _has_index_table(self, db: "SQLerDB") -> bool:
+        return db.adapter.execute(_HAS_INDEX_TABLE_SQL, [self.index_table]).fetchone() is not None
 
     def _trigger_sql(self, db: "SQLerDB") -> dict[str, str]:
         """The statement of each trigger of this content_sync index (see :func:`_trigger_sql`),
@@ -789,12 +714,7 @@ class FTSIndex(_SearchIndex):
         Args:
             model_or_id: Model instance or _id to remove
         """
-        _id = model_or_id._id if hasattr(model_or_id, "_id") else model_or_id
-        if self.content_sync:
-            self._refill(_id)
-            return
-
-        self._delete_entry(self._get_db(), _id)
+        self._run(self._remove_steps(model_or_id))
 
     def _delete_entry(self, db: "SQLerDB", _id: int | None) -> None:
         db.adapter.execute(self._forget_sql(), [_id])
@@ -804,16 +724,7 @@ class FTSIndex(_SearchIndex):
         """Keep the entry of ``_id`` after its row was written to, or deleted from, ``table``
         of ``db``, in that database (so in the caller's transaction on it). A row of another
         table, or a database that has no table of this index, has no entry to keep."""
-        if table != self.table:
-            return
-        if db is not self._get_db() and db.adapter.execute(
-            _HAS_INDEX_TABLE_SQL, [self.index_table]
-        ).fetchone() is None:
-            return
-        if deleted:
-            self._delete_entry(db, _id)
-        else:
-            self._refill(_id, db)
+        self._run(self._follow_steps(db, table, _id, deleted=deleted))
 
     def search(
         self,
@@ -975,10 +886,7 @@ class FTSIndex(_SearchIndex):
         try:
             return self._get_db().adapter.execute(sql, params).fetchall()
         except sqlite3.OperationalError as exc:
-            refused = _search_error(query, exc, sql, params)
-            if refused is None:
-                raise
-            raise refused from exc
+            _raise_search_error(query, exc, sql, params)
 
     def stats(self) -> FTSStats:
         """Get index statistics."""
@@ -1042,41 +950,39 @@ class AsyncFTSIndex(_SearchIndex):
             self._db = db
         db = self._get_db()
 
-        if await self._make(db, write=False):
+        if await self._run(self._make_steps(db, write=False)):
             async with db.transaction():
-                await self._make(db, write=True)
+                await self._run(self._make_steps(db, write=True))
         else:
             await db.adapter.auto_commit()  # what it read holds no connection
 
-    async def _make(self, db: AsyncSQLerDB, *, write: bool) -> bool:
-        """Async twin of :meth:`FTSIndex._make`."""
-        adapter = db.adapter
-        stored = self._found(await _afetch_all(adapter, *self._lookup()))
-        changed = self.index_table.lower() not in stored
-        if changed and write:
-            await _sent_now(adapter, self._create_sql())
+    async def _run(self, steps: Any) -> Any:
+        """Async twin of :meth:`FTSIndex._run`."""
+        try:
+            call = next(steps)
+            while True:
+                name, *args = call
+                call = steps.send(await getattr(self, name)(*args))
+        except StopIteration as done:
+            return done.value
 
-        if not self.content_sync:
-            stale = self._stale_triggers(stored)
-            if write:
-                for name in stale:
-                    await _sent_now(adapter, _drop_trigger_sql(name))
-            return changed or bool(stale)
+    async def _read(self, db: AsyncSQLerDB, sql: str, params: list[Any]) -> list:
+        return await _afetch_all(db.adapter, sql, params)
 
-        table, promoted = self.table, self._promoted()
-        if table.lower() not in stored or (promoted and _lacks_columns(promoted, await db._columns_of(table))):
-            if not write:
-                return True
-            await db.ensure_table(table, **self._table_args(promoted))
-        differing = self._differing(stored, await self._trigger_sql(db))
-        if write:
-            for name, sql in differing:
-                await _sent_now(adapter, _drop_trigger_sql(name))
-                await _sent_now(adapter, sql)
-        changed = changed or bool(differing)
-        if changed and write:
-            await self._fill(db)
-        return changed
+    async def _send(self, db: AsyncSQLerDB, sql: str) -> None:
+        await _sent_now(db.adapter, sql)
+
+    async def _columns(self, db: AsyncSQLerDB, table: str) -> Any:
+        return await db._columns_of(table)
+
+    async def _ensure(self, db: AsyncSQLerDB, table: str, args: dict[str, Any]) -> None:
+        await db.ensure_table(table, **args)
+
+    async def _has_index_table(self, db: AsyncSQLerDB) -> bool:
+        if await _afetch_all(db.adapter, _HAS_INDEX_TABLE_SQL, [self.index_table]):
+            return True
+        await db.adapter.auto_commit()
+        return False
 
     async def _trigger_sql(self, db: AsyncSQLerDB) -> dict[str, str]:
         """Async twin of :meth:`FTSIndex._trigger_sql`."""
@@ -1145,12 +1051,7 @@ class AsyncFTSIndex(_SearchIndex):
 
     async def remove(self, model_or_id: Any) -> None:
         """Async twin of :meth:`FTSIndex.remove`."""
-        _id = model_or_id._id if hasattr(model_or_id, "_id") else model_or_id
-        if self.content_sync:
-            await self._refill(_id)
-            return
-
-        await self._delete_entry(self._get_db(), _id)
+        await self._run(self._remove_steps(model_or_id))
 
     async def _delete_entry(self, db: AsyncSQLerDB, _id: int | None) -> None:
         await _sent_now(db.adapter, self._forget_sql(), [_id])
@@ -1158,17 +1059,7 @@ class AsyncFTSIndex(_SearchIndex):
 
     async def _follow(self, db: AsyncSQLerDB, table: str, _id: int | None, *, deleted: bool) -> None:
         """Async twin of :meth:`FTSIndex._follow`."""
-        if table != self.table:
-            return
-        if db is not self._get_db() and not await _afetch_all(
-            db.adapter, _HAS_INDEX_TABLE_SQL, [self.index_table]
-        ):
-            await db.adapter.auto_commit()
-            return
-        if deleted:
-            await self._delete_entry(db, _id)
-        else:
-            await self._refill(_id, db)
+        await self._run(self._follow_steps(db, table, _id, deleted=deleted))
 
     async def search(
         self,
@@ -1247,10 +1138,7 @@ class AsyncFTSIndex(_SearchIndex):
         try:
             rows = await _afetch_all(adapter, sql, params)
         except sqlite3.OperationalError as exc:
-            refused = _search_error(query, exc, sql, params)
-            if refused is None:
-                raise
-            raise refused from exc
+            _raise_search_error(query, exc, sql, params)
         await adapter.auto_commit()
         return rows
 
@@ -1309,6 +1197,16 @@ def _index_on(cls: Any, kind: type, db: Any) -> Any:
     )
 
 
+def _manual_index(instance: Any, db: Any) -> Optional[tuple[Any, Any, str, int]]:
+    """Before ``instance`` is deleted: its class's index, the database and table the row is in,
+    and its id, when the index is one the mixin must keep by hand (no ``content_sync``) and the
+    row was saved; otherwise ``None``. Read before the delete, which may clear the id."""
+    index, _id = instance._fts_index, instance._id
+    if index is None or _id is None or index.content_sync:
+        return None
+    return (index, *_instance_binding(instance, db), _id)
+
+
 class SearchableMixin(_SearchHost):
     """Mixin to add search capabilities to a sync model, on every sync base (an async model
     takes :class:`AsyncSearchableMixin`).
@@ -1344,11 +1242,6 @@ class SearchableMixin(_SearchHost):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         _refuse_kind(cls, "SearchableMixin", "AsyncSearchableMixin", takes_async=False)
-
-    @classmethod
-    def _get_fts_config(cls) -> Tuple[list[str], str]:
-        """Get FTS configuration from class."""
-        return _fts_config(cls)
 
     @classmethod
     def create_search_index(cls, db: Optional["SQLerDB"] = None) -> FTSIndex:
@@ -1443,14 +1336,11 @@ class SearchableMixin(_SearchHost):
 
     def delete(self, *args, **kwargs):
         """Delete and remove from search index (with ``content_sync`` its triggers do)."""
-        _id = self._id
-        index = self._fts_index
-        manual = index if index is not None and _id is not None and not index.content_sync else None
-        if manual is not None:
-            db, table = _instance_binding(self, kwargs.get("db"))
+        manual = _manual_index(self, kwargs.get("db"))
         result = super().delete(*args, **kwargs)
         if manual is not None:
-            manual._follow(db, table, _id, deleted=True)
+            index, db, table, _id = manual
+            index._follow(db, table, _id, deleted=True)
         return result
 
 
@@ -1474,11 +1364,6 @@ class AsyncSearchableMixin(_AsyncSearchHost):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         _refuse_kind(cls, "AsyncSearchableMixin", "SearchableMixin", takes_async=True)
-
-    @classmethod
-    def _get_fts_config(cls) -> Tuple[list[str], str]:
-        """Get FTS configuration from class."""
-        return _fts_config(cls)
 
     @classmethod
     async def create_search_index(cls, db: Optional[AsyncSQLerDB] = None) -> AsyncFTSIndex:
@@ -1559,12 +1444,9 @@ class AsyncSearchableMixin(_AsyncSearchHost):
     async def delete(self, *args, **kwargs):
         """Delete and remove from search index (with ``content_sync`` its triggers do), once
         the delete has run."""
-        _id = self._id
-        index = self._fts_index
-        manual = index if index is not None and _id is not None and not index.content_sync else None
-        if manual is not None:
-            db, table = _instance_binding(self, kwargs.get("db"))
+        manual = _manual_index(self, kwargs.get("db"))
         result = await super().delete(*args, **kwargs)
         if manual is not None:
-            await manual._follow(db, table, _id, deleted=True)
+            index, db, table, _id = manual
+            await index._follow(db, table, _id, deleted=True)
         return result

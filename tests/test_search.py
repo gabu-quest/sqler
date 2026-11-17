@@ -364,8 +364,15 @@ PLAIN = {
 }
 
 
-@pytest.mark.parametrize("method", SEARCH_METHODS)
-@pytest.mark.parametrize("text", REFUSED)
+def _cases(texts, kept):
+    """Every method reaches SQLite through the same ``_match_params``, ``_search_rows`` and
+    ``_plain_query``, so ``search`` runs every text, which is the promise about the query
+    rules, and each other method runs the one text (``kept``) that fails first if the method
+    drops or changes the text it is given, which is the promise that it passes the text on."""
+    return [(method, text) for method in SEARCH_METHODS for text in texts if method == "search" or text == kept]
+
+
+@pytest.mark.parametrize("method, text", _cases(REFUSED, kept="C++"))
 def test_a_query_sqlite_refuses_raises_a_search_query_error_that_names_it(articles, posts, method, text):
     with pytest.raises(SearchQueryError) as caught:
         _found(articles, posts, method, text, plain=False)
@@ -376,14 +383,12 @@ def test_a_query_sqlite_refuses_raises_a_search_query_error_that_names_it(articl
     assert str(err.__cause__) in str(err)
 
 
-@pytest.mark.parametrize("method", SEARCH_METHODS)
-@pytest.mark.parametrize("text", list(QUERIES))
+@pytest.mark.parametrize("method, text", _cases(list(QUERIES), kept="python OR pointers"))
 def test_a_query_sqlite_reads_finds_what_it_found_before(articles, posts, method, text):
     assert _found(articles, posts, method, text, plain=False) == _expected(method, QUERIES[text])
 
 
-@pytest.mark.parametrize("method", SEARCH_METHODS)
-@pytest.mark.parametrize("text", list(PLAIN))
+@pytest.mark.parametrize("method, text", _cases(list(PLAIN), kept="C++"))
 def test_plain_text_finds_the_rows_with_every_word(articles, posts, method, text):
     assert _found(articles, posts, method, text, plain=True) == _expected(method, PLAIN[text])
 
@@ -1746,7 +1751,7 @@ async def _mixin_default_fields(t):
     Plain = t.model("plaindocs", fts=None)
     index = await _v(Plain.create_search_index(t.db))
     await t.save(Plain, title="red apple", body="memo")
-    return [Plain._get_fts_config(), index.fields, await t.titles(Plain.search("memo", db=t.db))]
+    return [(index.fields, index.tokenizer), index.fields, await t.titles(Plain.search("memo", db=t.db))]
 
 
 async def _mixin_rebuild(t):
