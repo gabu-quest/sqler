@@ -15,6 +15,9 @@ a rule derives from :class:`WriteRules` and adds its part cooperatively:
   ``(action, _id, before, after)``: ``action`` is ``"create"``, ``"update"`` or
   ``"delete"``, ``before`` is the stored document before (``None`` for a create) and
   ``after`` the one written (``None`` for a delete).
+* ``_row_kept()`` / ``_arow_kept()``, for a class whose ``_keeps_row()`` is true (the search
+  mixin with an index kept by hand): told, inside the write's transaction, of the one row a
+  ``save()`` wrote or a ``delete()`` deleted, by id; it needs no document before or after.
 
 The set-based ways (a queryset's ``update()``, ``update_one()``, ``update_n()`` and
 ``delete_all()``) and the rows a delete's policy nulls or deletes come here too: they stamp and
@@ -64,6 +67,21 @@ class WriteRules:
     async def _arows_written(cls, db, table: str, rows: list[Row]) -> None:
         """Async twin of ``_rows_written``."""
 
+    @classmethod
+    def _keeps_row(cls) -> bool:
+        """Whether ``save()`` and ``delete()`` of an instance tell ``_row_kept``, which makes
+        the write and what it writes one unit."""
+        return False
+
+    @classmethod
+    def _row_kept(cls, db, table: str, _id: Any, deleted: bool) -> None:
+        """Called inside the write's transaction with the row ``_id`` of ``table`` that a
+        ``save()`` wrote (``deleted`` false) or a ``delete()`` deleted."""
+
+    @classmethod
+    async def _arow_kept(cls, db, table: str, _id: Any, deleted: bool) -> None:
+        """Async twin of ``_row_kept``."""
+
 
 # ----- the checks every way in makes before anything runs ------------------------------
 
@@ -98,16 +116,12 @@ def known_policy(on_delete: str) -> None:
 # put back to match.
 
 
-_NO_VALUE = object()
-
-
 def _remember_identity(obj) -> dict:
     """What a failed write must put back: ``_id``, ``_snapshot``, the home and, where the
     model has one, ``_version``."""
     kept = {"_id": obj._id, "_snapshot": obj._snapshot}
-    version = getattr(obj, "_version", _NO_VALUE)
-    if version is not _NO_VALUE:
-        kept["_version"] = version
+    if type(obj)._versioned_rows:  # every base says whether its instances have ``_version``
+        kept["_version"] = obj._version
     kept["_home"] = _home_of(obj)
     return kept
 
@@ -145,12 +159,13 @@ async def _awritten(db, table: str, inst, partial: bool) -> dict:
 
 
 def save(inst, db, table: str, partial: bool, write: Callable[[], Any]):
-    """``save()``: stamp, then ``write()`` the row; with row rules, in one transaction with
-    them, and a failure puts the instance's identity back."""
+    """``save()``: stamp, then ``write()`` the row; with row rules or a row kept
+    (``_keeps_row``), in one transaction with them, and a failure puts the instance's identity
+    back."""
     rules = isinstance(inst, WriteRules)
     if rules:
         inst._stamp()
-    if not (rules and inst._row_rules):
+    if not (rules and (inst._row_rules or inst._keeps_row())):
         try:
             result = write()
         finally:
@@ -158,17 +173,21 @@ def save(inst, db, table: str, partial: bool, write: Callable[[], Any]):
                 inst._table_written(db, table)
         _written_to([inst], db, table)
         return result
+    told = inst._row_rules
     kept = _remember_identity(inst)
     try:
         with db.transaction():
-            row_id = inst._id
-            before = None if row_id is None else db.find_document(table, row_id)
+            row_id = kept["_id"]
+            before = None if row_id is None or not told else db.find_document(table, row_id)
             result = write()
             inst._table_written(db, table)
             _written_to([inst], db, table)
-            action = "create" if row_id is None else "update"
-            after = _written(db, table, inst, partial)
-            inst._rows_written(db, table, [(action, inst._id, before, after)])
+            written_id = inst._id
+            if told:
+                action = "create" if row_id is None else "update"
+                after = _written(db, table, inst, partial)
+                inst._rows_written(db, table, [(action, written_id, before, after)])
+            inst._row_kept(db, table, written_id, False)
             return result
     except BaseException:
         _restore_identity(inst, kept)
@@ -180,7 +199,7 @@ async def asave(inst, db, table: str, partial: bool, write):
     rules = isinstance(inst, WriteRules)
     if rules:
         inst._stamp()
-    if not (rules and inst._row_rules):
+    if not (rules and (inst._row_rules or inst._keeps_row())):
         try:
             result = await write()
         finally:
@@ -188,17 +207,21 @@ async def asave(inst, db, table: str, partial: bool, write):
                 inst._table_written(db, table)
         _written_to([inst], db, table)
         return result
+    told = inst._row_rules
     kept = _remember_identity(inst)
     try:
         async with db.transaction():
-            row_id = inst._id
-            before = None if row_id is None else await db.find_document(table, row_id)
+            row_id = kept["_id"]
+            before = None if row_id is None or not told else await db.find_document(table, row_id)
             result = await write()
             inst._table_written(db, table)
             _written_to([inst], db, table)
-            action = "create" if row_id is None else "update"
-            after = await _awritten(db, table, inst, partial)
-            await inst._arows_written(db, table, [(action, inst._id, before, after)])
+            written_id = inst._id
+            if told:
+                action = "create" if row_id is None else "update"
+                after = await _awritten(db, table, inst, partial)
+                await inst._arows_written(db, table, [(action, written_id, before, after)])
+            await inst._arow_kept(db, table, written_id, False)
             return result
     except BaseException:
         _restore_identity(inst, kept)
@@ -354,7 +377,7 @@ def refresh_row(doc: Optional[dict], _id: Any) -> dict:
 
 def delete(inst, db, table: str, on_delete: str) -> None:
     """``delete_with_policy()``: delete the row and do what the policy does about the rows
-    that refer to it (:func:`deleted`), with the class's row rules, as one unit
+    that refer to it (:func:`deleted`), with the class's row rules and its row kept, as one unit
     (``db.transaction()``); a failure leaves every row as it was. Then the instance is
     unsaved (see :func:`_deleted`)."""
     deletable(inst, on_delete)
@@ -369,6 +392,8 @@ def delete(inst, db, table: str, on_delete: str) -> None:
         deleted(db, table, [row_id], on_delete)
         if before is not None:
             inst._rows_written(db, table, [("delete", row_id, before, None)])
+        if told:
+            inst._row_kept(db, table, row_id, True)
     _deleted(inst)
 
 
@@ -386,6 +411,8 @@ async def adelete(inst, db, table: str, on_delete: str) -> None:
         await adeleted(db, table, [row_id], on_delete)
         if before is not None:
             await inst._arows_written(db, table, [("delete", row_id, before, None)])
+        if told:
+            await inst._arow_kept(db, table, row_id, True)
     _deleted(inst)
 
 

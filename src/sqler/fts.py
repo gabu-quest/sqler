@@ -52,7 +52,7 @@ from sqler.db.async_db import AsyncSQLerDB, _afetch_all
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import SchemaError, SearchQueryError
 from sqler.models._compat import field_types
-from sqler.models._table_names import _instance_binding
+from sqler.models._write_rules import WriteRules
 from sqler.utils import validate_field_name, validate_identifier
 
 if TYPE_CHECKING:
@@ -1197,17 +1197,7 @@ def _index_on(cls: Any, kind: type, db: Any) -> Any:
     )
 
 
-def _manual_index(instance: Any, db: Any) -> Optional[tuple[Any, Any, str, int]]:
-    """Before ``instance`` is deleted: its class's index, the database and table the row is in,
-    and its id, when the index is one the mixin must keep by hand (no ``content_sync``) and the
-    row was saved; otherwise ``None``. Read before the delete, which may clear the id."""
-    index, _id = instance._fts_index, instance._id
-    if index is None or _id is None or index.content_sync:
-        return None
-    return (index, *_instance_binding(instance, db), _id)
-
-
-class SearchableMixin(_SearchHost):
+class SearchableMixin(WriteRules, _SearchHost):
     """Mixin to add search capabilities to a sync model, on every sync base (an async model
     takes :class:`AsyncSearchableMixin`).
 
@@ -1325,26 +1315,22 @@ class SearchableMixin(_SearchHost):
         given, else in the class's database."""
         return cls._search_index(db).count(query, plain=plain)
 
-    def save(self, *args, **kwargs):
-        """Save and update search index (with ``content_sync`` its triggers do)."""
-        result = super().save(*args, **kwargs)
-        index = self._fts_index
+    # ``save()`` and ``delete()`` keep an index kept by hand (no ``content_sync``; with it the
+    # triggers do) in the write's own unit: the row and its entry commit together or not at all.
+
+    @classmethod
+    def _keeps_row(cls) -> bool:
+        index = cls._fts_index
+        return index is not None and not index.content_sync
+
+    @classmethod
+    def _row_kept(cls, db, table: str, _id: Any, deleted: bool) -> None:
+        index = cls._fts_index
         if index is not None and not index.content_sync:
-            # a saved instance belongs to the database and table it was written to
-            index._follow(*_instance_binding(self), self._id, deleted=False)
-        return result
-
-    def delete(self, *args, **kwargs):
-        """Delete and remove from search index (with ``content_sync`` its triggers do)."""
-        manual = _manual_index(self, kwargs.get("db"))
-        result = super().delete(*args, **kwargs)
-        if manual is not None:
-            index, db, table, _id = manual
-            index._follow(db, table, _id, deleted=True)
-        return result
+            index._follow(db, table, _id, deleted=deleted)
 
 
-class AsyncSearchableMixin(_AsyncSearchHost):
+class AsyncSearchableMixin(WriteRules, _AsyncSearchHost):
     """Async twin of :class:`SearchableMixin`, for every async base: every search call is a
     coroutine of the same name, arguments and result, on an ``AsyncSQLerDB``
     (:class:`AsyncFTSIndex`).
@@ -1432,21 +1418,15 @@ class AsyncSearchableMixin(_AsyncSearchHost):
         """Async twin of :meth:`SearchableMixin.search_count`."""
         return await (await cls._search_index(db)).count(query, plain=plain)
 
-    async def save(self, *args, **kwargs):
-        """Save and update search index (with ``content_sync`` its triggers do), once the
-        save has run."""
-        result = await super().save(*args, **kwargs)
-        index = self._fts_index
-        if index is not None and not index.content_sync:
-            await index._follow(*_instance_binding(self), self._id, deleted=False)
-        return result
+    # as :class:`SearchableMixin`: the entry is kept in the write's own unit
 
-    async def delete(self, *args, **kwargs):
-        """Delete and remove from search index (with ``content_sync`` its triggers do), once
-        the delete has run."""
-        manual = _manual_index(self, kwargs.get("db"))
-        result = await super().delete(*args, **kwargs)
-        if manual is not None:
-            index, db, table, _id = manual
-            await index._follow(db, table, _id, deleted=True)
-        return result
+    @classmethod
+    def _keeps_row(cls) -> bool:
+        index = cls._fts_index
+        return index is not None and not index.content_sync
+
+    @classmethod
+    async def _arow_kept(cls, db, table: str, _id: Any, deleted: bool) -> None:
+        index = cls._fts_index
+        if index is not None and not index.content_sync:
+            await index._follow(db, table, _id, deleted=deleted)

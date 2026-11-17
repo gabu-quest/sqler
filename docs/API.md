@@ -2432,9 +2432,11 @@ index on every insert, update and delete of the table, whoever writes: `save()`,
 change commits or rolls back with the write. `index()` and `remove()` change nothing then:
 an entry leaves only with its row. **`content_sync=False`** adds no trigger: the index
 changes only through `index()`, `remove()`, `rebuild()` and the mixin's `save()` and
-`delete()`. The mixin keeps the entry in the database the row is written to or deleted from
-(inside that database's transaction), and only for a row of the index's table: a database
-that has no table of this index is left alone.
+`delete()` (`delete_with_policy()` too). The mixin keeps the entry in the database the row is
+written to or deleted from, and only for a row of the index's table: a database that has no
+table of this index is left alone. The row and its entry are one unit (a transaction of their
+own, or a savepoint inside the caller's): when either write fails, neither is kept, and the
+instance is put back as a failed save of a class with an audit log leaves it.
 
 **What a trigger costs:** each insert and delete of a row writes its index row as well;
 an update writes it only when the row id or the stored value of an indexed field changed,
@@ -2512,8 +2514,8 @@ class names the fields itself.
 name, arguments and result, and `AsyncSearchableMixin` the mixin's, on every async base. Both
 send the statements the sync ones send, so an index made through a `SQLerDB` is searched
 through an `AsyncSQLerDB` on the same file, and the reverse. With `content_sync=False` the
-mixin's `await save()` and `await delete()` change the index after the write, in the write's
-transaction when one is open.
+mixin's `await save()` and `await delete()` change the index in one unit with the write, as the
+sync mixin does.
 
 ```python
 import asyncio

@@ -1931,7 +1931,10 @@ def _public_calls(*classes) -> set[str]:
 def test_every_search_call_has_a_twin_row():
     sync = _public_calls(FTSIndex) | _public_calls(SearchableMixin)
     asynchronous = _public_calls(AsyncFTSIndex) | _public_calls(AsyncSearchableMixin)
-    assert (sync == asynchronous, {method for _, method, _, _ in TWIN_CALLS}) == (True, sync)
+    # save and delete are the model's own calls (the mixin keeps its index through the
+    # write rules), and keep their twin rows
+    rows = {method for _, method, _, _ in TWIN_CALLS} - {"save", "delete"}
+    assert (sync == asynchronous, rows) == (True, sync)
 
 
 def test_the_twin_row_ids_are_unique():
@@ -1988,7 +1991,7 @@ SEARCH_BASES = [
 BASE_IDS = [b.__name__ for b, _, _ in SEARCH_BASES]
 
 
-def _base_model(base, lite, mixin, table, fts=None):
+def _base_model(base, lite, mixin, table, fts=None, mixin_first=True):
     ns = {
         "__module__": __name__,
         "__annotations__": {"title": str, "note": Optional[str], "n": int},
@@ -2000,7 +2003,8 @@ def _base_model(base, lite, mixin, table, fts=None):
     name = f"Searchable{base.__name__}"
     if fts is not None:
         ns["FTS"] = _fts_class(name, fts)
-    cls = type(name, (mixin, base), {"__qualname__": name, **ns})
+    bases = (mixin, base) if mixin_first else (base, mixin)
+    cls = type(name, bases, {"__qualname__": name, **ns})
     return dataclasses.dataclass(cls) if lite else cls
 
 
@@ -2249,3 +2253,190 @@ def test_eight_tasks_creating_the_index_at_once_all_succeed_with_one_index(where
         [("table", "racedocs_fts"), ("trigger", "racedocs_fts_ad"), ("trigger", "racedocs_fts_ai"), ("trigger", "racedocs_fts_au")],
     )
     assert asyncio.run(run()) == [one] * 20
+
+
+# ----- a save or delete of an index kept by hand is one unit with its index write ----------
+#
+# The row write and the index write commit together or not at all: when the index write fails,
+# the row, the index and the instance are as before the call (the instance as a failed save of
+# a class with an audit log leaves it).
+
+
+def _deny_index_writes(index_table):
+    def deny(action, arg1, *rest):
+        if arg1 == index_table and action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_DELETE, sqlite3.SQLITE_UPDATE):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    return deny
+
+
+async def _set_authorizer(db, fn):
+    """``fn`` as the authorizer of every connection the database object holds."""
+    if isinstance(db, AsyncSQLerDB):
+        for conn in db.adapter._all_conns:
+            await conn._execute(conn._conn.set_authorizer, fn)
+    else:
+        db.adapter._conn().set_authorizer(fn)
+
+
+def _stored(path, table, index_table):
+    """The rows of ``table`` and the entries of ``index_table`` as a connection of its own reads them."""
+    raw = sqlite3.connect(path)
+    try:
+        rows = raw.execute(f"SELECT _id, json_extract(data, '$.title') FROM {table} ORDER BY _id").fetchall()
+        entries = raw.execute(f"SELECT rowid, title FROM {index_table} ORDER BY rowid").fetchall()
+    finally:
+        raw.close()
+    return rows, entries
+
+
+def _identity(inst):
+    return (inst._id, getattr(inst, "_version", None), inst._snapshot)
+
+
+@pytest.mark.parametrize("call", ["save-new", "save-changed", "delete"])
+@pytest.mark.parametrize("base, is_async, lite", SEARCH_BASES, ids=BASE_IDS)
+def test_a_failed_index_write_leaves_the_row_the_index_and_the_instance_as_they_were(base, is_async, lite, call, tmp_path):
+    mixin = AsyncSearchableMixin if is_async else SearchableMixin
+    Doc = _base_model(base, lite, mixin, "unitdocs", ["title"])
+    path = str(tmp_path / "unit.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
+            await _v(Doc._fts_index.create(db))
+            kept = await _v(Doc(title="old apple").save(db=db))
+            target = Doc(title="new pear") if call == "save-new" else kept
+            if call == "save-changed":
+                target.title = "new pear"
+            before = _identity(target)
+            await _set_authorizer(db, _deny_index_writes("unitdocs_fts"))
+            with pytest.raises(sqlite3.DatabaseError) as raised:
+                await _v(target.delete(db=db) if call == "delete" else target.save(db=db))
+            await _set_authorizer(db, None)
+            return str(raised.value), _identity(target) == before, target._id, _stored(path, "unitdocs", "unitdocs_fts")
+        finally:
+            await _v(db.close())
+
+    message, same, _id, stored = asyncio.run(run())
+    assert (message, same, _id, stored) == (
+        "not authorized",
+        True,
+        None if call == "save-new" else 1,
+        ([(1, "old apple")], [(1, "old apple")]),
+    )
+
+
+@pytest.mark.parametrize("base, is_async, lite", SEARCH_BASES, ids=BASE_IDS)
+def test_an_index_kept_by_hand_follows_save_and_delete_when_the_base_is_named_first(base, is_async, lite, tmp_path):
+    mixin = AsyncSearchableMixin if is_async else SearchableMixin
+    Doc = _base_model(base, lite, mixin, "orderdocs", ["title"], mixin_first=False)
+    path = str(tmp_path / "order.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
+            await _v(Doc._fts_index.create(db))
+            kept = await _v(Doc(title="old apple").save(db=db))
+            gone = await _v(Doc(title="plum").save(db=db))
+            kept.title = "new pear"
+            await _v(kept.save(db=db))
+            await _v(gone.delete(db=db))
+        finally:
+            await _v(db.close())
+        return _stored(path, "orderdocs", "orderdocs_fts")
+
+    assert asyncio.run(run()) == ([(1, "new pear")], [(1, "new pear")])
+
+
+@pytest.mark.parametrize("call", ["save", "delete"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_failed_index_write_of_an_audited_search_class_keeps_no_audit_row(is_async, call, tmp_path):
+    from sqler import AsyncAuditLogMixin, AuditLogMixin
+
+    if is_async:
+        class Doc(AsyncAuditLogMixin, AsyncSearchableMixin, AsyncSQLerModel):
+            __tablename__ = "auditdocs"
+            title: str = ""
+    else:
+        class Doc(AuditLogMixin, SearchableMixin, SQLerModel):
+            __tablename__ = "auditdocs"
+            title: str = ""
+
+    path = str(tmp_path / "audit.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
+            await _v(Doc._fts_index.create(db))
+            doc = await _v(Doc(title="old apple").save(db=db))
+            doc.title = "new pear"
+            await _set_authorizer(db, _deny_index_writes("auditdocs_fts"))
+            with pytest.raises(sqlite3.DatabaseError, match="^not authorized$"):
+                await _v(doc.delete(db=db) if call == "delete" else doc.save(db=db))
+            await _set_authorizer(db, None)
+        finally:
+            await _v(db.close())
+        raw = sqlite3.connect(path)
+        try:
+            audit = raw.execute("SELECT action, record_id FROM auditdocs_audit ORDER BY rowid").fetchall()
+        finally:
+            raw.close()
+        return audit, _stored(path, "auditdocs", "auditdocs_fts")
+
+    assert asyncio.run(run()) == ([("create", 1)], ([(1, "old apple")], [(1, "old apple")]))
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["transaction", "nested"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_save_and_delete_inside_the_callers_transaction_begin_nothing_and_commit_nothing_early(is_async, nested, tmp_path):
+    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
+                      AsyncSearchableMixin if is_async else SearchableMixin, "txndocs", ["title"])
+    path = str(tmp_path / "txn.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        seen_inside = None
+        try:
+            Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
+            await _v(Doc._fts_index.create(db))
+            gone = await _v(Doc(title="gone plum").save(db=db))
+
+            async def body():
+                nonlocal seen_inside
+                await _v(Doc(title="red apple").save(db=db))
+                await _v(gone.delete(db=db))
+                seen_inside = _stored(path, "txndocs", "txndocs_fts")  # another connection
+
+            with query_logger.capture() as sent:
+                if is_async:
+                    async with db.transaction():
+                        if nested:
+                            async with db.transaction():
+                                await body()
+                        else:
+                            await body()
+                else:
+                    with db.transaction():
+                        if nested:
+                            with db.transaction():
+                                await body()
+                        else:
+                            await body()
+            statements = [q.sql.split()[0].upper() for q in sent if q.sql.split()[0].upper() in ("BEGIN", "COMMIT", "SAVEPOINT", "RELEASE")]
+        finally:
+            await _v(db.close())
+        return seen_inside, statements, _stored(path, "txndocs", "txndocs_fts")
+
+    seen_inside, statements, after = asyncio.run(run())
+    assert seen_inside == ([(1, "gone plum")], [(1, "gone plum")])
+    assert after == ([(2, "red apple")], [(2, "red apple")])
+    assert statements == []
