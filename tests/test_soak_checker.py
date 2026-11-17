@@ -8,11 +8,14 @@ invariant, a copy of the threads workload's database is damaged in one way the i
 and the checker must fail, naming the invariant and the row.
 """
 
+import argparse
+import json
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -186,6 +189,15 @@ def d_index(conn, exp):
     return "index", "soak_promo", None
 
 
+def d_index_on_the_path_of_a_promoted_field(conn, exp):
+    """``stage`` is a column (promoted before the writers start); an index left on its JSON
+    path can never serve a query by it."""
+    (name,) = conn.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'soak_promo'").fetchone()
+    conn.execute(f"DROP INDEX {name}")
+    conn.execute(f"CREATE INDEX {name} ON soak_promo (prio, json_extract(data, '$.stage'))")
+    return "index", "soak_promo", None
+
+
 def d_search_missing(conn, exp):
     i = _live(exp, "soak_search_s")
     conn.execute("DELETE FROM soak_search_s_fts WHERE rowid = ?", [i])
@@ -251,6 +263,7 @@ DAMAGES = [
     ("promoted_column", d_promoted_column),
     ("promoted_in_data", d_promoted_in_data),
     ("index", d_index),
+    ("index", d_index_on_the_path_of_a_promoted_field),
     ("search_missing", d_search_missing),
     ("search_deleted", d_search_deleted),
     ("search_integrity", d_search_integrity),
@@ -289,8 +302,8 @@ def test_a_killed_workers_call_in_flight_is_tolerated_and_only_for_that_worker(s
     )
     conn.commit()
     conn.close()
-    with open(folder / "journal-t0.jsonl", "a", encoding="utf-8") as f:
-        f.write('{"i":61,"intent":"new_plain","ids":[],"keys":["t0x99999"]}\n')
+    plan = ["put", "soak_plain_p", {"key": "t0x99999"}, {"owner": "t0", "key": "t0x99999", "n": 1, "note": "new"}, 0]
+    _intent(folder, "t0", "new_plain", keys=["t0x99999"], fx=[plan])
     killed = _check(folder, killed=["t0"])
     assert [v.line() for v in killed.violations] == []
     assert killed.tolerated == 1
@@ -310,10 +323,216 @@ def test_a_killed_workers_call_in_flight_covers_the_index_entries_of_the_rows_it
     conn.execute("DELETE FROM soak_search_s WHERE _id = ?", [i])  # the trigger takes the entry
     conn.commit()
     conn.close()
-    with open(folder / f"journal-{owner}.jsonl", "a", encoding="utf-8") as f:
-        f.write(f'{{"i":99999,"intent":"delete_search","ids":[["soak_search_s",{i}]],"keys":[]}}\n')
+    _intent(folder, owner, "delete_search", ids=[["soak_search_s", i]], fx=[["del", "soak_search_s", i, 0]])
     killed = _check(folder, killed=[owner])
     assert [v.line() for v in killed.violations] == []
-    assert killed.tolerated == 2  # the row, and its index entry
+    assert killed.tolerated == 1  # one call, wholly stored: the row and its index entry
     alive = _check(folder)
     assert alive.names() == {("row_missing", "soak_search_s", i), ("search_missing", "soak_search_s_fts", i)}
+
+
+def _intent(folder, worker, op, ids=(), keys=(), fx=()):
+    """Append the ``intent`` line of an unfinished call to a worker's journal."""
+    line = {"i": 99999, "intent": op, "ids": list(ids), "keys": list(keys), "fx": list(fx)}
+    with open(folder / f"journal-{worker}.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(line) + "\n")
+
+
+@pytest.fixture
+def copied(soaked, tmp_path):
+    """A copy of the threads workload's folder (database and journals), and its journals'
+    expectations."""
+    root, _ = soaked
+    folder = tmp_path / "soak-threads"
+    shutil.copytree(root / "soak-threads", folder)
+    return folder, soak_check.read_journals(str(folder))
+
+
+def _sqler_db(folder):
+    import soak_models_sync as models
+
+    from sqler import SQLerDB
+
+    db = SQLerDB.on_disk(str(folder / "soak.db"))
+    models.open_search_indexes(db)
+    return models, db
+
+
+# Each kind of call below is killed in flight in one of three states: "none" (nothing of it
+# stored), "all" (all of it stored, as the package stores it) or "half" (the state a call that
+# is not one unit could leave). It returns the worker, its intent and, for "half", the exact
+# violations the checker must name: what breaks if none were stored, and what if all were.
+
+
+def k_txn_commit(folder, exp, state):
+    """A transaction saving a plain row and an audited row; half: the audited row is missing."""
+    a = {"owner": "t0", "key": "t0x90001", "n": 1, "note": "txn"}
+    b = {"owner": "t0", "key": "t0x90002", "n": 1}
+    fx = [["put", "soak_plain_p", {"key": a["key"]}, a, 0], ["put", "soak_audit", {"key": b["key"]}, b, 1]]
+    _intent(folder, "t0", "txn_commit", keys=[a["key"], b["key"]], fx=fx)
+    if state == "none":
+        return "t0", set()
+    models, db = _sqler_db(folder)
+    with db.transaction():
+        pa = models.PlainP(**a).save(db=db)
+        if state == "all":
+            models.Audited(**b).save(db=db)
+    db.close()
+    return "t0", {("row_unknown", "soak_plain_p", pa._id), ("row_missing", "soak_audit", None)}
+
+
+def k_archive(folder, exp, state):
+    """``copy_to()`` then ``delete()`` of a task; half: the task is in the archive and still
+    in its table."""
+    owner, i = sorted((doc["owner"], j) for j, doc in exp.live["soak_task"].items())[0]
+    doc = exp.live["soak_task"][i]
+    _intent(folder, owner, "archive", ids=[["soak_task", i], ["soak_task_archive", i]], fx=[["arch", "soak_task", "soak_task_archive", i, doc]])
+    conn = sqlite3.connect(folder / "soak.db")
+    if state != "none":
+        conn.execute("INSERT INTO soak_task_archive (_id, data) SELECT _id, data FROM soak_task WHERE _id = ?", [i])
+    if state == "all":
+        conn.execute("DELETE FROM soak_task WHERE _id = ?", [i])
+    conn.commit()
+    conn.close()
+    return owner, {("row_unknown", "soak_task_archive", i), ("archive", "soak_task", i)}
+
+
+def k_new_audit(folder, exp, state):
+    """A save of a new audited row; half: the row is saved, its audit row is not."""
+    b = {"owner": "t0", "key": "t0x90003", "n": 0}
+    _intent(folder, "t0", "new_audit", keys=[b["key"]], fx=[["put", "soak_audit", {"key": b["key"]}, b, 1]])
+    if state == "none":
+        return "t0", set()
+    models, db = _sqler_db(folder)
+    row = models.Audited(**b).save(db=db)
+    db.close()
+    if state == "half":
+        conn = sqlite3.connect(folder / "soak.db")
+        conn.execute("DELETE FROM soak_audit_audit WHERE record_id = ?", [row._id])
+        conn.commit()
+        conn.close()
+    return "t0", {("row_unknown", "soak_audit", row._id), ("audit", "soak_audit", row._id)}
+
+
+def k_new_search_s(folder, exp, state):
+    """A save of a new row of the class whose triggers keep its index; half: the row is
+    saved, its index entry is not."""
+    s = {"owner": "t0", "key": "t0x90004", "n": 0, "body": "soak t0x90004v0 common"}
+    _intent(folder, "t0", "new_search", keys=[s["key"]], fx=[["put", "soak_search_s", {"key": s["key"]}, s, 0]])
+    if state == "none":
+        return "t0", set()
+    models, db = _sqler_db(folder)
+    row = models.SearchS(**s).save(db=db)
+    db.close()
+    if state == "half":
+        conn = sqlite3.connect(folder / "soak.db")
+        conn.execute("DELETE FROM soak_search_s_fts WHERE rowid = ?", [row._id])
+        conn.commit()
+        conn.close()
+    return "t0", {("row_unknown", "soak_search_s", row._id), ("search_missing", "soak_search_s_fts", row._id)}
+
+
+KILLED_CALLS = [k_txn_commit, k_archive, k_new_audit, k_new_search_s]
+
+
+@pytest.mark.parametrize("state, tolerated", [("none", 0), ("all", 1)])
+@pytest.mark.parametrize("call", KILLED_CALLS, ids=[k.__name__[2:] for k in KILLED_CALLS])
+def test_a_killed_call_wholly_stored_or_not_stored_passes(copied, call, state, tolerated):
+    folder, exp = copied
+    worker, _ = call(folder, exp, state)
+    report = _check(folder, killed=[worker])
+    assert [v.line() for v in report.violations] == []
+    assert report.tolerated == tolerated
+
+
+@pytest.mark.parametrize("call", KILLED_CALLS, ids=[k.__name__[2:] for k in KILLED_CALLS])
+def test_a_killed_call_half_stored_fails_naming_both_states(copied, call):
+    folder, exp = copied
+    worker, names = call(folder, exp, "half")
+    report = _check(folder, killed=[worker])
+    assert report.names() == names, [v.line() for v in report.violations]
+    assert len(report.violations) == 2
+    assert all(v.text.startswith("half-applied call ") for v in report.violations)
+    assert report.tolerated == 0
+
+
+def test_two_killed_increments_of_one_counter_pass_only_as_whole_increments(copied):
+    """Two killed workers each had an increment of the same counter in flight: 0, 1 or 2
+    more is a mix of whole calls; 3 more is not."""
+    folder, exp = copied
+    c = sorted(exp.live["soak_counter"])[0]
+    want = exp.incs.get(c, 0)
+    for w in ("t0", "t1"):
+        _intent(folder, w, "counter_inc", ids=[["soak_counter", c]], fx=[["inc", "soak_counter", c]])
+    conn = sqlite3.connect(folder / "soak.db")
+    for more, ok in [(0, True), (1, True), (2, True), (3, False)]:
+        conn.execute(
+            "UPDATE soak_counter SET data = json_set(data, '$.count', ?), _version = ? WHERE _id = ?",
+            [want + more, want + more, c],
+        )
+        conn.commit()
+        report = _check(folder, killed=["t0", "t1"])
+        assert report.ok is ok, (more, [v.line() for v in report.violations])
+        assert report.tolerated == (more if ok else 0)
+    conn.close()
+
+
+# ---- a killed process's errors, and kills that did not happen
+
+import soak  # noqa: E402
+from soak_ops import Journal, Stats, Worker, errors_path, read_errors  # noqa: E402
+
+
+def _summary(stats, kill=True, kills=1):
+    args = argparse.Namespace(seed=1, storage="file", minutes=1.0, ops=None, kill=kill)
+    run = SimpleNamespace(totals=lambda: stats, checks=1, kills=kills, reports=[{"violations": 0, "lines": []}])
+    res = {"interrupted": False, "report": {"summary": "", "checked": {}, "rows": 0, "tolerated": 0}}
+    lines = []
+    out = SimpleNamespace(write=lines.append, flush=lambda: None)
+    code = soak.summarize(args, "/x", {"procs2": (run, res)}, False, out)
+    return code, "".join(lines).strip().splitlines()
+
+
+def test_a_worker_puts_each_error_on_disk_before_it_goes_on(tmp_path):
+    journal = Journal(str(tmp_path / "journal-p0g0w0.jsonl"))
+    w = Worker("p0g0w0", 1, {}, None, journal, Stats(), [])
+    w.error("OperationalError locked at once", "database is locked", op="new_search")
+    # read before the journal is closed: the line is on disk already
+    got = read_errors(errors_path(journal.path))
+    journal.close()
+    assert [(e["worker"], e["error"], e["op"]) for e in got] == [("p0g0w0", "OperationalError locked at once", "new_search")]
+
+
+def test_a_killed_process_errors_after_its_last_poll_fail_the_run(tmp_path):
+    """The parent last polled the process before the error: its polled stats have none. The
+    error file has one, and a line the kill cut short: both are counted, and the run fails."""
+    with open(tmp_path / "errors-p0g0w0.jsonl", "w", encoding="utf-8") as f:
+        f.write(json.dumps({"worker": "p0g0w0", "seed": 1, "op_no": 7, "op": "new_search", "error": "OperationalError locked at once", "text": "database is locked"}) + "\n")
+    with open(tmp_path / "errors-p0g0w1.jsonl", "w", encoding="utf-8") as f:
+        f.write('{"worker": "p0g0w1", "se')
+    polled = {"ops": 40, "conflicts": 0, "expected": {}, "errors": {}, "first": []}
+    dead = soak.dead_stats(str(tmp_path), ["p0g0w0", "p0g0w1"], polled)
+    assert dead["ops"] == 40
+    assert dead["errors"] == {"OperationalError locked at once": 1, "unreadable error line": 1}
+    total = Stats()
+    total.merge(dead)
+    code, lines = _summary(total)
+    assert code == 1
+    assert lines[-1].startswith("SOAK FAIL seed=1 storage=file 1 min workloads=procs2 ops=40 conflicts=0 errors=2 ")
+
+
+def test_a_run_asked_to_kill_that_killed_nothing_fails():
+    code, lines = _summary(Stats(), kill=True, kills=0)
+    assert code == 1
+    assert lines[1:-1] == ["NO KILLS: --kill was given and no writer process was killed"]
+    assert lines[-1].startswith("SOAK FAIL ") and " kills=0 " in lines[-1]
+    code, lines = _summary(Stats(), kill=True, kills=3)
+    assert code == 0
+    assert lines[-1].startswith("SOAK PASS ") and " kills=3 " in lines[-1]
+
+
+def test_kill_with_ops_is_refused(capsys):
+    with pytest.raises(SystemExit) as stop:
+        soak.parse(["--ops", "5", "--seed", "1", "--kill", "--workload", "procs2"])
+    assert stop.value.code == 2
+    assert "--kill needs --minutes: the kills are placed in the run's time" in capsys.readouterr().err

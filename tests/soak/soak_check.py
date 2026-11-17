@@ -22,7 +22,8 @@ The invariants (the names the report uses):
 - ``promoted_column``: a promoted column does not hold the value written, or a promotion a
   journal made is not in the table.
 - ``promoted_in_data``: a promoted field is still in ``data``.
-- ``index``: the index over two fields of the promoted table is gone.
+- ``index``: the index over two fields of the promoted table is gone, or a key of it is not
+  where the table stores the field (the column of a promoted field, else its JSON path).
 - ``search_missing``: the search index does not find a row by a word only it holds, or
   holds another text for it.
 - ``search_deleted``: the search index still finds a row that was deleted (or no row).
@@ -32,15 +33,22 @@ The invariants (the names the report uses):
 - ``integrity_check`` and ``foreign_key_check``: SQLite's own checks are not clean;
   ``health`` is ``sqler.ops.health_check`` when the checker is given a ``SQLerDB``.
 
-A killed worker may leave one call it made and never journaled. Its last ``intent`` line names
-the rows that call could touch; a difference in those rows (or a new row with a key it names,
-or one more increment of the counter it names) is counted as ``tolerated``, not a violation.
+A killed worker may leave one call it made and never journaled. Its last ``intent`` line holds
+everything that call writes when it goes through (``fx``). Every call the soak makes is one
+unit by the package's documents (one statement, or one transaction: see ``CONTRIBUTING.md``,
+"The soak"), so for that call the checker accepts exactly two states: none of ``fx`` stored,
+or all of it, over every row, version, audit row, index entry, archive row and reference the
+call writes. Any other state is reported with the violations it shows in each of the two
+states (invariant, table, row), their text starting "half-applied call". Killed calls that
+touch the same rows are judged together: one mix of them, each stored or not, must fit.
+``tolerated`` counts the calls of killed workers found wholly stored.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -73,12 +81,28 @@ AUDIT_TABLE = f"{TABLE['audit']}_audit"
 PROMO = TABLE["promo"]
 
 
+#: Above this many killed calls touching the same rows the checker does not try every mix
+#: of them stored or not (2**n checks); it reports them instead.
+MAX_OVERLAP = 6
+
+
 @dataclass
 class Violation:
     invariant: str
     table: str
     row: Any
     text: str
+    #: the row of a source table this is about, when ``(table, row)`` is not it (an audit row
+    #: names its record, an index entry its row)
+    ref: Any = None
+    #: the ``key`` of the document it is about, when known (a row no journal knows by id)
+    key: Any = None
+
+    def about(self) -> tuple:
+        if self.ref is not None:
+            return tuple(self.ref)
+        table = self.table[: -len("_fts")] if self.table.endswith("_fts") else self.table
+        return (table, self.row)
 
     def line(self) -> str:
         return f"VIOLATION {self.invariant} table={self.table} id={self.row}: {self.text}"
@@ -117,9 +141,47 @@ class Expected:
     incs: dict = field(default_factory=lambda: defaultdict(int))  # counter id -> increments
     ghosts: list = field(default_factory=list)  # (table, key, word or None)
     promotions: set = field(default_factory=set)  # (table, column)
-    tol_ids: set = field(default_factory=set)
-    tol_keys: set = field(default_factory=set)
-    tol_incs: dict = field(default_factory=lambda: defaultdict(int))
+    unresolved: list = field(default_factory=list)  # (table, key): a planned new row not stored
+    inflight: list = field(default_factory=list)  # the unfinished calls of killed workers
+
+    def copy(self) -> "Expected":
+        return Expected(
+            live=defaultdict(dict, {t: dict(rows) for t, rows in self.live.items()}),
+            puts=defaultdict(int, self.puts),
+            audits=defaultdict(int, self.audits),
+            deleted=defaultdict(set, {t: set(ids) for t, ids in self.deleted.items()}),
+            archived=dict(self.archived),
+            incs=defaultdict(int, self.incs),
+            ghosts=list(self.ghosts),
+            promotions=set(self.promotions),
+            unresolved=list(self.unresolved),
+            inflight=list(self.inflight),
+        )
+
+
+@dataclass
+class InFlight:
+    """The unfinished call of a killed worker: what it writes when it goes through, and the
+    rows (and keys of new rows) any of that can show up in."""
+
+    worker: str
+    op: str
+    fx: list
+    rows: set = field(default_factory=set)
+    keys: set = field(default_factory=set)
+    promote: bool = False
+
+    def owns(self, v: Violation) -> bool:
+        about = v.about()
+        if about in self.rows or (v.key is not None and v.key in self.keys):
+            return True
+        return self.promote and about[0] == PROMO
+
+    def meets(self, other: "InFlight") -> bool:
+        if self.rows & other.rows or self.keys & other.keys:
+            return True
+        touches = {t for t, _ in self.rows}, {t for t, _ in other.rows}
+        return (self.promote and (other.promote or PROMO in touches[1])) or (other.promote and PROMO in touches[0])
 
 
 def _lines(path: str) -> Iterable[dict]:
@@ -132,7 +194,7 @@ def _lines(path: str) -> Iterable[dict]:
 
 def read_journals(journal_dir: str, killed: Iterable[str] = ()) -> Expected:
     """Replay every journal of ``journal_dir``; ``killed`` names the journals (file stems) of
-    workers that were killed, whose last unfinished intent is tolerated."""
+    workers that were killed, whose last unfinished intent is kept in ``inflight``."""
     exp = Expected()
     killed = set(killed)
     for name in sorted(os.listdir(journal_dir)):
@@ -148,17 +210,40 @@ def read_journals(journal_dir: str, killed: Iterable[str] = ()) -> Expected:
             for fx in line.get("fx", ()):
                 _apply(exp, fx)
         if open_intent is not None and stem in killed:
-            for table, _id in open_intent["ids"]:
-                exp.tol_ids.add((table, _id))
-                if table == TABLE["counter"]:
-                    exp.tol_incs[_id] += 1
-            exp.tol_keys.update(open_intent["keys"])
+            fx = open_intent.get("fx", [])
+            exp.inflight.append(
+                InFlight(
+                    stem,
+                    open_intent["intent"],
+                    fx,
+                    rows={(t, i) for t, i in open_intent["ids"]},
+                    keys=set(open_intent["keys"]),
+                    promote=any(f[0] == "promote" for f in fx),
+                )
+            )
     return exp
+
+
+def _resolve(conn: sqlite3.Connection, call: InFlight) -> None:
+    """Find, by its key, the id of each new row ``call`` plans (its ``put`` names it by key):
+    its audit rows and index entries are then known by that id. A planned row not found
+    stays named by key; :func:`_apply` then expects it and the check finds it missing."""
+    for fx in call.fx:
+        if fx[0] == "put" and isinstance(fx[2], dict):
+            table, key = fx[1], fx[2]["key"]
+            if not _columns(conn, table):
+                continue
+            found = [r[0] for r in conn.execute(f"SELECT _id FROM {table} WHERE json_extract(data, '$.key') = ?", [key])]
+            if len(found) == 1:
+                fx[2] = found[0]
+                call.rows.add((table, found[0]))
 
 
 def _apply(exp: Expected, fx: list) -> None:
     kind = fx[0]
-    if kind == "put":
+    if kind == "put" and isinstance(fx[2], dict):
+        exp.unresolved.append((fx[1], fx[2]["key"]))
+    elif kind == "put":
         _, table, _id, doc, audit = fx
         exp.live[table][_id] = doc
         exp.puts[(table, _id)] += 1
@@ -204,18 +289,8 @@ class _Checker:
         self.exp = exp
         self.report = Report()
 
-    def bad(self, invariant: str, table: str, row: Any, text: str, key: Any = None) -> None:
-        # an index entry belongs to the row of its source table: the in-flight call of a killed
-        # worker that names the row covers its entry too
-        source = table[: -len("_fts")] if table.endswith("_fts") else table
-        if (
-            (table, row) in self.exp.tol_ids
-            or (source, row) in self.exp.tol_ids
-            or (key is not None and key in self.exp.tol_keys)
-        ):
-            self.report.tolerated += 1
-            return
-        self.report.violations.append(Violation(invariant, table, row, text))
+    def bad(self, invariant: str, table: str, row: Any, text: str, key: Any = None, ref: Any = None) -> None:
+        self.report.violations.append(Violation(invariant, table, row, text, ref=ref, key=key))
 
     def seen(self, invariant: str, n: int = 1) -> None:
         self.report.checked[invariant] += n
@@ -239,7 +314,7 @@ class _Checker:
             want = {k: v for k, v in doc.items() if k not in promoted}
             self.seen("row_doc")
             if data != want:
-                self.bad("row_doc", table, _id, f"data {data} != journal {want}")
+                self.bad("row_doc", table, _id, f"data {data} != journal {want}", key=doc.get("key"))
             for col in promoted:
                 self.seen("promoted_in_data")
                 if col in data:
@@ -267,12 +342,15 @@ class _Checker:
                 continue
             key = data.get("key")
             if key in ghosts:
-                self.bad("rollback_left", table, _id, f"row of a rolled-back write: {data}")
+                self.bad("rollback_left", table, _id, f"row of a rolled-back write: {data}", key=key)
             else:
                 self.bad("row_unknown", table, _id, f"no journal knows it: {data}", key=key)
         for t, key, _ in exp.ghosts:
             if t == table:
                 self.seen("rollback_left")
+        for t, key in exp.unresolved:
+            if t == table:
+                self.bad("row_missing", table, None, f"a call planned a row with key {key!r}; none is stored", key=key)
         return rows
 
     def archive(self) -> None:
@@ -301,24 +379,17 @@ class _Checker:
         for _id, (data, _c, version) in rows.items():
             self.seen("counter")
             want = self.exp.incs.get(_id, 0)
-            slack = self.exp.tol_incs.get(_id, 0)
             if _id not in self.exp.live[table]:
-                self.report.violations.append(Violation("row_unknown", table, _id, f"{data}"))
+                self.bad("row_unknown", table, _id, f"{data}")
                 continue
             count = data.get("count")
-            if not (isinstance(count, int) and want <= count <= want + slack):
-                self.report.violations.append(
-                    Violation("counter", table, _id, f"count {count}, journals add up to {want} (+{slack} in flight)")
-                )
-            if not (isinstance(version, int) and want <= version <= want + slack):
-                self.report.violations.append(
-                    Violation("counter", table, _id, f"_version {version}, journals have {want} increments")
-                )
-            if slack and count != version:
-                self.report.violations.append(Violation("counter", table, _id, f"count {count} != _version {version}"))
+            if count != want:
+                self.bad("counter", table, _id, f"count {count}, journals add up to {want}")
+            if version != want:
+                self.bad("counter", table, _id, f"_version {version}, journals have {want} increments")
         for _id in self.exp.live[table]:
             if _id not in rows:
-                self.report.violations.append(Violation("row_missing", table, _id, "counter is gone"))
+                self.bad("row_missing", table, _id, "counter is gone")
 
     def audit(self, audited_rows: dict) -> None:
         exp = self.exp
@@ -332,7 +403,10 @@ class _Checker:
             ):
                 snap = json.loads(snapshot) if snapshot else {}
                 if snap.get("key") in ghosts:
-                    self.bad("rollback_left", AUDIT_TABLE, aid, f"audit row of a rolled-back write: {snap}")
+                    self.bad(
+                        "rollback_left", AUDIT_TABLE, aid, f"audit row of a rolled-back write: {snap}",
+                        key=snap.get("key"), ref=(table, record_id),
+                    )
                     continue
                 got[record_id].append((aid, action, snap))
         known = set(exp.live[table]) | exp.deleted[table]
@@ -348,7 +422,10 @@ class _Checker:
             if record_id not in known:
                 key = entries[0][2].get("key")
                 for aid, action, _snap in entries:
-                    self.bad("audit", AUDIT_TABLE, aid, f"audit row ({action}) of record {record_id} without its write", key=key)
+                    self.bad(
+                        "audit", AUDIT_TABLE, aid, f"audit row ({action}) of record {record_id} without its write",
+                        key=key, ref=(table, record_id),
+                    )
 
     def references(self, jobs: dict, crews: dict) -> None:
         for _id, (data, _c, _v) in jobs.items():
@@ -382,19 +459,20 @@ class _Checker:
                 continue
             self.seen("search_deleted")
             word = body.split()[1] if body and len(body.split()) > 1 else ""
+            key = word.rsplit("v", 1)[0] if word else None
             if any(g == word for t, _k, g in self.exp.ghosts if t == table):
-                self.bad("rollback_left", idx, rowid, f"index entry of a rolled-back write: {body!r}")
+                self.bad("rollback_left", idx, rowid, f"index entry of a rolled-back write: {body!r}", key=key)
             elif rowid in self.exp.deleted[table]:
-                self.bad("search_deleted", idx, rowid, f"deleted row still found: {body!r}")
+                self.bad("search_deleted", idx, rowid, f"deleted row still found: {body!r}", key=key)
             else:
-                self.bad("search_deleted", idx, rowid, f"entry of no row: {body!r}", key=word.split("v")[0] if word else None)
-        for t, _key, word in self.exp.ghosts:
+                self.bad("search_deleted", idx, rowid, f"entry of no row: {body!r}", key=key)
+        for t, ghost_key, word in self.exp.ghosts:
             if t == table and word:
                 self.seen("rollback_left")
                 hits = [r[0] for r in self.conn.execute(f"SELECT rowid FROM {idx} WHERE {idx} MATCH ?", [f'"{word}"'])]
                 for h in hits:
                     if h not in live:
-                        self.bad("rollback_left", idx, h, f"rolled-back word {word!r} is found")
+                        self.bad("rollback_left", idx, h, f"rolled-back word {word!r} is found", key=ghost_key)
         self.seen("search_integrity")
         try:
             self.conn.execute(f"INSERT INTO {idx}({idx}) VALUES('integrity-check')")
@@ -411,16 +489,18 @@ class _Checker:
                 self.bad("promoted_column", table, None, f"the promotion of {col!r} is not in the table")
         if cols:
             self.seen("index")
-            found = False
-            for (name,) in self.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?", [PROMO]
+            # each key where the table stores the field: its column once promoted, else its path
+            want = [f if f in cols else f"json_extract(data, '$.{f}')" for f in ("prio", "stage")]
+            have = []
+            for name, sql in self.conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL", [PROMO]
             ):
-                # the key columns: a column's name, or None for an expression (a field in data)
-                keys = [r[2] for r in self.conn.execute(f"PRAGMA index_xinfo({name})") if r[5]]
-                if len(keys) == 2 and keys[0] == "prio" and keys[1] in ("stage", None):
-                    found = True
-            if not found:
-                self.bad("index", PROMO, None, "no index over the two fields prio and stage")
+                keys = _index_keys(sql)
+                if keys and keys[0] in ("prio", "json_extract(data, '$.prio')"):
+                    have.append((name, keys))
+            if not any(keys == want for _n, keys in have):
+                found = "; ".join(f"{n} on ({', '.join(k)})" for n, k in have) or "none"
+                self.bad("index", PROMO, None, f"no index on ({', '.join(want)}); over prio there is: {found}")
 
     def sqlite(self) -> None:
         self.seen("integrity_check")
@@ -433,9 +513,38 @@ class _Checker:
         self.seen("foreign_key_check")
 
 
-def check(conn: sqlite3.Connection, journal_dir: str, killed: Iterable[str] = (), db: Any = None) -> Report:
-    """Check the database behind ``conn`` against the journals in ``journal_dir``."""
-    exp = read_journals(journal_dir, killed)
+def _index_keys(sql: str) -> list[str]:
+    """The key terms of a ``CREATE INDEX`` as ``sqlite_master`` keeps it, each as sqler writes
+    it (a column's name, or ``json_extract(data, '$.<field>')``), quotes and case of a column
+    name dropped, ``DESC`` kept."""
+    head = re.match(r"(?is)\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+.*?\bON\s+\S+?\s*\(", sql)
+    if head is None:
+        return []
+    body = sql[head.end() :]
+    terms, depth, cur = [], 0, ""
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        if ch == "," and depth == 0:
+            terms.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    terms.append(cur)
+    out = []
+    for term in terms:
+        t = " ".join(term.split())
+        if "(" not in t:
+            t = t.replace('"', "").replace("`", "").replace("[", "").replace("]", "").lower()
+        out.append(t)
+    return out
+
+
+def _check_once(conn: sqlite3.Connection, exp: Expected, db: Any = None) -> Report:
     c = _Checker(conn, exp)
     seen: dict = {}
     for name, table in TABLE.items():
@@ -457,6 +566,93 @@ def check(conn: sqlite3.Connection, journal_dir: str, killed: Iterable[str] = ()
         if not status.healthy:
             c.bad("integrity_check", "*", None, f"health_check: {status.message}")
     return c.report
+
+
+def _groups(calls: list) -> list[list]:
+    """The killed calls in groups that touch the same rows (a group's calls are judged
+    together; calls of different groups touch different rows and are judged apart)."""
+    groups: list[list] = []
+    for call in calls:
+        joined = [g for g in groups if any(call.meets(other) for other in g)]
+        merged = [call]
+        for g in joined:
+            groups.remove(g)
+            merged = g + merged
+        groups.append(merged)
+    return groups
+
+
+def _applied(exp: Expected, calls: list) -> Expected:
+    """The journals' expectation with every write of ``calls`` stored as well."""
+    out = exp.copy()
+    for call in calls:
+        for fx in call.fx:
+            _apply(out, fx)
+    return out
+
+
+def check(conn: sqlite3.Connection, journal_dir: str, killed: Iterable[str] = (), db: Any = None) -> Report:
+    """Check the database behind ``conn`` against the journals in ``journal_dir``.
+
+    Each group of killed calls that touch the same rows must match one mix of its calls
+    stored wholly or not at all (a lone call: none of it, or all of it). The first check
+    expects none of them; a group with a violation then is checked again with each other mix
+    of its calls stored, and passes on the first mix that leaves it no violation."""
+    exp = read_journals(journal_dir, killed)
+    for call in exp.inflight:
+        _resolve(conn, call)
+    groups = _groups(exp.inflight)
+    first = _check_once(conn, exp, db)
+
+    def owned(report: Report, g: list) -> list:
+        return [v for v in report.violations if any(call.owns(v) for call in g)]
+
+    free = [v for v in first.violations if not any(call.owns(v) for g in groups for call in g)]
+    found: dict[int, list] = {}  # group -> its violations in each mix tried, by mix
+    pending = []
+    accepted: dict[int, int] = {}
+    for k, g in enumerate(groups):
+        mine = owned(first, g)
+        if not mine:
+            accepted[k] = 0
+        elif len(g) > MAX_OVERLAP:
+            found[k] = [mine]
+        else:
+            found[k] = [mine]
+            pending.append(k)
+    mixes = max((1 << len(groups[k]) for k in pending), default=1)
+    for mix in range(1, mixes):
+        todo = [k for k in pending if k not in accepted and mix < (1 << len(groups[k]))]
+        if not todo:
+            break
+        calls = [groups[k][b] for k in todo for b in range(len(groups[k])) if mix >> b & 1]
+        report = _check_once(conn, _applied(exp, calls))
+        for k in todo:
+            mine = owned(report, groups[k])
+            found[k].append(mine)
+            if not mine:
+                accepted[k] = mix
+    result = first
+    result.violations = list(free)
+    result.tolerated = sum(bin(mix).count("1") for mix in accepted.values())
+    for k, tries in found.items():
+        if k in accepted:
+            continue
+        g = groups[k]
+        calls = ", ".join(f"{c.op} of {c.worker}" for c in g)
+        if len(g) > MAX_OVERLAP:
+            shown = [(0, f"{len(g)} killed calls touch the same rows, too many to try each mix: {calls}")]
+        elif len(g) == 1:
+            # a lone call: what breaks if none of it is stored, and what if all of it is
+            shown = [(0, f"half-applied call {calls}, if none stored"), (1, f"half-applied call {calls}, if all stored")]
+        else:
+            nearest = min(range(len(tries)), key=lambda m: len(tries[m]))
+            stored = ", ".join(f"{c.op} of {c.worker}" for b, c in enumerate(g) if nearest >> b & 1) or "none"
+            shown = [(nearest, f"half-applied calls ({calls}), nearest mix stores: {stored}")]
+        for mix, why in shown:
+            for v in tries[mix]:
+                result.violations.append(Violation(v.invariant, v.table, v.row, f"{why}: {v.text}", ref=v.ref, key=v.key))
+    return result
 
 
 def connect(path_or_uri: str, uri: bool = False) -> sqlite3.Connection:

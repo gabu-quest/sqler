@@ -19,10 +19,14 @@ runs once more. ``--kill`` (process workloads) kills one writer process with SIG
 random moment 20 times in the run and starts another in its place.
 
 The exit status is 0 when no checker found a violation and no worker met an error a caller
-should never see; 1 otherwise, after the first violations and errors; 2 for a refused
-invocation; 130 after Ctrl-C with a clean check (the workers stop, the checker still runs).
-The last line is the summary. A failing seed is re-run with the same flags: the same seed gives
-every worker the same operations (the interleaving, and so the row ids, differ).
+should never see; 1 otherwise, after the first violations and errors, and 1 when ``--kill``
+was given and no process was killed (``kills=`` in the summary is the number made); 2 for a
+refused invocation (``--kill`` with ``--ops`` among them: kills are placed in time); 130 after
+Ctrl-C with a clean check (the workers stop, the checker still runs). Every worker writes each
+error to ``errors-<worker>.jsonl`` beside its journal before it goes on, so a killed process's
+errors are counted too. The last line is the summary. A failing seed is re-run with the same
+flags: the same seed gives every first-started worker the same operations (see ``soak_ops.py`` for
+where it does not).
 
 By default the first writes make the tables and one writer promotes ``stage`` of the promoted
 class while the others run (the database's own ``ensure_table``). ``--precreate`` makes every
@@ -70,6 +74,8 @@ from soak_ops import (  # noqa: E402
     Journal,
     Stats,
     Worker,
+    errors_path,
+    read_errors,
     run_async_worker,
     run_sync_worker,
 )
@@ -389,6 +395,7 @@ class Run:
         self.held: list = []  # messages read from ``events`` that no wait has taken yet
         self.procs: list[Proc] = []
         self.killed: list[str] = []
+        self.kills = 0
         self.dead_stats: list[dict] = []
         self.checks = 0
         self.report: Optional[dict] = None
@@ -618,7 +625,8 @@ class Run:
         victim.popen.send_signal(signal.SIGKILL)
         victim.popen.wait()
         victim.alive = False
-        self.dead_stats.append(victim.stats)
+        self.kills += 1
+        self.dead_stats.append(dead_stats(self.folder, victim.wids, victim.stats))
         self.killed.extend(victim.wids)
         fresh = self.spawn(victim.index, victim.kind, victim.gen + 1)
         self.procs[self.procs.index(victim)] = fresh
@@ -695,6 +703,21 @@ class Run:
             p.popen.wait(timeout=60)
 
 
+def dead_stats(folder: str, wids: list, polled: dict) -> dict:
+    """The stats of a killed process: its operations as last polled, and its errors as its
+    workers put them on disk (every one of them, also those met after the last poll)."""
+    stats = Stats()
+    stats.merge({**{"ops": 0, "conflicts": 0, "expected": {}, "errors": {}, "first": []}, **polled})
+    stats.errors = {}
+    stats.first = []
+    for wid in wids:
+        for item in read_errors(errors_path(os.path.join(folder, f"journal-{wid}.jsonl"))):
+            stats.errors[item["error"]] = stats.errors.get(item["error"], 0) + 1
+            if len(stats.first) < 20:
+                stats.first.append(item)
+    return stats.as_dict()
+
+
 def _is_soak_db(path: str) -> bool:
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -748,6 +771,8 @@ def parse(argv: list[str]) -> argparse.Namespace:
             ap.error(f"workload {n} needs --storage file: two processes cannot share an in-memory database")
     if args.kill and not any(WORKLOADS[n][2] for n in names):
         ap.error("--kill needs a process workload (procs2 or procs4)")
+    if args.kill and args.ops is not None:
+        ap.error("--kill needs --minutes: the kills are placed in the run's time, and an --ops run has none to place them in")
     args.names = names
     return args
 
@@ -804,7 +829,7 @@ def summarize(args: Any, root: str, results: dict, interrupted: bool, out: Any) 
         t = run.totals()
         total.merge(t.as_dict())
         checks += run.checks
-        kills += len({w.rsplit("w", 1)[0] for w in run.killed})
+        kills += run.kills
         for rep in run.reports:
             violations += rep.get("violations", 0)
             for line in rep.get("lines", []):
@@ -823,9 +848,12 @@ def summarize(args: Any, root: str, results: dict, interrupted: bool, out: Any) 
             f"ERROR {item['error']} worker={item['worker']} seed={item['seed']} op#{item['op_no']} "
             f"{item['op']}: {item['text']}"
         )
+    no_kills = bool(getattr(args, "kill", False)) and kills == 0 and not interrupted
+    if no_kills:
+        failed_lines.insert(0, "NO KILLS: --kill was given and no writer process was killed")
     for line in failed_lines[:40]:
         print(line, file=out)
-    ok = violations == 0 and errors == 0
+    ok = violations == 0 and errors == 0 and not no_kills
     verdict = "PASS" if ok else "FAIL"
     if interrupted:
         verdict += " (interrupted)"

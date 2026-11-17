@@ -14,14 +14,18 @@ the journals hold. References point only at rows of the same worker, so a delete
 effect on the referring rows is known to the worker that deletes.
 
 **The journal.** Before each operation the worker writes an ``intent`` line (the ids and new
-keys the call may touch); after the call returns, a ``done`` line with what it was told had
-been written. Both are flushed to the file at once. A killed worker leaves at most one
-``intent`` with no ``done``: the checker accepts the rows that intent names in either state.
+keys the call may touch, and ``fx``, everything the call writes when it goes through); after
+the call returns, a ``done`` line with what it was told had been written. Both are flushed to
+the file at once. A killed worker leaves at most one ``intent`` with no ``done``: the checker
+accepts that call wholly stored or not stored at all, nothing in between. Each error a worker
+meets goes to ``errors-<worker>.jsonl`` beside the journal, flushed, before it goes on.
 
 **The seed.** Each worker's generator is ``random.Random(f"{seed}/{worker id}")``, and its
 choices depend only on its own rows, so a seed gives the same operations per worker in every
-run. The interleaving of workers, and so the ids rows get and the conflicts the counters
-meet, differ from run to run.
+run, with two exceptions: a worker started in place of a killed one has a new id and so other
+operations, and in a timed run without ``--precreate`` the promotion comes at a time, not at
+an operation number. The interleaving of workers, and so the ids rows get and the conflicts
+the counters meet, differ from run to run.
 """
 
 from __future__ import annotations
@@ -135,14 +139,50 @@ class Journal:
     """One worker's journal: a JSON line per intent and per finished operation."""
 
     def __init__(self, path: str):
+        self.path = path
         self._f = open(path, "a", encoding="utf-8")
+        self._err: Optional[Any] = None
 
     def write(self, obj: dict) -> None:
         self._f.write(json.dumps(obj, separators=(",", ":")) + "\n")
         self._f.flush()
 
+    def error(self, item: dict) -> None:
+        """One error of the worker, as a line of ``errors-<worker>.jsonl`` beside the journal,
+        flushed to the file before this returns."""
+        if self._err is None:
+            self._err = open(errors_path(self.path), "a", encoding="utf-8")
+        self._err.write(json.dumps(item, separators=(",", ":")) + "\n")
+        self._err.flush()
+
     def close(self) -> None:
         self._f.close()
+        if self._err is not None:
+            self._err.close()
+
+
+def errors_path(journal_path: str) -> str:
+    """The errors file beside a journal: ``journal-W.jsonl`` -> ``errors-W.jsonl``."""
+    folder, name = os.path.split(journal_path)
+    return os.path.join(folder, "errors-" + name[len("journal-") :])
+
+
+def read_errors(path: str) -> list:
+    """The errors a worker put on disk. A last line its process was killed while writing is
+    an error too (its text is lost; the run must not pass over it)."""
+    out: list = []
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            try:
+                item = json.loads(raw) if raw.endswith("\n") else None
+            except json.JSONDecodeError:
+                item = None
+            if item is None:
+                item = {"worker": "?", "seed": "?", "op_no": "?", "op": "?", "error": "unreadable error line", "text": raw[:200]}
+            out.append(item)
+    return out
 
 
 @dataclass
@@ -237,6 +277,13 @@ class Worker:
             base["done"] = inst.done
         return base
 
+    def plan(self, name: str, inst: Any, audit: int = 0, **changed: Any) -> list:
+        """The ``put`` a call will journal for ``inst`` when it goes through, ``changed`` being
+        fields the call itself sets; a row not saved yet is named by its key."""
+        doc = {**self.doc(name, inst), **changed}
+        where = inst._id if inst._id is not None else {"key": inst.key}
+        return ["put", TABLE[name], where, doc, audit]
+
     def put(self, name: str, inst: Any, audit: int = 0) -> None:
         self.fx.append(["put", TABLE[name], inst._id, self.doc(name, inst), audit])
 
@@ -262,7 +309,7 @@ class Worker:
         if len(self.live[name]) > CAP:
             return (yield from self.op_delete_plain(name))
         inst = self.m[name](owner=self.wid, key=self.key(), n=self.rng.randrange(1000), note="new")
-        self.intent("new_plain", keys=[inst.key])
+        self.intent("new_plain", keys=[inst.key], fx=[self.plan(name, inst)])
         yield lambda: inst.save(db=self.db)
         self.live[name][inst._id] = inst
         self.put(name, inst)
@@ -275,7 +322,7 @@ class Worker:
         _id, inst = got
         inst.n += 1
         inst.note = f"c{self.rng.randrange(10**6)}"
-        self.intent("change_plain", ids=[[TABLE[name], _id]])
+        self.intent("change_plain", ids=[[TABLE[name], _id]], fx=[self.plan(name, inst)])
         yield lambda: inst.save(db=self.db)
         self.put(name, inst)
 
@@ -285,7 +332,7 @@ class Worker:
             self.m[name](owner=self.wid, key=self.key(), n=self.rng.randrange(1000), note="many")
             for _ in range(self.rng.randint(2, 5))
         ]
-        self.intent("many_plain", keys=[i.key for i in insts])
+        self.intent("many_plain", keys=[i.key for i in insts], fx=[self.plan(name, i) for i in insts])
         yield lambda: self.m[name].save_many(insts, db=self.db)
         for inst in insts:
             self.live[name][inst._id] = inst
@@ -297,7 +344,7 @@ class Worker:
         if got is None:
             return (yield from self.op_new_plain())
         _id, inst = got
-        self.intent("delete_plain", ids=[[TABLE[name], _id]])
+        self.intent("delete_plain", ids=[[TABLE[name], _id]], fx=[["del", TABLE[name], _id, 0]])
         yield lambda: inst.delete(db=self.db)
         del self.live[name][_id]
         self.fx.append(["del", TABLE[name], _id, 0])
@@ -311,7 +358,9 @@ class Worker:
         qs, insts = self.mine(name, ids)
         value = 10**6 + self.seq
         self.seq += 1
-        self.intent("qs_update_plain", ids=[[TABLE[name], i] for i in ids])
+        self.intent(
+            "qs_update_plain", ids=[[TABLE[name], i] for i in ids], fx=[self.plan(name, i, n=value) for i in insts]
+        )
         count = yield lambda: qs.update(n=value)
         for inst in insts:
             inst.n = value
@@ -325,7 +374,7 @@ class Worker:
             return (yield from self.op_new_plain())
         ids = self.rng.sample(ids, min(2, len(ids)))
         qs, _ = self.mine(name, ids)
-        self.intent("qs_delete_plain", ids=[[TABLE[name], i] for i in ids])
+        self.intent("qs_delete_plain", ids=[[TABLE[name], i] for i in ids], fx=[["del", TABLE[name], i, 0] for i in ids])
         count = yield lambda: qs.delete()
         for i in ids:
             del self.live[name][i]
@@ -337,7 +386,7 @@ class Worker:
         if len(self.live[name]) > CAP:
             return (yield from self.op_delete_safe(name))
         inst = self.m[name](owner=self.wid, key=self.key(), n=0, note="new")
-        self.intent("new_safe", keys=[inst.key])
+        self.intent("new_safe", keys=[inst.key], fx=[self.plan(name, inst)])
         yield lambda: inst.save(db=self.db)
         self.live[name][inst._id] = inst
         self.put(name, inst)
@@ -348,12 +397,14 @@ class Worker:
         if got is None:
             return (yield from self.op_new_safe())
         _id, inst = got
-        self.intent("partial_safe" if partial else "change_safe", ids=[[TABLE[name], _id]])
         if partial:
             inst.note = f"p{self.rng.randrange(10**6)}"
-            yield lambda: inst.save_partial(db=self.db)
         else:
             inst.n += 1
+        self.intent("partial_safe" if partial else "change_safe", ids=[[TABLE[name], _id]], fx=[self.plan(name, inst)])
+        if partial:
+            yield lambda: inst.save_partial(db=self.db)
+        else:
             yield lambda: inst.save(db=self.db)
         self.put(name, inst)
 
@@ -369,7 +420,9 @@ class Worker:
         qs, insts = self.mine(name, ids)
         value = 10**6 + self.seq
         self.seq += 1
-        self.intent("qs_update_safe", ids=[[TABLE[name], i] for i in ids])
+        self.intent(
+            "qs_update_safe", ids=[[TABLE[name], i] for i in ids], fx=[self.plan(name, i, n=value) for i in insts]
+        )
         count = yield lambda: qs.update(n=value)
         for inst in insts:
             inst.n = value
@@ -385,14 +438,14 @@ class Worker:
         if got is None:
             return (yield from self.op_new_safe())
         _id, inst = got
-        self.intent("delete_safe", ids=[[TABLE[name], _id]])
+        self.intent("delete_safe", ids=[[TABLE[name], _id]], fx=[["del", TABLE[name], _id, 0]])
         yield lambda: inst.delete(db=self.db)
         del self.live[name][_id]
         self.fx.append(["del", TABLE[name], _id, 0])
 
     def op_counter_inc(self):
         _id = self.rng.choice(self.counters)
-        self.intent("counter_inc", ids=[[TABLE["counter"], _id]])
+        self.intent("counter_inc", ids=[[TABLE["counter"], _id]], fx=[["inc", TABLE["counter"], _id]])
         for _ in range(COUNTER_TRIES):
             inst = yield lambda: self.m["counter"].from_id(_id, db=self.db)
             inst.count += 1
@@ -409,7 +462,7 @@ class Worker:
         if len(self.live["crew"]) > CAP // 2:
             return (yield from self.op_delete_crew())
         inst = self.m["crew"](owner=self.wid, key=self.key(), n=0)
-        self.intent("new_crew", keys=[inst.key])
+        self.intent("new_crew", keys=[inst.key], fx=[self.plan("crew", inst)])
         yield lambda: inst.save(db=self.db)
         self.live["crew"][inst._id] = inst
         self.put("crew", inst)
@@ -420,7 +473,7 @@ class Worker:
         got = self.pick("crew")
         crew = got[1] if got else None
         inst = self.m["job"](owner=self.wid, key=self.key(), n=0, crew=crew)
-        self.intent("new_job", keys=[inst.key])
+        self.intent("new_job", keys=[inst.key], fx=[self.plan("job", inst)])
         yield lambda: inst.save(db=self.db)
         self.live["job"][inst._id] = inst
         self.put("job", inst)
@@ -433,7 +486,7 @@ class Worker:
         crew = None if clear else self.pick("crew")
         inst.crew = None if crew is None else crew[1]
         inst.n += 1
-        self.intent("unlink_job" if clear else "relink_job", ids=[[TABLE["job"], _id]])
+        self.intent("unlink_job" if clear else "relink_job", ids=[[TABLE["job"], _id]], fx=[self.plan("job", inst)])
         yield lambda: inst.save(db=self.db)
         self.put("job", inst)
 
@@ -448,7 +501,16 @@ class Worker:
         policy = self.rng.choice(("restrict", "set_null", "cascade"))
         jobs = sorted(j for j, inst in self.live["job"].items() if inst.crew is not None and inst.crew._id == _id)
         ids = [[TABLE["crew"], _id]] + [[TABLE["job"], j] for j in jobs]
-        self.intent(f"delete_crew_{policy}", ids=ids)
+        if policy == "restrict" and jobs:
+            plan: list = []  # refused: the call writes nothing
+        else:
+            plan = [["del", TABLE["crew"], _id, 0]]
+            for j in jobs:
+                if policy == "cascade":
+                    plan.append(["del", TABLE["job"], j, 0])
+                else:
+                    plan.append(self.plan("job", self.live["job"][j], crew=None))
+        self.intent(f"delete_crew_{policy}", ids=ids, fx=plan)
         if policy == "restrict" and jobs:
             try:
                 yield lambda: crew.delete_with_policy(db=self.db, on_delete="restrict")
@@ -478,7 +540,7 @@ class Worker:
             stage=self.rng.choice("abc"),
             n=0,
         )
-        self.intent("new_promo", keys=[inst.key])
+        self.intent("new_promo", keys=[inst.key], fx=[self.plan("promo", inst)])
         yield lambda: inst.save(db=self.db)
         self.live["promo"][inst._id] = inst
         self.put("promo", inst)
@@ -491,7 +553,7 @@ class Worker:
         inst.prio = self.rng.randrange(10)
         inst.stage = self.rng.choice("abcd")
         inst.n += 1
-        self.intent("change_promo", ids=[[TABLE["promo"], _id]])
+        self.intent("change_promo", ids=[[TABLE["promo"], _id]], fx=[self.plan("promo", inst)])
         yield lambda: inst.save(db=self.db)
         self.put("promo", inst)
 
@@ -500,14 +562,14 @@ class Worker:
         if got is None:
             return (yield from self.op_new_promo())
         _id, inst = got
-        self.intent("delete_promo", ids=[[TABLE["promo"], _id]])
+        self.intent("delete_promo", ids=[[TABLE["promo"], _id]], fx=[["del", TABLE["promo"], _id, 0]])
         yield lambda: inst.delete(db=self.db)
         del self.live["promo"][_id]
         self.fx.append(["del", TABLE["promo"], _id, 0])
 
     def op_promote(self):
         """Promote ``stage`` through the database's own call while the others write."""
-        self.intent("promote")
+        self.intent("promote", fx=[["promote", TABLE["promo"], "stage"]])
         yield lambda: self.db.ensure_table(TABLE["promo"], promoted=PROMOTED_LATER)
         self.fx.append(["promote", TABLE["promo"], "stage"])
 
@@ -515,7 +577,7 @@ class Worker:
         if len(self.live["audit"]) > CAP:
             return (yield from self.op_delete_audit())
         inst = self.m["audit"](owner=self.wid, key=self.key(), n=0)
-        self.intent("new_audit", keys=[inst.key])
+        self.intent("new_audit", keys=[inst.key], fx=[self.plan("audit", inst, audit=1)])
         yield lambda: inst.save(db=self.db)
         self.live["audit"][inst._id] = inst
         self.put("audit", inst, audit=1)
@@ -526,7 +588,7 @@ class Worker:
             return (yield from self.op_new_audit())
         _id, inst = got
         inst.n += 1  # every audited write changes the document: one audit row each
-        self.intent("change_audit", ids=[[TABLE["audit"], _id]])
+        self.intent("change_audit", ids=[[TABLE["audit"], _id]], fx=[self.plan("audit", inst, audit=1)])
         yield lambda: inst.save(db=self.db)
         self.put("audit", inst, audit=1)
 
@@ -538,7 +600,12 @@ class Worker:
         qs, insts = self.mine("audit", ids)
         value = 10**6 + self.seq
         self.seq += 1
-        self.intent("qs_update_audit", ids=[[TABLE["audit"], i] for i in ids])
+        # an update writes an audit row only where the stored document changed
+        self.intent(
+            "qs_update_audit",
+            ids=[[TABLE["audit"], i] for i in ids],
+            fx=[self.plan("audit", i, audit=1 if i.n != value else 0, n=value) for i in insts],
+        )
         count = yield lambda: qs.update(n=value)
         for inst in insts:
             # an update writes an audit row only where the stored document changed
@@ -552,7 +619,7 @@ class Worker:
         if got is None:
             return (yield from self.op_new_audit())
         _id, inst = got
-        self.intent("delete_audit", ids=[[TABLE["audit"], _id]])
+        self.intent("delete_audit", ids=[[TABLE["audit"], _id]], fx=[["del", TABLE["audit"], _id, 1]])
         yield lambda: inst.delete(db=self.db)
         del self.live["audit"][_id]
         self.fx.append(["del", TABLE["audit"], _id, 1])
@@ -563,7 +630,7 @@ class Worker:
             return (yield from self.op_delete_search(name))
         key = self.key()
         inst = self.m[name](owner=self.wid, key=key, n=0, body=self.body(key, 0))
-        self.intent("new_search", keys=[key])
+        self.intent("new_search", keys=[key], fx=[self.plan(name, inst)])
         yield lambda: inst.save(db=self.db)
         self.live[name][inst._id] = inst
         self.put(name, inst)
@@ -576,7 +643,7 @@ class Worker:
         _id, inst = got
         inst.n += 1
         inst.body = self.body(inst.key, inst.n)
-        self.intent("change_search", ids=[[TABLE[name], _id]])
+        self.intent("change_search", ids=[[TABLE[name], _id]], fx=[self.plan(name, inst)])
         yield lambda: inst.save(db=self.db)
         self.put(name, inst)
 
@@ -586,7 +653,7 @@ class Worker:
         if got is None:
             return (yield from self.op_new_search())
         _id, inst = got
-        self.intent("delete_search", ids=[[TABLE[name], _id]])
+        self.intent("delete_search", ids=[[TABLE[name], _id]], fx=[["del", TABLE[name], _id, 0]])
         yield lambda: inst.delete(db=self.db)
         del self.live[name][_id]
         self.fx.append(["del", TABLE[name], _id, 0])
@@ -597,7 +664,7 @@ class Worker:
         for _ in range(self.rng.randint(2, 4)):
             key = self.key()
             insts.append(self.m["search_s"](owner=self.wid, key=key, n=0, body=self.body(key, 0)))
-        self.intent("many_search_s", keys=[i.key for i in insts])
+        self.intent("many_search_s", keys=[i.key for i in insts], fx=[self.plan("search_s", i) for i in insts])
         yield lambda: self.m["search_s"].save_many(insts, db=self.db)
         for inst in insts:
             self.live["search_s"][inst._id] = inst
@@ -609,7 +676,9 @@ class Worker:
             return (yield from self.op_new_search())
         ids = self.rng.sample(ids, min(2, len(ids)))
         qs, _ = self.mine("search_s", ids)
-        self.intent("qs_delete_search_s", ids=[[TABLE["search_s"], i] for i in ids])
+        self.intent(
+            "qs_delete_search_s", ids=[[TABLE["search_s"], i] for i in ids], fx=[["del", TABLE["search_s"], i, 0] for i in ids]
+        )
         count = yield lambda: qs.delete()
         for i in ids:
             del self.live["search_s"][i]
@@ -619,7 +688,7 @@ class Worker:
     def op_txn_commit(self):
         a = self.m["plain_p"](owner=self.wid, key=self.key(), n=1, note="txn")
         b = self.m["audit"](owner=self.wid, key=self.key(), n=1)
-        self.intent("txn_commit", keys=[a.key, b.key])
+        self.intent("txn_commit", keys=[a.key, b.key], fx=[self.plan("plain_p", a), self.plan("audit", b, audit=1)])
         cm = self.db.transaction()
         yield Enter(cm)
         try:
@@ -639,7 +708,8 @@ class Worker:
         b = self.m["audit"](owner=self.wid, key=self.key(), n=2)
         ck = self.key()
         c = self.m["search_s"](owner=self.wid, key=ck, n=0, body=self.body(ck, 0))
-        self.intent("txn_rollback", keys=[a.key, b.key, c.key])
+        ghosts = [["ghost", TABLE["plain_p"], a.key], ["ghost", TABLE["audit"], b.key], ["ghost", TABLE["search_s"], ck, f"{ck}v0"]]
+        self.intent("txn_rollback", keys=[a.key, b.key, c.key], fx=ghosts)
         cm = self.db.transaction()
         yield Enter(cm)
         try:
@@ -652,16 +722,14 @@ class Worker:
         except BaseException as exc:
             yield Exit(cm, exc)
             raise
-        self.fx.append(["ghost", TABLE["plain_p"], a.key])
-        self.fx.append(["ghost", TABLE["audit"], b.key])
-        self.fx.append(["ghost", TABLE["search_s"], c.key, f"{ck}v0"])
+        self.fx.extend(ghosts)
         self.expected("Rollback(deliberate)")
 
     def op_new_task(self):
         if len(self.live["task"]) > CAP:
             return (yield from self.op_archive())
         inst = self.m["task"](owner=self.wid, key=self.key(), done=False, n=0)
-        self.intent("new_task", keys=[inst.key])
+        self.intent("new_task", keys=[inst.key], fx=[self.plan("task", inst)])
         yield lambda: inst.save(db=self.db)
         self.live["task"][inst._id] = inst
         self.put("task", inst)
@@ -674,7 +742,7 @@ class Worker:
         inst = self.live["task"][_id]
         inst.done = True
         inst.n += 1
-        self.intent("done_task", ids=[[TABLE["task"], _id]])
+        self.intent("done_task", ids=[[TABLE["task"], _id]], fx=[self.plan("task", inst)])
         yield lambda: inst.save(db=self.db)
         self.done_tasks.add(_id)
         self.put("task", inst)
@@ -685,7 +753,11 @@ class Worker:
         if not ids:
             return (yield from self.op_done_task())
         qs = self.m["task"].using(self.db).filter((F("owner") == self.wid) & (F("done") == True))  # noqa: E712
-        self.intent("archive", ids=[[TABLE["task"], i] for i in ids] + [[ARCHIVE, i] for i in ids])
+        self.intent(
+            "archive",
+            ids=[[TABLE["task"], i] for i in ids] + [[ARCHIVE, i] for i in ids],
+            fx=[["arch", TABLE["task"], ARCHIVE, i, self.doc("task", self.live["task"][i])] for i in ids],
+        )
         cm = self.db.transaction()
         yield Enter(cm)
         try:
@@ -718,18 +790,23 @@ class Worker:
 
     # ---- bookkeeping ----
 
-    def intent(self, op: str, ids: Any = (), keys: Any = ()) -> None:
-        self.journal.write({"i": self.opno, "intent": op, "ids": list(ids), "keys": list(keys)})
+    def intent(self, op: str, ids: Any = (), keys: Any = (), fx: Any = ()) -> None:
+        """Journal, before the call, the rows it may touch and ``fx``: everything it writes
+        when it goes through (a new row by its key, its id being unknown yet). The checker holds
+        a killed worker's unfinished call to all of ``fx`` or none of it."""
+        self.journal.write({"i": self.opno, "intent": op, "ids": list(ids), "keys": list(keys), "fx": list(fx)})
 
     def expected(self, kind: str) -> None:
         self.stats.expected[kind] = self.stats.expected.get(kind, 0) + 1
 
     def error(self, kind: str, text: str, op: str = "") -> None:
+        """Count an error, and put it on disk beside the journal before the worker goes on: a
+        process killed before the parent asks for its stats still leaves its errors."""
+        item = {"worker": self.wid, "seed": self.seed, "op_no": self.opno, "op": op, "error": kind, "text": text}
+        self.journal.error(item)
         self.stats.errors[kind] = self.stats.errors.get(kind, 0) + 1
         if len(self.stats.first) < 20:
-            self.stats.first.append(
-                {"worker": self.wid, "seed": self.seed, "op_no": self.opno, "op": op, "error": kind, "text": text}
-            )
+            self.stats.first.append(item)
 
     def expect_count(self, what: str, got: Any, want: int) -> None:
         if got != want:
@@ -757,9 +834,10 @@ class Worker:
         return name, op()
 
     def finish(self, name: str, exc: Optional[BaseException], seconds: float = 0.0) -> None:
-        """Journal what the operation was told had been written, and count the error."""
-        self.journal.write({"i": self.opno, "done": name, "fx": self.fx})
-        self.stats.ops += 1
+        """Journal what the operation was told had been written, and count the error.
+
+        The error is on disk before the done line: a worker killed between the two writes
+        keeps its error, and its call stays in flight for the checker."""
         if exc is not None:
             kind = type(exc).__name__
             if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc):
@@ -777,6 +855,9 @@ class Worker:
             ][-4:]
             where = f" after {seconds:.3f}s in the operation; at {' < '.join(reversed(frames))}"
             self.error(kind, text[:400] + where, op=name)
+        self.journal.write({"i": self.opno, "done": name, "fx": self.fx})
+        self.stats.ops += 1
+        if exc is not None:
             self.resync_after_error()
 
     def resync_after_error(self) -> None:
