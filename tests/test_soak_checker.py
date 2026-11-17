@@ -480,7 +480,7 @@ def test_two_killed_increments_of_one_counter_pass_only_as_whole_increments(copi
 # ---- a killed process's errors, and kills that did not happen
 
 import soak  # noqa: E402
-from soak_ops import Journal, Stats, Worker, errors_path, read_errors  # noqa: E402
+from soak_ops import Journal, Stats, Worker, drive_sync, errors_path, read_errors  # noqa: E402
 
 
 def _summary(stats, kill=True, kills=1):
@@ -529,6 +529,42 @@ def test_a_run_asked_to_kill_that_killed_nothing_fails():
     code, lines = _summary(Stats(), kill=True, kills=3)
     assert code == 0
     assert lines[-1].startswith("SOAK PASS ") and " kills=3 " in lines[-1]
+
+
+class _SameDraw:
+    """A worker's generator that always draws the first choice and the number 5: two partial
+    saves in a row then set ``note`` to ``"p5"`` twice."""
+
+    def choice(self, seq):
+        return seq[0]
+
+    def randrange(self, n):
+        return 5
+
+
+def test_a_partial_save_that_draws_the_note_the_row_has_is_not_counted_as_a_write(copied):
+    """A ``partial_safe`` that draws the note the row already has: ``save_partial()`` with no
+    changed field sends nothing, so ``_version`` does not move; the journal must not count that
+    call as a write."""
+    folder, _ = copied
+    models, db = _sqler_db(folder)
+    journal = Journal(str(folder / "journal-t9.jsonl"))
+    w = Worker("t9", 1, models.MODELS, db, journal, Stats(), [])
+    w.rng = _SameDraw()
+    for name, op in [("new_safe", w.op_new_safe), ("partial_safe", w.op_partial_safe), ("partial_safe", w.op_partial_safe)]:
+        w.opno += 1
+        w.fx = []
+        drive_sync(op())
+        w.finish(name, None)
+    journal.close()
+    (row_id,) = w.live["safe_p"]
+    db.close()
+    conn = sqlite3.connect(folder / "soak.db")
+    (version,) = conn.execute("SELECT _version FROM soak_safe_p WHERE _id = ?", [row_id]).fetchone()
+    conn.close()
+    assert version == 1  # the insert and one partial save that changed the note
+    report = _check(folder)
+    assert [v.line() for v in report.violations] == []
 
 
 def test_kill_with_ops_is_refused(capsys):
