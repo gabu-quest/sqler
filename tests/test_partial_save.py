@@ -733,21 +733,15 @@ def test_a_cached_read_after_a_partial_save_returns_the_new_value(db):
     assert read() == "new"
 
 
-class PsManualArticle(SearchableMixin, PartialUpdateMixin, TrackedModel, SQLerModel):
-    __tablename__ = "ps_manual_articles"
-    title: str = ""
-    body: str = ""
-
-
 class PsSyncedArticle(SearchableMixin, PartialUpdateMixin, TrackedModel, SQLerModel):
     __tablename__ = "ps_synced_articles"
     title: str = ""
     body: str = ""
 
 
-@pytest.mark.parametrize("cls,content_sync", [(PsManualArticle, False), (PsSyncedArticle, True)])
-def test_the_search_index_finds_the_text_of_a_partial_save(db, cls, content_sync):
-    cls._fts_index = FTSIndex(cls, ["title", "body"], db=db, content_sync=content_sync)
+def test_the_search_index_finds_the_text_of_a_partial_save(db):
+    cls = PsSyncedArticle
+    cls._fts_index = FTSIndex(cls, ["title", "body"], db=db)
     cls._fts_index.create(db)
     try:
         m = cls(title="t", body="apple").save(db=db)

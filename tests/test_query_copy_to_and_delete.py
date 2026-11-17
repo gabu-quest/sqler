@@ -663,7 +663,7 @@ def _run_sync_seed(cls, db) -> None:
         cls(n=n, done=n % 2 == 0, tag=f"t{n}").save(db=db)
 
 
-def test_a_content_sync_search_index_on_the_target_finds_the_copy():
+def test_a_search_index_on_the_target_finds_the_copy():
     db = SQLerDB.in_memory(shared=False)
     try:
         cls = _job("pydantic")
@@ -674,25 +674,6 @@ def test_a_content_sync_search_index_on_the_target_finds_the_copy():
         cls.using(db).filter(F("done") == True).copy_to("ct_search_archive")  # noqa: E712
         found = FTSIndex(archive_cls, ["tag"], db=db).search("t2")
         assert [(m._id, m.tag) for m in found] == [(3, "t2")]
-    finally:
-        db.close()
-
-
-def test_a_content_sync_false_search_index_on_the_target_does_not_see_the_copy():
-    """Without content_sync only ``index()``, ``remove()`` and ``rebuild()`` change the index,
-    as for a queryset's ``update()``; ``rebuild()`` brings the copy in."""
-    db = SQLerDB.in_memory(shared=False)
-    try:
-        cls = _job("pydantic")
-        archive_cls = _job("pydantic", table="ct_search_archive")
-        db.ensure_table("ct_search_archive")
-        index = FTSIndex(archive_cls, ["tag"], db=db, content_sync=False)
-        index.create()
-        _run_sync_seed(cls, db)
-        cls.using(db).filter(F("done") == True).copy_to("ct_search_archive")  # noqa: E712
-        before = index.search("t2")
-        index.rebuild()
-        assert ([m._id for m in before], [m._id for m in index.search("t2")]) == ([], [3])
     finally:
         db.close()
 

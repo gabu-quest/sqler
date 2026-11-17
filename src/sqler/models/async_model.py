@@ -342,9 +342,8 @@ class AsyncSQLerModel(BaseModel):
         Uses multi-row INSERT for significantly better throughput than
         calling ``save()`` in a loop. Only supports new (unsaved) instances.
         Each instance meets the rules of its class as ``save()`` does: hooks,
-        timestamps, audit rows and the entries of a search index kept by hand
-        (``content_sync=False``) (see the mixins); with an audit log or such an
-        index the batch, its audit rows and its entries are one transaction.
+        timestamps and audit rows (see the mixins); with an audit log the batch and
+        its audit rows are one transaction.
 
         Args:
             instances: List of model instances with ``_id is None``.

@@ -547,7 +547,7 @@ def test_a_waiter_whose_adapter_is_closed_while_it_waits_ends_with_an_error(paus
 #
 # Python's implicit transaction before a write was a plain BEGIN, which takes no lock. When the
 # write itself read first (a statement prepared again after the connection's own schema reset
-# connects the FTS5 table of a trigger, or of the index kept by hand, and reads its config), the
+# connects the FTS5 table of a trigger, and reads its config), the
 # read transaction had to become a write one, and SQLite answers that with "database is locked"
 # at once, without the wait. The adapter's implicit transaction is BEGIN IMMEDIATE.
 
@@ -556,7 +556,7 @@ class _RolledBack(Exception):
     pass
 
 
-def _search_classes(path: str, content_sync: bool):
+def _search_classes(path: str):
     from sqler import FTSIndex, SearchableMixin, SQLerModel
 
     tag = uuid.uuid4().hex[:8]
@@ -570,7 +570,7 @@ def _search_classes(path: str, content_sync: bool):
         n: int = 0
 
     db = SQLerDB.on_disk(path)  # waits 5 s for a lock
-    Note._fts_index = FTSIndex(Note, ["body"], content_sync=content_sync, db=db)
+    Note._fts_index = FTSIndex(Note, ["body"], db=db)
     Note._fts_index.create(db)
     return db, Note, Fresh
 
@@ -605,12 +605,11 @@ def _held_for(path: str, seconds: float) -> tuple[threading.Event, threading.Thr
 
 
 @pytest.mark.parametrize("between", ["nothing", "a read"])
-@pytest.mark.parametrize("content_sync", [True, False], ids=["content_sync", "kept-by-hand"])
 def test_a_search_save_after_the_connections_own_schema_reset_waits_for_the_lock(
-    content_sync, between, tmp_path, clock_tick
+    between, tmp_path, clock_tick
 ):
     path = str(tmp_path / "search-wait.db")
-    db, Note, Fresh = _search_classes(path, content_sync)
+    db, Note, Fresh = _search_classes(path)
     try:
         Note(body="first").save(db=db)  # its statements are prepared and cached
         _reset_own_schema(db, Fresh)
@@ -630,36 +629,28 @@ def test_a_search_save_after_the_connections_own_schema_reset_waits_for_the_lock
 
 def test_eight_threads_saving_search_rows_beside_first_saves_of_a_new_class_never_fail(tmp_path):
     path = str(tmp_path / "search-threads.db")
-    db, Note, Fresh = _search_classes(path, True)
-    from sqler import FTSIndex, SearchableMixin, SQLerModel
-
-    class Kept(SearchableMixin, SQLerModel):
-        __tablename__ = f"kept_{uuid.uuid4().hex[:8]}"
-        body: str = ""
-
-    Kept._fts_index = FTSIndex(Kept, ["body"], content_sync=False, db=db)
-    Kept._fts_index.create(db)
+    db, Note, Fresh = _search_classes(path)
     stop = time.monotonic() + 1.0
     errors: list[str] = []
     saved = [0] * 8
 
-    def worker(i: int, cls) -> None:
+    def worker(i: int) -> None:
         while time.monotonic() < stop:
             try:
                 _reset_own_schema(db, Fresh)
-                cls(body="hello").save(db=db)
+                Note(body="hello").save(db=db)
                 saved[i] += 1
             except sqlite3.OperationalError as exc:
-                errors.append(f"{cls.__name__}: {exc}")
+                errors.append(str(exc))
 
-    threads = [threading.Thread(target=worker, args=(i, (Note, Kept)[i % 2])) for i in range(8)]
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
     try:
         for t in threads:
             t.start()
         for t in threads:
             t.join(30)
-        counts = [Note.search_count("hello", db=db), Kept.search_count("hello", db=db)]
+        count = Note.search_count("hello", db=db)
     finally:
         db.close()
     assert errors == []
-    assert counts == [sum(saved[0::2]), sum(saved[1::2])]
+    assert count == sum(saved)

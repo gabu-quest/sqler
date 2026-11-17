@@ -10,7 +10,7 @@ from typing import Any, Optional
 from sqler.exceptions import SchemaError
 from sqler.utils import validate_identifier
 
-# The triggers that keep a content_sync index equal to its table: name suffix -> event.
+# The triggers that keep a search index equal to its table: name suffix -> event.
 _SYNC_TRIGGERS = {"ai": "INSERT", "au": "UPDATE", "ad": "DELETE"}
 
 # The arguments of a stored ``fts5(...)``: runs of anything but a comma, a quoted run whole.
@@ -48,7 +48,7 @@ def _stored_definition(sql: Optional[str]) -> Optional[tuple[list[str], str, lis
     return columns, tokenizer, other
 
 
-# ---- the statements of a content_sync index, from its names and its table's promoted columns ----
+# ---- the statements of a search index, from its names and its table's promoted columns ----
 
 
 def _values_sql(fields: list[str], promoted: Any, row: str) -> list[str]:
@@ -65,7 +65,7 @@ def _fill_sql(idx: str, fields: list[str], promoted: Any, row: str) -> str:
 
 
 def _trigger_sql(idx: str, table: str, fields: list[str], promoted: Any) -> dict[str, str]:
-    """The statement of each trigger of a content_sync index, as SQLite stores it.
+    """The statement of each trigger of a search index, as SQLite stores it.
 
     Every name in it is checked by the caller: the fields, the index name and the table. The
     update trigger fires only when the row id or the stored value of an indexed field changed,
@@ -97,7 +97,7 @@ def _trigger_sql(idx: str, table: str, fields: list[str], promoted: Any) -> dict
 
 def _follow_promotion(table: str, moved: list[str], promoted: list[str]) -> Any:
     """After the values of ``moved`` left the documents of ``table`` for their columns: each
-    content_sync index on ``table`` with a field among them gets the triggers that read those
+    search index on ``table`` with a field among them gets the triggers that read those
     fields from their columns, and is filled again from the table. ``promoted``: every promoted
     column of the table now.
 
@@ -142,10 +142,8 @@ def _plain_query(text: str) -> str:
     return " ".join('"' + run.replace('"', '""') + '"' for run in runs) or '""'
 
 
-# Whether the model's table exists (``rebuild()``), and whether a database has a table of
-# this index's name (the mixin's ``content_sync=False`` step in another database).
+# Whether the model's table exists (``rebuild()``).
 _HAS_TABLE_SQL = "SELECT name FROM sqlite_master WHERE type='table' AND name=?;"
-_HAS_INDEX_TABLE_SQL = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?);"
 
 
 def _drop_trigger_sql(name: str) -> str:

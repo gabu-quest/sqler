@@ -76,7 +76,7 @@ INVARIANTS = (
     "integrity_check",
     "foreign_key_check",
 )
-SEARCH = {TABLE["search_s"]: "soak_search_s_fts", TABLE["search_m"]: "soak_search_m_fts"}
+SEARCH = {TABLE["search_s"]: "soak_search_s_fts"}
 AUDIT_TABLE = f"{TABLE['audit']}_audit"
 PROMO = TABLE["promo"]
 

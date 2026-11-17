@@ -61,10 +61,10 @@ def test_the_soak_passes_and_says_so_in_its_last_line(soaked):
 # workload), in the order of ``soak_check.INVARIANTS``. Counted from that run; any change to
 # the operations or their weights changes them.
 CHECKED = {
-    "threads": dict(zip(soak_check.INVARIANTS, [253, 253, 58, 253, 33, 4, 30, 6, 39, 38, 1, 26, 14, 2, 56, 2, 1, 1])),
-    "tasks": dict(zip(soak_check.INVARIANTS, [260, 260, 69, 260, 29, 4, 37, 3, 31, 30, 1, 15, 16, 2, 48, 3, 1, 1])),
-    "procs2": dict(zip(soak_check.INVARIANTS, [297, 297, 48, 297, 37, 4, 35, 5, 45, 44, 1, 35, 12, 2, 60, 2, 1, 1])),
-    "procs4": dict(zip(soak_check.INVARIANTS, [269, 269, 53, 269, 26, 4, 33, 6, 51, 50, 1, 33, 11, 2, 56, 1, 1, 1])),
+    "threads": dict(zip(soak_check.INVARIANTS, [268, 268, 49, 268, 32, 4, 32, 10, 41, 40, 1, 29, 16, 1, 68, 2, 1, 1])),
+    "tasks": dict(zip(soak_check.INVARIANTS, [252, 252, 70, 252, 31, 4, 31, 1, 17, 16, 1, 19, 17, 1, 36, 4, 1, 1])),
+    "procs2": dict(zip(soak_check.INVARIANTS, [288, 288, 40, 288, 33, 4, 34, 8, 37, 36, 1, 38, 7, 1, 68, 2, 1, 1])),
+    "procs4": dict(zip(soak_check.INVARIANTS, [244, 244, 52, 244, 28, 4, 29, 8, 35, 34, 1, 25, 15, 1, 60, 2, 1, 1])),
 }
 
 
@@ -205,9 +205,9 @@ def d_search_missing(conn, exp):
 
 
 def d_search_deleted(conn, exp):
-    i = _gone(exp, "soak_search_m")
-    conn.execute("INSERT INTO soak_search_m_fts (rowid, body) VALUES (?, 'soak gonev0 common')", [i])
-    return "search_deleted", "soak_search_m_fts", i
+    i = _gone(exp, "soak_search_s")
+    conn.execute("INSERT INTO soak_search_s_fts (rowid, body) VALUES (?, 'soak gonev0 common')", [i])
+    return "search_deleted", "soak_search_s_fts", i
 
 
 def d_search_integrity(conn, exp):

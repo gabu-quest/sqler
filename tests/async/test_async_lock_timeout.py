@@ -742,7 +742,7 @@ class _RolledBack(Exception):
     pass
 
 
-async def _search_classes(path: str, content_sync: bool, one_connection: bool = False):
+async def _search_classes(path: str, one_connection: bool = False):
     from sqler import AsyncFTSIndex, AsyncSearchableMixin, AsyncSQLerModel
 
     tag = uuid.uuid4().hex[:8]
@@ -759,7 +759,7 @@ async def _search_classes(path: str, content_sync: bool, one_connection: bool = 
     if one_connection:  # the pool of one: the reset and the save meet the same connection
         db = AsyncSQLerDB(AsyncSQLiteAdapter(path, pragmas=db.adapter.pragmas, pool_size=1))
     await db.connect()
-    Note._fts_index = AsyncFTSIndex(Note, ["body"], content_sync=content_sync, db=db)
+    Note._fts_index = AsyncFTSIndex(Note, ["body"], db=db)
     await Note._fts_index.create(db)
     return db, Note, Fresh
 
@@ -794,12 +794,11 @@ def _held_for(path: str, seconds: float) -> tuple[threading.Event, threading.Thr
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("between", ["nothing", "a read"])
-@pytest.mark.parametrize("content_sync", [True, False], ids=["content_sync", "kept-by-hand"])
 async def test_a_search_save_after_the_connections_own_schema_reset_waits_for_the_lock(
-    content_sync, between, tmp_path, clock_tick
+    between, tmp_path, clock_tick
 ):
     path = str(tmp_path / "search-wait.db")
-    db, Note, Fresh = await _search_classes(path, content_sync, one_connection=True)
+    db, Note, Fresh = await _search_classes(path, one_connection=True)
     try:
         await Note(body="first").save(db=db)  # its statements are prepared and cached
         await _reset_own_schema(db, Fresh)
@@ -819,34 +818,27 @@ async def test_a_search_save_after_the_connections_own_schema_reset_waits_for_th
 
 @pytest.mark.asyncio
 async def test_eight_tasks_saving_search_rows_beside_first_saves_of_a_new_class_never_fail(tmp_path):
-    from sqler import AsyncFTSIndex, AsyncSearchableMixin, AsyncSQLerModel
 
     path = str(tmp_path / "search-tasks.db")
-    db, Note, Fresh = await _search_classes(path, True)
+    db, Note, Fresh = await _search_classes(path)
 
-    class Kept(AsyncSearchableMixin, AsyncSQLerModel):
-        __tablename__ = f"kept_{uuid.uuid4().hex[:8]}"
-        body: str = ""
-
-    Kept._fts_index = AsyncFTSIndex(Kept, ["body"], content_sync=False, db=db)
-    await Kept._fts_index.create(db)
     stop = time.monotonic() + 1.0
     errors: list[str] = []
     saved = [0] * 8
 
-    async def worker(i: int, cls) -> None:
+    async def worker(i: int) -> None:
         while time.monotonic() < stop:
             try:
                 await _reset_own_schema(db, Fresh)
-                await cls(body="hello").save(db=db)
+                await Note(body="hello").save(db=db)
                 saved[i] += 1
             except sqlite3.OperationalError as exc:
-                errors.append(f"{cls.__name__}: {exc}")
+                errors.append(str(exc))
 
     try:
-        await asyncio.gather(*(worker(i, (Note, Kept)[i % 2]) for i in range(8)))
-        counts = [await Note.search_count("hello", db=db), await Kept.search_count("hello", db=db)]
+        await asyncio.gather(*(worker(i) for i in range(8)))
+        count = await Note.search_count("hello", db=db)
     finally:
         await db.close()
     assert errors == []
-    assert counts == [sum(saved[0::2]), sum(saved[1::2])]
+    assert count == sum(saved)
