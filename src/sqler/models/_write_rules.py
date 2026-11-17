@@ -16,12 +16,13 @@ a rule derives from :class:`WriteRules` and adds its part cooperatively:
   ``"delete"``, ``before`` is the stored document before (``None`` for a create) and
   ``after`` the one written (``None`` for a delete).
 * ``_row_kept()`` / ``_arow_kept()``, for a class whose ``_keeps_row()`` is true (the search
-  mixin with an index kept by hand): told, inside the write's transaction, of the one row a
-  ``save()`` wrote or a ``delete()`` deleted, by id; it needs no document before or after.
+  mixin with an index kept by hand): told, inside the write's transaction, of the rows a write
+  wrote or deleted, by id; it needs no document before or after.
 
 The set-based ways (a queryset's ``update()``, ``update_one()``, ``update_n()`` and
-``delete_all()``) and the rows a delete's policy nulls or deletes come here too: they stamp and
-are told of their rows as an instance write is, and they call no hook (no instance exists).
+``delete_all()``) come here too: they stamp, are told of their rows and keep their rows as an
+instance write is. The rows a delete's policy nulls or deletes stamp and are told of their
+rows; they keep no row by ``_row_kept``.
 
 A class with no such mixin pays one ``isinstance`` test per write and no statement.
 """
@@ -69,17 +70,18 @@ class WriteRules:
 
     @classmethod
     def _keeps_row(cls) -> bool:
-        """Whether ``save()`` and ``delete()`` of an instance tell ``_row_kept``, which makes
-        the write and what it writes one unit."""
+        """Whether every write of the class's rows (``save()``, ``delete()``, ``save_many()``
+        and the set-based ways) tells ``_row_kept``, which makes the write and what it writes
+        one unit."""
         return False
 
     @classmethod
-    def _row_kept(cls, db, table: str, _id: Any, deleted: bool) -> None:
-        """Called inside the write's transaction with the row ``_id`` of ``table`` that a
-        ``save()`` wrote (``deleted`` false) or a ``delete()`` deleted."""
+    def _row_kept(cls, db, table: str, ids: list, deleted: bool) -> None:
+        """Called inside the write's transaction with the rows ``ids`` of ``table`` that a
+        write wrote (``deleted`` false) or deleted; never with no id."""
 
     @classmethod
-    async def _arow_kept(cls, db, table: str, _id: Any, deleted: bool) -> None:
+    async def _arow_kept(cls, db, table: str, ids: list, deleted: bool) -> None:
         """Async twin of ``_row_kept``."""
 
 
@@ -187,7 +189,7 @@ def save(inst, db, table: str, partial: bool, write: Callable[[], Any]):
                 action = "create" if row_id is None else "update"
                 after = _written(db, table, inst, partial)
                 inst._rows_written(db, table, [(action, written_id, before, after)])
-            inst._row_kept(db, table, written_id, False)
+            inst._row_kept(db, table, [written_id], False)
             return result
     except BaseException:
         _restore_identity(inst, kept)
@@ -221,7 +223,7 @@ async def asave(inst, db, table: str, partial: bool, write):
                 action = "create" if row_id is None else "update"
                 after = await _awritten(db, table, inst, partial)
                 await inst._arows_written(db, table, [(action, written_id, before, after)])
-            await inst._arow_kept(db, table, written_id, False)
+            await inst._arow_kept(db, table, [written_id], False)
             return result
     except BaseException:
         _restore_identity(inst, kept)
@@ -230,8 +232,8 @@ async def asave(inst, db, table: str, partial: bool, write):
 
 def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]) -> list:
     """``save_many()``: stamp each instance, then ``insert(db, table, instances)`` them in
-    one batch; with row rules, in one transaction with them, and a failure puts every
-    instance's identity back."""
+    one batch; with row rules or rows kept (``_keeps_row``), in one transaction with them,
+    and a failure puts every instance's identity back."""
     if not instances:
         _check_given(cls, db)
         return instances
@@ -241,7 +243,8 @@ def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]
     if rules:
         for inst in instances:
             inst._stamp()
-    if not (rules and cls._row_rules):
+    keeps = rules and cls._keeps_row()
+    if not (rules and (cls._row_rules or keeps)):
         try:
             insert(db, table, instances)
         finally:
@@ -255,9 +258,12 @@ def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]
             insert(db, table, instances)
             cls._table_written(db, table)
             _written_to(instances, db, table)
-            cls._rows_written(
-                db, table, [("create", inst._id, None, inst._snapshot) for inst in instances]
-            )
+            if cls._row_rules:
+                cls._rows_written(
+                    db, table, [("create", inst._id, None, inst._snapshot) for inst in instances]
+                )
+            if keeps:
+                cls._row_kept(db, table, [inst._id for inst in instances], False)
     except BaseException:
         for inst, k in zip(instances, kept):
             _restore_identity(inst, k)
@@ -276,7 +282,8 @@ async def asave_many(cls, instances: list, db, insert) -> list:
     if rules:
         for inst in instances:
             inst._stamp()
-    if not (rules and cls._row_rules):
+    keeps = rules and cls._keeps_row()
+    if not (rules and (cls._row_rules or keeps)):
         try:
             await insert(db, table, instances)
         finally:
@@ -290,9 +297,12 @@ async def asave_many(cls, instances: list, db, insert) -> list:
             await insert(db, table, instances)
             cls._table_written(db, table)
             _written_to(instances, db, table)
-            await cls._arows_written(
-                db, table, [("create", inst._id, None, inst._snapshot) for inst in instances]
-            )
+            if cls._row_rules:
+                await cls._arows_written(
+                    db, table, [("create", inst._id, None, inst._snapshot) for inst in instances]
+                )
+            if keeps:
+                await cls._arow_kept(db, table, [inst._id for inst in instances], False)
     except BaseException:
         for inst, k in zip(instances, kept):
             _restore_identity(inst, k)
@@ -393,7 +403,7 @@ def delete(inst, db, table: str, on_delete: str) -> None:
         if before is not None:
             inst._rows_written(db, table, [("delete", row_id, before, None)])
         if told:
-            inst._row_kept(db, table, row_id, True)
+            inst._row_kept(db, table, [row_id], True)
     _deleted(inst)
 
 
@@ -412,7 +422,7 @@ async def adelete(inst, db, table: str, on_delete: str) -> None:
         if before is not None:
             await inst._arows_written(db, table, [("delete", row_id, before, None)])
         if told:
-            await inst._arow_kept(db, table, row_id, True)
+            await inst._arow_kept(db, table, [row_id], True)
     _deleted(inst)
 
 
@@ -496,6 +506,17 @@ def row_rules(cls) -> bool:
     return issubclass(cls, WriteRules) and cls._row_rules
 
 
+def keeps_rows(cls) -> bool:
+    """Whether a write of ``cls``'s rows tells ``_row_kept`` (an index kept by hand)."""
+    return issubclass(cls, WriteRules) and cls._keeps_row()
+
+
+def needs_rows(cls) -> bool:
+    """Whether a set-based write of ``cls``'s rows needs each row it writes (:func:`set_write`):
+    row rules, or rows kept; else it is its one statement."""
+    return issubclass(cls, WriteRules) and (cls._row_rules or cls._keeps_row())
+
+
 def _set_rows(pairs) -> list[Row]:
     return [
         ("delete", before["_id"], before, None)
@@ -508,18 +529,18 @@ def _set_rows(pairs) -> list[Row]:
 def _unit_db(cls, db):
     if db is None:
         raise RuntimeError(
-            f"{cls.__name__} has row rules or rows that may be referred to: a set-based write "
-            "needs the queryset's database"
+            f"{cls.__name__} has row rules, an index kept by hand or rows that may be referred "
+            "to: a set-based write needs the queryset's database"
         )
     return db
 
 
 def set_delete(cls, table: str, on_delete: str) -> bool:
-    """Whether a ``delete_all()`` of ``cls``'s rows in ``table`` is a unit (row rules, or a
-    class that can refer to the table) rather than its one statement; an unknown policy is
-    refused first."""
+    """Whether a ``delete_all()`` of ``cls``'s rows in ``table`` is a unit (row rules, rows
+    kept, or a class that can refer to the table) rather than its one statement; an unknown
+    policy is refused first."""
     known_policy(on_delete)
-    return row_rules(cls) or integrity.referable(table)
+    return needs_rows(cls) or integrity.referable(table)
 
 
 def _ids(pairs) -> list:
@@ -584,8 +605,9 @@ def copied(cls, db, table: str, count: int) -> int:
 def set_write(cls, db, table: str, write: Callable[[], list], on_delete: Optional[str] = None) -> list:
     """A set-based write: ``write()`` writes the rows and returns each as
     ``(before, after)`` (``after`` ``None`` for a delete); it, what ``on_delete`` does about
-    the rows that refer to the deleted ones (:func:`deleted`) and the class's row rules are
-    one unit."""
+    the rows that refer to the deleted ones (:func:`deleted`), the class's row rules and its
+    rows kept (``_row_kept``, with the ids the rows were written or deleted with) are one
+    unit."""
     with _unit_db(cls, db).transaction():
         pairs = write()
         if issubclass(cls, WriteRules):
@@ -594,6 +616,8 @@ def set_write(cls, db, table: str, write: Callable[[], list], on_delete: Optiona
             deleted(db, table, _ids(pairs), on_delete)
         if row_rules(cls):
             cls._rows_written(db, table, _set_rows(pairs))
+        if pairs and keeps_rows(cls):
+            cls._row_kept(db, table, _ids(pairs), on_delete is not None)
     return pairs
 
 
@@ -607,6 +631,8 @@ async def aset_write(cls, db, table: str, write, on_delete: Optional[str] = None
             await adeleted(db, table, _ids(pairs), on_delete)
         if row_rules(cls):
             await cls._arows_written(db, table, _set_rows(pairs))
+        if pairs and keeps_rows(cls):
+            await cls._arow_kept(db, table, _ids(pairs), on_delete is not None)
     return pairs
 
 
@@ -636,6 +662,8 @@ def null_referrer(db, table: str, row_id, doc: dict) -> None:
     db._upsert(table, row_id, _nulled(cls, doc))
     if cls is not None:
         cls._table_written(db, table)
+        if cls._keeps_row():
+            cls._row_kept(db, table, [row_id], False)
     if before is not None:
         after = _dirty.snapshot(db.find_document(table, row_id))
         cls._rows_written(db, table, [("update", row_id, before, after)])
@@ -648,6 +676,8 @@ async def anull_referrer(db, table: str, row_id, doc: dict) -> None:
     await db._upsert(table, row_id, _nulled(cls, doc))
     if cls is not None:
         cls._table_written(db, table)
+        if cls._keeps_row():
+            await cls._arow_kept(db, table, [row_id], False)
     if before is not None:
         after = _dirty.snapshot(await db.find_document(table, row_id))
         await cls._arows_written(db, table, [("update", row_id, before, after)])
@@ -660,6 +690,8 @@ def delete_referrer(db, table: str, row_id) -> None:
     db.delete_document(table, row_id)
     if cls is not None:
         cls._table_written(db, table)
+        if cls._keeps_row():
+            cls._row_kept(db, table, [row_id], True)
     if before is not None:
         cls._rows_written(db, table, [("delete", row_id, before, None)])
 
@@ -671,5 +703,7 @@ async def adelete_referrer(db, table: str, row_id) -> None:
     await db.delete_document(table, row_id)
     if cls is not None:
         cls._table_written(db, table)
+        if cls._keeps_row():
+            await cls._arow_kept(db, table, [row_id], True)
     if before is not None:
         await cls._arows_written(db, table, [("delete", row_id, before, None)])

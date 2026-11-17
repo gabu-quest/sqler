@@ -2440,3 +2440,315 @@ def test_a_save_and_delete_inside_the_callers_transaction_begin_nothing_and_comm
     assert seen_inside == ([(1, "gone plum")], [(1, "gone plum")])
     assert after == ([(2, "red apple")], [(2, "red apple")])
     assert statements == []
+
+
+# ----- the bulk and set-based writes of a class whose index is kept by hand ----------------
+#
+# ``save_many()`` and a queryset's ``update()``, ``update_one()``, ``update_n()`` and
+# ``delete_all()`` keep the entries of every row they write or delete, as ``save()`` and
+# ``delete()`` do, in one unit with the rows. Every case starts from three rows saved one by
+# one: 1 "old apple" (n 0), 2 "plum" (n 1), 3 "fig" (n 1).
+
+BULK_CALLS = ["save_many", "update", "update_one", "update_n", "delete_all"]
+SEEDED = [(1, "old apple"), (2, "plum"), (3, "fig")]
+# what the table, and so the index, holds after each call; the ids a search for "pear" and for
+# "plum" finds
+BULK_AFTER = {
+    "save_many": ([*SEEDED, (4, "red pear"), (5, "kiwi")], [4], [2]),
+    "update": ([(1, "old apple"), (2, "red pear"), (3, "fig")], [2], []),
+    "update_one": ([(1, "old apple"), (2, "red pear"), (3, "fig")], [2], []),
+    "update_n": ([(1, "old apple"), (2, "red pear"), (3, "red pear")], [2, 3], []),
+    "delete_all": ([(1, "old apple"), (3, "fig")], [], []),
+}
+# the bases on one call each, and every call on one sync and one async base
+_ROTATED = [(i, BULK_CALLS[i % len(BULK_CALLS)]) for i in range(len(SEARCH_BASES))]
+_EVERY_CALL = [(i, call) for i in (0, 2) for call in BULK_CALLS]
+BULK_CASES = [
+    pytest.param(*SEARCH_BASES[i], call, id=f"{BASE_IDS[i]}-{call}")
+    for i, call in dict.fromkeys(_ROTATED + _EVERY_CALL)
+]
+
+
+def _bulk_call(Doc, db, call, table=None):
+    """``call`` on ``Doc``'s rows in ``table`` of ``db`` (its own table when ``table`` is None);
+    an awaitable on an async base."""
+    if call == "save_many":
+        return Doc.save_many([Doc(title="red pear"), Doc(title="kiwi")], db=db)
+    rows = Doc.using(db, table) if table else Doc.using(db)
+    plum = rows.filter(F("title") == "plum")
+    if call == "update":
+        return plum.update(title="red pear")
+    if call == "update_one":
+        return plum.update_one(title="red pear")
+    if call == "update_n":
+        return rows.filter(F("n") == 1).update_n(2, title="red pear")
+    return plum.delete_all()
+
+
+async def _seeded(Doc, db, is_async):
+    """A hand-kept index on ``db`` and the three rows every case starts from."""
+    Doc._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Doc, ["title"], content_sync=False, db=db)
+    await _v(Doc._fts_index.create(db))
+    for title, n in (("old apple", 0), ("plum", 1), ("fig", 1)):
+        await _v(Doc(title=title, n=n).save(db=db))
+
+
+async def _hits(Doc, db, text):
+    return sorted(m._id for m in await _v(Doc.search(text, db=db)))
+
+
+@pytest.mark.parametrize("base, is_async, lite, call", BULK_CASES)
+def test_a_bulk_write_of_an_index_kept_by_hand_leaves_the_index_what_the_table_holds(base, is_async, lite, call, tmp_path):
+    mixin = AsyncSearchableMixin if is_async else SearchableMixin
+    Doc = _base_model(base, lite, mixin, "bulkdocs", ["title"])
+    path = str(tmp_path / "bulk.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            await _seeded(Doc, db, is_async)
+            await _v(_bulk_call(Doc, db, call))
+            found = await _hits(Doc, db, "pear"), await _hits(Doc, db, "plum")
+        finally:
+            await _v(db.close())
+        return _stored(path, "bulkdocs", "bulkdocs_fts"), found
+
+    rows, pear, plum = BULK_AFTER[call]
+    assert asyncio.run(run()) == ((rows, rows), (pear, plum))
+
+
+@pytest.mark.parametrize("base, is_async, lite, call", BULK_CASES)
+def test_a_bulk_write_whose_index_write_fails_leaves_the_rows_and_the_index_as_they_were(base, is_async, lite, call, tmp_path):
+    mixin = AsyncSearchableMixin if is_async else SearchableMixin
+    Doc = _base_model(base, lite, mixin, "bulkfail", ["title"])
+    path = str(tmp_path / "bulkfail.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            await _seeded(Doc, db, is_async)
+            await _set_authorizer(db, _deny_index_writes("bulkfail_fts"))
+            with pytest.raises(sqlite3.DatabaseError) as raised:
+                await _v(_bulk_call(Doc, db, call))
+            await _set_authorizer(db, None)
+        finally:
+            await _v(db.close())
+        return str(raised.value), _stored(path, "bulkfail", "bulkfail_fts")
+
+    assert asyncio.run(run()) == ("not authorized", (SEEDED, SEEDED))
+
+
+@pytest.mark.parametrize("call", [c for c in BULK_CALLS if c != "save_many"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_set_write_on_another_table_changes_its_rows_and_leaves_the_index_of_the_class(is_async, call, tmp_path):
+    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
+                      AsyncSearchableMixin if is_async else SearchableMixin, "homedocs", ["title"])
+    path = str(tmp_path / "other.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            await _seeded(Doc, db, is_async)
+            await _v(Doc.using(db).copy_to("awaydocs"))
+            await _v(_bulk_call(Doc, db, call, table="awaydocs"))
+        finally:
+            await _v(db.close())
+        raw = sqlite3.connect(path)
+        try:
+            away = raw.execute("SELECT _id, json_extract(data, '$.title') FROM awaydocs ORDER BY _id").fetchall()
+        finally:
+            raw.close()
+        return away, _stored(path, "homedocs", "homedocs_fts")
+
+    assert asyncio.run(run()) == (BULK_AFTER[call][0], (SEEDED, SEEDED))
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_bulk_write_that_writes_no_row_leaves_the_index(is_async, tmp_path):
+    """``save_many([])`` and an ``update()`` that matches no row write nothing."""
+    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
+                      AsyncSearchableMixin if is_async else SearchableMixin, "nonedocs", ["title"])
+    path = str(tmp_path / "none.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            await _seeded(Doc, db, is_async)
+            saved = await _v(Doc.save_many([], db=db))
+            updated = await _v(Doc.using(db).filter(F("title") == "absent").update(title="red pear"))
+            deleted = await _v(Doc.using(db).filter(F("title") == "absent").delete_all())
+        finally:
+            await _v(db.close())
+        return saved, updated, deleted, _stored(path, "nonedocs", "nonedocs_fts")
+
+    assert asyncio.run(run()) == ([], 0, 0, (SEEDED, SEEDED))
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_delete_all_inside_the_callers_transaction_that_rolls_back_leaves_the_index(is_async, tmp_path):
+    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
+                      AsyncSearchableMixin if is_async else SearchableMixin, "rbdocs", ["title"])
+    path = str(tmp_path / "rb.db")
+
+    class Undo(Exception):
+        pass
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        seen_inside = None
+        try:
+            await _seeded(Doc, db, is_async)
+
+            async def body():
+                nonlocal seen_inside
+                deleted = await _v(Doc.using(db).filter(F("n") == 1).delete_all())
+                inner = await _v(db.adapter.execute("SELECT rowid, title FROM rbdocs_fts ORDER BY rowid"))
+                rows = await _v(inner.fetchall())
+                seen_inside = deleted, [tuple(r) for r in rows]
+                raise Undo
+
+            with pytest.raises(Undo):
+                if is_async:
+                    async with db.transaction():
+                        await body()
+                else:
+                    with db.transaction():
+                        await body()
+        finally:
+            await _v(db.close())
+        return seen_inside, _stored(path, "rbdocs", "rbdocs_fts")
+
+    assert asyncio.run(run()) == ((2, [(1, "old apple")]), (SEEDED, SEEDED))
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["written", "index-write-fails"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_set_write_of_an_audited_class_with_an_index_kept_by_hand_keeps_both(is_async, fails, tmp_path):
+    from sqler import AsyncAuditLogMixin, AuditLogMixin
+
+    if is_async:
+        class Doc(AsyncAuditLogMixin, AsyncSearchableMixin, AsyncSQLerModel):
+            __tablename__ = "bauditdocs"
+            title: str = ""
+            n: int = 0
+    else:
+        class Doc(AuditLogMixin, SearchableMixin, SQLerModel):
+            __tablename__ = "bauditdocs"
+            title: str = ""
+            n: int = 0
+
+    path = str(tmp_path / "baudit.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            await _seeded(Doc, db, is_async)
+            if fails:
+                await _set_authorizer(db, _deny_index_writes("bauditdocs_fts"))
+                with pytest.raises(sqlite3.DatabaseError, match="^not authorized$"):
+                    await _v(Doc.using(db).filter(F("title") == "plum").update(title="red pear"))
+                with pytest.raises(sqlite3.DatabaseError, match="^not authorized$"):
+                    await _v(Doc.using(db).filter(F("title") == "fig").delete_all())
+                await _set_authorizer(db, None)
+            else:
+                await _v(Doc.using(db).filter(F("title") == "plum").update(title="red pear"))
+                await _v(Doc.using(db).filter(F("title") == "fig").delete_all())
+        finally:
+            await _v(db.close())
+        raw = sqlite3.connect(path)
+        try:
+            audit = raw.execute("SELECT action, record_id FROM bauditdocs_audit ORDER BY rowid").fetchall()
+        finally:
+            raw.close()
+        return audit, _stored(path, "bauditdocs", "bauditdocs_fts")
+
+    created = [("create", 1), ("create", 2), ("create", 3)]
+    if fails:
+        expected = (created, (SEEDED, SEEDED))
+    else:
+        after = [(1, "old apple"), (2, "red pear")]
+        expected = ([*created, ("update", 2), ("delete", 3)], (after, after))
+    assert asyncio.run(run()) == expected
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_a_set_write_through_a_promoted_field_keeps_the_index_kept_by_hand(is_async, tmp_path):
+    Doc = _base_model(AsyncSQLerModel if is_async else SQLerModel, False,
+                      AsyncSearchableMixin if is_async else SearchableMixin, "promodocs", ["title"])
+    Doc.__promoted__ = {"title": "TEXT"}
+    path = str(tmp_path / "promo.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            await _seeded(Doc, db, is_async)
+            await _v(Doc.using(db).filter(F("title") == "plum").update(title="red pear"))
+            await _v(Doc.using(db).filter(F("title") == "fig").delete_all())
+            found = await _hits(Doc, db, "pear"), await _hits(Doc, db, "plum")
+        finally:
+            await _v(db.close())
+        raw = sqlite3.connect(path)
+        try:
+            rows = raw.execute("SELECT _id, title FROM promodocs ORDER BY _id").fetchall()
+            entries = raw.execute("SELECT rowid, title FROM promodocs_fts ORDER BY rowid").fetchall()
+        finally:
+            raw.close()
+        return rows, entries, found
+
+    after = [(1, "old apple"), (2, "red pear")]
+    assert asyncio.run(run()) == (after, after, ([2], []))
+
+
+class PolicyPost(SQLerModel):
+    __tablename__ = "policyposts"
+    name: str = ""
+
+
+class PolicyNote(SearchableMixin, SQLerModel):
+    __tablename__ = "policynotes"
+    title: str = ""
+    post: Optional[PolicyPost] = None
+
+
+class AsyncPolicyPost(AsyncSQLerModel):
+    __tablename__ = "apolicyposts"
+    name: str = ""
+
+
+class AsyncPolicyNote(AsyncSearchableMixin, AsyncSQLerModel):
+    __tablename__ = "apolicynotes"
+    title: str = ""
+    post: Optional[AsyncPolicyPost] = None
+
+
+@pytest.mark.parametrize("policy", ["cascade", "set_null"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_rows_a_delete_policy_changes_keep_their_entries_kept_by_hand(is_async, policy, tmp_path):
+    """A cascade removes the referring rows' entries; a nulled reference keeps the entry of
+    the row it leaves."""
+    Post, Note = (AsyncPolicyPost, AsyncPolicyNote) if is_async else (PolicyPost, PolicyNote)
+    path = str(tmp_path / "policy.db")
+
+    async def run():
+        db = (AsyncSQLerDB if is_async else SQLerDB).on_disk(path)
+        await _v(db.connect())
+        try:
+            Note._fts_index = (AsyncFTSIndex if is_async else FTSIndex)(Note, ["title"], content_sync=False, db=db)
+            await _v(Note._fts_index.create(db))
+            post = await _v(Post(name="p").save(db=db))
+            await _v(Note(title="old apple", post=post).save(db=db))
+            await _v(Note(title="plum").save(db=db))
+            await _v(post.delete_with_policy(on_delete=policy, db=db))
+        finally:
+            await _v(db.close())
+        return _stored(path, Note.__tablename__, f"{Note.__tablename__}_fts")
+
+    kept = [(2, "plum")] if policy == "cascade" else [(1, "old apple"), (2, "plum")]
+    assert asyncio.run(run()) == (kept, kept)

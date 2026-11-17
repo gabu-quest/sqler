@@ -2431,12 +2431,20 @@ index on every insert, update and delete of the table, whoever writes: `save()`,
 `update()`, `bulk_upsert()`, the document methods, raw SQL, another connection. The index
 change commits or rolls back with the write. `index()` and `remove()` change nothing then:
 an entry leaves only with its row. **`content_sync=False`** adds no trigger: the index
-changes only through `index()`, `remove()`, `rebuild()` and the mixin's `save()` and
-`delete()` (`delete_with_policy()` too). The mixin keeps the entry in the database the row is
+changes only through `index()`, `remove()`, `rebuild()` and the mixin's writes: `save()`,
+`delete()` (`delete_with_policy()` too), `save_many()`, and a queryset's `update()`,
+`update_one()`, `update_n()` and `delete_all()` (`delete()` too), each of which keeps the entry
+of every row it writes or deletes. The mixin keeps the entry in the database the row is
 written to or deleted from, and only for a row of the index's table: a database that has no
-table of this index is left alone. The row and its entry are one unit (a transaction of their
-own, or a savepoint inside the caller's): when either write fails, neither is kept, and the
-instance is put back as a failed save of a class with an audit log leaves it.
+table of this index, and a queryset on another table (`using(db, table)`), are left alone. The
+rows and their entries are one unit (a transaction of their own, or a savepoint inside the
+caller's): when a write fails, none of it is kept, and the instances are put back as a failed
+save of a class with an audit log leaves them. A queryset's `update()` of such a class reads
+the rows it changes and then writes exactly those, as one with an audit log does (two
+statements where a class without the index sends one), and `delete_all()` takes the deleted
+rows back from its one `DELETE`; then the entries of those rows are written. Rows a delete's
+policy nulls or deletes in such a class (`set_null`, `cascade`) keep their entries in the
+policy's unit too. `copy_to()` into its table keeps no entry: `rebuild()` that index after it.
 
 **What a trigger costs:** each insert and delete of a row writes its index row as well;
 an update writes it only when the row id or the stored value of an indexed field changed,
@@ -2514,8 +2522,9 @@ class names the fields itself.
 name, arguments and result, and `AsyncSearchableMixin` the mixin's, on every async base. Both
 send the statements the sync ones send, so an index made through a `SQLerDB` is searched
 through an `AsyncSQLerDB` on the same file, and the reverse. With `content_sync=False` the
-mixin's `await save()` and `await delete()` change the index in one unit with the write, as the
-sync mixin does.
+mixin's `await save()`, `await delete()`, `await save_many()` and an async queryset's
+`update()`, `update_one()`, `update_n()` and `delete_all()` change the index in one unit with
+the write, as the sync mixin does.
 
 ```python
 import asyncio
