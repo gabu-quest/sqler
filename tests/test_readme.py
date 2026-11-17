@@ -699,14 +699,13 @@ def test_C28_lifecycle_hooks_mixin():
     db = SQLerDB.in_memory()
     AuditedUser.set_db(db)
 
-    # Hooks are called manually by caller
-    u = AuditedUser(email="  ALICE@Example.COM  ")
-    if u.before_save():
-        u = u.save()
-        u.after_save()
+    # save() runs before_save() first and after_save() after the write
+    u = AuditedUser(email="  ALICE@Example.COM  ").save()
 
     assert u.email == "alice@example.com"
-    assert u.normalized == True
+    assert u.normalized is True
+    stored = db.find_document(AuditedUser.__tablename__, u._id)
+    assert stored["email"] == "alice@example.com"
 
 
 # ---------------- [C29] Query logging ----------------
