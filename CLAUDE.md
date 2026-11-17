@@ -61,7 +61,7 @@ A safe model checks and bumps a row version on every save. `SQLerLiteModelBase` 
 
 ## Running things
 
-- Whole suite (what CI runs): `uv run pytest -q -m "not perf"`. About 13,800 tests; it takes many
+- Whole suite (what CI runs): `uv run pytest -q -m "not perf"`. About 15,000 tests; it takes many
   minutes. `pytest.ini` already adds `-m "not perf"` and sets `testpaths` to `tests` and
   `examples/fastapi/tests`.
 - On a slow disk most of a run is commits to the file databases the tests make in the temp
