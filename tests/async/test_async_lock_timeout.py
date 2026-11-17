@@ -134,7 +134,9 @@ async def test_a_statement_cancelled_while_it_waits_for_the_lock_gives_its_conne
     sent = asyncio.Event()
 
     def traced(sql: str) -> None:  # runs in the connection's thread
-        if sql.startswith("INSERT INTO t VALUES ('mine')"):
+        # the transaction Python opens for the write begins with BEGIN IMMEDIATE, which is the
+        # statement that waits for the write lock
+        if sql.startswith("BEGIN IMMEDIATE"):
             loop.call_soon_threadsafe(sent.set)
 
     (conn,) = adapter._all_conns
@@ -728,3 +730,123 @@ async def test_a_close_cancelled_while_its_connections_close_leaves_an_adapter_t
     finally:
         await adapter.close()
     assert _threads_left(before) == []
+
+
+# ---- a write outside a transaction takes the write lock first, where SQLite waits ----
+#
+# Async twin of the tests of the same name in tests/test_lock_timeout.py: the adapter's
+# implicit transaction before a write is BEGIN IMMEDIATE, not a plain BEGIN.
+
+
+class _RolledBack(Exception):
+    pass
+
+
+async def _search_classes(path: str, content_sync: bool, one_connection: bool = False):
+    from sqler import AsyncFTSIndex, AsyncSearchableMixin, AsyncSQLerModel
+
+    tag = uuid.uuid4().hex[:8]
+
+    class Note(AsyncSearchableMixin, AsyncSQLerModel):
+        __tablename__ = f"notes_{tag}"
+        body: str = ""
+
+    class Fresh(AsyncSQLerModel):
+        __tablename__ = f"fresh_{tag}"
+        n: int = 0
+
+    db = AsyncSQLerDB.on_disk(path)  # waits 5 s for a lock
+    if one_connection:  # the pool of one: the reset and the save meet the same connection
+        db = AsyncSQLerDB(AsyncSQLiteAdapter(path, pragmas=db.adapter.pragmas, pool_size=1))
+    await db.connect()
+    Note._fts_index = AsyncFTSIndex(Note, ["body"], content_sync=content_sync, db=db)
+    await Note._fts_index.create(db)
+    return db, Note, Fresh
+
+
+async def _reset_own_schema(db: AsyncSQLerDB, Fresh) -> None:
+    """The connection's own rolled-back CREATE TABLE (see the sync twin)."""
+    try:
+        async with db.transaction():
+            await Fresh(n=1).save(db=db)
+            raise _RolledBack()
+    except _RolledBack:
+        pass
+
+
+def _held_for(path: str, seconds: float) -> tuple[threading.Event, threading.Thread]:
+    """Another connection takes the write lock now; once the returned event is set, it holds it
+    ``seconds`` more and commits."""
+    holder = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    started = threading.Event()
+
+    def release():
+        started.wait(10)
+        time.sleep(seconds)
+        holder.execute("COMMIT")
+        holder.close()
+
+    thread = threading.Thread(target=release)
+    thread.start()
+    return started, thread
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("between", ["nothing", "a read"])
+@pytest.mark.parametrize("content_sync", [True, False], ids=["content_sync", "kept-by-hand"])
+async def test_a_search_save_after_the_connections_own_schema_reset_waits_for_the_lock(
+    content_sync, between, tmp_path, clock_tick
+):
+    path = str(tmp_path / "search-wait.db")
+    db, Note, Fresh = await _search_classes(path, content_sync, one_connection=True)
+    try:
+        await Note(body="first").save(db=db)  # its statements are prepared and cached
+        await _reset_own_schema(db, Fresh)
+        if between == "a read":
+            assert [n.body for n in await Note.search("first", db=db)] == ["first"]
+        started, releaser = _held_for(path, 0.3)
+        start = time.monotonic()
+        started.set()
+        await Note(body="second").save(db=db)
+        elapsed = time.monotonic() - start
+        await asyncio.to_thread(releaser.join, 10)
+        found = sorted(n.body for n in await Note.search("first OR second", db=db))
+    finally:
+        await db.close()
+    assert (0.3 - clock_tick <= elapsed < 5, found) == (True, ["first", "second"])
+
+
+@pytest.mark.asyncio
+async def test_eight_tasks_saving_search_rows_beside_first_saves_of_a_new_class_never_fail(tmp_path):
+    from sqler import AsyncFTSIndex, AsyncSearchableMixin, AsyncSQLerModel
+
+    path = str(tmp_path / "search-tasks.db")
+    db, Note, Fresh = await _search_classes(path, True)
+
+    class Kept(AsyncSearchableMixin, AsyncSQLerModel):
+        __tablename__ = f"kept_{uuid.uuid4().hex[:8]}"
+        body: str = ""
+
+    Kept._fts_index = AsyncFTSIndex(Kept, ["body"], content_sync=False, db=db)
+    await Kept._fts_index.create(db)
+    stop = time.monotonic() + 1.0
+    errors: list[str] = []
+    saved = [0] * 8
+
+    async def worker(i: int, cls) -> None:
+        while time.monotonic() < stop:
+            try:
+                await _reset_own_schema(db, Fresh)
+                await cls(body="hello").save(db=db)
+                saved[i] += 1
+            except sqlite3.OperationalError as exc:
+                errors.append(f"{cls.__name__}: {exc}")
+
+    try:
+        await asyncio.gather(*(worker(i, (Note, Kept)[i % 2]) for i in range(8)))
+        counts = [await Note.search_count("hello", db=db), await Kept.search_count("hello", db=db)]
+    finally:
+        await db.close()
+    assert errors == []
+    assert counts == [sum(saved[0::2]), sum(saved[1::2])]

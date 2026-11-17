@@ -582,7 +582,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         self._ending: set[sqlite3.Connection] = set()
 
     async def _open(self) -> aiosqlite.Connection:
-        conn = aiosqlite.connect(self.path, uri=True)
+        # BEGIN IMMEDIATE for the implicit transaction of a write outside an explicit one: the
+        # write lock is taken first, where SQLite waits for it (as ``SQLiteAdapter._open``)
+        conn = aiosqlite.connect(self.path, uri=True, isolation_level="IMMEDIATE")
         # A program ends when its main thread ends, a database left open or not: the
         # connection's thread does not hold the process (the connection is that thread
         # before aiosqlite 0.22, and holds it as ``_thread`` from 0.22). What was committed
