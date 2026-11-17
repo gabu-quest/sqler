@@ -43,8 +43,8 @@ public name its sync twin has):
 - `query/`: `SQLerQuery` (`query.py`), `AsyncSQLerQuery` (`async_query.py`), `SQLerField`/`F`
   (`field.py`) and `SQLerExpression` (`expression.py`).
 - Top-level modules: `cache.py` (query cache), `export.py` (CSV, JSON and JSONL import and
-  export), `fts.py` (FTS5 search), `migrations.py`, `ops.py` (backup, health, vacuum,
-  checkpoint), `logging.py` and `metrics.py`, `tracking.py` (change tracking), `registry.py`
+  export), `fts.py` (FTS5 search; the SQL text of its index is in `_fts_sql.py`),
+  `migrations.py`, `ops.py` (backup, health, vacuum, checkpoint), `logging.py` and `metrics.py`, `tracking.py` (change tracking), `registry.py`
   (table to class), `exceptions.py`, `_stored.py` (the stored form of a value), `utils.py`.
 - `__init__.py` holds `__all__`; `docs/API.md` must name every name in it.
 

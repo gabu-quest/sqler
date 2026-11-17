@@ -4,6 +4,7 @@ import sqlite3
 import sys
 from typing import Any
 
+from sqler._fts_sql import _follow_promotion
 from sqler._stored import stored
 from sqler.db._rows import _columns_sql, _layout, _promoted_in
 from sqler.db._statements import _follow_indexes
@@ -218,8 +219,6 @@ def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], mod
         for col, definition in added.items():
             yield f'ALTER TABLE "{table}" ADD COLUMN {col} {definition};', []
         yield _move_sql(table, fills)
-        from sqler.fts import _follow_promotion  # fts imports this package
-
         yield from _follow_promotion(table, list(added), columns)
         yield from _follow_indexes(table, list(added), columns)
     return columns, (*layout, *added)
@@ -252,8 +251,6 @@ def _moved(table: str, column: str, keep: str) -> Any:
             raise _refused(table, column, row[0], row[1])
     yield from _record(table, [column])
     yield _move_sql(table, {column: _NO_FILL if keep == "document" else _KEEP}, _has_version(tuple(info)))
-    from sqler.fts import _follow_promotion  # fts imports this package
-
     yield from _follow_promotion(table, [column], _promoted_in(info))
     yield from _follow_indexes(table, [column], _promoted_in(info))
 
