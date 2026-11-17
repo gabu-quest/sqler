@@ -19,7 +19,7 @@ from sqler import registry
 from sqler.db._statements import IndexFields
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import UniqueConstraintError
-from sqler.models import _dirty, _refs, _table_names, _write_rules
+from sqler.models import _refs, _table_names, _write_rules
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
@@ -218,12 +218,8 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         inst = cls(**{**lookup, **(defaults or {})})
         try:
             inst.save(db=db)
-        except UniqueConstraintError:
-            # another caller inserted the same lookup between the read and the insert
-            existing = qs.first()
-            if existing is None:
-                raise  # refused by a unique index on a field outside the lookup
-            return existing, False
+        except UniqueConstraintError as error:
+            return _write_rules.found_after_race(qs.first(), error)
         return inst, True
 
     @classmethod
@@ -282,12 +278,10 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         """Write new instances in one batch; each takes its ``_id`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
-            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
+            _write_rules.ensure_columns(cls, db, table, promoted)
         payloads = [inst._dump_with_relations() for inst in instances]
-        if promoted:
-            ids = db.insert_many_promoted(table, payloads, list(promoted.keys()))
-        else:
-            ids = db.insert_many(table, payloads)
+        insert, args = _write_rules.rows_insert(db, table, payloads, promoted)
+        ids = insert(*args)
         cls._inserted(instances, ids, payloads)
 
     def save(self: T, *, db=None, _partial: bool = False) -> T:
@@ -313,15 +307,9 @@ class SQLerMsgspecModel(SQLerMsgspecModelBase):
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
-            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
-        if _partial:
-            new_id = self._id
-            changed = _dirty.changed_fields(self._snapshot or {}, payload)
-            db._update_fields(table, new_id, payload, changed, promoted or ())
-        elif promoted:
-            new_id = db.upsert_document_promoted(table, self._id, payload, list(promoted.keys()))
-        else:
-            new_id = db.upsert_document(table, self._id, payload)
+            _write_rules.ensure_columns(cls, db, table, promoted)
+        written = _write_rules.row_write(db, table, self, payload, _partial, promoted)
+        new_id = self._id if _partial else written
         return self._wrote(new_id, payload)
 
     def delete(self, *, db=None) -> None:

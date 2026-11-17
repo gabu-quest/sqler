@@ -277,6 +277,81 @@ async def asave_many(cls, instances: list, db, insert) -> list:
     return instances
 
 
+# ----- the database calls of a row write: decided here, for every base -------------------
+#
+# A save is the hottest call of the package: the body of each base tests ``if promoted:``
+# itself (a class with no promoted columns makes no call for them), and :func:`row_write`
+# makes the database call and returns what it returned, which a sync base uses and an async
+# one awaits. The ones that return a call instead (``fn(*args)``, awaited on an async
+# database) serve a batch or the steps of a safe save.
+
+#: One database call: ``fn(*args)`` (awaited on an async database).
+Call = tuple[Callable[..., Any], tuple[Any, ...]]
+
+
+def ensure_columns(cls, db, table: str, promoted: Any) -> Any:
+    """Ensure the promoted columns ``promoted`` (``cls.__promoted__``, not empty) in
+    ``table`` before a write; what ``db._ensure_promoted`` returns (an awaitable on an async
+    database)."""
+    return db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
+
+
+def row_write(db, table: str, inst: Any, payload: dict, partial: bool, promoted: Any) -> Any:
+    """Write the row ``payload`` of ``inst``, whose class's ``__promoted__`` is ``promoted``,
+    as ``inst._id``, and return what the database call returned (an awaitable on an async
+    database): with ``partial``, only the fields changed since ``inst._snapshot``
+    (``db._update_fields``, whose result is not the id: the row keeps ``_id``); else the
+    whole row, with its promoted columns where the class has any
+    (``db.upsert_document_promoted``) or without (``db.upsert_document``)."""
+    if partial:
+        changed = _dirty.changed_fields(inst._snapshot or {}, payload)
+        return db._update_fields(table, inst._id, payload, changed, promoted or ())
+    if promoted:
+        return db.upsert_document_promoted(table, inst._id, payload, list(promoted.keys()))
+    return db.upsert_document(table, inst._id, payload)
+
+
+def versioned_write(db, table: str, _id: Any, payload: dict, base: Any, partial: bool, promoted: Any, version: Any) -> Call:
+    """The call that writes the row ``payload`` of a safe model as ``_id`` only at row
+    version ``version``, as :func:`row_write` decides it (``base`` the snapshot a partial
+    write compares with); the whole-row ones return ``(id, new version)``."""
+    if partial:
+        changed = _dirty.changed_fields(base or {}, payload)
+        return db._update_fields, (table, _id, payload, changed, promoted or (), version)
+    if promoted:
+        return db.upsert_with_version_promoted, (table, _id, payload, version, list(promoted.keys()))
+    return db.upsert_with_version, (table, _id, payload, version)
+def rows_insert(db, table: str, payloads: list, promoted: Any, versioned: bool = False) -> Call:
+    """The call that inserts the new rows ``payloads`` of a class whose ``__promoted__`` is
+    ``promoted`` in one batch, with the promoted columns where it has any; it returns their
+    ids, or with ``versioned`` (a safe model) ``(id, version)`` pairs."""
+    if promoted:
+        fn = db.insert_many_with_version_promoted if versioned else db.insert_many_promoted
+        return fn, (table, payloads, list(promoted.keys()))
+    return (db.insert_many_with_version if versioned else db.insert_many), (table, payloads)
+
+
+def found_after_race(existing: Any, error: BaseException) -> tuple[Any, bool]:
+    """``first_or_create()`` whose insert raised ``error`` (a unique index refused it), with
+    ``existing`` the second read of the lookup: another caller inserted the same lookup
+    between the read and the insert, and its row is returned as found; ``None`` means a
+    unique index on a field outside the lookup refused it, and ``error`` is raised."""
+    if existing is None:
+        raise error
+    return existing, False
+
+
+def refresh_row(doc: Optional[dict], _id: Any) -> dict:
+    """The row ``doc`` that ``refresh()`` read for ``_id``.
+
+    Raises:
+        LookupError: The row no longer exists (``doc`` is ``None``).
+    """
+    if doc is None:
+        raise LookupError(f"Row {_id} not found for refresh")
+    return doc
+
+
 def delete(inst, db, table: str, on_delete: str) -> None:
     """``delete_with_policy()``: delete the row and do what the policy does about the rows
     that refer to it (:func:`deleted`), with the class's row rules, as one unit

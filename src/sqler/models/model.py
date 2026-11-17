@@ -297,12 +297,8 @@ class SQLerModel(BaseModel):
         inst = cls(**merged)
         try:
             inst.save(db=db)
-        except UniqueConstraintError:
-            # another caller inserted the same lookup between the read and the insert
-            existing = qs.first()
-            if existing is None:
-                raise  # refused by a unique index on a field outside the lookup
-            return existing, False
+        except UniqueConstraintError as error:
+            return _write_rules.found_after_race(qs.first(), error)
         return inst, True  # type: ignore[return-value]
 
     @classmethod
@@ -369,18 +365,11 @@ class SQLerModel(BaseModel):
     def _insert_rows(cls, db, table: str, instances: list) -> None:
         """Write new instances in one batch; each takes its ``_id`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
-
         if promoted:
-            checks = getattr(cls, "__checks__", None)
-            db._ensure_promoted(table, promoted, checks, model=cls)
-
+            _write_rules.ensure_columns(cls, db, table, promoted)
         payloads = [inst._dump_with_relations() for inst in instances]
-
-        if promoted:
-            promoted_fields = list(promoted.keys())
-            ids = db.insert_many_promoted(table, payloads, promoted_fields)
-        else:
-            ids = db.insert_many(table, payloads)
+        insert, args = _write_rules.rows_insert(db, table, payloads, promoted)
+        ids = insert(*args)
 
         for inst, id_, payload in zip(instances, ids, payloads):
             inst._id = id_
@@ -407,16 +396,9 @@ class SQLerModel(BaseModel):
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
-            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
-        if _partial:
-            new_id = self._id
-            changed = _dirty.changed_fields(self._snapshot or {}, payload)
-            db._update_fields(table, new_id, payload, changed, promoted or ())
-        elif promoted:
-            promoted_fields = list(promoted.keys())
-            new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
-        else:
-            new_id = db.upsert_document(table, self._id, payload)
+            _write_rules.ensure_columns(cls, db, table, promoted)
+        written = _write_rules.row_write(db, table, self, payload, _partial, promoted)
+        new_id = self._id if _partial else written
         self._id = new_id
         self._snapshot = _dirty.snapshot(payload)
         return self
@@ -461,9 +443,7 @@ class SQLerModel(BaseModel):
         db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = _read_document(db, table, self._id, cls._versioned_rows)
-        if doc is None:
-            raise LookupError(f"Row {self._id} not found for refresh")
+        doc = _write_rules.refresh_row(_read_document(db, table, self._id, cls._versioned_rows), self._id)
         own = {(table, self._id): self}
         return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]
 

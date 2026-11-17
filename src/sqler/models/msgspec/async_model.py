@@ -20,7 +20,7 @@ from sqler import registry
 from sqler.db._statements import IndexFields
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import UniqueConstraintError
-from sqler.models import _dirty, _refs, _table_names, _write_rules
+from sqler.models import _refs, _table_names, _write_rules
 from sqler.models._table_names import _aread_document, _aread_documents, _instance_binding
 from sqler.models.msgspec.base import SQLerMsgspecModelBase
 from sqler.models.msgspec.model import SQLerMsgspecModel
@@ -204,12 +204,8 @@ class AsyncSQLerMsgspecModel(SQLerMsgspecModelBase):
         inst = cls(**{**lookup, **(defaults or {})})
         try:
             await inst.save(db=db)
-        except UniqueConstraintError:
-            # another caller inserted the same lookup between the read and the insert
-            existing = await qs.first()
-            if existing is None:
-                raise  # refused by a unique index on a field outside the lookup
-            return existing, False
+        except UniqueConstraintError as error:
+            return _write_rules.found_after_race(await qs.first(), error)
         return inst, True
 
     @classmethod
@@ -268,12 +264,10 @@ class AsyncSQLerMsgspecModel(SQLerMsgspecModelBase):
         """Write new instances in one batch; each takes its ``_id`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
-            await db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
+            await _write_rules.ensure_columns(cls, db, table, promoted)
         payloads = [inst._dump_with_relations() for inst in instances]
-        if promoted:
-            ids = await db.insert_many_promoted(table, payloads, list(promoted.keys()))
-        else:
-            ids = await db.insert_many(table, payloads)
+        insert, args = _write_rules.rows_insert(db, table, payloads, promoted)
+        ids = await insert(*args)
         cls._inserted(instances, ids, payloads)
 
     async def save(self: TAModel, *, db=None, _partial: bool = False) -> TAModel:
@@ -299,15 +293,9 @@ class AsyncSQLerMsgspecModel(SQLerMsgspecModelBase):
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
-            await db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
-        if _partial:
-            new_id = self._id
-            changed = _dirty.changed_fields(self._snapshot or {}, payload)
-            await db._update_fields(table, new_id, payload, changed, promoted or ())
-        elif promoted:
-            new_id = await db.upsert_document_promoted(table, self._id, payload, list(promoted.keys()))
-        else:
-            new_id = await db.upsert_document(table, self._id, payload)
+            await _write_rules.ensure_columns(cls, db, table, promoted)
+        written = await _write_rules.row_write(db, table, self, payload, _partial, promoted)
+        new_id = self._id if _partial else written
         return self._wrote(new_id, payload)
 
     async def delete(self, *, db=None) -> None:
