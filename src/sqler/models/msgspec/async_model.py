@@ -100,12 +100,16 @@ class AsyncSQLerMsgspecModel(SQLerMsgspecModelBase):
         return cls._queryset(db, cls._using_table(db, table))
 
     @classmethod
-    def _queryset(cls: Type[TAModel], db: "AsyncSQLerDB", table: str) -> "AsyncSQLerQuerySet[TAModel]":
+    def _queryset(
+        cls: Type[TAModel], db: "AsyncSQLerDB", table: str
+    ) -> "AsyncSQLerQuerySet[TAModel]":
         """The queryset on ``table`` of ``db`` that ``query()`` and ``using()`` give."""
         from sqler.models.async_queryset import AsyncSQLerQuerySet
         from sqler.query.async_query import AsyncSQLerQuery
 
-        return AsyncSQLerQuerySet[TAModel](cls, cls._shaped(AsyncSQLerQuery(table=table, adapter=db.adapter)), db)
+        return AsyncSQLerQuerySet[TAModel](
+            cls, cls._shaped(AsyncSQLerQuery(table=table, adapter=db.adapter)), db
+        )
 
     @classmethod
     def db(cls: Type[TAModel]) -> "AsyncSQLerDB":

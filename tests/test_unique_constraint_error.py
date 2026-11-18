@@ -159,8 +159,16 @@ class TestCompatibility:
     @pytest.mark.parametrize(
         "ddl,insert,message",
         [
-            ("CREATE TABLE t (v TEXT NOT NULL)", "INSERT INTO t VALUES (NULL)", "NOT NULL constraint failed: t.v"),
-            ("CREATE TABLE t (v INTEGER CHECK (v > 0))", "INSERT INTO t VALUES (-1)", "CHECK constraint failed: v > 0"),
+            (
+                "CREATE TABLE t (v TEXT NOT NULL)",
+                "INSERT INTO t VALUES (NULL)",
+                "NOT NULL constraint failed: t.v",
+            ),
+            (
+                "CREATE TABLE t (v INTEGER CHECK (v > 0))",
+                "INSERT INTO t VALUES (-1)",
+                "CHECK constraint failed: v > 0",
+            ),
         ],
         ids=["not_null", "check"],
     )
@@ -217,7 +225,9 @@ class TestTriggerMessageIsNotAViolation:
         )
         db.adapter.commit()
 
-    @pytest.mark.parametrize("text", ["UNIQUE constraint failed: audit", "UNIQUE constraint failed: a.b"])
+    @pytest.mark.parametrize(
+        "text", ["UNIQUE constraint failed: audit", "UNIQUE constraint failed: a.b"]
+    )
     def test_insert_document(self, db, text):
         self._trigger(db, text)
         with pytest.raises(sqlite3.IntegrityError) as info:

@@ -48,8 +48,10 @@ class TestAsyncFExpressionExecution:
         assert b.count == 41
 
     async def test_mixed_literal_and_fexpr(self, async_db_counters):
-        await AsyncCounter.query().filter(F("name") == "a").update(
-            count=F("count") + 1, name="updated"
+        await (
+            AsyncCounter.query()
+            .filter(F("name") == "a")
+            .update(count=F("count") + 1, name="updated")
         )
         a = await AsyncCounter.query().filter(F("name") == "updated").first()
         assert a is not None

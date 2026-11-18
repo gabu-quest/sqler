@@ -329,6 +329,7 @@ class TestDeepNestingAndCircularReferences:
         nodes = Node.query().all()
         assert len(nodes) == 3
 
+
 class TestLargeScaleOperations:
     """Tests for operations on large datasets."""
 
@@ -1122,7 +1123,9 @@ def _stored(path, table="things"):
     """The rows of ``table`` in the file at ``path`` as ``(name, _version)``, sorted, and the
     number of its ``_version`` columns, read with the standard ``sqlite3`` module."""
     with closing(sqlite3.connect(path)) as conn:
-        rows = sorted(conn.execute(f"SELECT json_extract(data, '$.name'), _version FROM {table}").fetchall())
+        rows = sorted(
+            conn.execute(f"SELECT json_extract(data, '$.name'), _version FROM {table}").fetchall()
+        )
         versions = [r for r in conn.execute(f'PRAGMA table_xinfo("{table}")') if r[1] == "_version"]
     return rows, len(versions)
 
@@ -1173,7 +1176,10 @@ async def _saves(path, models, *, objects=1, hold=True, plain_first=False):
     finally:
         for db in dbs:
             await db.close()
-    return [f"{type(r).__name__}: {r}" if isinstance(r, BaseException) else type(r).__name__ for r in got]
+    return [
+        f"{type(r).__name__}: {r}" if isinstance(r, BaseException) else type(r).__name__
+        for r in got
+    ]
 
 
 def _thread_saves(path, n, *, objects):
@@ -1245,7 +1251,9 @@ class TestFirstSavesTogether:
         assert got == ["_ASafePromoted"] * 4
         assert _stored(path) == ([(f"s{i}", 0) for i in range(4)], 1)
         with closing(sqlite3.connect(path)) as conn:
-            assert conn.execute("SELECT status, COUNT(*) FROM things GROUP BY 1").fetchall() == [("new", 4)]
+            assert conn.execute("SELECT status, COUNT(*) FROM things GROUP BY 1").fetchall() == [
+                ("new", 4)
+            ]
 
     def test_eight_threads_on_one_new_sync_database_all_save(self, tmp_path):
         path = tmp_path / "t.db"

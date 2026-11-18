@@ -87,7 +87,14 @@ def _is_async(kind: str) -> bool:
     return kind.startswith("async")
 
 
-def _model(kind: str, fields: dict[str, tuple[Any, Any]], *, table: str, mixins: tuple = (), extra: Optional[dict] = None) -> type:
+def _model(
+    kind: str,
+    fields: dict[str, tuple[Any, Any]],
+    *,
+    table: str,
+    mixins: tuple = (),
+    extra: Optional[dict] = None,
+) -> type:
     """A class of base ``kind`` storing in ``table`` with ``fields`` ({name: (annotation,
     default)}), published in this module so a string annotation can name it."""
     base = BASES[kind]
@@ -208,7 +215,9 @@ async def test_copy_to_keeps_versions_and_promoted_columns(kind):
         await _v(cls.using(db).filter(F("done") == True).copy_to("ct_archive"))  # noqa: E712
         source = await _raw(db, "SELECT * FROM ct_jobs WHERE _id IN (1, 3, 5) ORDER BY _id")
         target = await _raw(db, "SELECT * FROM ct_archive ORDER BY _id")
-        expected_columns = ["_id", "data", "tag", "_version"] if kind in SAFE else ["_id", "data", "tag"]
+        expected_columns = (
+            ["_id", "data", "tag", "_version"] if kind in SAFE else ["_id", "data", "tag"]
+        )
         assert await _columns(db, "ct_archive") == expected_columns
         assert target == source
         if kind in SAFE:
@@ -227,7 +236,11 @@ async def test_copy_to_is_one_insert_select_and_reads_no_row(kind):
         await _v(db.ensure_table("ct_archive"))
         async with _Trace(db) as sent:
             await _v(cls.using(db).filter(F("done") == True).copy_to("ct_archive"))  # noqa: E712
-        writes = [s for s in sent if s.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "SELECT"))]
+        writes = [
+            s
+            for s in sent
+            if s.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "SELECT"))
+        ]
         guard = "CASE WHEN 1 THEN 1 ELSE (SELECT (`_id`, `data`) IN (SELECT * FROM ct_jobs) FROM ct_jobs) END"
         assert writes == [
             "INSERT INTO ct_archive (_id, data) SELECT _id, data FROM ct_jobs "
@@ -246,7 +259,10 @@ async def test_copy_to_through_exclude_and_or_filter(kind):
         q = cls.using(db).exclude(F("done") == True).or_filter(F("n") == 4)  # noqa: E712
         copied = await _v(q.copy_to("ct_archive"))
         archived = await _v(cls.using(db, "ct_archive").order_by("n").all())
-        assert (copied, _rows(archived)) == (3, [(2, 1, False, "t1"), (4, 3, False, "t3"), (5, 4, True, "t4")])
+        assert (copied, _rows(archived)) == (
+            3,
+            [(2, 1, False, "t1"), (4, 3, False, "t3"), (5, 4, True, "t4")],
+        )
     finally:
         await _close(db)
 
@@ -257,7 +273,9 @@ async def test_copy_to_through_a_reference_filter_from_the_class_table_and_from_
     db = await _db(kind)
     try:
         owner_cls = _model(kind, {"name": (str, "")}, table="ct_owners")
-        pet_cls = _model(kind, {"name": (str, ""), "owner": (Optional[owner_cls], None)}, table="ct_pets")
+        pet_cls = _model(
+            kind, {"name": (str, ""), "owner": (Optional[owner_cls], None)}, table="ct_pets"
+        )
         a = await _v(owner_cls(name="a").save(db=db))
         b = await _v(owner_cls(name="b").save(db=db))
         for name, owner in (("p1", a), ("p2", b), ("p3", a)):
@@ -266,7 +284,11 @@ async def test_copy_to_through_a_reference_filter_from_the_class_table_and_from_
         first = await _v(pet_cls.using(db).filter(of_a).copy_to("ct_pets_archive"))
         second = await _v(pet_cls.using(db, "ct_pets_archive").filter(of_a).copy_to("ct_pets_cold"))
         cold = await _v(pet_cls.using(db, "ct_pets_cold").order_by("name").all())
-        assert (first, second, [(p._id, p.name, p.owner.name) for p in cold]) == (2, 2, [(1, "p1", "a"), (3, "p3", "a")])
+        assert (first, second, [(p._id, p.name, p.owner.name) for p in cold]) == (
+            2,
+            2,
+            [(1, "p1", "a"), (3, "p3", "a")],
+        )
     finally:
         await _close(db)
 
@@ -277,7 +299,9 @@ async def test_copy_to_with_order_by_copies_every_match(kind):
     try:
         cls = _job(kind)
         await _seed(cls, db)
-        copied = await _v(cls.using(db).filter(F("done") == True).order_by("n", desc=True).copy_to("ct_archive"))  # noqa: E712
+        copied = await _v(
+            cls.using(db).filter(F("done") == True).order_by("n", desc=True).copy_to("ct_archive")
+        )  # noqa: E712
         assert copied == 3
     finally:
         await _close(db)
@@ -376,7 +400,9 @@ async def test_a_second_copy_fails_whole_and_the_target_keeps_the_first(kind):
         q = cls.using(db).filter(F("done") == True)  # noqa: E712
         await _v(q.copy_to("ct_archive"))
         await _v(cls(n=6, done=True, tag="t6").save(db=db))  # a new match: id 6
-        with pytest.raises(UniqueConstraintError, match=r"^UNIQUE constraint failed: ct_archive\._id$"):
+        with pytest.raises(
+            UniqueConstraintError, match=r"^UNIQUE constraint failed: ct_archive\._id$"
+        ):
             await _v(q.copy_to("ct_archive"))
         assert await _raw(db, "SELECT _id FROM ct_archive ORDER BY _id") == [(1,), (3,), (5,)]
     finally:
@@ -394,7 +420,11 @@ async def test_an_existing_target_without_a_promoted_column_of_the_source_gets_i
         await _seed(cls, db)
         await _v(db.ensure_table("ct_archive", versioned=kind in SAFE))
         await _v(cls.using(db).filter(F("done") == True).copy_to("ct_archive"))  # noqa: E712
-        assert await _raw(db, "SELECT _id, tag FROM ct_archive ORDER BY _id") == [(1, "t0"), (3, "t2"), (5, "t4")]
+        assert await _raw(db, "SELECT _id, tag FROM ct_archive ORDER BY _id") == [
+            (1, "t0"),
+            (3, "t2"),
+            (5, "t4"),
+        ]
     finally:
         await _close(db)
 
@@ -406,7 +436,9 @@ async def test_a_target_with_a_promoted_column_the_source_lacks_is_refused(kind)
         cls = _job(kind)
         await _seed(cls, db)
         await _v(db.ensure_table("ct_archive", promoted={"owner": "TEXT"}, versioned=kind in SAFE))
-        with pytest.raises(ValueError, match=r"^copy_to: ct_archive has the column owner, which ct_jobs has not"):
+        with pytest.raises(
+            ValueError, match=r"^copy_to: ct_archive has the column owner, which ct_jobs has not"
+        ):
             await _v(cls.using(db).copy_to("ct_archive"))
         assert await _raw(db, "SELECT COUNT(*) FROM ct_archive") == [(0,)]
     finally:
@@ -420,7 +452,11 @@ async def test_a_target_versioned_unlike_the_source_is_refused(kind):
         cls = _job(kind)
         await _seed(cls, db)
         await _v(db.ensure_table("ct_archive", versioned=kind not in SAFE))
-        said = "has no _version column and ct_jobs has" if kind in SAFE else "has a _version column and ct_jobs has not"
+        said = (
+            "has no _version column and ct_jobs has"
+            if kind in SAFE
+            else "has a _version column and ct_jobs has not"
+        )
         with pytest.raises(ValueError, match=f"^copy_to: ct_archive {said}"):
             await _v(cls.using(db).copy_to("ct_archive"))
         assert await _raw(db, "SELECT COUNT(*) FROM ct_archive") == [(0,)]
@@ -435,7 +471,10 @@ async def test_a_new_target_takes_the_class_checks(kind):
     try:
         cls = _job(
             kind,
-            extra={"__promoted__": {"n": "INTEGER NOT NULL DEFAULT 0"}, "__checks__": {"n_small": "n < 100"}},
+            extra={
+                "__promoted__": {"n": "INTEGER NOT NULL DEFAULT 0"},
+                "__checks__": {"n_small": "n < 100"},
+            },
         )
         await _seed(cls, db)
         await _v(cls.using(db).copy_to("ct_archive"))
@@ -463,7 +502,11 @@ async def test_a_row_with_a_datetime_a_dataclass_and_a_reference_loads_equal_fro
         when = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
         holder_cls = _model(
             kind,
-            {"when": (Optional[datetime], None), "home": (Optional[CtHome], None), "owner": (Optional[owner_cls], None)},
+            {
+                "when": (Optional[datetime], None),
+                "home": (Optional[CtHome], None),
+                "owner": (Optional[owner_cls], None),
+            },
             table="ct_holders",
         )
         owner = await _v(owner_cls(name="ada").save(db=db))
@@ -512,7 +555,9 @@ async def test_delete_meets_the_policy_as_delete_all_does(kind, call, policy, ex
     db = await _db(kind)
     try:
         owner_cls = _model(kind, {"name": (str, "")}, table="ct_owners")
-        pet_cls = _model(kind, {"name": (str, ""), "owner": (Optional[owner_cls], None)}, table="ct_pets")
+        pet_cls = _model(
+            kind, {"name": (str, ""), "owner": (Optional[owner_cls], None)}, table="ct_pets"
+        )
         a = await _v(owner_cls(name="a").save(db=db))
         await _v(owner_cls(name="b").save(db=db))
         await _v(pet_cls(name="ct_owner_b", owner=a).save(db=db))  # outside the set, refers into it
@@ -552,7 +597,9 @@ async def _in_transaction(db, body, fail: bool):
         pass
 
 
-@pytest.mark.parametrize("fail,expected", [(False, (2, 3)), (True, (5, 0))], ids=["commit", "rollback"])
+@pytest.mark.parametrize(
+    "fail,expected", [(False, (2, 3)), (True, (5, 0))], ids=["commit", "rollback"]
+)
 @pytest.mark.asyncio
 async def test_copy_then_delete_inside_a_transaction_is_one_unit(kind, fail, expected):
     db = await _db(kind)
@@ -567,7 +614,10 @@ async def test_copy_then_delete_inside_a_transaction_is_one_unit(kind, fail, exp
             await _v(q.delete())
 
         await _in_transaction(db, body, fail)
-        assert (await _v(cls.using(db).count()), await _v(cls.using(db, "ct_archive").count())) == expected
+        assert (
+            await _v(cls.using(db).count()),
+            await _v(cls.using(db, "ct_archive").count()),
+        ) == expected
     finally:
         await _close(db)
 
@@ -609,7 +659,9 @@ async def test_a_second_database_object_on_the_file_reads_the_copy(kind, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_eight_tasks_copying_disjoint_filters_into_one_new_target_copy_every_row_once(tmp_path):
+async def test_eight_tasks_copying_disjoint_filters_into_one_new_target_copy_every_row_once(
+    tmp_path,
+):
     for run in range(20):
         db = AsyncSQLerDB.on_disk(str(tmp_path / f"ct{run}.db"))
         await db.connect()
@@ -617,7 +669,12 @@ async def test_eight_tasks_copying_disjoint_filters_into_one_new_target_copy_eve
             cls = _job("async-pydantic")
             await cls.save_many([cls(n=n, tag=f"t{n}") for n in range(80)], db=db)
             counts = await asyncio.gather(
-                *(cls.using(db).filter((F("n") >= 10 * k) & (F("n") < 10 * k + 10)).copy_to("ct_archive") for k in range(8))
+                *(
+                    cls.using(db)
+                    .filter((F("n") >= 10 * k) & (F("n") < 10 * k + 10))
+                    .copy_to("ct_archive")
+                    for k in range(8)
+                )
             )
             ids = await _raw(db, "SELECT _id FROM ct_archive ORDER BY _id")
             assert (counts, ids) == ([10] * 8, [(i,) for i in range(1, 81)])
@@ -676,10 +733,14 @@ async def test_a_unique_index_on_the_target_refuses_a_copied_row_as_it_refuses_a
         await _seed(cls, db)
         await _v(db.ensure_table("ct_archive"))
         await _v(db.create_index("ct_archive", "tag", unique=True))
-        await _v(_job(kind, table="ct_archive")(n=9, tag="t2").save(db=db))  # _id 1, the tag of _id 3
+        await _v(
+            _job(kind, table="ct_archive")(n=9, tag="t2").save(db=db)
+        )  # _id 1, the tag of _id 3
         with pytest.raises(UniqueConstraintError, match="^UNIQUE constraint failed: index"):
             await _v(cls.using(db).filter(F("n") == 2).copy_to("ct_archive"))
-        assert await _raw(db, "SELECT _id, json_extract(data, '$.tag') FROM ct_archive") == [(1, "t2")]
+        assert await _raw(db, "SELECT _id, json_extract(data, '$.tag') FROM ct_archive") == [
+            (1, "t2")
+        ]
     finally:
         await _close(db)
 
@@ -714,13 +775,19 @@ def _self_referring(kind: str, shape: str) -> tuple[type, str]:
     row of ``ct_nodes``."""
     if shape == "optional":
         name = f"Ct{next(_names) + 1}"  # the name _model gives the class it makes next
-        return _model(kind, {**JOB, "parent": (f"Optional[{name}]", None)}, table="ct_nodes"), "parent"
+        return _model(
+            kind, {**JOB, "parent": (f"Optional[{name}]", None)}, table="ct_nodes"
+        ), "parent"
     if shape == "list":
         name = f"Ct{next(_names) + 1}"
-        return _model(kind, {**JOB, "kids": (f"Optional[list[{name}]]", None)}, table="ct_nodes"), "kids"
+        return _model(
+            kind, {**JOB, "kids": (f"Optional[list[{name}]]", None)}, table="ct_nodes"
+        ), "kids"
     if shape == "dict value":
         name = f"Ct{next(_names) + 1}"
-        return _model(kind, {**JOB, "by_tag": (f"Optional[dict[str, {name}]]", None)}, table="ct_nodes"), "by_tag"
+        return _model(
+            kind, {**JOB, "by_tag": (f"Optional[dict[str, {name}]]", None)}, table="ct_nodes"
+        ), "by_tag"
     if shape == "a parent class stored in the same table":
         parent = _model(kind, JOB, table="ct_nodes")
         return _sub(parent, {"up": (Optional[parent], None)}), "up"
@@ -730,7 +797,14 @@ def _self_referring(kind: str, shape: str) -> tuple[type, str]:
 
 
 @pytest.mark.parametrize(
-    "shape", ["optional", "list", "dict value", "a parent class stored in the same table", "a class sharing the table name"]
+    "shape",
+    [
+        "optional",
+        "list",
+        "dict value",
+        "a parent class stored in the same table",
+        "a class sharing the table name",
+    ],
 )
 @pytest.mark.asyncio
 async def test_copy_to_refuses_a_class_that_can_refer_to_rows_of_its_source(kind, shape):
@@ -762,7 +836,9 @@ async def test_an_archived_row_refers_to_what_its_original_referred_to(kind, pol
     db = await _db(kind)
     try:
         owner_cls = _model(kind, {"name": (str, "")}, table="ct_owners")
-        job_cls = _model(kind, {"name": (str, ""), "owner": (Optional[owner_cls], None)}, table="ct_jobs")
+        job_cls = _model(
+            kind, {"name": (str, ""), "owner": (Optional[owner_cls], None)}, table="ct_jobs"
+        )
         a = await _v(owner_cls(name="a").save(db=db))
         b = await _v(owner_cls(name="b").save(db=db))
         await _v(job_cls(name="j1", owner=a).save(db=db))
@@ -771,11 +847,17 @@ async def test_an_archived_row_refers_to_what_its_original_referred_to(kind, pol
         assert (await _v(moved.copy_to("ct_jobs_archive")), await _v(moved.delete())) == (1, 1)
         of_a = owner_cls.using(db).filter(F("name") == "a")
         if policy == "restrict":
-            with pytest.raises(ReferentialIntegrityError, match=r"^Cannot delete ct_owners:1; referenced by 1 row\(s\)$"):
+            with pytest.raises(
+                ReferentialIntegrityError,
+                match=r"^Cannot delete ct_owners:1; referenced by 1 row\(s\)$",
+            ):
                 await _v(of_a.delete(on_delete=policy))
         else:
             assert await _v(of_a.delete(on_delete=policy)) == 1
-        archive = await _raw(db, "SELECT _id, json_extract(data, '$.name'), json_extract(data, '$.owner._id') FROM ct_jobs_archive")
+        archive = await _raw(
+            db,
+            "SELECT _id, json_extract(data, '$.name'), json_extract(data, '$.owner._id') FROM ct_jobs_archive",
+        )
         owners = await _raw(db, "SELECT json_extract(data, '$.name') FROM ct_owners ORDER BY _id")
         jobs = await _raw(db, "SELECT _id, json_extract(data, '$.name') FROM ct_jobs")
         assert (archive, owners, jobs) == {
@@ -798,7 +880,9 @@ def _window(q):
 
 async def _state(cls, db) -> dict[int, tuple]:
     """Each row by id: ``(n, tag, version)``, the version ``None`` on a base without one."""
-    return {m._id: (m.n, m.tag, getattr(m, "_version", None)) for m in await _v(cls.using(db).all())}
+    return {
+        m._id: (m.n, m.tag, getattr(m, "_version", None)) for m in await _v(cls.using(db).all())
+    }
 
 
 def _touched(before: dict, after: dict) -> list[int]:
@@ -808,7 +892,9 @@ def _touched(before: dict, after: dict) -> list[int]:
 
 @pytest.mark.parametrize("call", ["delete_all", "delete", "update", "copy_to"])
 @pytest.mark.asyncio
-async def test_a_write_of_a_query_with_a_limit_an_order_and_an_offset_touches_the_rows_all_returns(kind, call):
+async def test_a_write_of_a_query_with_a_limit_an_order_and_an_offset_touches_the_rows_all_returns(
+    kind, call
+):
     db = await _db(kind)
     try:
         cls = _job(kind)
@@ -885,7 +971,9 @@ async def test_an_order_on_a_promoted_or_a_json_field_picks_the_rows_all_returns
         before = await _state(cls, db)
         count = await _v(q.update(done=False) if call == "update" else q.delete_all())
         if call == "update":
-            touched = sorted(m._id for m in await _v(cls.using(db).filter(F("done") == False).all()))  # noqa: E712
+            touched = sorted(
+                m._id for m in await _v(cls.using(db).filter(F("done") == False).all())
+            )  # noqa: E712
             assert (count, touched) == (2, [2, 4, 5])  # 2 and 4 were not done before
         else:
             assert (count, _touched(before, await _state(cls, db))) == (2, [4, 5])
@@ -899,7 +987,9 @@ async def test_a_cascade_of_a_limited_query_deletes_its_parents_and_their_childr
     db = await _db(kind)
     try:
         owner_cls = _model(kind, {"name": (str, "")}, table="ct_owners")
-        pet_cls = _model(kind, {"name": (str, ""), "owner": (Optional[owner_cls], None)}, table="ct_pets")
+        pet_cls = _model(
+            kind, {"name": (str, ""), "owner": (Optional[owner_cls], None)}, table="ct_pets"
+        )
         for name in "edcba":
             owner = await _v(owner_cls(name=name).save(db=db))
             await _v(pet_cls(name=f"pet_{name}", owner=owner).save(db=db))
@@ -959,7 +1049,9 @@ async def test_the_audit_log_of_a_limited_write_names_the_rows_it_touched(kind):
         await _seed(cls, db)
         await _v(_window(cls.using(db)).update(tag="x"))
         await _v(_window(cls.using(db)).delete_all())
-        logged = await _raw(db, "SELECT action, record_id FROM ct_jobs_audit WHERE action != 'create' ORDER BY _id")
+        logged = await _raw(
+            db, "SELECT action, record_id FROM ct_jobs_audit WHERE action != 'create' ORDER BY _id"
+        )
         assert sorted(logged) == [("delete", 3), ("delete", 4), ("update", 3), ("update", 4)]
     finally:
         await _close(db)
@@ -1048,12 +1140,18 @@ async def test_a_limited_query_reads_and_writes_the_same_rows(kind, shape, expec
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("shape,expected", _LIMITED, ids=_LIMITED_IDS)
 @pytest.mark.asyncio
-async def test_a_plain_query_with_a_limit_reads_and_deletes_the_same_rows(is_async, shape, expected):
+async def test_a_plain_query_with_a_limit_reads_and_deletes_the_same_rows(
+    is_async, shape, expected
+):
     kind = "async-pydantic" if is_async else "pydantic"
     db = await _db(kind)
     try:
         cls = await _aged(kind, db)
-        q = shape((AsyncSQLerQuery if is_async else SQLerQuery)("ct_aged", adapter=db.adapter, promoted_fields=["age"]))
+        q = shape(
+            (AsyncSQLerQuery if is_async else SQLerQuery)(
+                "ct_aged", adapter=db.adapter, promoted_fields=["age"]
+            )
+        )
         read = [d["_id"] for d in await _v(q.all_dicts())]
         before = await _aged_state(cls, db)
         await _v(q.delete())
@@ -1069,7 +1167,10 @@ async def test_a_plain_query_with_a_limit_reads_and_deletes_the_same_rows(is_asy
         (lambda q: q.limit(2), " LIMIT 2"),
         (lambda q: q.offset(3), " LIMIT -1 OFFSET 3"),
         (lambda q: q.order_by("age").limit(2), " ORDER BY age LIMIT 2"),
-        (lambda q: q.order_by("grp", "-age").limit(5).offset(2), " ORDER BY json_extract(data, '$.grp'), age DESC LIMIT 5 OFFSET 2"),
+        (
+            lambda q: q.order_by("grp", "-age").limit(5).offset(2),
+            " ORDER BY json_extract(data, '$.grp'), age DESC LIMIT 5 OFFSET 2",
+        ),
         (lambda q: q.order_by("age"), " ORDER BY age"),
     ],
     ids=["none", "limit", "offset", "one-term", "two-terms", "order-no-limit"],
@@ -1090,13 +1191,25 @@ def test_the_select_of_a_limited_query_is_the_one_it_always_sent(shape, order):
 # and the write would pick rows 2 and 3.
 
 
-_RACED = [(False, "delete"), (False, "update"), (False, "update_n"), (False, "copy_to"), (True, "delete"), (True, "update"), (True, "update_n")]
+_RACED = [
+    (False, "delete"),
+    (False, "update"),
+    (False, "update_n"),
+    (False, "copy_to"),
+    (True, "delete"),
+    (True, "update"),
+    (True, "update_n"),
+]
 
 
-@pytest.mark.parametrize("plain,call", _RACED, ids=[("plain-" if p else "queryset-") + c for p, c in _RACED])
+@pytest.mark.parametrize(
+    "plain,call", _RACED, ids=[("plain-" if p else "queryset-") + c for p, c in _RACED]
+)
 @pytest.mark.parametrize("kind", PYDANTIC)
 @pytest.mark.asyncio
-async def test_a_second_writer_cannot_change_the_rows_a_limited_write_picked(kind, plain, call, tmp_path):
+async def test_a_second_writer_cannot_change_the_rows_a_limited_write_picked(
+    kind, plain, call, tmp_path
+):
     path = str(tmp_path / "race.db")
     db = await _db(kind, path)
     other = sqlite3.connect(path, timeout=0, isolation_level=None)
@@ -1126,7 +1239,9 @@ async def test_a_second_writer_cannot_change_the_rows_a_limited_write_picked(kin
     try:
         cls = await _aged(kind, db)
         if plain:
-            q = (AsyncSQLerQuery if _is_async(kind) else SQLerQuery)("ct_aged", adapter=adapter, promoted_fields=["age"])
+            q = (AsyncSQLerQuery if _is_async(kind) else SQLerQuery)(
+                "ct_aged", adapter=adapter, promoted_fields=["age"]
+            )
         else:
             q = cls.using(db)
         q = q.limit(2)
@@ -1165,12 +1280,19 @@ async def test_update_n_takes_only_a_whole_number(kind, plain, n):
     try:
         cls = await _aged(kind, db)
         if plain:
-            q = (AsyncSQLerQuery if _is_async(kind) else SQLerQuery)("ct_aged", adapter=db.adapter, promoted_fields=["age"])
+            q = (AsyncSQLerQuery if _is_async(kind) else SQLerQuery)(
+                "ct_aged", adapter=db.adapter, promoted_fields=["age"]
+            )
         else:
             q = cls.using(db)
         before = await _aged_state(cls, db)
-        with pytest.raises(TypeError, match=r"update_n\(\) takes a whole number, not (str|float|bool)"):
+        with pytest.raises(
+            TypeError, match=r"update_n\(\) takes a whole number, not (str|float|bool)"
+        ):
             await _v(q.update_n(n, tag="x"))
-        assert (await _aged_state(cls, db), await _raw(db, "SELECT COUNT(*) FROM ct_aged")) == (before, [(5,)])
+        assert (await _aged_state(cls, db), await _raw(db, "SELECT COUNT(*) FROM ct_aged")) == (
+            before,
+            [(5,)],
+        )
     finally:
         await _close(db)

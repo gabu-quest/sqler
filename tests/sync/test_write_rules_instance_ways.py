@@ -98,7 +98,9 @@ def make(kind, *mixins, promoted=None, fields=None):
         ns["__promoted__"] = promoted
     ns["__annotations__"] = annotations
     kwds = {"tag": False} if kind == "msgspec" else {}
-    cls = types.new_class(f"Item_{table}", (*mixins, BASES[kind]), kwds, lambda body: body.update(ns))
+    cls = types.new_class(
+        f"Item_{table}", (*mixins, BASES[kind]), kwds, lambda body: body.update(ns)
+    )
     return dataclass(cls) if kind.startswith("lite") else cls
 
 
@@ -743,7 +745,11 @@ def test_a_refused_target_delete_leaves_the_referrers_as_they_were(
 # a write by _id makes no table; a new row makes none once its table is remembered; a batch of
 # several rows sends the check of the columns first (a ``SELECT``)
 UNVERSIONED = (["INSERT"], ["UPDATE"], ["CREATE", "SELECT", "INSERT"])
-VERSIONED = (["INSERT"], ["BEGIN", "UPDATE"], ["CREATE", "PRAGMA", "CREATE", "PRAGMA", "SELECT", "INSERT"])
+VERSIONED = (
+    ["INSERT"],
+    ["BEGIN", "UPDATE"],
+    ["CREATE", "PRAGMA", "CREATE", "PRAGMA", "SELECT", "INSERT"],
+)
 A_DELETE = ["CREATE", "DELETE"]
 
 
@@ -751,9 +757,7 @@ def _sent(act):
     with query_logger.capture() as q:
         act()
     return [
-        e.sql.split()[0]
-        for e in q
-        if "sqlite_master" not in e.sql and "data LIKE" not in e.sql
+        e.sql.split()[0] for e in q if "sqlite_master" not in e.sql and "data LIKE" not in e.sql
     ]
 
 
@@ -943,7 +947,9 @@ def test_a_save_to_a_database_without_the_row_raises_and_the_home_stays(db, kind
         inst.name = "second"
         with pytest.raises(_refused(kind)):
             inst.save(db=other)
-        assert _exists(other, Item.__tablename__) is False  # a write by _id makes no table, versioned too
+        assert (
+            _exists(other, Item.__tablename__) is False
+        )  # a write by _id makes no table, versioned too
         assert _docs(other, Item) == []
         inst.save()
         assert [(i, d["name"]) for i, d in _docs(db, Item)] == [(1, "second")]
@@ -1031,7 +1037,9 @@ def _raw(path, sql):
         conn.close()
 
 
-def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(tmp_path, ticking_clock):
+def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(
+    tmp_path, ticking_clock
+):
     """``updated_at`` became a column after ``db`` learned the table: the nulled row's new
     stamp goes into the column, and the document holds no copy the column would hide."""
     path = str(tmp_path / "stamped.db")
@@ -1049,11 +1057,17 @@ def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_int
     finally:
         db.close()
     [(data, new)] = _raw(path, "SELECT data, updated_at FROM wr_stamped_books")
-    assert json.loads(data) == {"created_at": book.created_at.isoformat(), "title": "b", "author": None}
+    assert json.loads(data) == {
+        "created_at": book.created_at.isoformat(),
+        "title": "b",
+        "author": None,
+    }
     assert (new != old, read) == (True, new)
 
 
-def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_writes_the_row(tmp_path):
+def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_writes_the_row(
+    tmp_path,
+):
     """The table was dropped and made again without ``_version`` after ``db`` learned it: the
     write learns it again and writes the row as the table is now; a plain write adds no column,
     so the version is a fact about the table, not the class of the row."""
@@ -1076,7 +1090,10 @@ def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_wr
         author.delete_with_policy(db=db, on_delete="set_null")
     finally:
         db.close()
-    assert _raw(path, "SELECT name FROM pragma_table_info('wr_safe_books')") == [("_id",), ("data",)]
+    assert _raw(path, "SELECT name FROM pragma_table_info('wr_safe_books')") == [
+        ("_id",),
+        ("data",),
+    ]
     [(data,)] = _raw(path, "SELECT data FROM wr_safe_books")
     assert json.loads(data) == {"title": "b", "author": None}
     assert _raw(path, "SELECT count(*) FROM wr_nulled_authors") == [(0,)]
@@ -1097,7 +1114,11 @@ ROUND_TRIPS = [
     ),
     ("hooks", (Recorded,), {}),
     ("tracking", (TrackedModel,), {}),
-    ("full", (FullMixin,), {"created_at": datetime, "updated_at": datetime, "deleted_at": datetime}),
+    (
+        "full",
+        (FullMixin,),
+        {"created_at": datetime, "updated_at": datetime, "deleted_at": datetime},
+    ),
     ("audit_log", (AuditLogMixin,), {}),
 ]
 ROUND_TRIP_CASES = [
@@ -1203,7 +1224,9 @@ MSGSPEC_CANNOT = {"where"}
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_field_loads_as_the_type_it_declares(db, kind):
-    typed = {n: hv for n, hv in TYPED_FIELDS.items() if kind != "msgspec" or n not in MSGSPEC_CANNOT}
+    typed = {
+        n: hv for n, hv in TYPED_FIELDS.items() if kind != "msgspec" or n not in MSGSPEC_CANNOT
+    }
     Item = make(kind, fields={name: (hint, None) for name, (hint, _) in typed.items()})
     saved = Item(name="a", **{name: value for name, (_, value) in typed.items()}).save(db=db)
 
@@ -1277,8 +1300,6 @@ class Counted:
         self.count = len(self.items)
 
 
-
-
 @dataclass
 class Blob:
     data: bytes = b""
@@ -1287,7 +1308,12 @@ class Blob:
 # (row, field type, value saved, the document's value for it); each loads back as that value
 NESTED = [
     ("dataclass", Optional[Address], Address(city="x"), {"city": "x"}),
-    ("datetime_and_uuid", Optional[Stamp], Stamp(T_SET, UUID(int=7)), {"at": T_SET.isoformat(), "ticket": str(UUID(int=7))}),
+    (
+        "datetime_and_uuid",
+        Optional[Stamp],
+        Stamp(T_SET, UUID(int=7)),
+        {"at": T_SET.isoformat(), "ticket": str(UUID(int=7))},
+    ),
     (
         "dataclass_in_dataclass",
         Optional[Home],
@@ -1296,7 +1322,12 @@ NESTED = [
     ),
     ("optional_none", Optional[Address], None, None),
     ("list_empty", list[Address], [], []),
-    ("list_two", list[Address], [Address(city="x"), Address(city="y")], [{"city": "x"}, {"city": "y"}]),
+    (
+        "list_two",
+        list[Address],
+        [Address(city="x"), Address(city="y")],
+        [{"city": "x"}, {"city": "y"}],
+    ),
     ("tuple", tuple[Address, ...], (Address(city="x"),), [{"city": "x"}]),
     ("dict", dict[str, Address], {"k": Address(city="x")}, {"k": {"city": "x"}}),
     ("frozen", Optional[FrozenAddress], FrozenAddress(city="x"), {"city": "x"}),
@@ -1304,12 +1335,16 @@ NESTED = [
     ("init_false", Optional[Counted], Counted(items=[1, 2]), {"items": [1, 2], "count": 2}),
 ]
 NESTED_CASES = [
-    pytest.param(hint, value, doc, kind, id=f"{row}-{kind}") for row, hint, value, doc in NESTED for kind in KINDS
+    pytest.param(hint, value, doc, kind, id=f"{row}-{kind}")
+    for row, hint, value, doc in NESTED
+    for kind in KINDS
 ]
 
 
 @pytest.mark.parametrize("hint, value, doc, kind", NESTED_CASES)
-def test_a_dataclass_field_is_stored_as_its_fields_and_loads_as_its_type(db, hint, value, doc, kind):
+def test_a_dataclass_field_is_stored_as_its_fields_and_loads_as_its_type(
+    db, hint, value, doc, kind
+):
     Item = make(kind, fields={"home": (hint, None)})
     saved = Item(name="a", home=value).save(db=db)
 
@@ -1317,7 +1352,9 @@ def test_a_dataclass_field_is_stored_as_its_fields_and_loads_as_its_type(db, hin
     loaded = Item.from_id(saved._id, db=db)
     assert loaded.home == value
     assert type(loaded.home) is type(value)
-    if isinstance(value, (list, tuple, dict)):  # each entry an Address, not the dict it is stored as
+    if isinstance(
+        value, (list, tuple, dict)
+    ):  # each entry an Address, not the dict it is stored as
         entries = list(loaded.home.values() if isinstance(value, dict) else loaded.home)
         assert [type(v) for v in entries] == [Address] * len(value)
     assert loaded.is_dirty() is False
@@ -1348,7 +1385,14 @@ def test_a_reference_stays_a_reference_beside_a_dataclass_field(db, kind):
     saved = Item(name="a", owner=owner, home=Address(city="x")).save(db=db)
 
     assert _docs(db, Item) == [
-        (saved._id, {"name": "a", "owner": {"_table": Owner.__tablename__, "_id": owner._id}, "home": {"city": "x"}})
+        (
+            saved._id,
+            {
+                "name": "a",
+                "owner": {"_table": Owner.__tablename__, "_id": owner._id},
+                "home": {"city": "x"},
+            },
+        )
     ]
     loaded = Item.from_id(saved._id, db=db)
     assert (type(loaded.owner), loaded.owner._id, loaded.owner.name) == (Owner, owner._id, "o")
@@ -1365,7 +1409,9 @@ def test_a_lite_model_the_caller_does_not_store_as_a_reference_is_refused_not_ne
         __tablename__ = "wr_other_async_lite"
         name: str = ""
 
-    with pytest.raises(UnstorableValueError, match=r"Object of type Other is not JSON serializable \(at home\)"):
+    with pytest.raises(
+        UnstorableValueError, match=r"Object of type Other is not JSON serializable \(at home\)"
+    ):
         dumps(stored({"home": Other(name="o")}, SQLerLiteModel))
 
 
@@ -1400,9 +1446,13 @@ def test_a_dataclass_class_or_an_unknown_object_is_refused(value):
 
 
 @pytest.mark.parametrize("kind", ["lite", "lite_safe"])
-def test_a_stored_dict_loads_as_the_dataclass_its_field_declares_and_a_dict_field_stays_a_dict(db, kind):
+def test_a_stored_dict_loads_as_the_dataclass_its_field_declares_and_a_dict_field_stays_a_dict(
+    db, kind
+):
     Item = make(kind, fields={"home": (Optional[Address], None), "extra": (Optional[dict], None)})
-    _id = db.insert_document(Item.__tablename__, {"name": "a", "home": {"city": "x"}, "extra": {"city": "y"}})
+    _id = db.insert_document(
+        Item.__tablename__, {"name": "a", "home": {"city": "x"}, "extra": {"city": "y"}}
+    )
 
     loaded = Item.from_id(_id, db=db)
 
@@ -1444,7 +1494,9 @@ MODEL_INSIDE = [
 
 @pytest.mark.parametrize("args, place", [pytest.param(a, p, id=r) for r, a, p in MODEL_INSIDE])
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_model_inside_a_dataclass_value_is_refused_at_its_place_and_nothing_is_written(db, kind, args, place):
+def test_a_model_inside_a_dataclass_value_is_refused_at_its_place_and_nothing_is_written(
+    db, kind, args, place
+):
     from sqler.exceptions import UnstorableValueError
 
     Owner = make(kind)
@@ -1464,20 +1516,31 @@ def test_a_model_inside_a_dataclass_value_is_refused_at_its_place_and_nothing_is
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_model_in_a_list_and_a_dict_field_of_the_model_stays_a_reference_beside_a_dataclass(db, kind):
+def test_a_model_in_a_list_and_a_dict_field_of_the_model_stays_a_reference_beside_a_dataclass(
+    db, kind
+):
     Owner = make(kind)
     Holder, _ = _holders(Owner)
-    Item = make(kind, fields={
-        "owners": (list[Owner], None), "by": (dict[str, Owner], None), "home": (Optional[Holder], None)
-    })
+    Item = make(
+        kind,
+        fields={
+            "owners": (list[Owner], None),
+            "by": (dict[str, Owner], None),
+            "home": (Optional[Holder], None),
+        },
+    )
     owner = Owner(name="o").save(db=db)
     saved = Item(name="a", owners=[owner], by={"k": owner}, home=Holder(city="x")).save(db=db)
 
     ref = {"_table": Owner.__tablename__, "_id": owner._id}
     home = {"city": "x", "owner": None, "owners": [], "pair": [], "by": {}, "inner": None}
-    assert _docs(db, Item) == [(saved._id, {"name": "a", "owners": [ref], "by": {"k": ref}, "home": home})]
+    assert _docs(db, Item) == [
+        (saved._id, {"name": "a", "owners": [ref], "by": {"k": ref}, "home": home})
+    ]
     loaded = Item.from_id(saved._id, db=db)
-    assert [(type(o), o._id) for o in [*loaded.owners, *loaded.by.values()]] == [(Owner, owner._id)] * 2
+    assert [(type(o), o._id) for o in [*loaded.owners, *loaded.by.values()]] == [
+        (Owner, owner._id)
+    ] * 2
 
 
 # ----- a field holding a plain msgspec.Struct ----------------------------------------------
@@ -1526,20 +1589,36 @@ class SDog(msgspec.Struct, tag="dog"):
 # (row, field type, value saved, the document's value for it); each loads back as that value
 STRUCTS = [
     ("struct", Optional[SAddress], SAddress(city="x"), {"city": "x"}),
-    ("datetime_and_struct_in_struct", Optional[SStamp], SStamp(T_SET, SAddress("y")),
-     {"at": T_SET.isoformat(), "place": {"city": "y"}}),
+    (
+        "datetime_and_struct_in_struct",
+        Optional[SStamp],
+        SStamp(T_SET, SAddress("y")),
+        {"at": T_SET.isoformat(), "place": {"city": "y"}},
+    ),
     ("optional_none", Optional[SAddress], None, None),
-    ("list_two", list[SAddress], [SAddress(city="x"), SAddress(city="y")], [{"city": "x"}, {"city": "y"}]),
+    (
+        "list_two",
+        list[SAddress],
+        [SAddress(city="x"), SAddress(city="y")],
+        [{"city": "x"}, {"city": "y"}],
+    ),
     ("frozen", Optional[SFrozen], SFrozen(city="x"), {"city": "x"}),
     ("kw_only", Optional[SKwOnly], SKwOnly(city="x", zip="1"), {"city": "x", "zip": "1"}),
-    ("renamed_by_its_encoded_names", Optional[SCamel], SCamel("1", "x"), {"zipCode": "1", "homeCity": "x"}),
+    (
+        "renamed_by_its_encoded_names",
+        Optional[SCamel],
+        SCamel("1", "x"),
+        {"zipCode": "1", "homeCity": "x"},
+    ),
     ("array_like_as_a_list", Optional[SPair], SPair(1, 2), [1, 2]),
     ("list_of_array_like", list[SPair], [SPair(1, 2), SPair(3, 4)], [[1, 2], [3, 4]]),
     ("tagged_with_its_tag", Optional[SDog], SDog("rex"), {"type": "dog", "name": "rex"}),
 ]
 
 
-@pytest.mark.parametrize("hint, value, doc", [pytest.param(h, v, d, id=r) for r, h, v, d in STRUCTS])
+@pytest.mark.parametrize(
+    "hint, value, doc", [pytest.param(h, v, d, id=r) for r, h, v, d in STRUCTS]
+)
 @pytest.mark.parametrize("kind", ["msgspec", "lite", "lite_safe"])
 def test_a_struct_field_is_stored_as_its_fields_and_loads_as_its_type(db, kind, hint, value, doc):
     Item = make(kind, fields={"home": (hint, None)})
@@ -1566,12 +1645,21 @@ def test_a_union_of_tagged_structs_loads_as_the_one_that_was_saved(db):
 
 def test_a_msgspec_model_field_stays_a_reference_beside_a_struct_field(db):
     Owner = make("msgspec")
-    Item = make("msgspec", fields={"owner": (Optional[Owner], None), "home": (Optional[SAddress], None)})
+    Item = make(
+        "msgspec", fields={"owner": (Optional[Owner], None), "home": (Optional[SAddress], None)}
+    )
     owner = Owner(name="o").save(db=db)
     saved = Item(name="a", owner=owner, home=SAddress(city="x")).save(db=db)
 
     assert _docs(db, Item) == [
-        (saved._id, {"name": "a", "owner": {"_table": Owner.__tablename__, "_id": owner._id}, "home": {"city": "x"}})
+        (
+            saved._id,
+            {
+                "name": "a",
+                "owner": {"_table": Owner.__tablename__, "_id": owner._id},
+                "home": {"city": "x"},
+            },
+        )
     ]
     loaded = Item.from_id(saved._id, db=db)
     assert (type(loaded.owner), loaded.owner._id, loaded.owner.name) == (Owner, owner._id, "o")

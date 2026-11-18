@@ -128,18 +128,24 @@ def _check_search_field(name: str) -> None:
 # statement they send and every rule without I/O is here, written once.
 
 
-def _check_step(table: str, layout: Optional[tuple[str, ...]]) -> Optional[tuple[str, list[Any], Any]]:
+def _check_step(
+    table: str, layout: Optional[tuple[str, ...]]
+) -> Optional[tuple[str, list[Any], Any]]:
     """The check of the names a database object remembers of ``table`` (``_check_sql``), as
     the step its ``_sent`` sends; none when it remembers none."""
     return (_check_sql(table, layout), [], layout) if layout else None
 
 
-def _raise_search_error(query: str, exc: sqlite3.OperationalError, sql: str, params: list) -> NoReturn:
+def _raise_search_error(
+    query: str, exc: sqlite3.OperationalError, sql: str, params: list
+) -> NoReturn:
     """Raise, for the ``MATCH`` statement ``exc`` came from, the ``SearchQueryError`` of a query
     SQLite refused; ``exc`` is raised as it is when it is about something else."""
     if not str(exc).startswith(_REFUSED_QUERY):
         raise exc
-    raise SearchQueryError(f"search query {query!r} refused by SQLite: {exc}", sql=sql, params=params) from exc
+    raise SearchQueryError(
+        f"search query {query!r} refused by SQLite: {exc}", sql=sql, params=params
+    ) from exc
 
 
 def _is_text(annotation: Any) -> bool:
@@ -154,7 +160,9 @@ def _fts_config(cls: type) -> Tuple[list[str], str]:
     if hasattr(cls, "FTS"):
         fts = getattr(cls, "FTS")
         return getattr(fts, "fields", []), getattr(fts, "tokenizer", "porter unicode61")
-    return [name for name, declared in field_types(cls).items() if _is_text(declared)], "porter unicode61"
+    return [
+        name for name, declared in field_types(cls).items() if _is_text(declared)
+    ], "porter unicode61"
 
 
 def _lacks_columns(promoted: Any, columns: Any) -> bool:
@@ -312,7 +320,10 @@ class _SearchIndex:
     def _table_args(self, promoted: Any) -> dict[str, Any]:
         """The arguments of the ``ensure_table`` a trigger needs (it reads a promoted field
         from its column)."""
-        return {"promoted": promoted or None, "checks": getattr(self.model_class, "__checks__", None)}
+        return {
+            "promoted": promoted or None,
+            "checks": getattr(self.model_class, "__checks__", None),
+        }
 
     def _triggers(self, columns: Any) -> dict[str, str]:
         """The statement of each trigger of this index (see :func:`_trigger_sql`),
@@ -322,7 +333,11 @@ class _SearchIndex:
     @staticmethod
     def _differing(stored: dict, triggers: dict[str, str]) -> list[tuple[str, str]]:
         """The triggers that are missing or are not the statement this definition writes now."""
-        return [(name, sql) for name, sql in triggers.items() if stored.get(name.lower()) != ("trigger", sql)]
+        return [
+            (name, sql)
+            for name, sql in triggers.items()
+            if stored.get(name.lower()) != ("trigger", sql)
+        ]
 
     def _check_definition(self, index: tuple[str, Optional[str]]) -> None:
         """Raise SchemaError unless the stored ``index`` (type, statement) is this definition."""
@@ -335,7 +350,11 @@ class _SearchIndex:
             )
         columns, tokenizer, other = found
         asked = " ".join(self.tokenizer.split())
-        if [c.lower() for c in columns] != [f.lower() for f in self.fields] or tokenizer != asked or other:
+        if (
+            [c.lower() for c in columns] != [f.lower() for f in self.fields]
+            or tokenizer != asked
+            or other
+        ):
             extra = f" and arguments {other}" if other else ""
             raise SchemaError(
                 f"search index {self.index_table!r} has fields {columns} and tokenizer "
@@ -361,7 +380,9 @@ class _SearchIndex:
             yield ("_send", db, self._create_sql())
 
         table, promoted = self.table, self._promoted()
-        if table.lower() not in stored or (promoted and _lacks_columns(promoted, (yield ("_columns", db, table)))):
+        if table.lower() not in stored or (
+            promoted and _lacks_columns(promoted, (yield ("_columns", db, table)))
+        ):
             # a trigger needs its table, and reads a promoted field from its column
             if not write:
                 return True
@@ -380,7 +401,10 @@ class _SearchIndex:
 
     def _drop_sqls(self) -> list[str]:
         """``drop()``: the triggers, then the index table."""
-        return [*map(_drop_trigger_sql, self._trigger_names()), f"DROP TABLE IF EXISTS {self.index_table};"]
+        return [
+            *map(_drop_trigger_sql, self._trigger_names()),
+            f"DROP TABLE IF EXISTS {self.index_table};",
+        ]
 
     def _clear_sql(self) -> str:
         return f"DELETE FROM {self.index_table};"
@@ -432,7 +456,9 @@ class _SearchIndex:
         """The statement of ``search_with_highlights()`` and its parameters before the query:
         one ``highlight()`` per field, its tags as parameters."""
         idx = self.index_table
-        exprs = [f"highlight({idx}, {i}, ?, ?) as {field}_hl" for i, field in enumerate(self.fields)]
+        exprs = [
+            f"highlight({idx}, {i}, ?, ?) as {field}_hl" for i, field in enumerate(self.fields)
+        ]
         sql = (
             f"SELECT rowid, bm25({idx}) as score, {', '.join(exprs)} FROM {idx} "
             f"WHERE {idx} MATCH ? ORDER BY score LIMIT ? OFFSET ?;"
@@ -462,12 +488,17 @@ class _SearchIndex:
     def _ranked(rows: list, models: list) -> list[SearchResult]:
         """The hits of ``search_ranked()`` in the index's order: a row whose model loaded."""
         loaded = {model._id: model for model in models}
-        return [SearchResult(model=loaded[_id], score=score) for _id, score in rows if _id in loaded]
+        return [
+            SearchResult(model=loaded[_id], score=score) for _id, score in rows if _id in loaded
+        ]
 
     def _highlights(self, rows: list) -> dict[int, dict[str, Any]]:
         """The score and the highlight of each field of each row of ``search_with_highlights()``."""
         return {
-            row[0]: {"score": row[1], "highlights": {f: row[2 + i] for i, f in enumerate(self.fields)}}
+            row[0]: {
+                "score": row[1],
+                "highlights": {f: row[2 + i] for i, f in enumerate(self.fields)},
+            }
             for row in rows
         }
 
@@ -477,7 +508,9 @@ class _SearchIndex:
         for model in models:
             data = found.get(model._id, {})
             results.append(
-                SearchResult(model=model, score=data.get("score", 0.0), highlights=data.get("highlights"))
+                SearchResult(
+                    model=model, score=data.get("score", 0.0), highlights=data.get("highlights")
+                )
             )
         results.sort(key=lambda r: r.score)
         return results
@@ -768,7 +801,9 @@ class FTSIndex(_SearchIndex):
             Highlighted snippet string
         """
         sql = self._snippet_sql(field, max_tokens)
-        rows = self._search_rows(sql, query, plain, before=(highlight_start, highlight_end, model._id))
+        rows = self._search_rows(
+            sql, query, plain, before=(highlight_start, highlight_end, model._id)
+        )
         return rows[0][0] if rows else ""
 
     def count(self, query: str, *, plain: bool = False) -> int:
@@ -783,7 +818,9 @@ class FTSIndex(_SearchIndex):
         """
         return self._search_rows(self._count_sql(), query, plain)[0][0]
 
-    def _search_rows(self, sql: str, query: str, plain: bool, before: Any = (), after: Any = ()) -> list:
+    def _search_rows(
+        self, sql: str, query: str, plain: bool, before: Any = (), after: Any = ()
+    ) -> list:
         """The rows of a ``MATCH ?`` statement, its parameters :meth:`_match_params`. A query
         SQLite refuses raises SearchQueryError; any other error is raised as it is."""
         params = self._match_params(query, plain, before, after)
@@ -994,14 +1031,18 @@ class AsyncFTSIndex(_SearchIndex):
     ) -> str:
         """Async twin of :meth:`FTSIndex.snippet`."""
         sql = self._snippet_sql(field, max_tokens)
-        rows = await self._search_rows(sql, query, plain, before=(highlight_start, highlight_end, model._id))
+        rows = await self._search_rows(
+            sql, query, plain, before=(highlight_start, highlight_end, model._id)
+        )
         return rows[0][0] if rows else ""
 
     async def count(self, query: str, *, plain: bool = False) -> int:
         """Async twin of :meth:`FTSIndex.count`."""
         return (await self._search_rows(self._count_sql(), query, plain))[0][0]
 
-    async def _search_rows(self, sql: str, query: str, plain: bool, before: Any = (), after: Any = ()) -> list:
+    async def _search_rows(
+        self, sql: str, query: str, plain: bool, before: Any = (), after: Any = ()
+    ) -> list:
         """Async twin of :meth:`FTSIndex._search_rows`; what it read holds no connection."""
         params = self._match_params(query, plain, before, after)
         adapter = self._get_db().adapter
@@ -1185,7 +1226,6 @@ class SearchableMixin(WriteRules, _SearchHost):
         return cls._search_index(db).count(query, plain=plain)
 
 
-
 class AsyncSearchableMixin(WriteRules, _AsyncSearchHost):
     """Async twin of :class:`SearchableMixin`, for every async base: every search call is a
     coroutine of the same name, arguments and result, on an ``AsyncSQLerDB``
@@ -1251,7 +1291,9 @@ class AsyncSearchableMixin(WriteRules, _AsyncSearchHost):
         db: Optional[AsyncSQLerDB] = None,
     ) -> list:
         """Async twin of :meth:`SearchableMixin.search`."""
-        return await (await cls._search_index(db)).search(query, limit=limit, offset=offset, plain=plain)
+        return await (await cls._search_index(db)).search(
+            query, limit=limit, offset=offset, plain=plain
+        )
 
     @classmethod
     async def search_ranked(

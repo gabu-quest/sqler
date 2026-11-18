@@ -37,14 +37,20 @@ def all_pairs(*axes) -> tuple[str, list]:
     cols = []
     for names, values, *ids in axes:
         ids = ids[0] if ids else [None] * len(values)
-        cols.append([_value(names, v, i, g) for i, (v, g) in enumerate(zip(values, ids, strict=True))])
+        cols.append(
+            [_value(names, v, i, g) for i, (v, g) in enumerate(zip(values, ids, strict=True))]
+        )
     size = [len(col) for col in cols]
     order = sorted(range(len(cols)), key=lambda a: -size[a])
-    rows = [{order[0]: i, order[1]: j} for i in range(size[order[0]]) for j in range(size[order[1]])]
+    rows = [
+        {order[0]: i, order[1]: j} for i in range(size[order[0]]) for j in range(size[order[1]])
+    ]
     for pos, k in enumerate(order[2:], 2):
         need = {(a, v, w) for a in order[:pos] for v in range(size[a]) for w in range(size[k])}
         for row in rows:
-            row[k] = max(range(size[k]), key=lambda w: (sum((a, row[a], w) in need for a in row), -w))
+            row[k] = max(
+                range(size[k]), key=lambda w: (sum((a, row[a], w) in need for a in row), -w)
+            )
             need -= {(a, row[a], row[k]) for a in row if a != k}
         for a, v, w in sorted(need):
             free = next((r for r in rows if r.get(k) == w and a not in r), None)
@@ -54,10 +60,16 @@ def all_pairs(*axes) -> tuple[str, list]:
                 free[a] = v
     cases = [tuple(row.get(a, 0) for a in range(len(cols))) for row in rows]
     for a, b in combinations(range(len(cols)), 2):
-        assert {(c[a], c[b]) for c in cases} == {(i, j) for i in range(size[a]) for j in range(size[b])}
+        assert {(c[a], c[b]) for c in cases} == {
+            (i, j) for i in range(size[a]) for j in range(size[b])
+        }
     params = []
     for case in cases:
         held = [cols[a][i] for a, i in enumerate(case)]
         values = [x for h in held for x in h[0]]
-        params.append(pytest.param(*values, id="-".join(h[1] for h in held), marks=[m for h in held for m in h[2]]))
+        params.append(
+            pytest.param(
+                *values, id="-".join(h[1] for h in held), marks=[m for h in held for m in h[2]]
+            )
+        )
     return ",".join(names for names, *_ in axes), params

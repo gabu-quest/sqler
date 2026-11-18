@@ -181,7 +181,9 @@ class InFlight:
         if self.rows & other.rows or self.keys & other.keys:
             return True
         touches = {t for t, _ in self.rows}, {t for t, _ in other.rows}
-        return (self.promote and (other.promote or PROMO in touches[1])) or (other.promote and PROMO in touches[0])
+        return (self.promote and (other.promote or PROMO in touches[1])) or (
+            other.promote and PROMO in touches[0]
+        )
 
 
 def _lines(path: str) -> Iterable[dict]:
@@ -233,7 +235,12 @@ def _resolve(conn: sqlite3.Connection, call: InFlight) -> None:
             table, key = fx[1], fx[2]["key"]
             if not _columns(conn, table):
                 continue
-            found = [r[0] for r in conn.execute(f"SELECT _id FROM {table} WHERE json_extract(data, '$.key') = ?", [key])]
+            found = [
+                r[0]
+                for r in conn.execute(
+                    f"SELECT _id FROM {table} WHERE json_extract(data, '$.key') = ?", [key]
+                )
+            ]
             if len(found) == 1:
                 fx[2] = found[0]
                 call.rows.add((table, found[0]))
@@ -289,7 +296,9 @@ class _Checker:
         self.exp = exp
         self.report = Report()
 
-    def bad(self, invariant: str, table: str, row: Any, text: str, key: Any = None, ref: Any = None) -> None:
+    def bad(
+        self, invariant: str, table: str, row: Any, text: str, key: Any = None, ref: Any = None
+    ) -> None:
         self.report.violations.append(Violation(invariant, table, row, text, ref=ref, key=key))
 
     def seen(self, invariant: str, n: int = 1) -> None:
@@ -314,7 +323,9 @@ class _Checker:
             want = {k: v for k, v in doc.items() if k not in promoted}
             self.seen("row_doc")
             if data != want:
-                self.bad("row_doc", table, _id, f"data {data} != journal {want}", key=doc.get("key"))
+                self.bad(
+                    "row_doc", table, _id, f"data {data} != journal {want}", key=doc.get("key")
+                )
             for col in promoted:
                 self.seen("promoted_in_data")
                 if col in data:
@@ -322,12 +333,22 @@ class _Checker:
                 if col in doc:
                     self.seen("promoted_column")
                     if cols[col] != doc[col]:
-                        self.bad("promoted_column", table, _id, f"column {col}={cols[col]!r}, journal {doc[col]!r}")
+                        self.bad(
+                            "promoted_column",
+                            table,
+                            _id,
+                            f"column {col}={cols[col]!r}, journal {doc[col]!r}",
+                        )
             if versioned and table in (TABLE["safe_p"], TABLE["safe_l"]):
                 self.seen("version")
                 want_v = exp.puts[(table, _id)] - 1
                 if version != want_v:
-                    self.bad("version", table, _id, f"_version {version}, journal has {want_v + 1} writes")
+                    self.bad(
+                        "version",
+                        table,
+                        _id,
+                        f"_version {version}, journal has {want_v + 1} writes",
+                    )
         for _id in exp.deleted[table]:
             self.seen("row_deleted_present")
             if _id in rows and _id not in exp.live[table]:
@@ -338,11 +359,17 @@ class _Checker:
                 self.bad("archive", table, _id, "archived row is still in its table")
         for _id, (data, _cols, _v) in rows.items():
             self.seen("row_unknown")
-            if _id in exp.live[table] or _id in exp.deleted[table] or (archived_src and _id in exp.archived):
+            if (
+                _id in exp.live[table]
+                or _id in exp.deleted[table]
+                or (archived_src and _id in exp.archived)
+            ):
                 continue
             key = data.get("key")
             if key in ghosts:
-                self.bad("rollback_left", table, _id, f"row of a rolled-back write: {data}", key=key)
+                self.bad(
+                    "rollback_left", table, _id, f"row of a rolled-back write: {data}", key=key
+                )
             else:
                 self.bad("row_unknown", table, _id, f"no journal knows it: {data}", key=key)
         for t, key, _ in exp.ghosts:
@@ -350,7 +377,13 @@ class _Checker:
                 self.seen("rollback_left")
         for t, key in exp.unresolved:
             if t == table:
-                self.bad("row_missing", table, None, f"a call planned a row with key {key!r}; none is stored", key=key)
+                self.bad(
+                    "row_missing",
+                    table,
+                    None,
+                    f"a call planned a row with key {key!r}; none is stored",
+                    key=key,
+                )
         return rows
 
     def archive(self) -> None:
@@ -370,7 +403,13 @@ class _Checker:
                 self.bad("archive", ARCHIVE, _id, f"archive holds {data}, journal {doc}")
         for _id, (data, _c, _v) in rows.items():
             if _id not in self.exp.archived:
-                self.bad("row_unknown", ARCHIVE, _id, f"no journal archived it: {data}", key=data.get("key"))
+                self.bad(
+                    "row_unknown",
+                    ARCHIVE,
+                    _id,
+                    f"no journal archived it: {data}",
+                    key=data.get("key"),
+                )
 
     def counters(self) -> None:
         table = TABLE["counter"]
@@ -386,7 +425,9 @@ class _Checker:
             if count != want:
                 self.bad("counter", table, _id, f"count {count}, journals add up to {want}")
             if version != want:
-                self.bad("counter", table, _id, f"_version {version}, journals have {want} increments")
+                self.bad(
+                    "counter", table, _id, f"_version {version}, journals have {want} increments"
+                )
         for _id in self.exp.live[table]:
             if _id not in rows:
                 self.bad("row_missing", table, _id, "counter is gone")
@@ -404,8 +445,12 @@ class _Checker:
                 snap = json.loads(snapshot) if snapshot else {}
                 if snap.get("key") in ghosts:
                     self.bad(
-                        "rollback_left", AUDIT_TABLE, aid, f"audit row of a rolled-back write: {snap}",
-                        key=snap.get("key"), ref=(table, record_id),
+                        "rollback_left",
+                        AUDIT_TABLE,
+                        aid,
+                        f"audit row of a rolled-back write: {snap}",
+                        key=snap.get("key"),
+                        ref=(table, record_id),
                     )
                     continue
                 got[record_id].append((aid, action, snap))
@@ -415,16 +460,32 @@ class _Checker:
             want = exp.audits.get(_id, 0)
             have = got.get(_id, [])
             if len(have) != want:
-                self.bad("audit", table, _id, f"{len(have)} audit rows, journal has {want} audited writes")
-            elif have and _id in exp.deleted[table] and _id not in exp.live[table] and have[-1][1] != "delete":
-                self.bad("audit", table, _id, f"last audit row is {have[-1][1]!r}, the row was deleted")
+                self.bad(
+                    "audit",
+                    table,
+                    _id,
+                    f"{len(have)} audit rows, journal has {want} audited writes",
+                )
+            elif (
+                have
+                and _id in exp.deleted[table]
+                and _id not in exp.live[table]
+                and have[-1][1] != "delete"
+            ):
+                self.bad(
+                    "audit", table, _id, f"last audit row is {have[-1][1]!r}, the row was deleted"
+                )
         for record_id, entries in got.items():
             if record_id not in known:
                 key = entries[0][2].get("key")
                 for aid, action, _snap in entries:
                     self.bad(
-                        "audit", AUDIT_TABLE, aid, f"audit row ({action}) of record {record_id} without its write",
-                        key=key, ref=(table, record_id),
+                        "audit",
+                        AUDIT_TABLE,
+                        aid,
+                        f"audit row ({action}) of record {record_id} without its write",
+                        key=key,
+                        ref=(table, record_id),
                     )
 
     def references(self, jobs: dict, crews: dict) -> None:
@@ -443,15 +504,28 @@ class _Checker:
             if self.exp.live[table]:
                 self.bad("search_missing", idx, None, "the search index is gone")
             return
-        entries = {rowid: body for rowid, body in self.conn.execute(f"SELECT rowid, body FROM {idx}")}
+        entries = {
+            rowid: body for rowid, body in self.conn.execute(f"SELECT rowid, body FROM {idx}")
+        }
         live = self.exp.live[table]
         for _id, doc in live.items():
             self.seen("search_missing")
             body = doc["body"]
             word = body.split()[1]
-            hits = [r[0] for r in self.conn.execute(f"SELECT rowid FROM {idx} WHERE {idx} MATCH ?", [f'"{word}"'])]
+            hits = [
+                r[0]
+                for r in self.conn.execute(
+                    f"SELECT rowid FROM {idx} WHERE {idx} MATCH ?", [f'"{word}"']
+                )
+            ]
             if entries.get(_id) != body or hits != [_id]:
-                self.bad("search_missing", idx, _id, f"word {word!r} finds {hits}, entry {entries.get(_id)!r}", key=doc.get("key"))
+                self.bad(
+                    "search_missing",
+                    idx,
+                    _id,
+                    f"word {word!r} finds {hits}, entry {entries.get(_id)!r}",
+                    key=doc.get("key"),
+                )
         # each deleted row is looked for among the entries below
         self.seen("search_deleted", len(self.exp.deleted[table] - set(live)))
         for rowid, body in entries.items():
@@ -461,18 +535,37 @@ class _Checker:
             word = body.split()[1] if body and len(body.split()) > 1 else ""
             key = word.rsplit("v", 1)[0] if word else None
             if any(g == word for t, _k, g in self.exp.ghosts if t == table):
-                self.bad("rollback_left", idx, rowid, f"index entry of a rolled-back write: {body!r}", key=key)
+                self.bad(
+                    "rollback_left",
+                    idx,
+                    rowid,
+                    f"index entry of a rolled-back write: {body!r}",
+                    key=key,
+                )
             elif rowid in self.exp.deleted[table]:
-                self.bad("search_deleted", idx, rowid, f"deleted row still found: {body!r}", key=key)
+                self.bad(
+                    "search_deleted", idx, rowid, f"deleted row still found: {body!r}", key=key
+                )
             else:
                 self.bad("search_deleted", idx, rowid, f"entry of no row: {body!r}", key=key)
         for t, ghost_key, word in self.exp.ghosts:
             if t == table and word:
                 self.seen("rollback_left")
-                hits = [r[0] for r in self.conn.execute(f"SELECT rowid FROM {idx} WHERE {idx} MATCH ?", [f'"{word}"'])]
+                hits = [
+                    r[0]
+                    for r in self.conn.execute(
+                        f"SELECT rowid FROM {idx} WHERE {idx} MATCH ?", [f'"{word}"']
+                    )
+                ]
                 for h in hits:
                     if h not in live:
-                        self.bad("rollback_left", idx, h, f"rolled-back word {word!r} is found", key=ghost_key)
+                        self.bad(
+                            "rollback_left",
+                            idx,
+                            h,
+                            f"rolled-back word {word!r} is found",
+                            key=ghost_key,
+                        )
         self.seen("search_integrity")
         try:
             self.conn.execute(f"INSERT INTO {idx}({idx}) VALUES('integrity-check')")
@@ -486,21 +579,29 @@ class _Checker:
         for table, col in sorted(self.exp.promotions):
             self.seen("promoted_column")
             if col not in _columns(self.conn, table):
-                self.bad("promoted_column", table, None, f"the promotion of {col!r} is not in the table")
+                self.bad(
+                    "promoted_column", table, None, f"the promotion of {col!r} is not in the table"
+                )
         if cols:
             self.seen("index")
             # each key where the table stores the field: its column once promoted, else its path
             want = [f if f in cols else f"json_extract(data, '$.{f}')" for f in ("prio", "stage")]
             have = []
             for name, sql in self.conn.execute(
-                "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL", [PROMO]
+                "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL",
+                [PROMO],
             ):
                 keys = _index_keys(sql)
                 if keys and keys[0] in ("prio", "json_extract(data, '$.prio')"):
                     have.append((name, keys))
             if not any(keys == want for _n, keys in have):
                 found = "; ".join(f"{n} on ({', '.join(k)})" for n, k in have) or "none"
-                self.bad("index", PROMO, None, f"no index on ({', '.join(want)}); over prio there is: {found}")
+                self.bad(
+                    "index",
+                    PROMO,
+                    None,
+                    f"no index on ({', '.join(want)}); over prio there is: {found}",
+                )
 
     def sqlite(self) -> None:
         self.seen("integrity_check")
@@ -591,7 +692,9 @@ def _applied(exp: Expected, calls: list) -> Expected:
     return out
 
 
-def check(conn: sqlite3.Connection, journal_dir: str, killed: Iterable[str] = (), db: Any = None) -> Report:
+def check(
+    conn: sqlite3.Connection, journal_dir: str, killed: Iterable[str] = (), db: Any = None
+) -> Report:
     """Check the database behind ``conn`` against the journals in ``journal_dir``.
 
     Each group of killed calls that touch the same rows must match one mix of its calls
@@ -641,17 +744,27 @@ def check(conn: sqlite3.Connection, journal_dir: str, killed: Iterable[str] = ()
         g = groups[k]
         calls = ", ".join(f"{c.op} of {c.worker}" for c in g)
         if len(g) > MAX_OVERLAP:
-            shown = [(0, f"{len(g)} killed calls touch the same rows, too many to try each mix: {calls}")]
+            shown = [
+                (0, f"{len(g)} killed calls touch the same rows, too many to try each mix: {calls}")
+            ]
         elif len(g) == 1:
             # a lone call: what breaks if none of it is stored, and what if all of it is
-            shown = [(0, f"half-applied call {calls}, if none stored"), (1, f"half-applied call {calls}, if all stored")]
+            shown = [
+                (0, f"half-applied call {calls}, if none stored"),
+                (1, f"half-applied call {calls}, if all stored"),
+            ]
         else:
             nearest = min(range(len(tries)), key=lambda m: len(tries[m]))
-            stored = ", ".join(f"{c.op} of {c.worker}" for b, c in enumerate(g) if nearest >> b & 1) or "none"
+            stored = (
+                ", ".join(f"{c.op} of {c.worker}" for b, c in enumerate(g) if nearest >> b & 1)
+                or "none"
+            )
             shown = [(nearest, f"half-applied calls ({calls}), nearest mix stores: {stored}")]
         for mix, why in shown:
             for v in tries[mix]:
-                result.violations.append(Violation(v.invariant, v.table, v.row, f"{why}: {v.text}", ref=v.ref, key=v.key))
+                result.violations.append(
+                    Violation(v.invariant, v.table, v.row, f"{why}: {v.text}", ref=v.ref, key=v.key)
+                )
     return result
 
 

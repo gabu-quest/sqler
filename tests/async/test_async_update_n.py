@@ -105,18 +105,14 @@ class TestAsyncUpdateNBasic:
 
     async def test_empty_match_returns_empty_list(self, async_db_items):
         results = await (
-            AsyncItem.query()
-            .filter(F("status") == "nonexistent")
-            .update_n(5, status="running")
+            AsyncItem.query().filter(F("status") == "nonexistent").update_n(5, status="running")
         )
         assert results == []
 
     async def test_n_exceeds_available(self, async_db_items):
         """n=100 but only 4 pending -> returns 4."""
         results = await (
-            AsyncItem.query()
-            .filter(F("status") == "pending")
-            .update_n(100, status="running")
+            AsyncItem.query().filter(F("status") == "pending").update_n(100, status="running")
         )
         assert len(results) == 4
 
@@ -233,9 +229,7 @@ class TestAsyncUpdateNConcurrency:
         )
         ids_a = {r._id for r in claimed_a}
         ids_b = {r._id for r in claimed_b}
-        assert ids_a.isdisjoint(ids_b), (
-            f"Overlap detected: {ids_a & ids_b}"
-        )
+        assert ids_a.isdisjoint(ids_b), f"Overlap detected: {ids_a & ids_b}"
         assert len(ids_a) + len(ids_b) == 4  # all 4 pending claimed
 
 

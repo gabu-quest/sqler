@@ -62,7 +62,10 @@ REQUIRED = object()
 def _make(key: str, base: type, lite: bool, name: str, fields: dict) -> type:
     """A model class of ``base`` with ``fields`` (``{name: (annotation, default)}``); a
     default that is a type (``dict``, ``list``) is a factory, ``REQUIRED`` none."""
-    ns: dict = {"__tablename__": f"rp_{key.replace('-', '_')}_{name.lower()}", "__annotations__": {}}
+    ns: dict = {
+        "__tablename__": f"rp_{key.replace('-', '_')}_{name.lower()}",
+        "__annotations__": {},
+    }
     for field_name, (annotation, default) in fields.items():
         ns["__annotations__"][field_name] = annotation
         if default is REQUIRED:
@@ -172,7 +175,9 @@ class World:
 
     async def stored(self, name: str, rid: int) -> str:
         """The row's JSON text; a safe base's ``_version`` (which every save moves) cut out."""
-        cur = await aw(self.db.adapter.execute(f"SELECT data FROM {self.t[name]} WHERE _id = ?", [rid]))
+        cur = await aw(
+            self.db.adapter.execute(f"SELECT data FROM {self.t[name]} WHERE _id = ?", [rid])
+        )
         text = (await aw(cur.fetchone()))[0]
         await aw(cur.close())
         return re.sub(r',"_version":\d+}$', "}", text)
@@ -203,7 +208,9 @@ def run(key: str, scenario) -> Any:
 
 
 def selects_from(sent: list, table: str) -> int:
-    return sum(1 for q in sent if q.sql.lstrip().upper().startswith("SELECT") and f"FROM {table}" in q.sql)
+    return sum(
+        1 for q in sent if q.sql.lstrip().upper().startswith("SELECT") and f"FROM {table}" in q.sql
+    )
 
 
 def shape(x: Any) -> Any:
@@ -226,7 +233,13 @@ def test_a_reference_in_an_untyped_field_is_given_back_and_its_table_is_not_read
         ref = w.ref("secret", 1)
         cid = await w.put(
             "comment",
-            {"author": "visitor", "extra": ref, "anything": ref, "items": [ref], "writer": w.ref("user", uid)},
+            {
+                "author": "visitor",
+                "extra": ref,
+                "anything": ref,
+                "items": [ref],
+                "writer": w.ref("user", uid),
+            },
         )
         with query_logger.capture() as sent:
             got = await w.load("comment", cid, way)
@@ -284,12 +297,15 @@ def test_a_followed_child_follows_its_own_typed_field(key, way):
         with query_logger.capture() as sent:
             got = await w.load("comment", cid, way)
         team = got.writer.team
-        return (type(team).__name__.endswith("Team"), team._id, team.name), selects_from(sent, w.t["team"])
+        return (type(team).__name__.endswith("Team"), team._id, team.name), selects_from(
+            sent, w.t["team"]
+        )
 
     assert run(key, scenario) == ((True, 1, "t"), 1)
 
 
 # ---- a typed position admits only its classes ---------------------------------------
+
 
 @pytest.mark.parametrize("way", WAYS)
 @pytest.mark.parametrize("key", list(BASES))
@@ -397,7 +413,9 @@ STATEMENTS_OF_A_PLAIN_ROW: dict = {"from_id": 1, "from_ids": 1, "refresh": 2, "a
 
 @pytest.mark.parametrize("way", WAYS)
 @pytest.mark.parametrize("key", list(BASES))
-def test_a_class_with_no_typed_field_sends_the_same_statements_with_a_reference_or_without(key, way):
+def test_a_class_with_no_typed_field_sends_the_same_statements_with_a_reference_or_without(
+    key, way
+):
     async def scenario(w):
         await w.put("secret", {"owner": "admin", "token": "s3cr3t"})
         with_ref = await w.put("plain", {"name": "r", "extra": w.ref("secret", 1)})
@@ -408,7 +426,12 @@ def test_a_class_with_no_typed_field_sends_the_same_statements_with_a_reference_
         with query_logger.capture() as ref_sent:
             got = await w.load("plain", with_ref, way)
         sql = [q.sql for q in ref_sent]
-        return len(sql), sql == [q.sql for q in plain_sent], selects_from(ref_sent, w.t["secret"]), got.extra
+        return (
+            len(sql),
+            sql == [q.sql for q in plain_sent],
+            selects_from(ref_sent, w.t["secret"]),
+            got.extra,
+        )
 
     ref = {"_table": f"rp_{key.replace('-', '_')}_secret", "_id": 1}
     count, same, secret_reads, extra = run(key, scenario)
@@ -544,7 +567,12 @@ def test_typed_fields_reads_where_an_annotation_puts_a_model(annotation, want):
     """The same answer for an annotation and for its text."""
     from sqler.models import _refs
 
-    ns = {"__tablename__": "rp_shape_holder", "__module__": __name__, "__annotations__": {"f": annotation}, "f": None}
+    ns = {
+        "__tablename__": "rp_shape_holder",
+        "__module__": __name__,
+        "__annotations__": {"f": annotation},
+        "f": None,
+    }
     holder = dataclasses.dataclass(type("RpShapeHolder", (SQLerLiteModel,), ns))
 
     assert _refs.typed_fields(holder) == ({} if want is None else {"f": want})
@@ -563,10 +591,14 @@ def test_a_gone_row_in_a_tuple_with_one_entry_per_place_keeps_the_places(key, qu
     user = _make(key, base, lite, "PairUser", {"name": (str, "")})
     globals()[user.__name__] = user  # where the text of an annotation finds it
     n = user.__name__
-    pair = f"tuple[Optional[{n}], Optional[{n}]]" if quoted else tuple[Optional[user], Optional[user]]
+    pair = (
+        f"tuple[Optional[{n}], Optional[{n}]]" if quoted else tuple[Optional[user], Optional[user]]
+    )
     row = f"tuple[{n}, ...]" if quoted else tuple[user, ...]
     try:
-        holder = _make(key, base, lite, f"PairHolder{int(quoted)}", {"pair": (pair, None), "row": (row, ())})
+        holder = _make(
+            key, base, lite, f"PairHolder{int(quoted)}", {"pair": (pair, None), "row": (row, ())}
+        )
         db = SQLerDB.in_memory(shared=False)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
@@ -576,7 +608,12 @@ def test_a_gone_row_in_a_tuple_with_one_entry_per_place_keeps_the_places(key, qu
         gone = {"_table": user.__tablename__, "_id": 2}
         kept = {"_table": user.__tablename__, "_id": 1}
         db.insert_document(holder.__tablename__, {"pair": [gone, kept], "row": [gone, kept]})
-        got = [holder.from_id(1), holder.from_ids([1])[0], holder.query().all()[0], holder.query().first()]
+        got = [
+            holder.from_id(1),
+            holder.from_ids([1])[0],
+            holder.query().all()[0],
+            holder.query().first(),
+        ]
         db.close()
     finally:
         del globals()[n]
@@ -584,7 +621,9 @@ def test_a_gone_row_in_a_tuple_with_one_entry_per_place_keeps_the_places(key, qu
     def names(entries):
         return [None if e is None else (e._id, e.name) for e in entries]
 
-    assert [(names(g.pair), names(g.row)) for g in got] == [([None, (1, "kept")], [(1, "kept")])] * 4
+    assert [(names(g.pair), names(g.row)) for g in got] == [
+        ([None, (1, "kept")], [(1, "kept")])
+    ] * 4
 
 
 # ---- a msgspec class whose annotation names a class that is not there yet ------------
@@ -753,22 +792,34 @@ NO_ROW = [
     pytest.param("one", GONE_USER, None, None, id="one-gone"),
     pytest.param("many", [("user", 1), GONE_USER], [U1], None, id="many-one-gone"),
     pytest.param("many", [("user", 98), GONE_USER], [], None, id="many-all-gone"),
-    pytest.param("many", [GONE_USER, ("user", 1), GONE_USER], [U1], None, id="many-same-gone-twice"),
+    pytest.param(
+        "many", [GONE_USER, ("user", 1), GONE_USER], [U1], None, id="many-same-gone-twice"
+    ),
     pytest.param("by_key", {"a": ("user", 1), "b": GONE_USER}, {"a": U1}, None, id="dict-one-gone"),
     pytest.param("one", ("secret", 1), None, "secret", id="one-other-class"),
     pytest.param("many", [("user", 1), ("secret", 1)], [U1], "secret", id="many-other-class"),
-    pytest.param("by_key", {"a": ("user", 1), "b": ("secret", 1)}, {"a": U1}, "secret", id="dict-other-class"),
+    pytest.param(
+        "by_key", {"a": ("user", 1), "b": ("secret", 1)}, {"a": U1}, "secret", id="dict-other-class"
+    ),
     pytest.param("one", NO_CLASS, None, None, id="one-no-class"),
     pytest.param("many", [("user", 1), NO_CLASS], [U1], None, id="many-no-class"),
     pytest.param("either", ("secret", 1), None, "secret", id="union-dict-reference-not-followed"),
     pytest.param("either", ("user", 1), U1, None, id="union-dict-reference-followed"),
     pytest.param("num", 5, 5, "user", id="union-int-holding-an-int"),
     pytest.param("num", ("user", 1), U1, None, id="union-int-holding-a-reference"),
-    pytest.param("grid", [[("user", 1), GONE_USER], [GONE_USER]], [[U1], []], None, id="list-of-lists"),
     pytest.param(
-        "groups", {"a": [("user", 1), GONE_USER], "b": [GONE_USER]}, {"a": [U1], "b": []}, None, id="dict-of-lists"
+        "grid", [[("user", 1), GONE_USER], [GONE_USER]], [[U1], []], None, id="list-of-lists"
     ),
-    pytest.param("one", ("admin", 1), ("Admin", 1, "a1"), None, id="parent-class-field-subclass-row"),
+    pytest.param(
+        "groups",
+        {"a": [("user", 1), GONE_USER], "b": [GONE_USER]},
+        {"a": [U1], "b": []},
+        None,
+        id="dict-of-lists",
+    ),
+    pytest.param(
+        "one", ("admin", 1), ("Admin", 1, "a1"), None, id="parent-class-field-subclass-row"
+    ),
     pytest.param("admin", ("user", 1), None, "user", id="subclass-field-parent-class-row"),
 ]
 
@@ -779,7 +830,9 @@ async def _two_rows(w: World) -> None:
     await w.put("secret", {"owner": "admin", "token": "s3cr3t"})
 
 
-@pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("field,held,want,unread", NO_ROW), ("way", WAYS)))
+@pytest.mark.parametrize(
+    *all_pairs(("key", list(BASES)), ("field,held,want,unread", NO_ROW), ("way", WAYS))
+)
 def test_a_typed_reference_to_no_row_of_the_fields_class(key, field, held, want, unread, way):
     async def scenario(w):
         await _two_rows(w)
@@ -849,7 +902,9 @@ def test_a_dict_that_is_not_a_reference_at_a_typed_position_is_not_followed(key,
         await w.put("user", {"name": "u1"})
         data = {k: w.t["user"] if v == "USER" else v for k, v in held.items()}
         twin = w.ref("user", 1)
-        hid = await w.put("holder", {"one": data, "many": [twin, data], "by_key": {"a": twin, "b": data}})
+        hid = await w.put(
+            "holder", {"one": data, "many": [twin, data], "by_key": {"a": twin, "b": data}}
+        )
         with query_logger.capture() as sent:
             got = await w.load("holder", hid, way)
         return (
@@ -967,7 +1022,9 @@ def test_a_reference_to_no_row_costs_what_a_found_one_costs(key, way):
     async def scenario(w):
         await w.put("user", {"name": "u1"})
         await w.put("user", {"name": "u2"})
-        found = await w.put("holder", {"one": w.ref("user", 2), "many": [w.ref("user", 1), w.ref("user", 2)]})
+        found = await w.put(
+            "holder", {"one": w.ref("user", 2), "many": [w.ref("user", 1), w.ref("user", 2)]}
+        )
         lost = await w.put(
             "holder",
             {
@@ -1008,10 +1065,16 @@ def test_a_msgspec_query_reads_a_typed_reference_to_no_row_by_the_same_rule(kind
                 RpMsOwner.set_db(db, "rp_ms_owner")
             await _aw(db.insert_document("rp_ms_user", {"name": "u1"}))
             ref, gone = {"_table": "rp_ms_user", "_id": 1}, {"_table": "rp_ms_user", "_id": 99}
-            await _aw(db.insert_document("rp_ms_owner", {"one": gone, "many": [ref, gone], "by_key": {"a": ref, "b": gone}}))
+            await _aw(
+                db.insert_document(
+                    "rp_ms_owner",
+                    {"one": gone, "many": [ref, gone], "by_key": {"a": ref, "b": gone}},
+                )
+            )
             got = [(await _aw(RpMsOwner.query().all()))[0], await _aw(RpMsOwner.query().first())]
             return [
-                (g.one, [(type(m).__name__, m._id, m.name) for m in g.many], sorted(g.by_key)) for g in got
+                (g.one, [(type(m).__name__, m._id, m.name) for m in g.many], sorted(g.by_key))
+                for g in got
             ]
         finally:
             await _aw(db.close())
@@ -1058,7 +1121,9 @@ def break_reads_of(w: World, table: str) -> None:
     adapter._execute_judged = broken(adapter._execute_judged)
 
 
-@pytest.mark.parametrize(*all_pairs(("key", list(BASES)), ("way", WAYS), ("broken", ["user", "team"])))
+@pytest.mark.parametrize(
+    *all_pairs(("key", list(BASES)), ("way", WAYS), ("broken", ["user", "team"]))
+)
 def test_a_database_error_while_a_reference_is_read_reaches_the_caller(key, way, broken):
     """The read of the child's table (``user``) fails, or the read of the child's own child's
     (``team``). The load raises that error; it gives back no model with the reference unread."""
@@ -1147,10 +1212,17 @@ def test_a_quoted_name_its_module_lacks_is_every_model_class_of_that_name(monkey
     tag = f"rp_{base.lower()}_{last}_last"
     made = {}
     for part in sorted(("shop", "warehouse"), key=lambda part: part == last):
-        made[part] = _module(monkeypatch, f"{tag}_{part}", _STOCK_MODULE, base=base, table=f"{tag}_{part}")
+        made[part] = _module(
+            monkeypatch, f"{tag}_{part}", _STOCK_MODULE, base=base, table=f"{tag}_{part}"
+        )
     shop, warehouse = made["shop"].RpStockItem, made["warehouse"].RpStockItem
     order_cls = _module(
-        monkeypatch, f"{tag}_orders", _ORDER_MODULE, base=base, warehouse=f"{tag}_warehouse", table=f"{tag}_orders"
+        monkeypatch,
+        f"{tag}_orders",
+        _ORDER_MODULE,
+        base=base,
+        warehouse=f"{tag}_warehouse",
+        table=f"{tag}_orders",
     ).RpOrder
 
     async def main():
@@ -1179,9 +1251,16 @@ def test_a_class_defined_after_a_quoted_name_was_first_read_is_admitted(monkeypa
     """The field is read while only the shop's class has the name; the warehouse's class is
     defined afterwards, and a reference to one of its rows is then followed and counted."""
     base, tag = "SQLerLiteModel", "rp_defined_later"
-    shop = _module(monkeypatch, f"{tag}_shop", _STOCK_MODULE, base=base, table=f"{tag}_shop").RpStockItem
+    shop = _module(
+        monkeypatch, f"{tag}_shop", _STOCK_MODULE, base=base, table=f"{tag}_shop"
+    ).RpStockItem
     order_cls = _module(
-        monkeypatch, f"{tag}_orders", _ORDER_MODULE, base=base, warehouse=f"{tag}_warehouse", table=f"{tag}_orders"
+        monkeypatch,
+        f"{tag}_orders",
+        _ORDER_MODULE,
+        base=base,
+        warehouse=f"{tag}_warehouse",
+        table=f"{tag}_orders",
     ).RpOrder
     db = SQLerDB.in_memory(shared=False)
     with warnings.catch_warnings():

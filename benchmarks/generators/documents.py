@@ -17,10 +17,32 @@ class DocumentGenerator:
     """
 
     WORDS = [
-        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
-        "hotel", "india", "juliet", "kilo", "lima", "mike", "november",
-        "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform",
-        "victor", "whiskey", "xray", "yankee", "zulu",
+        "alpha",
+        "bravo",
+        "charlie",
+        "delta",
+        "echo",
+        "foxtrot",
+        "golf",
+        "hotel",
+        "india",
+        "juliet",
+        "kilo",
+        "lima",
+        "mike",
+        "november",
+        "oscar",
+        "papa",
+        "quebec",
+        "romeo",
+        "sierra",
+        "tango",
+        "uniform",
+        "victor",
+        "whiskey",
+        "xray",
+        "yankee",
+        "zulu",
     ]
 
     CATEGORIES = ["tech", "science", "art", "sports", "music", "food", "travel", "health"]
@@ -128,7 +150,7 @@ class DocumentGenerator:
                     "type": self.rng.choice(["view", "click", "purchase", "share"]),
                     "amount": round(self.rng.uniform(1, 500), 2),
                     "active": self.rng.choice([True, False]),
-                    "ts": f"2025-01-{self.rng.randint(1,28):02d}",
+                    "ts": f"2025-01-{self.rng.randint(1, 28):02d}",
                 }
                 for _ in range(self.rng.randint(5, 15))
             ],
@@ -147,18 +169,22 @@ class DocumentGenerator:
         for i in range(count):
             events = []
             for j in range(events_per_doc):
-                events.append({
-                    "type": event_types[j % len(event_types)],
-                    "amount": round(self.rng.uniform(1, 500), 2),
-                    "active": j % 2 == 0,
-                    "ts": f"2025-01-{self.rng.randint(1,28):02d}",
-                })
-            docs.append({
-                "name": f"doc-{i}",
-                "value": self.rng.randint(0, 10000),
-                "tags": self._tags(self.rng.randint(2, 8)),
-                "events": events,
-            })
+                events.append(
+                    {
+                        "type": event_types[j % len(event_types)],
+                        "amount": round(self.rng.uniform(1, 500), 2),
+                        "active": j % 2 == 0,
+                        "ts": f"2025-01-{self.rng.randint(1, 28):02d}",
+                    }
+                )
+            docs.append(
+                {
+                    "name": f"doc-{i}",
+                    "value": self.rng.randint(0, 10000),
+                    "tags": self._tags(self.rng.randint(2, 8)),
+                    "events": events,
+                }
+            )
         return docs
 
     def generate_nested(self, count: int, depth: int = 3) -> list[dict]:

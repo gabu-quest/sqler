@@ -36,7 +36,9 @@ def _unversioned(doc: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in doc.items() if k != "_version"} if "_version" in doc else doc
 
 
-def _split_promoted(doc: dict[str, Any], promoted_fields: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+def _split_promoted(
+    doc: dict[str, Any], promoted_fields: Any
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """``doc`` as a row holds it: the JSON document, and each of the ``promoted_fields`` in
     stored form in its column. Every promoted name is checked, so it can go into SQL."""
     if not promoted_fields:
@@ -60,7 +62,9 @@ def _split(doc: dict[str, Any], columns: Any) -> tuple[dict[str, Any], dict[str,
     return json_doc, values
 
 
-def _row(doc: dict[str, Any], columns: Any, versioned: bool = False) -> tuple[tuple[str, ...], str, list[Any]]:
+def _row(
+    doc: dict[str, Any], columns: Any, versioned: bool = False
+) -> tuple[tuple[str, ...], str, list[Any]]:
     """``doc`` as one row of a table with the checked ``columns`` beside ``data`` (``versioned``:
     and ``_version``, :func:`_unversioned`): the columns whose key it holds, in the table's
     order; its JSON text; their values in stored form."""
@@ -94,7 +98,13 @@ def _runs(docs: list[dict[str, Any]], columns: Any, fixed: int, versioned: bool 
 
 @functools.lru_cache(maxsize=512)
 def _insert_sql(
-    table: str, held: Any, n: int, *, versioned: bool = False, upsert: bool = False, guard: Optional[tuple[str, ...]] = None
+    table: str,
+    held: Any,
+    n: int,
+    *,
+    versioned: bool = False,
+    upsert: bool = False,
+    guard: Optional[tuple[str, ...]] = None,
 ) -> str:
     """The ``INSERT`` of ``n`` rows into the validated ``table`` that names ``data`` and the
     columns ``held``, nothing else (a column it does not name gets its DEFAULT, or keeps its
@@ -110,7 +120,9 @@ def _insert_sql(
         marks[0] = mark.replace("json(?)", f"json({_guard(table, guard, True)})", 1)
     sql = f"INSERT INTO {table} ({', '.join(names)}) VALUES {', '.join(marks)}"
     if upsert:
-        sets = ", ".join([*(f"{c} = excluded.{c}" for c in ("data", *held)), *[_MOVE_VERSION] * versioned])
+        sets = ", ".join(
+            [*(f"{c} = excluded.{c}" for c in ("data", *held)), *[_MOVE_VERSION] * versioned]
+        )
         sql += f" ON CONFLICT(_id) DO UPDATE SET {sets}"
     return sql + ";"
 
@@ -151,7 +163,10 @@ def _fields_update(
     in ``fields`` that ``doc`` does not hold (a key of the row the model has no field for) is
     not written and not removed. A JSON field's name is bound, never put into the SQL text."""
     versioned = versioned or expected_version is not None
-    json_doc, columns = _split_promoted({k: v for k, v in doc.items() if k in fields and not (versioned and k == "_version")}, promoted)
+    json_doc, columns = _split_promoted(
+        {k: v for k, v in doc.items() if k in fields and not (versioned and k == "_version")},
+        promoted,
+    )
     sets: list[str] = []
     params: list[Any] = []
     if json_doc:
@@ -174,7 +189,11 @@ def _fields_update(
         sets += [_MOVE_VERSION] * versioned
         return f"UPDATE {table} SET {', '.join(sets)} WHERE _id = ?{guard};", [*params, _id], layout
     sets.append(_MOVE_VERSION)
-    return f"UPDATE {table} SET {', '.join(sets)} WHERE {_AT_VERSION}{guard};", [*params, _id, expected_version], layout
+    return (
+        f"UPDATE {table} SET {', '.join(sets)} WHERE {_AT_VERSION}{guard};",
+        [*params, _id, expected_version],
+        layout,
+    )
 
 
 def _refuse_unwritten(gone: bool, table: str, _id: Any) -> NoReturn:
@@ -219,18 +238,37 @@ def _upsert_sql(
     params = [dumps(json_doc), *values.values()]
     if _id is not None:
         params += (_id, expected_version) if checked else (_id,)
-    return _write_text(table, _id is None, versioned, tuple(values), layout, checked), params, layout
+    return (
+        _write_text(table, _id is None, versioned, tuple(values), layout, checked),
+        params,
+        layout,
+    )
 
 
 @functools.lru_cache(maxsize=512)
-def _write_text(table: str, insert: bool, versioned: bool, held: tuple[str, ...], layout: Any, checked: bool = False) -> str:
+def _write_text(
+    table: str,
+    insert: bool,
+    versioned: bool,
+    held: tuple[str, ...],
+    layout: Any,
+    checked: bool = False,
+) -> str:
     """The text of :func:`_upsert_sql` for the columns ``held``, built once per table,
     statement, columns, remembered names and version (``checked``: written only at it)."""
     if insert:
         lead = ["data", "_version"] if versioned else ["data"]
-        marks = ", ".join([f"json({_guard(table, layout, True) if layout else '?'})", *["0"] * versioned, *["?"] * len(held)])
+        marks = ", ".join(
+            [
+                f"json({_guard(table, layout, True) if layout else '?'})",
+                *["0"] * versioned,
+                *["?"] * len(held),
+            ]
+        )
         return f"INSERT INTO {table} ({', '.join([*lead, *held])}) VALUES ({marks});"
-    sets = ", ".join(["data = json(?)", *[_MOVE_VERSION] * versioned, *(f"{col} = ?" for col in held)])
+    sets = ", ".join(
+        ["data = json(?)", *[_MOVE_VERSION] * versioned, *(f"{col} = ?" for col in held)]
+    )
     return f"UPDATE {table} SET {sets} WHERE {_AT_VERSION if checked else '_id = ?'}{_and_guard(table, layout)};"
 
 
@@ -255,7 +293,9 @@ def _first(table: str, layout: Any, n: int) -> Any:
     return layout or None
 
 
-def _inserts(table: str, docs: list[dict[str, Any]], versioned: bool, columns: Any, layout: Any = None) -> Any:
+def _inserts(
+    table: str, docs: list[dict[str, Any]], versioned: bool, columns: Any, layout: Any = None
+) -> Any:
     """The multi-row INSERTs of ``docs`` into the validated ``table``: each run of consecutive
     documents that hold the same keys of the checked ``columns`` is one statement
     (:func:`_runs`), within SQLite's variable limit; a column a document does not hold is not
@@ -265,12 +305,18 @@ def _inserts(table: str, docs: list[dict[str, Any]], versioned: bool, columns: A
     for held, rows in _runs(docs, columns or (), 0, versioned):
         guard, layout = (yield from _first(table, layout, len(rows))), None
         params = [p for _, text, values in rows for p in (text, *values)]
-        last = yield _insert_sql(table, held, len(rows), versioned=versioned, guard=guard), params, guard
+        last = yield (
+            _insert_sql(table, held, len(rows), versioned=versioned, guard=guard),
+            params,
+            guard,
+        )
         ids.extend(range(last - len(rows) + 1, last + 1))
     return ids
 
 
-def _bulk_upserts(table: str, docs: list[dict[str, Any]], versioned: bool, columns: Any, layout: Any = None) -> Any:
+def _bulk_upserts(
+    table: str, docs: list[dict[str, Any]], versioned: bool, columns: Any, layout: Any = None
+) -> Any:
     """``bulk_upsert``: the documents without an ``_id`` inserted as :func:`_inserts` inserts
     them, then those with one written into their rows, made if missing (``versioned``: each
     write of a row moves its version, :func:`_insert_sql`). Returns the ``_id`` of each
@@ -283,13 +329,23 @@ def _bulk_upserts(table: str, docs: list[dict[str, Any]], versioned: bool, colum
     for held, rows in _runs([bodies[i] for i in inserts], columns, 0, versioned):
         guard, layout = (yield from _first(table, layout, len(rows))), None
         params = [p for _, text, values in rows for p in (text, *values)]
-        last = yield _insert_sql(table, held, len(rows), versioned=versioned, guard=guard), params, guard
+        last = yield (
+            _insert_sql(table, held, len(rows), versioned=versioned, guard=guard),
+            params,
+            guard,
+        )
         for j, (k, _, _) in enumerate(rows):
             assigned[inserts[k]] = last - len(rows) + 1 + j
     for held, rows in _runs([bodies[i] for i in updates], columns, 1, versioned):
         guard, layout = (yield from _first(table, layout, len(rows))), None
-        params = [p for k, text, values in rows for p in (int(docs[updates[k]]["_id"]), text, *values)]
-        yield _insert_sql(table, held, len(rows), versioned=versioned, upsert=True, guard=guard), params, guard
+        params = [
+            p for k, text, values in rows for p in (int(docs[updates[k]]["_id"]), text, *values)
+        ]
+        yield (
+            _insert_sql(table, held, len(rows), versioned=versioned, upsert=True, guard=guard),
+            params,
+            guard,
+        )
         for k, _, _ in rows:
             assigned[updates[k]] = int(docs[updates[k]]["_id"])
     return assigned

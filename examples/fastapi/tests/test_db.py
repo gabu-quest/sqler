@@ -87,7 +87,11 @@ class TestSeed:
         lists the table and not the record."""
         db = get_db()
         db.ensure_table("schema_promoted", promoted={"status": "TEXT"})
-        made = db.execute_sql("SELECT name FROM sqlite_master WHERE name IN ('schema_promoted', '_sqler_promoted') ORDER BY name")
+        made = db.execute_sql(
+            "SELECT name FROM sqlite_master WHERE name IN ('schema_promoted', '_sqler_promoted') ORDER BY name"
+        )
         assert [r["name"] for r in made] == ["_sqler_promoted", "schema_promoted"]
         names = [t["name"] for t in client.get("/api/db/schema").json()["tables"]]
-        assert [n for n in names if n in ("schema_promoted", "_sqler_promoted")] == ["schema_promoted"]
+        assert [n for n in names if n in ("schema_promoted", "_sqler_promoted")] == [
+            "schema_promoted"
+        ]

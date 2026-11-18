@@ -245,14 +245,14 @@ async def test_reads_inside_a_caller_transaction_use_its_connection_and_do_not_e
 async def test_vacuum_inside_a_transaction_is_a_clear_error_and_the_transaction_survives(db):
     with pytest.raises(QueryError, match="VACUUM cannot run inside a transaction"):
         async with db.transaction():
-            cur = await db.adapter.execute(
-                "INSERT INTO things (data) VALUES (json('{\"n\": 99}'))"
-            )
+            cur = await db.adapter.execute("INSERT INTO things (data) VALUES (json('{\"n\": 99}'))")
             await cur.close()
             with pytest.raises(QueryError, match="VACUUM cannot run inside a transaction"):
                 await async_vacuum(db)
             assert db.adapter.in_transaction
-            cur = await db.adapter.execute("INSERT INTO things (data) VALUES (json('{\"n\": 100}'))")
+            cur = await db.adapter.execute(
+                "INSERT INTO things (data) VALUES (json('{\"n\": 100}'))"
+            )
             await cur.close()
             cur = await db.adapter.execute("SELECT COUNT(*) FROM things")
             assert (await cur.fetchone())[0] == 22  # the transaction took both inserts

@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -293,7 +294,6 @@ def _(HooksMixin, SQLerModel, db):
                 return False  # Abort the delete
             return True
 
-
     # Create a locked record
     _record = ProtectedRecord(data="Important data", locked=True).save(db=db)
     print(f"Created locked record: {_record.data}")
@@ -324,7 +324,6 @@ def _(mo):
 
 @app.cell
 def _(FullMixin, SQLerModel, datetime, timezone):
-
     class Task(FullMixin, SQLerModel):
         _table = "tasks"
         title: str
@@ -422,7 +421,6 @@ def _(AuditMixin, SQLerModel, db):
         title: str
         content: str
 
-
     # Set the current user (typically done in middleware)
     AuditMixin.set_current_user("alice@example.com")
 
@@ -460,7 +458,6 @@ def _(AuditLogMixin, AuditMixin, SQLerModel, db):
         name: str
         price: float
         in_stock: bool = True
-
 
     # Set user for audit log
     AuditMixin.set_current_user("admin@shop.com")

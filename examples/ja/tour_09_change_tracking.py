@@ -85,7 +85,6 @@ def _(SQLerModel, TrackedModel, db):
         email: str
         age: int
 
-
     # ユーザーを作成
     _user = User(name="Alice", email="alice@example.com", age=30).save(db=db)
     print(f"作成: {_user.name}, {_user.email}, {_user.age}歳")
@@ -240,7 +239,6 @@ def _(DiffMixin, SQLerModel, db):
         price: float
         stock: int
 
-
     # 比較用に2つの商品を作成
     _prod1 = Product(name="Widget", price=29.99, stock=100).save(db=db)
     _prod2 = Product(name="Widget", price=24.99, stock=85).save(db=db)
@@ -291,7 +289,6 @@ def _(PartialUpdateMixin, SQLerModel, TrackedModel, db):
         key: str
         value: str
         description: str = ""
-
 
     _config = Config(key="theme", value="dark", description="UI テーマ設定").save(db=db)
     print(f"作成: {_config.key}={_config.value}")

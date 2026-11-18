@@ -80,6 +80,8 @@ class WALiteSafe(AsyncSQLerLiteSafeModel):
 
 
 SYNC = [WPyd, WPydSafe, WPydSafeChild, WPydSafeGrandchild, WLite, WLiteSafe, WMsg]
+
+
 class WAMsg(AsyncSQLerMsgspecModel):
     __tablename__ = "wl_amsg"
     n: int = 0

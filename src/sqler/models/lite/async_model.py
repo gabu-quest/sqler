@@ -106,9 +106,7 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         )
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
-        chosen = validate_table_name(
-            table or explicit or _default_table_name(cls.__name__)
-        )
+        chosen = validate_table_name(table or explicit or _default_table_name(cls.__name__))
         cls._table = chosen
         cls.__tablename__ = chosen  # type: ignore[attr-defined]
         registry.register(cls._table, cls)
@@ -148,7 +146,9 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         return cls._queryset(db, table)
 
     @classmethod
-    def _queryset(cls: Type[TAModel], db: "AsyncSQLerDB", table: str) -> "AsyncSQLerQuerySet[TAModel]":
+    def _queryset(
+        cls: Type[TAModel], db: "AsyncSQLerDB", table: str
+    ) -> "AsyncSQLerQuerySet[TAModel]":
         from sqler.models.async_queryset import AsyncSQLerQuerySet
         from sqler.query.async_query import AsyncSQLerQuery
 
@@ -410,7 +410,9 @@ class AsyncSQLerLiteModel(SQLerLiteModelBase):
         db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = _write_rules.refresh_row(await _aread_document(db, table, self._id, cls._versioned_rows), self._id)
+        doc = _write_rules.refresh_row(
+            await _aread_document(db, table, self._id, cls._versioned_rows), self._id
+        )
         own = {(table, self._id): self}
         return (await _refs.arun(_refs.load(cls, [doc], db, table, self._refreshed, own)))[0]
 

@@ -50,10 +50,14 @@ class TestLiteUsingAll:
 
     def test_all_returns_seeded_items(self):
         db = make_db()
-        seed(db, Widget, [
-            {"name": "bolt", "color": "silver"},
-            {"name": "nut", "color": "brass"},
-        ])
+        seed(
+            db,
+            Widget,
+            [
+                {"name": "bolt", "color": "silver"},
+                {"name": "nut", "color": "brass"},
+            ],
+        )
 
         results = Widget.using(db).all()
 
@@ -72,11 +76,15 @@ class TestLiteUsingFilter:
 
     def test_filter_by_field(self):
         db = make_db()
-        seed(db, Widget, [
-            {"name": "a", "color": "red"},
-            {"name": "b", "color": "blue"},
-            {"name": "c", "color": "red"},
-        ])
+        seed(
+            db,
+            Widget,
+            [
+                {"name": "a", "color": "red"},
+                {"name": "b", "color": "blue"},
+                {"name": "c", "color": "red"},
+            ],
+        )
 
         reds = Widget.using(db).filter(F("color") == "red").all()
 
@@ -116,6 +124,7 @@ class TestLiteUsingNoClassMutation:
 
         # Bind to db1 (suppressing deprecation)
         import warnings
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             Widget.set_db(db1)
@@ -137,13 +146,21 @@ class TestLiteUsingCrossDbIsolation:
         db1 = make_db()
         db2 = make_db()
 
-        seed(db1, Widget, [
-            {"name": "only_in_db1", "color": "red"},
-        ])
-        seed(db2, Widget, [
-            {"name": "only_in_db2", "color": "blue"},
-            {"name": "also_in_db2", "color": "green"},
-        ])
+        seed(
+            db1,
+            Widget,
+            [
+                {"name": "only_in_db1", "color": "red"},
+            ],
+        )
+        seed(
+            db2,
+            Widget,
+            [
+                {"name": "only_in_db2", "color": "blue"},
+                {"name": "also_in_db2", "color": "green"},
+            ],
+        )
 
         r1 = Widget.using(db1).all()
         r2 = Widget.using(db2).all()
@@ -171,11 +188,15 @@ class TestLiteUsingChaining:
 
     def test_order_by(self):
         db = make_db()
-        seed(db, Widget, [
-            {"name": "c_widget", "color": "red"},
-            {"name": "a_widget", "color": "blue"},
-            {"name": "b_widget", "color": "green"},
-        ])
+        seed(
+            db,
+            Widget,
+            [
+                {"name": "c_widget", "color": "red"},
+                {"name": "a_widget", "color": "blue"},
+                {"name": "b_widget", "color": "green"},
+            ],
+        )
 
         results = Widget.using(db).order_by("name").all()
 
@@ -184,18 +205,14 @@ class TestLiteUsingChaining:
 
     def test_limit(self):
         db = make_db()
-        seed(db, Widget, [
-            {"name": f"w{i}", "color": "red"} for i in range(10)
-        ])
+        seed(db, Widget, [{"name": f"w{i}", "color": "red"} for i in range(10)])
 
         results = Widget.using(db).limit(3).all()
         assert len(results) == 3
 
     def test_count(self):
         db = make_db()
-        seed(db, Widget, [
-            {"name": f"w{i}", "color": "red"} for i in range(7)
-        ])
+        seed(db, Widget, [{"name": f"w{i}", "color": "red"} for i in range(7)])
 
         assert Widget.using(db).count() == 7
 

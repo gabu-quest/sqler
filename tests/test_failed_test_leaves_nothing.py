@@ -164,14 +164,18 @@ ENDINGS = {
 
 
 @pytest.mark.parametrize("ending", list(ENDINGS))
-def test_a_program_that_ends_with_an_async_database_open_ends_and_keeps_what_it_wrote(tmp_path, ending):
+def test_a_program_that_ends_with_an_async_database_open_ends_and_keeps_what_it_wrote(
+    tmp_path, ending
+):
     line, code, last = ENDINGS[ending]
     path = tmp_path / "notes.db"
     argv = [sys.executable, "-c", textwrap.dedent(PROGRAM).replace("ENDING", line), str(path)]
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=20, cwd=tmp_path)
     except subprocess.TimeoutExpired as exc:
-        raise AssertionError(f"the program did not end within 20 s:\n{exc.stdout}\n{exc.stderr}") from exc
+        raise AssertionError(
+            f"the program did not end within 20 s:\n{exc.stdout}\n{exc.stderr}"
+        ) from exc
     assert (done.returncode, (done.stderr.strip().splitlines() or [""])[-1]) == (code, last)
     with sqlite3.connect(path) as conn:
         rows = conn.execute("SELECT _id, data FROM notes").fetchall()

@@ -94,7 +94,9 @@ async def adb():
 
 
 def _bound_subclass(base, db):
-    sub = type(f"{base.__name__}Bound", (base,), {"__tablename__": f"{base.__name__.lower()}_bound"})
+    sub = type(
+        f"{base.__name__}Bound", (base,), {"__tablename__": f"{base.__name__.lower()}_bound"}
+    )
     if hasattr(base, "__dataclass_fields__"):
         sub = dataclass(sub)
     with warnings.catch_warnings():
@@ -124,7 +126,11 @@ def test_using_after_the_only_save_was_rolled_back_is_empty(db, cls):
 def test_bound_and_using_routes_agree_on_an_empty_table(db, cls):
     bound = _bound_subclass(cls, db)
     assert (bound.query().count(), bound.query().all(), bound.query().first()) == (0, [], None)
-    assert (bound.using(db).count(), bound.using(db).all(), bound.using(db).first()) == (0, [], None)
+    assert (bound.using(db).count(), bound.using(db).all(), bound.using(db).first()) == (
+        0,
+        [],
+        None,
+    )
 
 
 @pytest.mark.asyncio
@@ -183,7 +189,10 @@ def test_promoted_save_with_db_creates_its_table_on_a_fresh_database(db, cls):
     table = cls._resolve_binding(db)[1]
     cols = [r[1] for r in db.adapter.execute(f'PRAGMA table_info("{table}");').fetchall()]
     assert cols == ["_id", "data", "status"]
-    assert db.adapter.execute(f"SELECT status FROM {table} WHERE _id = ?", [row._id]).fetchone()[0] == "open"
+    assert (
+        db.adapter.execute(f"SELECT status FROM {table} WHERE _id = ?", [row._id]).fetchone()[0]
+        == "open"
+    )
 
 
 # ----- a read creates nothing: every queryset method on a missing table ------------
@@ -460,7 +469,9 @@ async def _stale_pool_with_locked_writer(tmp_path, cls):
         cls.set_db(db)
     table = cls._table
     writer = sqlite3.connect(path, isolation_level=None)
-    writer.execute(f"CREATE TABLE {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)")
+    writer.execute(
+        f"CREATE TABLE {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)"
+    )
     writer.execute(f"INSERT INTO {table} (data) VALUES (json('{{\"n\": 1}}'))")
     writer.execute("BEGIN IMMEDIATE")
     writer.execute(f"INSERT INTO {table} (data) VALUES (json('{{\"n\": 2}}'))")

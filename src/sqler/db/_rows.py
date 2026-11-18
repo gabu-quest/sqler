@@ -59,13 +59,17 @@ _MAX_VARIABLES = 999
 
 
 @functools.lru_cache(maxsize=512)
-def _rows_sql(table: str, columns: tuple[str, ...], n: int, names: Optional[tuple[str, ...]] = None) -> str:
+def _rows_sql(
+    table: str, columns: tuple[str, ...], n: int, names: Optional[tuple[str, ...]] = None
+) -> str:
     """The statement that reads ``n`` ids of the validated ``table`` with ``columns``, one
     variable per id; for ``n == 0`` the ids come as one JSON array in one variable; with the
     guard of the remembered ``names`` (:func:`_guard`) when given. Built once per shape, so a
     one-id read builds no text."""
     ids = "SELECT value FROM json_each(?)" if n == 0 else ",".join("?" * n)
-    return f"SELECT {', '.join(columns)} FROM {table} WHERE _id IN ({ids}){_and_guard(table, names)};"
+    return (
+        f"SELECT {', '.join(columns)} FROM {table} WHERE _id IN ({ids}){_and_guard(table, names)};"
+    )
 
 
 def _row_documents(rows: Any, columns: Sequence[str]) -> list[dict[str, Any]]:

@@ -172,7 +172,10 @@ def test_backup_inside_the_threads_own_transaction_copies_nothing_and_says_why(k
         with database.transaction():
             database.adapter.execute("INSERT INTO t VALUES ('mine')")
             result = backup(database, str(tmp_path / "b.db"))
-        assert (result.success, result.error) == (False, "backup cannot run inside this thread's open transaction")
+        assert (result.success, result.error) == (
+            False,
+            "backup cannot run inside this thread's open transaction",
+        )
         assert sorted(os.listdir(tmp_path)) == ([] if kind == "memory" else ["src.db"])
         rows = database.adapter.execute("SELECT v FROM t ORDER BY v").fetchall()
         assert [r[0] for r in rows] == ["c1", "c2", "c3", "mine"]
@@ -198,7 +201,9 @@ def test_restore_into_a_memory_database_waits_for_another_threads_transaction(tm
         result = restore(database, source)
         thread.join(10)
         assert (result.success, result.error, raised) == (True, None, [])
-        assert [r[0] for r in database.adapter.execute("SELECT v FROM t ORDER BY v").fetchall()] == ["saved"]
+        assert [
+            r[0] for r in database.adapter.execute("SELECT v FROM t ORDER BY v").fetchall()
+        ] == ["saved"]
     finally:
         database.close()
 
@@ -226,11 +231,12 @@ def test_restore_into_a_memory_database_runs_out_and_leaves_the_other_threads_tr
         a_go.set()
         thread.join(10)
         assert (result.success, result.error) == (
-            False, "database is locked: another thread's transaction holds the in-memory connection"
+            False,
+            "database is locked: another thread's transaction holds the in-memory connection",
         )
         assert [type(e) for e in raised] == [RuntimeError]  # its own rollback, nobody else's commit
-        assert [r[0] for r in database.adapter.execute("SELECT v FROM t ORDER BY v").fetchall()] == [
-            "c1", "c2", "c3"
-        ]
+        assert [
+            r[0] for r in database.adapter.execute("SELECT v FROM t ORDER BY v").fetchall()
+        ] == ["c1", "c2", "c3"]
     finally:
         database.close()

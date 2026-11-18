@@ -91,9 +91,7 @@ class SaveRetry:
 
     def __init__(self, config: Optional[RebaseConfig]) -> None:
         self.max_retries = config.max_retries if config is not None else DEFAULT_MAX_RETRIES
-        self.lock_timeout = (
-            config.lock_timeout if config is not None else DEFAULT_LOCK_TIMEOUT_S
-        )
+        self.lock_timeout = config.lock_timeout if config is not None else DEFAULT_LOCK_TIMEOUT_S
         self.tries = 0
         self.conflicts = 0
         self.lock_waited = 0.0
@@ -169,7 +167,12 @@ class SaveRetry:
             yield pause, (delay,)
 
     def build(
-        self, stale: StaleVersionError, cls: Any, resolve: Callable[..., Any], payload: dict, db: Any
+        self,
+        stale: StaleVersionError,
+        cls: Any,
+        resolve: Callable[..., Any],
+        payload: dict,
+        db: Any,
     ) -> Steps:
         """The steps that build the model of the rebased ``payload``, before anything is written.
 
@@ -186,7 +189,12 @@ class SaveRetry:
 
 
 def rebase(
-    latest: dict, held: dict, snap: dict, delta: dict[str, int], stale: StaleVersionError, stamped: Any = ()
+    latest: dict,
+    held: dict,
+    snap: dict,
+    delta: dict[str, int],
+    stale: StaleVersionError,
+    stamped: Any = (),
 ) -> dict:
     """The payload of a save rebased onto the newer row ``latest``.
 
@@ -218,18 +226,24 @@ def settle(inst: Any, held: dict, written: Any) -> None:
         _refs._set(inst, name, getattr(written, name))
 
 
-def _try(cls: Any, inst: Any, db: Any, table: str, partial: bool, payload: dict, base: Any, version: Any) -> tuple[Step, ...]:
+def _try(
+    cls: Any, inst: Any, db: Any, table: str, partial: bool, payload: dict, base: Any, version: Any
+) -> tuple[Step, ...]:
     """The calls of one try, in order: the promoted columns ensured where the class has any,
     then the write of ``payload`` at ``version`` (only the fields changed since ``base`` when
     ``partial``)."""
     promoted = getattr(cls, "__promoted__", None)
-    write = _write_rules.versioned_write(db, table, inst._id, payload, base, partial, promoted, version)
+    write = _write_rules.versioned_write(
+        db, table, inst._id, payload, base, partial, promoted, version
+    )
     if not promoted:
         return (write,)
     return (_write_rules.ensure_columns, (cls, db, table, promoted)), write
 
 
-def _landed(inst: Any, assign: Callable[[Any, str, Any], None], partial: bool, payload: dict, result: Any) -> Any:
+def _landed(
+    inst: Any, assign: Callable[[Any, str, Any], None], partial: bool, payload: dict, result: Any
+) -> Any:
     """``inst`` after its write landed: at the id and version the write gave (``result``, what
     the last call of :func:`_try` returned), with ``payload`` as its snapshot."""
     new_id, new_version = (inst._id, result) if partial else result
@@ -239,7 +253,9 @@ def _landed(inst: Any, assign: Callable[[Any, str, Any], None], partial: bool, p
     return inst
 
 
-def _begin(inst: Any, db: Any, table: str, partial: bool, held: dict) -> tuple[SaveRetry, Any, tuple[Step, ...]]:
+def _begin(
+    inst: Any, db: Any, table: str, partial: bool, held: dict
+) -> tuple[SaveRetry, Any, tuple[Step, ...]]:
     """The opening of one safe save: its retry state with the first try begun, the snapshot
     the model holds, and the calls of that first try."""
     cls = type(inst)
@@ -300,7 +316,9 @@ def save_steps(
                 raise
             delay = retry.after_lock(e)
         except StaleVersionError as stale:
-            if can_rebase is None:  # the caller's intent: the counter deltas from its snapshot to its payload
+            if (
+                can_rebase is None
+            ):  # the caller's intent: the counter deltas from its snapshot to its payload
                 delta = compute_numeric_scalar_deltas(snap, held) if snap else None
                 can_rebase = bool(delta and can_rebase_deltas(delta, config))
             if not can_rebase or inst._id is None:
@@ -310,7 +328,9 @@ def save_steps(
             if latest is None:
                 raise
             assert snap is not None and delta is not None  # can_rebase holds only with both
-            payload = rebase(latest, held, snap, delta, stale, getattr(cls, "_update_stamps", dict)())
+            payload = rebase(
+                latest, held, snap, delta, stale, getattr(cls, "_update_stamps", dict)()
+            )
             written = yield from retry.build(stale, cls, resolve, payload, db)
             version, base = latest.get("_version", 0), _dirty.snapshot(latest)
         yield pause, (delay,)

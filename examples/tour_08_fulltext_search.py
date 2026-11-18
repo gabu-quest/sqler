@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -65,10 +66,13 @@ def _(SQLerModel, db):
         content: str
         author: str
 
-
     # Create sample articles
     _articles = [
-        ("Python Basics", "Learn Python programming fundamentals. Variables, loops, and functions.", "Alice"),
+        (
+            "Python Basics",
+            "Learn Python programming fundamentals. Variables, loops, and functions.",
+            "Alice",
+        ),
         ("Advanced Python", "Decorators, generators, and metaclasses in Python.", "Alice"),
         ("Web Development", "Build web applications with Flask and Django frameworks.", "Bob"),
         ("Data Science", "Pandas, NumPy, and machine learning with Python.", "Carol"),
@@ -256,9 +260,7 @@ def _(mo):
 @app.cell
 def _(fts):
     # Search with highlights - returns SearchResult with highlights dict
-    _highlighted = fts.search_with_highlights(
-        "python", highlight_start="**", highlight_end="**"
-    )
+    _highlighted = fts.search_with_highlights("python", highlight_start="**", highlight_end="**")
 
     print("Results with highlights:")
     for _r in _highlighted:
@@ -313,7 +315,6 @@ def _(SQLerModel, db):
 
         class FTS:
             fields = ["title", "body"]
-
 
     # Create the search index
     BlogPost.create_search_index(db=db)

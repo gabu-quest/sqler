@@ -102,5 +102,11 @@ async def test_msgspec_model():
         count = await MsgUser.using(db).count()
     finally:
         await db.close()
-    assert (created, user._id, user.email, user.name, user.role) == (True, 1, "alice@msg.com", "Alice", "user")
+    assert (created, user._id, user.email, user.name, user.role) == (
+        True,
+        1,
+        "alice@msg.com",
+        "Alice",
+        "user",
+    )
     assert (created2, user2._id, user2.name, count) == (False, 1, "Alice", 1)

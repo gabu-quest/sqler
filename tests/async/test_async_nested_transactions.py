@@ -57,7 +57,9 @@ class Traced:
         for conn in self.adapter._all_conns:
             mine: list[str] = []
             self.by_connection.append(mine)
-            await conn.set_trace_callback(lambda sql, mine=mine: (self.sent.append(sql), mine.append(sql)))
+            await conn.set_trace_callback(
+                lambda sql, mine=mine: (self.sent.append(sql), mine.append(sql))
+            )
 
     def statements(self) -> list[str]:
         """The transaction statements and inserts sent, in order, without their values."""
@@ -75,7 +77,11 @@ class Traced:
             words = sql.split()
             if not words or words[0].upper() not in TXN_WORDS:
                 continue
-            out.append("INSERT " + sql.split("VALUES", 1)[1].strip(" ();'") if words[0] == "INSERT" else sql.strip())
+            out.append(
+                "INSERT " + sql.split("VALUES", 1)[1].strip(" ();'")
+                if words[0] == "INSERT"
+                else sql.strip()
+            )
         return out
 
     def steps_by_connection(self) -> list[list[str]]:
@@ -314,7 +320,13 @@ async def run_siblings(t: Traced, commits: list[bool]) -> None:
         ([False, False], ["parent"]),
         ([True, False, True], ["c0", "c2", "parent"]),
     ],
-    ids=["commit-then-raise", "raise-then-commit", "both-commit", "both-raise", "three-middle-raises"],
+    ids=[
+        "commit-then-raise",
+        "raise-then-commit",
+        "both-commit",
+        "both-raise",
+        "three-middle-raises",
+    ],
 )
 async def test_each_sibling_keeps_or_loses_only_its_own_rows(make_db, commits, kept):
     t = await make_db()
@@ -475,7 +487,10 @@ async def test_two_top_level_transactions_in_two_tasks_use_two_connections(make_
     await asyncio.wait_for(asyncio.gather(a(), b()), BOUND_S)
     assert conns["a"] is not conns["b"]
     # b's BEGIN may start while a's commit is on its way: the order between them is SQLite's
-    assert sorted(t.statements()) == ["BEGIN IMMEDIATE"] * 2 + ["COMMIT"] * 2 + ["INSERT INTO t (v)"] * 2
+    assert (
+        sorted(t.statements())
+        == ["BEGIN IMMEDIATE"] * 2 + ["COMMIT"] * 2 + ["INSERT INTO t (v)"] * 2
+    )
     assert await t.rows() == ["a", "b"]
 
 
@@ -627,7 +642,9 @@ async def test_a_task_inside_a_nested_transaction_awaiting_a_sibling_that_wants_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("parent_raises", [False, True], ids=["after-commit", "after-rollback"])
-async def test_a_plain_write_of_a_task_that_outlived_its_transaction_is_committed(make_db, parent_raises):
+async def test_a_plain_write_of_a_task_that_outlived_its_transaction_is_committed(
+    make_db, parent_raises
+):
     t = await make_db()
     go = asyncio.Event()
 
@@ -648,7 +665,14 @@ async def test_a_plain_write_of_a_task_that_outlived_its_transaction_is_committe
     assert await asyncio.wait_for(task, BOUND_S) is False
     await assert_pool_clean(t)
     end = "ROLLBACK" if parent_raises else "COMMIT"
-    assert t.statements() == ["BEGIN IMMEDIATE", "INSERT INTO t (v)", end, "BEGIN IMMEDIATE", "INSERT INTO t (v)", "COMMIT"]
+    assert t.statements() == [
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t (v)",
+        end,
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t (v)",
+        "COMMIT",
+    ]
     assert await t.rows() == (["late"] if parent_raises else ["late", "parent"])
 
 
@@ -688,7 +712,9 @@ async def test_a_task_that_outlived_its_transaction_begins_its_own(make_db):
 
 
 @pytest.mark.asyncio
-async def test_a_task_started_in_a_nested_transaction_that_outlived_the_transaction_commits_alone(make_db):
+async def test_a_task_started_in_a_nested_transaction_that_outlived_the_transaction_commits_alone(
+    make_db,
+):
     t = await make_db()
     go = asyncio.Event()
 
@@ -708,7 +734,9 @@ async def test_a_task_started_in_a_nested_transaction_that_outlived_the_transact
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turns", [0, 1, 2, 3, 4])
-async def test_a_sibling_writing_in_the_loop_turn_the_parent_exits_is_never_left_uncommitted(make_db, turns):
+async def test_a_sibling_writing_in_the_loop_turn_the_parent_exits_is_never_left_uncommitted(
+    make_db, turns
+):
     """The parent's block ends in the step that lets the sibling go: the transaction has
     ended before the sibling runs, whatever the turn count, so the sibling's row is
     committed alone on the other pooled connection.
@@ -866,7 +894,9 @@ async def test_a_sibling_executescript_during_a_nested_transaction_raises_query_
 
     async with t.db.transaction():
         await asyncio.wait_for(asyncio.gather(a(), b()), BOUND_S)
-    assert [str(e).split(":")[0] for e in raised] == ["executescript cannot run inside a transaction"]
+    assert [str(e).split(":")[0] for e in raised] == [
+        "executescript cannot run inside a transaction"
+    ]
     assert await t.rows() == ["a"]
 
 
@@ -996,7 +1026,9 @@ async def test_a_plain_waiter_cancelled_leaves_the_next_waiter_its_turn(make_db)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("child_then", ["writes", "ends", "raises"])
-async def test_the_parent_committing_under_a_child_nested_transaction_rolls_back_and_tells_both(make_db, child_then):
+async def test_the_parent_committing_under_a_child_nested_transaction_rolls_back_and_tells_both(
+    make_db, child_then
+):
     t = await make_db()
     await t.insert("before")
     opened, finish = asyncio.Event(), asyncio.Event()
@@ -1207,7 +1239,9 @@ async def test_a_hold_that_is_never_let_go_ends_at_its_bound_and_says_so(make_db
 
 @pytest.mark.asyncio
 async def test_a_wait_for_a_state_that_never_comes_fails_saying_what_it_waited_for():
-    with pytest.raises(AssertionError, match="the owner's cancellation did not happen within 0.1 s"):
+    with pytest.raises(
+        AssertionError, match="the owner's cancellation did not happen within 0.1 s"
+    ):
         await turns_until(lambda: False, "the owner's cancellation", bound_s=0.1)
 
 
@@ -1217,8 +1251,13 @@ async def test_what_a_hold_counts_as_queued_is_the_calls_waiting_not_the_one_run
     hold = await Hold.install(t)
     async with t.db.transaction():  # pins one connection to this task
         statement = await hold.hold()
-        assert (hold.in_flight(), hold.queued()) == (True, 0)  # the held statement itself is being run
-        behind = asyncio.ensure_future(t.adapter._task_lease.get().conn.execute("SELECT 1"))  # straight onto it
+        assert (hold.in_flight(), hold.queued()) == (
+            True,
+            0,
+        )  # the held statement itself is being run
+        behind = asyncio.ensure_future(
+            t.adapter._task_lease.get().conn.execute("SELECT 1")
+        )  # straight onto it
         await turns_until(lambda: hold.queued() > 0)
         assert hold.queued() == 1
         hold.release()
@@ -1294,7 +1333,9 @@ async def test_a_task_cancelled_while_its_savepoint_end_is_in_flight(make_db, ch
         async with t.db.transaction():
             task = asyncio.ensure_future(child())
             await ending.wait()
-            await turns_until(lambda: hold.queued() > 0)  # the end of the child is queued behind the held statement
+            await turns_until(
+                lambda: hold.queued() > 0
+            )  # the end of the child is queued behind the held statement
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -1401,7 +1442,9 @@ BROKEN = (
 )
 
 
-async def plain_waiter_then_ready_opener(t: Traced, turns: int, xs: list[str], *, many: bool, y_commits: bool):
+async def plain_waiter_then_ready_opener(
+    t: Traced, turns: int, xs: list[str], *, many: bool, y_commits: bool
+):
     """The parent's nested transaction is open while X sends a plain statement for each of
     ``xs`` (each from its own task, in that order, or all in one ``executemany``), so they
     wait. Y is ready on every loop turn and opens a nested transaction of its own ``turns``
@@ -1445,7 +1488,9 @@ async def plain_waiter_then_ready_opener(t: Traced, turns: int, xs: list[str], *
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turns", [0, 1, 2, 3])
 @pytest.mark.parametrize(
-    "many, y_commits", [(False, False), (True, False), (False, True)], ids=["execute", "executemany", "y-commits"]
+    "many, y_commits",
+    [(False, False), (True, False), (False, True)],
+    ids=["execute", "executemany", "y-commits"],
 )
 async def test_a_plain_statement_given_its_turn_is_sent_before_a_ready_sibling_opens_a_nested_transaction(
     make_db, turns, many, y_commits
@@ -1454,7 +1499,11 @@ async def test_a_plain_statement_given_its_turn_is_sent_before_a_ready_sibling_o
     xs = ["x1", "x2"] if many else ["x"]
     await plain_waiter_then_ready_opener(t, turns, xs, many=many, y_commits=y_commits)
     assert await t.rows() == ["parent nested", *xs, *(["y"] if y_commits else [])]
-    y_end = ["RELEASE SAVEPOINT sp_1"] if y_commits else ["ROLLBACK TO SAVEPOINT sp_1", "RELEASE SAVEPOINT sp_1"]
+    y_end = (
+        ["RELEASE SAVEPOINT sp_1"]
+        if y_commits
+        else ["ROLLBACK TO SAVEPOINT sp_1", "RELEASE SAVEPOINT sp_1"]
+    )
     assert t.steps() == [
         "BEGIN IMMEDIATE",
         "SAVEPOINT sp_1",
@@ -1471,7 +1520,9 @@ async def test_a_plain_statement_given_its_turn_is_sent_before_a_ready_sibling_o
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turns", [0, 1, 2, 3])
-async def test_two_plain_statements_given_their_turn_together_are_both_sent_before_a_sibling_opens(make_db, turns):
+async def test_two_plain_statements_given_their_turn_together_are_both_sent_before_a_sibling_opens(
+    make_db, turns
+):
     t = await make_db()
     await plain_waiter_then_ready_opener(t, turns, ["x1", "x2"], many=False, y_commits=False)
     assert await t.rows() == ["parent nested", "x1", "x2"]
@@ -1519,7 +1570,9 @@ async def plain_child(t: Traced, value: str, start: asyncio.Event, asked: asynci
 
 
 @pytest.mark.asyncio
-async def test_a_plain_waiter_cancelled_after_its_turn_and_before_it_runs_lets_the_next_one_go(make_db):
+async def test_a_plain_waiter_cancelled_after_its_turn_and_before_it_runs_lets_the_next_one_go(
+    make_db,
+):
     t = await make_db()
     h = HeldNested(t)
     x_asked, x2_asked = asyncio.Event(), asyncio.Event()
@@ -1552,7 +1605,9 @@ async def test_a_plain_waiter_cancelled_after_its_turn_and_before_it_runs_lets_t
 
 
 @pytest.mark.asyncio
-async def test_a_plain_waiter_that_timed_out_leaves_a_nested_transaction_behind_it_its_turn(make_db):
+async def test_a_plain_waiter_that_timed_out_leaves_a_nested_transaction_behind_it_its_turn(
+    make_db,
+):
     t = await make_db(acquire_timeout=0.2)
     h = HeldNested(t)
     x_out, x2_asked = asyncio.Event(), asyncio.Event()
@@ -1595,7 +1650,9 @@ async def test_a_plain_waiter_that_timed_out_leaves_a_nested_transaction_behind_
 
 
 @pytest.mark.asyncio
-async def test_close_between_a_plain_waiter_turn_and_its_run_raises_not_connected_and_sends_nothing(make_db):
+async def test_close_between_a_plain_waiter_turn_and_its_run_raises_not_connected_and_sends_nothing(
+    make_db,
+):
     t = await make_db()
     h = HeldNested(t)
     x_asked = asyncio.Event()
@@ -1617,7 +1674,9 @@ async def test_close_between_a_plain_waiter_turn_and_its_run_raises_not_connecte
 
 
 @pytest.mark.asyncio
-async def test_a_nested_transaction_given_its_turn_and_not_yet_opened_when_the_parent_ends_opens_nothing(make_db):
+async def test_a_nested_transaction_given_its_turn_and_not_yet_opened_when_the_parent_ends_opens_nothing(
+    make_db,
+):
     """A nested transaction that has been given its turn counts as open: the parent's
     commit becomes a rollback and raises, and the waiter raises and sends no SAVEPOINT."""
     t = await make_db()
@@ -1636,13 +1695,21 @@ async def test_a_nested_transaction_given_its_turn_and_not_yet_opened_when_the_p
     with pytest.raises(TransactionStateError, match=ENDED):
         await asyncio.wait_for(tb, BOUND_S)
     await asyncio.wait_for(th, BOUND_S)
-    assert t.steps() == ["BEGIN IMMEDIATE", "SAVEPOINT sp_1", "INSERT h", "RELEASE SAVEPOINT sp_1", "ROLLBACK"]
+    assert t.steps() == [
+        "BEGIN IMMEDIATE",
+        "SAVEPOINT sp_1",
+        "INSERT h",
+        "RELEASE SAVEPOINT sp_1",
+        "ROLLBACK",
+    ]
     assert await t.rows() == []
     await assert_pool_clean(t)
 
 
 @pytest.mark.asyncio
-async def test_a_plain_waiter_given_its_turn_that_runs_after_the_transaction_ended_commits_alone(make_db):
+async def test_a_plain_waiter_given_its_turn_that_runs_after_the_transaction_ended_commits_alone(
+    make_db,
+):
     t = await make_db()
     h = HeldNested(t)
     x_asked = asyncio.Event()
@@ -1697,7 +1764,11 @@ async def test_a_plain_statement_whose_nested_transaction_ended_before_it_ran_is
         except Undo:
             pass
         await asyncio.wait_for(asyncio.gather(tg, tx), BOUND_S)
-    s_end = ["RELEASE SAVEPOINT sp_1"] if owner_commits else ["ROLLBACK TO SAVEPOINT sp_1", "RELEASE SAVEPOINT sp_1"]
+    s_end = (
+        ["RELEASE SAVEPOINT sp_1"]
+        if owner_commits
+        else ["ROLLBACK TO SAVEPOINT sp_1", "RELEASE SAVEPOINT sp_1"]
+    )
     assert t.steps() == [
         "BEGIN IMMEDIATE",
         "SAVEPOINT sp_1",
@@ -1755,7 +1826,9 @@ async def test_twenty_plain_waiters_and_three_nested_ones_go_in_the_order_they_a
             pass
 
     async with t.db.transaction():
-        await asyncio.wait_for(asyncio.gather(holder(), *(waiter(i) for i in range(len(kinds)))), BOUND_S)
+        await asyncio.wait_for(
+            asyncio.gather(holder(), *(waiter(i) for i in range(len(kinds)))), BOUND_S
+        )
     assert await t.rows_in_order_written() == [label for label in labels if label != "n1"]
     statements = t.statements()
     assert statements.count("SAVEPOINT sp_1") == 4
@@ -1778,7 +1851,9 @@ async def test_a_nested_commit_whose_release_fails_commits_nothing_and_tells_bot
             try:
                 async with t.db.transaction():
                     await t.insert("nested")
-                    await t.adapter.execute("RELEASE SAVEPOINT sp_1")  # the user ends it behind sqler's back
+                    await t.adapter.execute(
+                        "RELEASE SAVEPOINT sp_1"
+                    )  # the user ends it behind sqler's back
             except TransactionStateError as nested_raised:
                 assert str(nested_raised) == BROKEN.format("committed")
                 assert str(nested_raised.__cause__) == "no such savepoint: sp_1"
@@ -1800,7 +1875,9 @@ async def test_a_nested_commit_whose_release_fails_commits_nothing_and_tells_bot
 
 
 @pytest.mark.asyncio
-async def test_a_nested_rollback_that_fails_sends_no_release_and_rolls_the_transaction_back(make_db):
+async def test_a_nested_rollback_that_fails_sends_no_release_and_rolls_the_transaction_back(
+    make_db,
+):
     t = await make_db()
     await t.insert("before")
     with pytest.raises(TransactionStateError) as raised:
@@ -1809,7 +1886,9 @@ async def test_a_nested_rollback_that_fails_sends_no_release_and_rolls_the_trans
             with pytest.raises(Undo) as nested_raised:
                 async with t.db.transaction():
                     await t.insert("nested")
-                    await t.adapter.execute("RELEASE SAVEPOINT sp_1")  # the user ends it behind sqler's back
+                    await t.adapter.execute(
+                        "RELEASE SAVEPOINT sp_1"
+                    )  # the user ends it behind sqler's back
                     raise Undo()
             assert nested_raised.value.__notes__ == [BROKEN.format("rolled back")]
     assert str(raised.value) == BROKEN.format("rolled back")
@@ -1828,7 +1907,9 @@ async def test_a_nested_rollback_that_fails_sends_no_release_and_rolls_the_trans
 
 
 @pytest.mark.asyncio
-async def test_a_parent_raising_after_a_failed_nested_rollback_keeps_its_exception_with_a_note(make_db):
+async def test_a_parent_raising_after_a_failed_nested_rollback_keeps_its_exception_with_a_note(
+    make_db,
+):
     t = await make_db()
 
     class ParentFailed(Exception):
@@ -1856,18 +1937,27 @@ class OwnError(Exception):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("own", [OwnError, KeyboardInterrupt], ids=["exception", "keyboard-interrupt"])
-async def test_the_callers_exception_leaving_the_db_block_after_a_failed_nested_rollback_has_the_note(make_db, own):
+@pytest.mark.parametrize(
+    "own", [OwnError, KeyboardInterrupt], ids=["exception", "keyboard-interrupt"]
+)
+async def test_the_callers_exception_leaving_the_db_block_after_a_failed_nested_rollback_has_the_note(
+    make_db, own
+):
     t = await make_db()
     with pytest.raises(own) as raised:
         async with t.db:
             await t.insert("outer")
             with pytest.raises(Undo):
                 async with t.db.transaction():
-                    await t.adapter.execute("RELEASE SAVEPOINT sp_1")  # the user ends it behind sqler's back
+                    await t.adapter.execute(
+                        "RELEASE SAVEPOINT sp_1"
+                    )  # the user ends it behind sqler's back
                     raise Undo()
             raise own("its own")
-    assert (str(raised.value), raised.value.__notes__) == ("its own", [BROKEN.format("rolled back")])
+    assert (str(raised.value), raised.value.__notes__) == (
+        "its own",
+        [BROKEN.format("rolled back")],
+    )
     assert await t.rows() == []
     await assert_pool_clean(t)
 
@@ -1887,7 +1977,9 @@ async def test_an_exception_leaving_a_nested_block_and_the_db_block_has_the_note
 
 
 @pytest.mark.asyncio
-async def test_the_db_block_ending_without_an_exception_after_a_failed_nested_rollback_raises(make_db):
+async def test_the_db_block_ending_without_an_exception_after_a_failed_nested_rollback_raises(
+    make_db,
+):
     t = await make_db()
     with pytest.raises(TransactionStateError) as raised:
         async with t.db:
@@ -1896,7 +1988,10 @@ async def test_the_db_block_ending_without_an_exception_after_a_failed_nested_ro
                 async with t.db.transaction():
                     await t.adapter.execute("RELEASE SAVEPOINT sp_1")
                     raise Undo()
-    assert (str(raised.value), getattr(raised.value, "__notes__", [])) == (BROKEN.format("rolled back"), [])
+    assert (str(raised.value), getattr(raised.value, "__notes__", [])) == (
+        BROKEN.format("rolled back"),
+        [],
+    )
     assert await t.rows() == []
     await assert_pool_clean(t)
 
@@ -1908,14 +2003,18 @@ async def test_a_savepoint_that_sqlite_refuses_opened_nothing_and_leaves_no_plac
         # an INSERT ... RETURNING whose row is not read yet is a write in progress: SQLite refuses a SAVEPOINT.
         # Sent on the raw connection: the adapter reads the rows of its own cursors before the next statement
         cur = await t.adapter.connection.execute("INSERT INTO t (v) VALUES ('r') RETURNING v")
-        with pytest.raises(sqlite3.OperationalError, match="cannot open savepoint - SQL statements in progress"):
+        with pytest.raises(
+            sqlite3.OperationalError, match="cannot open savepoint - SQL statements in progress"
+        ):
             async with t.db.transaction():
                 await t.insert("never")
         assert await cur.fetchall() == [("r",)]
         start = asyncio.Event()
         start.set()
         # a sibling's nested transaction opens at once: the refused one left nothing on the stack
-        await asyncio.wait_for(asyncio.ensure_future(nested_child(t, "after", start, asyncio.Event())), BOUND_S)
+        await asyncio.wait_for(
+            asyncio.ensure_future(nested_child(t, "after", start, asyncio.Event())), BOUND_S
+        )
     assert t.statements() == [
         "BEGIN IMMEDIATE",
         "INSERT INTO t (v)",
@@ -1934,7 +2033,9 @@ async def test_a_savepoint_that_sqlite_refuses_opened_nothing_and_leaves_no_plac
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("child_raises", [False, True], ids=["release", "rollback-to"])
-async def test_the_parent_committing_while_a_cancelled_child_end_is_being_sent_commits(make_db, child_raises):
+async def test_the_parent_committing_while_a_cancelled_child_end_is_being_sent_commits(
+    make_db, child_raises
+):
     t = await make_db()
     hold = await Hold.install(t)
     ending, leaving = asyncio.Event(), asyncio.Event()
@@ -1954,7 +2055,9 @@ async def test_the_parent_committing_while_a_cancelled_child_end_is_being_sent_c
             await t.insert("parent")
             task = asyncio.ensure_future(child())
             await ending.wait()
-            await turns_until(lambda: hold.queued() > 0)  # the end of the child is queued behind the held statement
+            await turns_until(
+                lambda: hold.queued() > 0
+            )  # the end of the child is queued behind the held statement
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -1965,8 +2068,19 @@ async def test_the_parent_committing_while_a_cancelled_child_end_is_being_sent_c
     await turns_until(lambda: leaving.is_set() or parent.done())
     hold.release()
     await asyncio.wait_for(parent, BOUND_S * 2)
-    child_end = ["ROLLBACK TO SAVEPOINT sp_1", "RELEASE SAVEPOINT sp_1"] if child_raises else ["RELEASE SAVEPOINT sp_1"]
-    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT parent", "SAVEPOINT sp_1", "INSERT child", *child_end, "COMMIT"]
+    child_end = (
+        ["ROLLBACK TO SAVEPOINT sp_1", "RELEASE SAVEPOINT sp_1"]
+        if child_raises
+        else ["RELEASE SAVEPOINT sp_1"]
+    )
+    assert t.steps() == [
+        "BEGIN IMMEDIATE",
+        "INSERT parent",
+        "SAVEPOINT sp_1",
+        "INSERT child",
+        *child_end,
+        "COMMIT",
+    ]
     assert await t.rows() == (["parent"] if child_raises else ["child", "parent"])
     await assert_pool_clean(t)
 
@@ -2004,7 +2118,9 @@ async def nested_commit_that_fails(t: Traced, then=None, savepoint: str = "sp_1"
     with pytest.raises(TransactionStateError) as raised:
         async with t.db.transaction():
             await t.insert("h")
-            await t.adapter.execute(f"RELEASE SAVEPOINT {savepoint}")  # the user ends it behind sqler's back
+            await t.adapter.execute(
+                f"RELEASE SAVEPOINT {savepoint}"
+            )  # the user ends it behind sqler's back
             if then is not None:
                 await then()
     assert (str(raised.value), str(raised.value.__cause__)) == (
@@ -2016,7 +2132,9 @@ async def nested_commit_that_fails(t: Traced, then=None, savepoint: str = "sp_1"
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("who", ["the-task-that-broke-it", "a-sibling"])
-async def test_a_statement_sent_after_a_nested_end_failed_raises_and_sends_nothing(make_db, who, kind):
+async def test_a_statement_sent_after_a_nested_end_failed_raises_and_sends_nothing(
+    make_db, who, kind
+):
     t = await make_db()
     await t.insert("before")
     refused: list[tuple[str, str, list[str]]] = []
@@ -2102,7 +2220,8 @@ async def test_a_nested_block_that_ends_after_its_transaction_broke_raises(make_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "kinds", [["execute"], ["executemany"], ["nested"], [KINDS[i % 3] for i in range(20)]],
+    "kinds",
+    [["execute"], ["executemany"], ["nested"], [KINDS[i % 3] for i in range(20)]],
     ids=["one-execute", "one-executemany", "one-nested", "twenty-mixed"],
 )
 async def test_siblings_waiting_when_a_nested_end_fails_all_raise_and_send_nothing(make_db, kinds):
@@ -2132,7 +2251,8 @@ async def test_siblings_waiting_when_a_nested_end_fails_all_raise_and_send_nothi
             await t.insert("parent")
             await asyncio.wait_for(
                 asyncio.gather(
-                    nested_commit_that_fails(t, then=hold_until_all_asked), *(sibling(i) for i in range(len(kinds)))
+                    nested_commit_that_fails(t, then=hold_until_all_asked),
+                    *(sibling(i) for i in range(len(kinds))),
                 ),
                 BOUND_S,
             )
@@ -2158,7 +2278,9 @@ def block_the_loop_until(deadline: float) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_nested_transaction_cancelled_after_its_turn_and_before_it_runs_leaves_nothing(make_db):
+async def test_a_nested_transaction_cancelled_after_its_turn_and_before_it_runs_leaves_nothing(
+    make_db,
+):
     """B was given its turn (a savepoint is on the stack for it, not yet sent) and is
     cancelled before it runs: nothing of B stays on the stack, C (asked after B) opens next."""
     t = await make_db()
@@ -2241,7 +2363,9 @@ async def test_a_nested_transaction_whose_deadline_passes_after_its_turn_still_o
 TWO_ROWS = "SELECT 1 UNION ALL SELECT 2"
 
 
-async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, block: bool = False) -> dict:
+async def x_waits_again(
+    t: Traced, *, x_timeout: float, hold_s: float = 0.0, block: bool = False
+) -> dict:
     """X, started in the owner's nested transaction S, sends a plain insert while the
     grandchild G's nested transaction is open in S, and waits. Z, started in the
     transaction outside S, asks after X and waits. G ends: X has its turn in S (Z's place
@@ -2323,7 +2447,9 @@ async def x_waits_again(t: Traced, *, x_timeout: float, hold_s: float = 0.0, blo
 
 
 @pytest.mark.asyncio
-async def test_a_plain_statement_that_waits_again_keeps_its_place_before_one_asked_after_it(make_db):
+async def test_a_plain_statement_that_waits_again_keeps_its_place_before_one_asked_after_it(
+    make_db,
+):
     t = await make_db()
     got = await x_waits_again(t, x_timeout=BOUND_S)
     assert got["x"] == "wrote"
@@ -2411,7 +2537,12 @@ async def test_commit_inside_a_transaction_raises_and_the_transaction_goes_on(ma
     assert t.adapter._depth() == 1
     await t.insert("second")
     await t.adapter.end_transaction(commit=commit)
-    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT first", "INSERT second", "COMMIT" if commit else "ROLLBACK"]
+    assert t.steps() == [
+        "BEGIN IMMEDIATE",
+        "INSERT first",
+        "INSERT second",
+        "COMMIT" if commit else "ROLLBACK",
+    ]
     assert await t.rows() == (["first", "second"] if commit else [])
     await assert_pool_clean(t)
 
@@ -2454,7 +2585,9 @@ async def test_commit_from_a_task_outside_the_transaction_does_nothing(make_db):
     with pytest.raises(Undo):
         async with t.db.transaction():
             await t.insert("first")
-            outside = asyncio.get_running_loop().create_task(t.adapter.commit(), context=contextvars.Context())
+            outside = asyncio.get_running_loop().create_task(
+                t.adapter.commit(), context=contextvars.Context()
+            )
             assert await outside is None
             raise Undo()
     assert t.steps() == ["BEGIN IMMEDIATE", "INSERT first", "ROLLBACK"]
@@ -2463,14 +2596,18 @@ async def test_commit_from_a_task_outside_the_transaction_does_nothing(make_db):
 
 
 @pytest.mark.asyncio
-async def test_commit_in_a_transaction_whose_nested_end_failed_raises_that_error_and_sends_nothing(make_db):
+async def test_commit_in_a_transaction_whose_nested_end_failed_raises_that_error_and_sends_nothing(
+    make_db,
+):
     t = await make_db()
     with pytest.raises(TransactionStateError):
         async with t.db.transaction():
             await t.insert("first")
             with pytest.raises(TransactionStateError):
                 async with t.db.transaction():
-                    await t.adapter.execute("RELEASE SAVEPOINT sp_1")  # the user ends it behind sqler's back
+                    await t.adapter.execute(
+                        "RELEASE SAVEPOINT sp_1"
+                    )  # the user ends it behind sqler's back
             with pytest.raises(TransactionStateError) as raised:
                 await t.adapter.commit()
             assert str(raised.value) == BROKEN.format("committed")
@@ -2486,7 +2623,9 @@ async def test_commit_after_an_outermost_commit_failed_does_nothing(make_db):
     for conn in t.adapter._all_conns:  # a pragma of each connection: either one may be the next
         await conn.execute("PRAGMA foreign_keys = ON")
     await t.adapter.execute("CREATE TABLE p (id INTEGER PRIMARY KEY)")
-    await t.adapter.execute("CREATE TABLE c (p INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)")
+    await t.adapter.execute(
+        "CREATE TABLE c (p INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)"
+    )
     await t.adapter.auto_commit()
     await t.adapter.begin_transaction()
     await t.adapter.execute("INSERT INTO c VALUES (7)")
@@ -2498,7 +2637,9 @@ async def test_commit_after_an_outermost_commit_failed_does_nothing(make_db):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raises", [None, ValueError, asyncio.CancelledError], ids=["ends", "raises", "cancelled"])
+@pytest.mark.parametrize(
+    "raises", [None, ValueError, asyncio.CancelledError], ids=["ends", "raises", "cancelled"]
+)
 @pytest.mark.parametrize("commit", [False, True], ids=["rolled-back", "committed"])
 async def test_the_adapter_block_inside_a_transaction_leaves_it_alone(make_db, raises, commit):
     t = await make_db()
@@ -2521,7 +2662,9 @@ async def test_the_adapter_block_inside_a_transaction_leaves_it_alone(make_db, r
 
 
 @pytest.mark.asyncio
-async def test_the_adapter_block_around_a_transaction_commits_what_the_transaction_committed(make_db):
+async def test_the_adapter_block_around_a_transaction_commits_what_the_transaction_committed(
+    make_db,
+):
     """Passes on base: block outside, transaction inside."""
     t = await make_db()
     async with t.adapter:
@@ -2567,7 +2710,9 @@ INSERT = "INSERT INTO t (v) VALUES (?)"
     ],
     ids=["commit", "end", "rollback", "lower-case", "comment-in-front", "trailing-semicolon"],
 )
-async def test_a_raw_end_of_the_transaction_raises_at_the_statement_and_nothing_more_is_sent(make_db, raw, kept, who):
+async def test_a_raw_end_of_the_transaction_raises_at_the_statement_and_nothing_more_is_sent(
+    make_db, raw, kept, who
+):
     """SQLite's state after the statement decides, so every spelling reads the same, from the
     task that opened the transaction and from a child that shares it. A later statement in the
     block and the block's end raise the same error, and nothing more reaches SQLite."""
@@ -2581,11 +2726,17 @@ async def test_a_raw_end_of_the_transaction_raises_at_the_statement_and_nothing_
             async with t.db.transaction():
                 await t.adapter.execute(INSERT, ["a"])
                 with pytest.raises(TransactionStateError) as at_raw:
-                    await (send_raw() if who == "owner" else asyncio.wait_for(asyncio.create_task(send_raw()), BOUND_S))
+                    await (
+                        send_raw()
+                        if who == "owner"
+                        else asyncio.wait_for(asyncio.create_task(send_raw()), BOUND_S)
+                    )
                 with pytest.raises(TransactionStateError) as later:
                     await t.adapter.execute(INSERT, ["b"])
     assert [q.sql for q in logged] == [INSERT, raw]
-    assert [(str(e.value), e.value.__cause__) for e in (at_raw, later, ended)] == [(ENDED_BEHIND, None)] * 3
+    assert [(str(e.value), e.value.__cause__) for e in (at_raw, later, ended)] == [
+        (ENDED_BEHIND, None)
+    ] * 3
     await t.insert("after")
     assert await t.rows() == sorted(["after", *kept])
     await assert_pool_clean(t)
@@ -2594,7 +2745,9 @@ async def test_a_raw_end_of_the_transaction_raises_at_the_statement_and_nothing_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raw", ["COMMIT", "ROLLBACK"])
 @pytest.mark.parametrize("where", ["nested", "after-nested"])
-async def test_a_raw_end_inside_or_after_a_nested_block_raises_at_the_statement(make_db, raw, where):
+async def test_a_raw_end_inside_or_after_a_nested_block_raises_at_the_statement(
+    make_db, raw, where
+):
     t = await make_db()
     with pytest.raises(TransactionStateError) as raised:
         async with t.db.transaction():
@@ -2607,14 +2760,23 @@ async def test_a_raw_end_inside_or_after_a_nested_block_raises_at_the_statement(
     assert (str(raised.value), raised.value.__cause__) == (ENDED_BEHIND, None)
     assert getattr(raised.value, "__notes__", []) == []
     released = [] if where == "nested" else ["RELEASE SAVEPOINT sp_1"]
-    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT outer", "SAVEPOINT sp_1", "INSERT nested", *released, raw]
+    assert t.steps() == [
+        "BEGIN IMMEDIATE",
+        "INSERT outer",
+        "SAVEPOINT sp_1",
+        "INSERT nested",
+        *released,
+        raw,
+    ]
     assert await t.rows() == (["nested", "outer"] if raw == "COMMIT" else [])
     await assert_pool_clean(t)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("via", ["execute", "executemany"])
-async def test_a_failure_sqlite_answers_with_a_rollback_breaks_the_transaction_with_its_error_as_cause(make_db, via):
+async def test_a_failure_sqlite_answers_with_a_rollback_breaks_the_transaction_with_its_error_as_cause(
+    make_db, via
+):
     t = await make_db()
     await t.adapter.execute("CREATE TABLE u (x UNIQUE ON CONFLICT ROLLBACK)")
     await t.adapter.auto_commit()
@@ -2625,7 +2787,10 @@ async def test_a_failure_sqlite_answers_with_a_rollback_breaks_the_transaction_w
                 await t.adapter.execute("INSERT INTO u VALUES (1), (1)")
             else:
                 await t.adapter.executemany("INSERT INTO u VALUES (?)", [[1], [1]])
-    assert (str(raised.value), str(raised.value.__cause__)) == (ENDED_BEHIND, "UNIQUE constraint failed: u.x")
+    assert (str(raised.value), str(raised.value.__cause__)) == (
+        ENDED_BEHIND,
+        "UNIQUE constraint failed: u.x",
+    )
     assert type(raised.value.__cause__) is sqlite3.IntegrityError
     assert await t.rows() == []
     await assert_pool_clean(t)
@@ -2634,10 +2799,15 @@ async def test_a_failure_sqlite_answers_with_a_rollback_breaks_the_transaction_w
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("raw", "refused"),
-    [("ROLLBACK TO SAVEPOINT sp_1", None), ("BEGIN", "cannot start a transaction within a transaction")],
+    [
+        ("ROLLBACK TO SAVEPOINT sp_1", None),
+        ("BEGIN", "cannot start a transaction within a transaction"),
+    ],
     ids=["rollback-to", "begin"],
 )
-async def test_a_raw_statement_that_leaves_the_transaction_open_raises_no_false_alarm(make_db, raw, refused):
+async def test_a_raw_statement_that_leaves_the_transaction_open_raises_no_false_alarm(
+    make_db, raw, refused
+):
     """Passes on base: a raw ``ROLLBACK TO`` undoes the nested rows only, and SQLite refuses
     a raw ``BEGIN``; either way the transaction goes on."""
     t = await make_db()
@@ -2682,7 +2852,9 @@ async def test_a_cancellation_while_a_raw_commit_runs_leaves_as_a_cancellation(m
     await asyncio.wait_for(sending.wait(), BOUND_S)
     await turns_until(lambda: hold.queued() > 0)  # the COMMIT is queued behind the held statement
     task.cancel()
-    await turns_until(cancelled.is_set, "the owner's cancellation")  # let go only after it, with the COMMIT still queued
+    await turns_until(
+        cancelled.is_set, "the owner's cancellation"
+    )  # let go only after it, with the COMMIT still queued
     hold.release()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, BOUND_S)
@@ -2692,7 +2864,9 @@ async def test_a_cancellation_while_a_raw_commit_runs_leaves_as_a_cancellation(m
 
 
 @pytest.mark.asyncio
-async def test_a_rollback_sqlite_answers_in_executemany_is_seen_with_another_tasks_insert_queued_behind(make_db):
+async def test_a_rollback_sqlite_answers_in_executemany_is_seen_with_another_tasks_insert_queued_behind(
+    make_db,
+):
     """SQLite's state is read in the connection's thread with the statement: the INSERT of
     another task of the transaction, queued behind the failing ``executemany``, runs outside
     any transaction and opens one of its own before the failure reaches the loop. (A raw
@@ -2723,7 +2897,9 @@ async def test_a_rollback_sqlite_answers_in_executemany_is_seen_with_another_tas
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("raw", "kept"), [("COMMIT", ["a"]), ("ROLLBACK", [])])
-async def test_a_raw_end_whose_await_was_cancelled_and_caught_breaks_the_transaction(make_db, raw, kept):
+async def test_a_raw_end_whose_await_was_cancelled_and_caught_breaks_the_transaction(
+    make_db, raw, kept
+):
     """The raw end is queued behind a sibling's slow read and the owner is cancelled while it
     waits, then catches the cancellation inside the block. The raw statement still runs in
     the connection's thread and ends the transaction: the next statement in the block and
@@ -2753,7 +2929,9 @@ async def test_a_raw_end_whose_await_was_cancelled_and_caught_breaks_the_transac
     await asyncio.wait_for(sending.wait(), BOUND_S)
     await turns_until(lambda: hold.queued() > 0)  # the raw end is queued behind the held statement
     task.cancel()
-    await turns_until(cancelled.is_set, "the owner's cancellation")  # let go only after it, with the raw end still queued
+    await turns_until(
+        cancelled.is_set, "the owner's cancellation"
+    )  # let go only after it, with the raw end still queued
     hold.release()
     with pytest.raises(TransactionStateError) as ended:
         await asyncio.wait_for(task, BOUND_S)
@@ -2795,7 +2973,9 @@ async def roll_back_at(t: Traced, at: int, then=lambda: None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_lazy_fetch_that_ended_the_transaction_is_seen_with_another_tasks_insert_queued_behind(make_db):
+async def test_a_failed_lazy_fetch_that_ended_the_transaction_is_seen_with_another_tasks_insert_queued_behind(
+    make_db,
+):
     """Inside one transaction a task's lazy ``fetchall`` fails with the transaction rolled back,
     and another task's INSERT, queued behind it, opens a transaction of its own before the
     failure reaches the loop: the fetch raises ``TransactionStateError``, so does the block's
@@ -2807,7 +2987,9 @@ async def test_a_failed_lazy_fetch_that_ended_the_transaction_is_seen_with_anoth
     # queued on the loop from the connection's thread before the fetch's error is
     await roll_back_at(t, AT, then=lambda: loop.call_soon_threadsafe(inserting.wait, BOUND_S))
     for conn in t.adapter._all_conns:
-        await conn.set_trace_callback(lambda sql: inserting.set() if sql == "INSERT INTO t (v) VALUES ('b')" else None)
+        await conn.set_trace_callback(
+            lambda sql: inserting.set() if sql == "INSERT INTO t (v) VALUES ('b')" else None
+        )
     fetching = asyncio.Event()
 
     async def reader() -> None:
@@ -2821,7 +3003,9 @@ async def test_a_failed_lazy_fetch_that_ended_the_transaction_is_seen_with_anoth
             await t.adapter.execute(INSERT, ["a"])
             task = asyncio.create_task(reader())
             await asyncio.wait_for(fetching.wait(), BOUND_S)
-            await t.adapter.execute(INSERT, ["b"])  # queued behind the fetch, before the reader resumes
+            await t.adapter.execute(
+                INSERT, ["b"]
+            )  # queued behind the fetch, before the reader resumes
             with pytest.raises(TransactionStateError) as at_fetch:
                 await asyncio.wait_for(task, BOUND_S)
     assert [(str(e.value), str(e.value.__cause__)) for e in (at_fetch, ended)] == [
@@ -2867,7 +3051,9 @@ async def test_a_cancelled_lazy_fetch_whose_read_ended_the_transaction_breaks_it
                     later.append(exc)
 
             lease = t.adapter._task_lease.get()
-            assert lease.settling is not None  # the cancelled read is still being settled: anything sent waits for it
+            assert (
+                lease.settling is not None
+            )  # the cancelled read is still being settled: anything sent waits for it
             following = asyncio.ensure_future(next_statement())
             await asyncio.sleep(0)  # it is waiting for the read's settling
             assert not following.done()
@@ -2880,7 +3066,9 @@ async def test_a_cancelled_lazy_fetch_whose_read_ended_the_transaction_breaks_it
 
 
 @pytest.mark.asyncio
-async def test_a_read_ahead_that_failed_with_the_transaction_rolled_back_raises_at_the_read_that_reaches_it(make_db):
+async def test_a_read_ahead_that_failed_with_the_transaction_rolled_back_raises_at_the_read_that_reaches_it(
+    make_db,
+):
     """Another task's INSERT reads the cursor's rows ahead first; that read fails with the
     transaction rolled back, and the INSERT opens a transaction of its own: the read that
     reaches the error raises ``TransactionStateError``, and so does the block's end."""
@@ -2917,7 +3105,9 @@ async def test_a_failed_fetch_inside_a_transaction_that_leaves_it_open_ends_noth
     t = await make_db()
     async with t.db.transaction():
         await t.adapter.execute(INSERT, ["a"])
-        cur = await t.adapter.execute("SELECT column1, json(column1) FROM (VALUES ('1'), ('2'), ('{'))")
+        cur = await t.adapter.execute(
+            "SELECT column1, json(column1) FROM (VALUES ('1'), ('2'), ('{'))"
+        )
         assert await cur.fetchone() == ("1", "1")
         with pytest.raises(sqlite3.OperationalError, match="^malformed JSON$"):
             await cur.fetchall()
@@ -2975,7 +3165,9 @@ async def test_a_statement_queued_behind_its_connections_close_ends_with_its_own
     await t.adapter.begin_transaction()
     error = await _queued_behind_close(t, lambda: t.adapter.execute(INSERT, ["b"]))
     assert (type(error), str(error), error.__context__) == (
-        sqlite3.ProgrammingError, "Cannot operate on a closed database.", None
+        sqlite3.ProgrammingError,
+        "Cannot operate on a closed database.",
+        None,
     )
 
 
@@ -2986,7 +3178,9 @@ async def test_an_executemany_queued_behind_its_connections_close_ends_with_its_
     await t.adapter.begin_transaction()
     error = await _queued_behind_close(t, lambda: t.adapter.executemany(INSERT, [["b"], ["c"]]))
     assert (type(error), str(error), error.__context__) == (
-        sqlite3.ProgrammingError, "Cannot operate on a closed database.", None
+        sqlite3.ProgrammingError,
+        "Cannot operate on a closed database.",
+        None,
     )
 
 
@@ -2999,12 +3193,16 @@ async def test_a_read_queued_behind_its_connections_close_ends_with_its_own_erro
     cursor = await t.adapter.execute("SELECT v FROM t")  # its rows are read lazily
     error = await _queued_behind_close(t, cursor.fetchall)
     assert (type(error), str(error), error.__context__) == (
-        sqlite3.ProgrammingError, "Cannot operate on a closed database.", None
+        sqlite3.ProgrammingError,
+        "Cannot operate on a closed database.",
+        None,
     )
 
 
 @pytest.mark.asyncio
-async def test_closing_while_a_cancelled_statements_wait_is_settling_leaves_nothing_running(make_db):
+async def test_closing_while_a_cancelled_statements_wait_is_settling_leaves_nothing_running(
+    make_db,
+):
     """Passes on base: a sibling's statement queued behind a slow read is cancelled, and the
     adapter is closed while the wait for it settles. The close waits for it: no task is left
     running and no error is left unretrieved."""

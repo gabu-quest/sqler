@@ -56,6 +56,7 @@ def _kwds(kind):
     """The class keywords a class of ``kind`` is made with: a msgspec class has no tag."""
     return {"tag": False} if kind == "msgspec" else {}
 
+
 CALLS: list = []
 PLAN: dict = {}
 
@@ -92,7 +93,9 @@ def make(kind, *mixins, fields=None):
     for field, (hint, default) in (fields or {}).items():
         ns["__annotations__"][field] = hint
         ns[field] = default
-    cls = types.new_class(f"Item_{table}", (*mixins, BASES[kind]), _kwds(kind), lambda body: body.update(ns))
+    cls = types.new_class(
+        f"Item_{table}", (*mixins, BASES[kind]), _kwds(kind), lambda body: body.update(ns)
+    )
     return dataclass(cls) if kind.startswith("lite") else cls
 
 
@@ -395,7 +398,10 @@ async def test_delete_with_policy_called_directly_is_the_delete(db, kind, way):
         await inst.delete_with_policy(db=db, on_delete=way)
 
     assert CALLS == [("before_delete", "gone"), ("after_delete", "gone")]
-    assert [(r[0], r[1]) for r in await _audit(db, Item)] == [(row_id, "create"), (row_id, "delete")]
+    assert [(r[0], r[1]) for r in await _audit(db, Item)] == [
+        (row_id, "create"),
+        (row_id, "delete"),
+    ]
     assert await _docs(db, Item) == []
     assert inst._id is None
 
@@ -594,9 +600,7 @@ async def _sent(act):
     with query_logger.capture() as q:
         await act()
     return [
-        e.sql.split()[0]
-        for e in q
-        if "sqlite_master" not in e.sql and "data LIKE" not in e.sql
+        e.sql.split()[0] for e in q if "sqlite_master" not in e.sql and "data LIKE" not in e.sql
     ]
 
 
@@ -770,7 +774,9 @@ def _raw(path, sql):
         conn.close()
 
 
-async def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(tmp_path, ticking_clock):
+async def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_stamp_into_its_column(
+    tmp_path, ticking_clock
+):
     from sqler import SQLerDB
 
     path = str(tmp_path / "stamped.db")
@@ -789,11 +795,17 @@ async def test_a_set_null_after_another_object_promoted_the_stamp_writes_the_sta
     finally:
         await db.close()
     [(data, new)] = _raw(path, "SELECT data, updated_at FROM awr_stamped_books")
-    assert json.loads(data) == {"created_at": book.created_at.isoformat(), "title": "b", "author": None}
+    assert json.loads(data) == {
+        "created_at": book.created_at.isoformat(),
+        "title": "b",
+        "author": None,
+    }
     assert (new != old, read) == (True, new)
 
 
-async def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_writes_the_row(tmp_path):
+async def test_a_set_null_on_a_safe_table_another_object_remade_without_its_version_writes_the_row(
+    tmp_path,
+):
     import sqlite3
 
     path = str(tmp_path / "safe.db")
@@ -815,7 +827,10 @@ async def test_a_set_null_on_a_safe_table_another_object_remade_without_its_vers
     finally:
         await db.close()
     # written as the table is now: a plain write adds no column (see the sync twin)
-    assert _raw(path, "SELECT name FROM pragma_table_info('awr_safe_books')") == [("_id",), ("data",)]
+    assert _raw(path, "SELECT name FROM pragma_table_info('awr_safe_books')") == [
+        ("_id",),
+        ("data",),
+    ]
     [(data,)] = _raw(path, "SELECT data FROM awr_safe_books")
     assert json.loads(data) == {"title": "b", "author": None}
     assert _raw(path, "SELECT count(*) FROM awr_nulled_authors") == [(0,)]
@@ -836,7 +851,11 @@ ROUND_TRIPS = [
     ),
     ("hooks", (Recorded,), {}),
     ("tracking", (AsyncTrackedModel,), {}),
-    ("full", (AsyncFullMixin,), {"created_at": datetime, "updated_at": datetime, "deleted_at": datetime}),
+    (
+        "full",
+        (AsyncFullMixin,),
+        {"created_at": datetime, "updated_at": datetime, "deleted_at": datetime},
+    ),
     ("audit_log", (AsyncAuditLogMixin,), {}),
 ]
 ROUND_TRIP_CASES = [
@@ -847,7 +866,9 @@ ROUND_TRIP_CASES = [
 
 
 @pytest.mark.parametrize("mixins, held, kind", ROUND_TRIP_CASES)
-async def test_a_loaded_instance_holds_its_mixin_fields_as_typed_and_saves_again(db, mixins, held, kind):
+async def test_a_loaded_instance_holds_its_mixin_fields_as_typed_and_saves_again(
+    db, mixins, held, kind
+):
     AsyncAuditMixin.set_current_user("alice")
     Item = make(kind, *mixins)
     fresh = Item(name="a")
@@ -921,7 +942,9 @@ TYPED_FIELDS = {
 @pytest.mark.parametrize("kind", KINDS)
 async def test_a_field_loads_as_the_type_it_declares(db, kind):
     Item = make(kind, fields={name: (hint, None) for name, (hint, _) in TYPED_FIELDS.items()})
-    saved = await Item(name="a", **{name: value for name, (_, value) in TYPED_FIELDS.items()}).save(db=db)
+    saved = await Item(name="a", **{name: value for name, (_, value) in TYPED_FIELDS.items()}).save(
+        db=db
+    )
 
     loaded = await Item.from_id(saved._id, db=db)
 
@@ -953,19 +976,32 @@ class Home:
 
 # (row, field type, value saved, the document's value for it); each loads back as that value
 NESTED = [
-    ("dataclass_in_dataclass", Optional[Home], Home(Address(city="x"), date(2026, 1, 2)),
-     {"address": {"city": "x"}, "since": "2026-01-02"}),
+    (
+        "dataclass_in_dataclass",
+        Optional[Home],
+        Home(Address(city="x"), date(2026, 1, 2)),
+        {"address": {"city": "x"}, "since": "2026-01-02"},
+    ),
     ("optional_none", Optional[Address], None, None),
-    ("list_two", list[Address], [Address(city="x"), Address(city="y")], [{"city": "x"}, {"city": "y"}]),
+    (
+        "list_two",
+        list[Address],
+        [Address(city="x"), Address(city="y")],
+        [{"city": "x"}, {"city": "y"}],
+    ),
     ("dict", dict[str, Address], {"k": Address(city="x")}, {"k": {"city": "x"}}),
 ]
 NESTED_CASES = [
-    pytest.param(hint, value, doc, kind, id=f"{row}-{kind}") for row, hint, value, doc in NESTED for kind in KINDS
+    pytest.param(hint, value, doc, kind, id=f"{row}-{kind}")
+    for row, hint, value, doc in NESTED
+    for kind in KINDS
 ]
 
 
 @pytest.mark.parametrize("hint, value, doc, kind", NESTED_CASES)
-async def test_a_dataclass_field_is_stored_as_its_fields_and_loads_as_its_type(db, hint, value, doc, kind):
+async def test_a_dataclass_field_is_stored_as_its_fields_and_loads_as_its_type(
+    db, hint, value, doc, kind
+):
     Item = make(kind, fields={"home": (hint, None)})
     saved = await Item(name="a", home=value).save(db=db)
 
@@ -984,7 +1020,14 @@ async def test_a_reference_stays_a_reference_beside_a_dataclass_field(db, kind):
     saved = await Item(name="a", owner=owner, home=Address(city="x")).save(db=db)
 
     assert await _docs(db, Item) == [
-        (saved._id, {"name": "a", "owner": {"_table": Owner.__tablename__, "_id": owner._id}, "home": {"city": "x"}})
+        (
+            saved._id,
+            {
+                "name": "a",
+                "owner": {"_table": Owner.__tablename__, "_id": owner._id},
+                "home": {"city": "x"},
+            },
+        )
     ]
     loaded = await Item.from_id(saved._id, db=db)
     assert (type(loaded.owner), loaded.owner._id, loaded.owner.name) == (Owner, owner._id, "o")
@@ -1062,17 +1105,28 @@ async def test_a_model_inside_a_dataclass_value_is_refused_at_its_place_and_noth
 
 
 @pytest.mark.parametrize("kind", KINDS)
-async def test_a_model_in_a_list_and_a_dict_field_of_the_model_stays_a_reference_beside_a_dataclass(db, kind):
+async def test_a_model_in_a_list_and_a_dict_field_of_the_model_stays_a_reference_beside_a_dataclass(
+    db, kind
+):
     Owner = make(kind)
     Holder, _ = _holders(Owner)
-    Item = make(kind, fields={
-        "owners": (list[Owner], None), "by": (dict[str, Owner], None), "home": (Optional[Holder], None)
-    })
+    Item = make(
+        kind,
+        fields={
+            "owners": (list[Owner], None),
+            "by": (dict[str, Owner], None),
+            "home": (Optional[Holder], None),
+        },
+    )
     owner = await Owner(name="o").save(db=db)
     saved = await Item(name="a", owners=[owner], by={"k": owner}, home=Holder(city="x")).save(db=db)
 
     ref = {"_table": Owner.__tablename__, "_id": owner._id}
     home = {"city": "x", "owner": None, "owners": [], "pair": [], "by": {}, "inner": None}
-    assert await _docs(db, Item) == [(saved._id, {"name": "a", "owners": [ref], "by": {"k": ref}, "home": home})]
+    assert await _docs(db, Item) == [
+        (saved._id, {"name": "a", "owners": [ref], "by": {"k": ref}, "home": home})
+    ]
     loaded = await Item.from_id(saved._id, db=db)
-    assert [(type(o), o._id) for o in [*loaded.owners, *loaded.by.values()]] == [(Owner, owner._id)] * 2
+    assert [(type(o), o._id) for o in [*loaded.owners, *loaded.by.values()]] == [
+        (Owner, owner._id)
+    ] * 2

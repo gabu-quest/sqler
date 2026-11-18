@@ -55,11 +55,16 @@ def written(tmp_path):
         versioned=True,
     )
     _id, v = db.upsert_with_version_promoted(
-        "jobs", None, {"status": "queued", "priority": 5, "payload": "p"}, None, ["status", "priority"]
+        "jobs",
+        None,
+        {"status": "queued", "priority": 5, "payload": "p"},
+        None,
+        ["status", "priority"],
     )
     db.upsert_with_version_promoted(
         "jobs", _id, {"status": "running", "priority": 5, "payload": "p"}, v, ["status", "priority"]
     )
+
     class Note(SQLerModel):
         text: str
 
@@ -120,7 +125,9 @@ def test_document_table(written):
     assert "_id INTEGER PRIMARY KEY AUTOINCREMENT" in sql
     rows = written.execute("SELECT _id, data FROM docs ORDER BY _id").fetchall()
     assert rows == [(1, '{"a":1,"nested":{"b":"x"}}'), (2, '{"a":2}')]
-    assert written.execute("SELECT name, seq FROM sqlite_sequence WHERE name='docs'").fetchone() == ("docs", 2)
+    assert written.execute(
+        "SELECT name, seq FROM sqlite_sequence WHERE name='docs'"
+    ).fetchone() == ("docs", 2)
 
 
 def test_promoted_and_version_columns(written):
@@ -140,7 +147,9 @@ def test_reference(written):
     """Section "References"."""
     (data,) = written.execute("SELECT data FROM books").fetchone()
     assert json.loads(data) == {"title": "T", "author": {"_table": "authors", "_id": 1}}
-    assert written.execute("SELECT json_extract(data, '$.name') FROM authors WHERE _id = 1").fetchone() == ("Ann",)
+    assert written.execute(
+        "SELECT json_extract(data, '$.name') FROM authors WHERE _id = 1"
+    ).fetchone() == ("Ann",)
 
 
 def test_index_names(written):
@@ -150,7 +159,10 @@ def test_index_names(written):
     ).fetchall()
     assert [r[0] for r in rows] == ["idx_docs__id", "idx_docs_a", "idx_docs_nested_b"]
     by_name = dict(rows)
-    assert by_name["idx_docs_a"].split() == "CREATE UNIQUE INDEX idx_docs_a ON docs (json_extract(data, '$.a'))".split()
+    assert (
+        by_name["idx_docs_a"].split()
+        == "CREATE UNIQUE INDEX idx_docs_a ON docs (json_extract(data, '$.a'))".split()
+    )
     assert by_name["idx_docs_nested_b"].split() == (
         "CREATE INDEX idx_docs_nested_b ON docs (json_extract(data, '$.nested.b'))".split()
     )
@@ -166,7 +178,9 @@ def test_migrations_table(written):
         ("duration_ms", "REAL", 1, None, 0),
         ("checksum", "TEXT", 0, None, 0),
     ]
-    assert written.execute("SELECT version, name FROM _sqler_migrations").fetchall() == [(1, "first")]
+    assert written.execute("SELECT version, name FROM _sqler_migrations").fetchall() == [
+        (1, "first")
+    ]
 
 
 def test_table_made_by_a_query(written):
@@ -200,9 +214,17 @@ def test_with_version_writes_add_the_column_and_insert_zero(written):
 def test_record_of_settled_promoted_columns(written):
     """Section "The record of settled promoted columns"."""
     assert "`_sqler_promoted`" in DOC
-    assert "tbl TEXT NOT NULL COLLATE NOCASE, col TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY (tbl, col)) WITHOUT ROWID" in DOC
-    assert _cols(written, "_sqler_promoted") == [("tbl", "TEXT", 1, None, 1), ("col", "TEXT", 1, None, 2)]
-    (sql,) = written.execute("SELECT sql FROM sqlite_master WHERE name = '_sqler_promoted'").fetchone()
+    assert (
+        "tbl TEXT NOT NULL COLLATE NOCASE, col TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY (tbl, col)) WITHOUT ROWID"
+        in DOC
+    )
+    assert _cols(written, "_sqler_promoted") == [
+        ("tbl", "TEXT", 1, None, 1),
+        ("col", "TEXT", 1, None, 2),
+    ]
+    (sql,) = written.execute(
+        "SELECT sql FROM sqlite_master WHERE name = '_sqler_promoted'"
+    ).fetchone()
     assert sql.endswith("PRIMARY KEY (tbl, col)) WITHOUT ROWID")
     assert written.execute("SELECT tbl, col FROM _sqler_promoted ORDER BY tbl, col").fetchall() == [
         ("imvp", "s"),
@@ -285,16 +307,27 @@ def test_a_database_object_learns_a_tables_columns_once(tmp_path):
 # scene: (what ``a`` learns first, what ``b`` does, the key ``a`` writes, the value ``b`` leaves in it)
 SCENES = {
     "promote": ({}, lambda b: b.ensure_table("t", promoted={"status": "TEXT"}), "status"),
-    "promote a second": ({"status": "TEXT"}, lambda b: b.ensure_table("t", promoted={"status": "TEXT", "prio": "TEXT"}), "prio"),
+    "promote a second": (
+        {"status": "TEXT"},
+        lambda b: b.ensure_table("t", promoted={"status": "TEXT", "prio": "TEXT"}),
+        "prio",
+    ),
     "add _version": ({}, lambda b: b.ensure_table("t", versioned=True), "_version"),
     "drop and make again": (
         {"status": "TEXT"},
-        lambda b: (b.adapter.execute("DROP TABLE t;"), b.adapter.auto_commit(), b.ensure_table("t", promoted={"other": "TEXT"})),
+        lambda b: (
+            b.adapter.execute("DROP TABLE t;"),
+            b.adapter.auto_commit(),
+            b.ensure_table("t", promoted={"other": "TEXT"}),
+        ),
         "other",
     ),
     "rename a column": (
         {"status": "TEXT"},
-        lambda b: (b.adapter.execute("ALTER TABLE t RENAME COLUMN status TO prio;"), b.adapter.auto_commit()),
+        lambda b: (
+            b.adapter.execute("ALTER TABLE t RENAME COLUMN status TO prio;"),
+            b.adapter.auto_commit(),
+        ),
         "prio",
     ),
     "drop a column": (
@@ -307,7 +340,9 @@ SCENES = {
         {"status": "TEXT"},
         lambda b: (
             b.adapter.execute("DROP TABLE t;"),
-            b.adapter.execute("CREATE TABLE t (status TEXT, _id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL);"),
+            b.adapter.execute(
+                "CREATE TABLE t (status TEXT, _id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL);"
+            ),
             b.adapter.auto_commit(),
         ),
         "status",
@@ -371,10 +406,16 @@ def _searched_in_sync(a, key):
 
 # each reads row 1 of ``t``: the value of the key (a plain model does not read ``_version``)
 READS = {
-    "find_document": lambda a, key: (a.find_document_with_version if key == "_version" else a.find_document)("t", 1)[key],
+    "find_document": lambda a, key: (
+        a.find_document_with_version if key == "_version" else a.find_document
+    )("t", 1)[key],
     "from_id": lambda a, key: SceneRow.from_id(1, db=a).model_dump().get(key),
-    "query all": lambda a, key: next(r for r in SceneRow.using(a).all() if r._id == 1).model_dump().get(key),
-    "count": lambda a, key: SceneRow.using(a).filter(F(key) == (7 if key == "_version" else "old")).count(),
+    "query all": lambda a, key: next(r for r in SceneRow.using(a).all() if r._id == 1)
+    .model_dump()
+    .get(key),
+    "count": lambda a, key: SceneRow.using(a)
+    .filter(F(key) == (7 if key == "_version" else "old"))
+    .count(),
     "search in sync": _searched_in_sync,
 }
 
@@ -385,7 +426,8 @@ def _cells(ways, one):
         (scene, way)
         for scene in SCENES
         for way in ways
-        if (scene not in ONE_WAY or way == one) and not (scene == "drop and make again" and way in PROMOTING)
+        if (scene not in ONE_WAY or way == one)
+        and not (scene == "drop and make again" and way in PROMOTING)
     ]
 
 
@@ -403,7 +445,9 @@ def _scene(tmp_path, name):
     change(b)
     if name in REMADE:
         b.insert_document("t", {"name": "x"})
-    b.adapter.execute(f"UPDATE t SET {key} = {7 if key == '_version' else repr('old')} WHERE _id = 1;")
+    b.adapter.execute(
+        f"UPDATE t SET {key} = {7 if key == '_version' else repr('old')} WHERE _id = 1;"
+    )
     b.adapter.auto_commit()
     b.close()
     return a, path, key
@@ -419,7 +463,9 @@ def _stored(path, _id, key):
 
 
 @pytest.mark.parametrize(("scene", "way"), _cells(_write_ways(None, "k"), "insert_document"))
-def test_a_write_after_another_object_changed_the_table_lands_each_key_in_its_column(tmp_path, scene, way):
+def test_a_write_after_another_object_changed_the_table_lands_each_key_in_its_column(
+    tmp_path, scene, way
+):
     """Section "Promoted columns": SQLite refuses a statement built for the columns ``t`` had,
     so ``a`` learns ``t`` again and writes it as it is."""
     a, path, key = _scene(tmp_path, scene)
@@ -540,7 +586,9 @@ def test_a_move_of_the_version_for_another_table_costs_no_relearn_and_changes_no
         a.close(), b.close()
     conn = sqlite3.connect(path)
     try:
-        assert conn.execute("SELECT count(*) FROM t WHERE status = 'v' AND data NOT LIKE '%status%'").fetchone() == (1000,)
+        assert conn.execute(
+            "SELECT count(*) FROM t WHERE status = 'v' AND data NOT LIKE '%status%'"
+        ).fetchone() == (1000,)
     finally:
         conn.close()
 
@@ -571,7 +619,10 @@ def test_a_new_row_in_a_remembered_table_sends_its_insert_alone(tmp_path):
     finally:
         a.close(), b.close()
     assert [q.sql.split()[0] for q in sent] == ["INSERT", "INSERT"]
-    assert (_stored(path, 2, "data")[0], _stored(path, 3, "data")[0]["name"]) == ({"name": "y"}, "z")
+    assert (_stored(path, 2, "data")[0], _stored(path, 3, "data")[0]["name"]) == (
+        {"name": "y"},
+        "z",
+    )
 
 
 def test_a_new_row_in_a_remembered_table_another_object_dropped_makes_the_table_again(tmp_path):
@@ -635,7 +686,9 @@ def _plain_guard(names):
     return f"CASE WHEN 1 THEN 1 ELSE (SELECT ({row}) IN (SELECT * FROM t) FROM t) END"
 
 
-def test_sqlite_refuses_a_row_value_of_other_names_than_select_star_where_the_branch_never_runs(tmp_path):
+def test_sqlite_refuses_a_row_value_of_other_names_than_select_star_where_the_branch_never_runs(
+    tmp_path,
+):
     """The mechanism every statement built from what an object remembers relies on, without
     sqler: a SQLite that stops refusing fails here, by this name."""
     path = str(tmp_path / "plain.db")
@@ -644,7 +697,9 @@ def test_sqlite_refuses_a_row_value_of_other_names_than_select_star_where_the_br
         a.execute("CREATE TABLE t (_id INTEGER PRIMARY KEY, data TEXT, status TEXT)")
         a.execute("INSERT INTO t (data) VALUES ('{}')")
         a.commit()
-        with pytest.raises(sqlite3.OperationalError, match="sub-select returns 3 columns - expected 2"):
+        with pytest.raises(
+            sqlite3.OperationalError, match="sub-select returns 3 columns - expected 2"
+        ):
             a.execute(f"SELECT _id FROM t WHERE {_plain_guard(['_id', 'data'])}")
         with pytest.raises(sqlite3.OperationalError, match="no such column: gone"):
             a.execute(f"SELECT _id FROM t WHERE {_plain_guard(['_id', 'data', 'gone'])}")
@@ -652,14 +707,18 @@ def test_sqlite_refuses_a_row_value_of_other_names_than_select_star_where_the_br
         assert a.execute(held).fetchall() == [(1,)]  # prepared and cached by the driver
         b.execute("ALTER TABLE t ADD COLUMN note TEXT")
         b.commit()
-        with pytest.raises(sqlite3.OperationalError, match="sub-select returns 4 columns - expected 3"):
+        with pytest.raises(
+            sqlite3.OperationalError, match="sub-select returns 4 columns - expected 3"
+        ):
             a.execute(held)
         # a connection that has not seen a column yet reloads the schema at the name it lacks
         c = sqlite3.connect(path)
         c.execute("SELECT * FROM t").fetchall()
         b.execute("ALTER TABLE t ADD COLUMN later TEXT")
         b.commit()
-        assert c.execute(f"SELECT _id FROM t WHERE {_plain_guard(['_id', 'data', 'status', 'note', 'later'])}").fetchall() == [(1,)]
+        assert c.execute(
+            f"SELECT _id FROM t WHERE {_plain_guard(['_id', 'data', 'status', 'note', 'later'])}"
+        ).fetchall() == [(1,)]
         c.close()
     finally:
         a.close(), b.close()
@@ -697,7 +756,9 @@ def test_a_table_with_a_generated_column_is_learned_as_select_star_gives_it(tmp_
         a.close()
     assert got == ("old", "old", ["old", None], 1)
     assert [q.sql for q in sent if q.sql.startswith("PRAGMA")] == ['PRAGMA table_xinfo("t");']
-    assert [q.sql for q in sent if q.sql.startswith("INSERT") and " g" in q.sql.split("VALUES")[0]] == []
+    assert [
+        q.sql for q in sent if q.sql.startswith("INSERT") and " g" in q.sql.split("VALUES")[0]
+    ] == []
     assert [q.error for q in sent if q.error and "_sqler_promoted" not in q.sql] == []
 
 
@@ -738,7 +799,10 @@ def test_the_callers_own_mistake_is_raised_as_sqlite_raised_it_after_one_learnin
                 SceneRow.using(a).filter(SQLerExpression("nocolumn = 1", [])).all()
     finally:
         a.close(), b.close()
-    assert [(q.sql.split()[0], q.error) for q in sent] == [("SELECT", "no such column: nocolumn"), ("PRAGMA", None)]
+    assert [(q.sql.split()[0], q.error) for q in sent] == [
+        ("SELECT", "no such column: nocolumn"),
+        ("PRAGMA", None),
+    ]
 
 
 def test_a_locked_database_is_raised_and_not_sent_again(tmp_path):
@@ -751,10 +815,14 @@ def test_a_locked_database_is_raised_and_not_sent_again(tmp_path):
         b.adapter.execute("ROLLBACK;")
     finally:
         a.close(), b.close()
-    assert [(q.sql.split()[0], q.error) for q in sent if not q.sql.startswith("PRAGMA")] == [("UPDATE", "database is locked")]
+    assert [(q.sql.split()[0], q.error) for q in sent if not q.sql.startswith("PRAGMA")] == [
+        ("UPDATE", "database is locked")
+    ]
 
 
-@pytest.mark.parametrize("nested", [False, True], ids=["in the unit", "in a nested level that rolls back"])
+@pytest.mark.parametrize(
+    "nested", [False, True], ids=["in the unit", "in a nested level that rolls back"]
+)
 def test_a_refusal_inside_a_unit_keeps_its_earlier_write(tmp_path, nested):
     """``b`` promoted after ``a`` learned ``t``: ``a``'s statement inside its unit is refused,
     learned again and sent again, and the unit's earlier write is there after the commit."""
@@ -799,7 +867,11 @@ def test_a_table_dropped_by_another_object_between_two_reads_reads_as_none(tmp_p
         assert a.find_document("t", 1) == {"name": "x", "_id": 1}
         b.adapter.execute("DROP TABLE t;")
         b.adapter.auto_commit()
-        assert (a.find_document("t", 1), SceneRow.using(a).count(), SceneRow.using(a).all()) == (None, 0, [])
+        assert (a.find_document("t", 1), SceneRow.using(a).count(), SceneRow.using(a).all()) == (
+            None,
+            0,
+            [],
+        )
     finally:
         a.close(), b.close()
     conn = sqlite3.connect(path)
@@ -857,7 +929,9 @@ def test_a_keyboard_interrupt_while_the_statement_runs_is_not_caught(tmp_path):
         except KeyboardInterrupt:
             pass
         a.close(), b.close()
-    assert [(q.sql.split()[0], q.error) for q in sent] == [("SELECT", "KeyboardInterrupt")]  # sent once, nothing learned
+    assert [(q.sql.split()[0], q.error) for q in sent] == [
+        ("SELECT", "KeyboardInterrupt")
+    ]  # sent once, nothing learned
 
 
 # ---- a writer splits by the table's columns; a bulk run checks them once ------------------------
@@ -882,7 +956,9 @@ class PrioRow(SQLerModel):
 
 
 @pytest.mark.parametrize("way", ["save", "save_many"])
-def test_two_classes_that_promote_different_fields_of_one_table_each_write_both_columns(tmp_path, way):
+def test_two_classes_that_promote_different_fields_of_one_table_each_write_both_columns(
+    tmp_path, way
+):
     """Each class tells the writer its own promoted field; the writer puts every key that
     names a column of the table into it, so neither class's save hides the other's column."""
     path = str(tmp_path / "two_classes.db")
@@ -899,7 +975,9 @@ def test_two_classes_that_promote_different_fields_of_one_table_each_write_both_
         rows = conn.execute("SELECT data, status, prio FROM two_classes ORDER BY _id").fetchall()
     finally:
         conn.close()
-    assert [(json.loads(d), s, p) for d, s, p in rows] == [({"name": f"r{n}"}, "s", "p") for n in range(3)]
+    assert [(json.loads(d), s, p) for d, s, p in rows] == [
+        ({"name": f"r{n}"}, "s", "p") for n in range(3)
+    ]
     assert got == [("s", "p")] * 3
 
 
@@ -926,7 +1004,9 @@ BULK = {
 
 @pytest.mark.parametrize("n", [1, 2, 2500])
 @pytest.mark.parametrize("way", BULK)
-def test_a_bulk_run_is_guarded_once_in_a_first_statement_of_one_row_or_by_a_check_before_it(tmp_path, way, n):
+def test_a_bulk_run_is_guarded_once_in_a_first_statement_of_one_row_or_by_a_check_before_it(
+    tmp_path, way, n
+):
     """A first statement of one row carries the guard of the remembered names. Before a
     longer one the check is a statement of its own, first in the run's transaction, and no
     statement of rows holds a ``SELECT``, so SQLite keeps its fast path."""
@@ -942,7 +1022,10 @@ def test_a_bulk_run_is_guarded_once_in_a_first_statement_of_one_row_or_by_a_chec
     guard = "(SELECT (`_id`, `data`) IN (SELECT * FROM t) FROM t)"
     if n == 1:
         assert kinds == ["CREATE", "INSERT"]
-        assert (sent[1].sql.count(f"json(CASE WHEN 1 THEN ? ELSE {guard} END)"), sent[1].sql.count("SELECT")) == (1, 2)
+        assert (
+            sent[1].sql.count(f"json(CASE WHEN 1 THEN ? ELSE {guard} END)"),
+            sent[1].sql.count("SELECT"),
+        ) == (1, 2)
     else:
         assert kinds == ["CREATE", "SELECT", *["INSERT"] * -(-n // 999)]
         assert sent[1].sql == f"SELECT CASE WHEN 1 THEN 1 ELSE {guard} END;"
@@ -952,7 +1035,9 @@ def test_a_bulk_run_is_guarded_once_in_a_first_statement_of_one_row_or_by_a_chec
 
 @pytest.mark.parametrize("n, refused", [(1, "INSERT"), (3, "SELECT")])
 @pytest.mark.parametrize("way", BULK)
-def test_a_bulk_run_in_the_callers_unit_after_a_promotion_lands_every_row_in_the_column(tmp_path, way, n, refused):
+def test_a_bulk_run_in_the_callers_unit_after_a_promotion_lands_every_row_in_the_column(
+    tmp_path, way, n, refused
+):
     """``b`` promoted ``status`` after ``a`` learned ``t``: the run's guarded statement (its
     one row, or the check before several) is refused, ``a`` learns ``t`` again and builds the
     run again; the caller's earlier write is kept."""
@@ -969,16 +1054,22 @@ def test_a_bulk_run_in_the_callers_unit_after_a_promotion_lands_every_row_in_the
         a.close(), b.close()
     conn = sqlite3.connect(path)
     try:
-        rows = conn.execute(f"SELECT data, status FROM t WHERE _id IN ({','.join('?' * len(ids))})", ids).fetchall()
+        rows = conn.execute(
+            f"SELECT data, status FROM t WHERE _id IN ({','.join('?' * len(ids))})", ids
+        ).fetchall()
     finally:
         conn.close()
-    assert [(q.sql.split()[0], q.error) for q in sent if q.error] == [(refused, "sub-select returns 3 columns - expected 2")]
+    assert [(q.sql.split()[0], q.error) for q in sent if q.error] == [
+        (refused, "sub-select returns 3 columns - expected 2")
+    ]
     assert rows == [(f'{{"name":"r{i}"}}', "v") for i in range(n)]
     assert beside == {"name": "the caller's own row", "_id": 1}
 
 
 @pytest.mark.parametrize("way", BULK)
-def test_a_keyboard_interrupt_at_the_check_of_a_bulk_run_is_not_caught_and_writes_nothing(tmp_path, way):
+def test_a_keyboard_interrupt_at_the_check_of_a_bulk_run_is_not_caught_and_writes_nothing(
+    tmp_path, way
+):
     a, _, path = _two(tmp_path)
 
     def interrupt(entry):
@@ -1034,9 +1125,9 @@ def test_a_safe_class_with_a_promoted_field_saved_at_a_stale_version_writes_noth
             held.save(db=a)
     finally:
         a.close()
-    assert sqlite3.connect(path).execute("SELECT data, status, _version FROM safe_promoting").fetchall() == [
-        ('{"name":"x"}', "s", 1)
-    ]
+    assert sqlite3.connect(path).execute(
+        "SELECT data, status, _version FROM safe_promoting"
+    ).fetchall() == [('{"name":"x"}', "s", 1)]
 
 
 def test_a_bulk_write_of_documents_holding_id_and_version_keys_keeps_them_in_data(tmp_path):
@@ -1045,12 +1136,14 @@ def test_a_bulk_write_of_documents_holding_id_and_version_keys_keeps_them_in_dat
     a, _, path = _two(tmp_path)
     try:
         a.ensure_table("t", promoted={"status": "TEXT"})
-        ids = a.insert_many_promoted("t", [{"name": "y", "_id": 9, "_version": 3, "status": "s"}], ["status"])
+        ids = a.insert_many_promoted(
+            "t", [{"name": "y", "_id": 9, "_version": 3, "status": "s"}], ["status"]
+        )
     finally:
         a.close()
-    assert sqlite3.connect(path).execute("SELECT _id, data, status FROM t WHERE _id = ?", ids).fetchall() == [
-        (2, '{"name":"y","_id":9,"_version":3}', "s")
-    ]
+    assert sqlite3.connect(path).execute(
+        "SELECT _id, data, status FROM t WHERE _id = ?", ids
+    ).fetchall() == [(2, '{"name":"y","_id":9,"_version":3}', "s")]
 
 
 # ---- the sender decides by the names its statement was built from ------------------------------
@@ -1105,11 +1198,16 @@ def test_a_rebuild_after_another_object_changed_the_table_leaves_a_row_per_docum
         assert index.rebuild(a) == 2
     finally:
         a.close()
-    assert sqlite3.connect(path).execute("SELECT rowid, name FROM t_search").fetchall() == [(1, "x"), (2, "two")]
+    assert sqlite3.connect(path).execute("SELECT rowid, name FROM t_search").fetchall() == [
+        (1, "x"),
+        (2, "two"),
+    ]
 
 
 @pytest.mark.parametrize("way", ["insert_document", "upsert_document"])
-def test_the_callers_raw_statement_before_a_refused_write_is_kept_and_committed_with_it(tmp_path, way):
+def test_the_callers_raw_statement_before_a_refused_write_is_kept_and_committed_with_it(
+    tmp_path, way
+):
     """Outside a transaction the caller's own ``INSERT`` is pending when ``a``'s write is
     refused for a table that moved: nothing is ended, the write is built again, and its
     commit commits the caller's row too."""
@@ -1134,13 +1232,15 @@ def test_the_callers_raw_statement_before_a_refused_write_is_kept_and_committed_
     assert _stored(path, _id, "status") == ({"name": "y"}, "v")
 
 
-def test_the_callers_own_mistake_after_a_raw_statement_ends_the_unit_and_is_raised_as_it_is(tmp_path):
+def test_the_callers_own_mistake_after_a_raw_statement_ends_the_unit_and_is_raised_as_it_is(
+    tmp_path,
+):
     from sqler.query import SQLerExpression
 
     a, b, path = _two(tmp_path)
     a.find_document("t", 1)
     try:
-        a.adapter.execute("INSERT INTO t (data) VALUES ('{\"name\": \"pending\"}');")
+        a.adapter.execute('INSERT INTO t (data) VALUES (\'{"name": "pending"}\');')
         with pytest.raises(sqlite3.OperationalError, match="^no such column: nocolumn$"):
             SceneRow.using(a).filter(SQLerExpression("nocolumn = 1", [])).all()
         a.adapter.commit()
@@ -1149,7 +1249,9 @@ def test_the_callers_own_mistake_after_a_raw_statement_ends_the_unit_and_is_rais
     assert sqlite3.connect(path).execute("SELECT count(*) FROM t").fetchone() == (1,)
 
 
-def test_the_callers_own_mistake_in_a_unit_that_is_not_the_objects_is_sent_once_and_changes_no_memory(tmp_path):
+def test_the_callers_own_mistake_in_a_unit_that_is_not_the_objects_is_sent_once_and_changes_no_memory(
+    tmp_path,
+):
     from sqler.query import SQLerExpression
 
     a, b, path = _two(tmp_path)
@@ -1163,7 +1265,10 @@ def test_the_callers_own_mistake_in_a_unit_that_is_not_the_objects_is_sent_once_
         after = a._known("t")
     finally:
         a.close(), b.close()
-    assert [q.sql.split()[0] for q in sent if not q.sql.startswith(("BEGIN", "ROLLBACK"))] == ["SELECT", "PRAGMA"]
+    assert [q.sql.split()[0] for q in sent if not q.sql.startswith(("BEGIN", "ROLLBACK"))] == [
+        "SELECT",
+        "PRAGMA",
+    ]
     assert after == before
 
 
@@ -1209,14 +1314,17 @@ def test_a_by_id_read_of_a_missing_table_ends_nothing_and_makes_nothing(tmp_path
                 got = (a.find_document("absent", 1), a.find_documents("absent", [1]))
                 a.insert_document("t", {"name": "after the read"})
         else:
-            a.adapter.execute("INSERT INTO t (data) VALUES ('{\"name\": \"pending\"}');")
+            a.adapter.execute('INSERT INTO t (data) VALUES (\'{"name": "pending"}\');')
             got = (a.find_document("absent", 1), a.find_documents("absent", [1]))
             a.adapter.commit()
     finally:
         a.close(), b.close()
     conn = sqlite3.connect(path)
     try:
-        assert (got, conn.execute("SELECT count(*) FROM t").fetchone()[0]) == ((None, []), 3 if unit else 2)
+        assert (got, conn.execute("SELECT count(*) FROM t").fetchone()[0]) == (
+            (None, []),
+            3 if unit else 2,
+        )
         assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'absent'").fetchall() == []
     finally:
         conn.close()
@@ -1229,11 +1337,17 @@ def test_a_failure_while_the_rows_are_fetched_is_raised_as_it_is(tmp_path):
 
     a, b, path = _two(tmp_path)
     try:
-        a.adapter.execute("INSERT INTO t (data) VALUES (json_object('name', 'y', 'n', -9223372036854775808));")
+        a.adapter.execute(
+            "INSERT INTO t (data) VALUES (json_object('name', 'y', 'n', -9223372036854775808));"
+        )
         a.adapter.auto_commit()
         with query_logger.capture() as sent:
             with pytest.raises(sqlite3.OperationalError, match="^integer overflow$"):
-                list(SceneRow.using(a).filter(SQLerExpression("abs(coalesce(json_extract(data, '$.n'), 0)) >= 0", [])).iter())
+                list(
+                    SceneRow.using(a)
+                    .filter(SQLerExpression("abs(coalesce(json_extract(data, '$.n'), 0)) >= 0", []))
+                    .iter()
+                )
     finally:
         a.close(), b.close()
     assert [q.sql.split()[0] for q in sent] == ["SELECT"]
@@ -1274,7 +1388,10 @@ def test_a_bulk_upsert_that_fails_leaves_the_callers_documents_as_they_were_pass
         a.close(), b.close()
     assert failed == [{"name": "new"}, {"name": "bad", "_id": "not a number"}]
     assert (ids, docs[0]) == ([2], {"name": "new", "_id": 2})
-    assert sqlite3.connect(path).execute("SELECT _id, data FROM t").fetchall() == [(1, '{"name":"x"}'), (2, '{"name":"new"}')]
+    assert sqlite3.connect(path).execute("SELECT _id, data FROM t").fetchall() == [
+        (1, '{"name":"x"}'),
+        (2, '{"name":"new"}'),
+    ]
 
 
 def test_a_document_passed_twice_to_one_bulk_upsert_is_two_rows_and_holds_the_id_of_the_last():
@@ -1282,7 +1399,10 @@ def test_a_document_passed_twice_to_one_bulk_upsert_is_two_rows_and_holds_the_id
     twice = {"name": "a"}
     try:
         ids = db.bulk_upsert("t", [twice, {"name": "b"}, twice])
-        stored = [tuple(row) for row in db.adapter.execute("SELECT _id, data FROM t ORDER BY _id").fetchall()]
+        stored = [
+            tuple(row)
+            for row in db.adapter.execute("SELECT _id, data FROM t ORDER BY _id").fetchall()
+        ]
     finally:
         db.close()
     assert (ids, twice) == ([1, 2, 3], {"name": "a", "_id": 3})

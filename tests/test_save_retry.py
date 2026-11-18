@@ -716,7 +716,13 @@ def _flat(doc) -> tuple:
 
 def _stored(row) -> tuple:
     child = row["child"]
-    return (row["title"], row["count"], row["hits"], row["tags"], None if child is None else child["_id"])
+    return (
+        row["title"],
+        row["count"],
+        row["hits"],
+        row["tags"],
+        None if child is None else child["_id"],
+    )
 
 
 def _rebase(kind, steps):
@@ -738,9 +744,21 @@ def _sets_a_date(rows, doc):
 
 
 _THEIR_EDITS = [
-    ("title", lambda r, d: setattr(d, "title", "theirs"), ("theirs", 11, 0, ["a"], 1, {}, [], None)),
-    ("dict-key", lambda r, d: d.meta.update(k="v"), ("first", 11, 0, ["a"], 1, {"k": "v"}, [], None)),
-    ("typed-list", lambda r, d: setattr(d, "kids", [r.c2, r.c1]), ("first", 11, 0, ["a"], 1, {}, [2, 1], None)),
+    (
+        "title",
+        lambda r, d: setattr(d, "title", "theirs"),
+        ("theirs", 11, 0, ["a"], 1, {}, [], None),
+    ),
+    (
+        "dict-key",
+        lambda r, d: d.meta.update(k="v"),
+        ("first", 11, 0, ["a"], 1, {"k": "v"}, [], None),
+    ),
+    (
+        "typed-list",
+        lambda r, d: setattr(d, "kids", [r.c2, r.c1]),
+        ("first", 11, 0, ["a"], 1, {}, [2, 1], None),
+    ),
     ("none", lambda r, d: setattr(d, "child", None), ("first", 11, 0, ["a"], None, {}, [], None)),
 ]
 _THEIR_EDIT_CASES = [
@@ -750,7 +768,12 @@ _THEIR_EDIT_CASES = [
 ] + [
     # a date field: every base gives a date back; the async pydantic bases cannot save one
     # at all, so there is no case for them
-    pytest.param(kind, _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], date(2026, 11, 14)), id=f"date-{kind}")
+    pytest.param(
+        kind,
+        _sets_a_date,
+        ("first", 11, 0, ["a"], 1, {}, [], date(2026, 11, 14)),
+        id=f"date-{kind}",
+    )
     for kind in ("sync", "lite_sync", "lite_async")
 ]
 
@@ -785,7 +808,10 @@ def test_rebase_where_both_changed_a_field_to_different_values_raises_and_writes
         return _stored(stored), stored["_version"], _held(mine), mine._version
 
     assert _rebase(kind, steps) == (
-        ("theirs", 10, 0, ["a"], 1), 1, ("mine", 11, 0, ["a"], 1), 0,
+        ("theirs", 10, 0, ["a"], 1),
+        1,
+        ("mine", 11, 0, ["a"], 1),
+        0,
     )
 
 
@@ -801,7 +827,10 @@ def test_rebase_where_both_changed_a_field_to_one_value_adds_the_counter(kind):
         return _stored(stored), stored["_version"], _held(mine), mine._version
 
     assert _rebase(kind, steps) == (
-        ("agreed", 11, 0, ["a"], 1), 2, ("agreed", 11, 0, ["a"], 1), 2,
+        ("agreed", 11, 0, ["a"], 1),
+        2,
+        ("agreed", 11, 0, ["a"], 1),
+        2,
     )
 
 
@@ -810,10 +839,22 @@ def _moves_its_date(rows, doc):
 
 
 _MY_EDITS = [
-    ("list", lambda r, d: d.tags.append("b"), ("theirs", 11, 0, ["a", "b"], 1, {"k": 1}, [1], None)),
+    (
+        "list",
+        lambda r, d: d.tags.append("b"),
+        ("theirs", 11, 0, ["a", "b"], 1, {"k": 1}, [1], None),
+    ),
     ("dict-key", lambda r, d: d.meta.update(k=2), ("theirs", 11, 0, ["a"], 1, {"k": 2}, [1], None)),
-    ("reference", lambda r, d: setattr(d, "child", r.c2), ("theirs", 11, 0, ["a"], 2, {"k": 1}, [1], None)),
-    ("typed-list", lambda r, d: setattr(d, "kids", [r.c2]), ("theirs", 11, 0, ["a"], 1, {"k": 1}, [2], None)),
+    (
+        "reference",
+        lambda r, d: setattr(d, "child", r.c2),
+        ("theirs", 11, 0, ["a"], 2, {"k": 1}, [1], None),
+    ),
+    (
+        "typed-list",
+        lambda r, d: setattr(d, "kids", [r.c2]),
+        ("theirs", 11, 0, ["a"], 1, {"k": 1}, [2], None),
+    ),
 ]
 _MY_EDIT_CASES = [
     pytest.param(kind, None, edit, expect, id=f"{name}-{kind}")
@@ -821,8 +862,13 @@ _MY_EDIT_CASES = [
     for kind in KINDS
 ] + [
     # the async pydantic bases cannot save a date at all, so there is no case for them
-    pytest.param(kind, date(2026, 11, 14), _moves_its_date,
-                 ("theirs", 11, 0, ["a"], 1, {"k": 1}, [1], date(2026, 11, 15)), id=f"date-{kind}")
+    pytest.param(
+        kind,
+        date(2026, 11, 14),
+        _moves_its_date,
+        ("theirs", 11, 0, ["a"], 1, {"k": 1}, [1], date(2026, 11, 15)),
+        id=f"date-{kind}",
+    )
     for kind in ("sync", "lite_sync", "lite_async")
 ]
 
@@ -832,7 +878,13 @@ def test_rebase_of_a_model_never_reloaded_keeps_the_field_only_it_changed(kind, 
     # its snapshot is the payload it saved, not a row it read
     async def steps(rows, _mine, _theirs):
         mine = rows.doc_cls(
-            title="own", count=10, tags=["a"], child=rows.c1, kids=[rows.c1], meta={"k": 1}, when=when
+            title="own",
+            count=10,
+            tags=["a"],
+            child=rows.c1,
+            kids=[rows.c1],
+            meta={"k": 1},
+            when=when,
         )
         await _aw(mine.save())
         theirs = await _aw(rows.doc_cls.from_id(mine._id))
@@ -908,7 +960,10 @@ def test_rebase_keeps_a_list_the_other_writer_changed_in_place(kind):
         await _aw(mine.save())
         return _stored(await rows.row()), _held(mine)
 
-    assert _rebase(kind, steps) == (("first", 11, 0, ["a", "b"], 1), ("first", 11, 0, ["a", "b"], 1))
+    assert _rebase(kind, steps) == (
+        ("first", 11, 0, ["a", "b"], 1),
+        ("first", 11, 0, ["a", "b"], 1),
+    )
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -927,7 +982,13 @@ def test_rebase_keeps_a_reference_the_other_writer_set(kind):
             child._id,
         )
 
-    assert _rebase(kind, steps) == (("first", 11, 0, ["a"], 2), ("first", 11, 0, ["a"], 2), True, "two", 2)
+    assert _rebase(kind, steps) == (
+        ("first", 11, 0, ["a"], 2),
+        ("first", 11, 0, ["a"], 2),
+        True,
+        "two",
+        2,
+    )
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -964,7 +1025,9 @@ def test_rebase_of_a_deleted_row_raises_stale(kind):
     "edit",
     [
         pytest.param(lambda d: setattr(d, "count", d.count + 2), id="delta-above-max"),
-        pytest.param(lambda d: (setattr(d, "count", d.count + 1), setattr(d, "hits", 1)), id="two-counters"),
+        pytest.param(
+            lambda d: (setattr(d, "count", d.count + 1), setattr(d, "hits", 1)), id="two-counters"
+        ),
     ],
 )
 def test_change_that_does_not_qualify_raises_and_touches_nothing(kind, edit, monkeypatch):
@@ -1110,7 +1173,9 @@ def test_a_save_that_raises_on_its_second_rebase_leaves_the_model_as_it_was(kind
         ]
 
         def bump():
-            return f"UPDATE rb_doc SET data = {writes.pop(0)}, _version = _version + 1 WHERE _id = 1;"
+            return (
+                f"UPDATE rb_doc SET data = {writes.pop(0)}, _version = _version + 1 WHERE _id = 1;"
+            )
 
         async def wrapped(table, _id, payload, version):
             if writes and table == "rb_doc":
@@ -1244,7 +1309,14 @@ def test_lock_on_the_reread_of_the_row_before_the_merge_writes_it_once(kind, sle
         del db.upsert_with_version
         row = await rows.row()
         # the first write is refused as stale; the second is the only one that lands
-        return row["count"], row["_version"], row["child"]["_id"], mine.child._id, locked[0], writes[0]
+        return (
+            row["count"],
+            row["_version"],
+            row["child"]["_id"],
+            mine.child._id,
+            locked[0],
+            writes[0],
+        )
 
     assert _rebase(kind, steps) == (11, 2, 2, 2, 0, 2)
 
@@ -1281,7 +1353,14 @@ def test_lock_on_reading_the_reference_of_the_merged_row_is_waited_out(kind, sle
         await _aw(mine.save())
         del db._read_rows
         row = await rows.row()
-        return row["count"], row["_version"], row["child"]["_id"], mine.child._id, locked[0], len(sleeps)
+        return (
+            row["count"],
+            row["_version"],
+            row["child"]["_id"],
+            mine.child._id,
+            locked[0],
+            len(sleeps),
+        )
 
     # two sleeps: one after the conflict, one after the lock
     assert _rebase(kind, steps) == (11, 2, 2, 2, 0, 2)
@@ -1327,7 +1406,10 @@ def test_rebase_of_a_timestamped_model_keeps_its_own_stamp(kind, ticking_clock):
         await _aw(db.connect()) if hasattr(db, "connect") else None
         try:
             first = await _aw(cls(title="first").save(db=db))
-            mine, theirs = await _aw(cls.from_id(first._id, db=db)), await _aw(cls.from_id(first._id, db=db))
+            mine, theirs = (
+                await _aw(cls.from_id(first._id, db=db)),
+                await _aw(cls.from_id(first._id, db=db)),
+            )
             theirs.title = "theirs"
             await _aw(theirs.save(db=db))
             mine.count += 1
@@ -1379,7 +1461,12 @@ class ALPsCounter(AsyncPartialUpdateMixin, AsyncTrackedModel, AsyncSQLerLiteSafe
     label: str = ""
 
 
-PARTIAL = {"sync": PsCounter, "async": APsCounter, "lite_sync": LPsCounter, "lite_async": ALPsCounter}
+PARTIAL = {
+    "sync": PsCounter,
+    "async": APsCounter,
+    "lite_sync": LPsCounter,
+    "lite_async": ALPsCounter,
+}
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -1397,7 +1484,11 @@ def test_rebased_partial_save_writes_onto_the_newer_row(kind):
             mine.hits += 2
             await _aw(mine.save_partial(db=db))
             row = await _aw(db.find_document_with_version("ps_counter", mine._id))
-            return (row["hits"], row["label"], row["_version"]), (mine.hits, mine.label, mine._version)
+            return (row["hits"], row["label"], row["_version"]), (
+                mine.hits,
+                mine.label,
+                mine._version,
+            )
         finally:
             await _aw(db.close())
 

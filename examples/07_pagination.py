@@ -51,7 +51,9 @@ def main():
     per_page = 10
     while True:
         page = (
-            Article.using(db).order_by("views", desc=True).paginate(page=page_num, per_page=per_page)
+            Article.using(db)
+            .order_by("views", desc=True)
+            .paginate(page=page_num, per_page=per_page)
         )
         print(f"Page {page_num}: {len(page)} items")
         if not page.has_next:

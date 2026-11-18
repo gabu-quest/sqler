@@ -12,6 +12,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -176,6 +177,7 @@ def _(Book, db):
     # データベース内の生データを確認
     raw = db.adapter.execute("SELECT _id, data FROM books LIMIT 1").fetchone()
     import json
+
     data = json.loads(raw[1])
     print("データベース内の本の生データ:")
     print(json.dumps(data, indent=2))
@@ -210,9 +212,7 @@ def _(mo):
 @app.cell
 def _(Book, db):
     # 特定の国の著者による本を検索
-    usa_books = Book.using(db).filter(
-        Book.ref("author").field("country") == "USA"
-    ).all()
+    usa_books = Book.using(db).filter(Book.ref("author").field("country") == "USA").all()
 
     print("USA の著者による本:")
     for _b in usa_books:
@@ -223,9 +223,7 @@ def _(Book, db):
 @app.cell
 def _(Book, db):
     # 特定の著者名で本を検索
-    alice_books = Book.using(db).filter(
-        Book.ref("author").field("name") == "Alice Smith"
-    ).all()
+    alice_books = Book.using(db).filter(Book.ref("author").field("name") == "Alice Smith").all()
 
     print("Alice Smith の本:")
     for _b in alice_books:
@@ -293,7 +291,6 @@ def _(Author, SQLerModel, db):
         title: str
         # 柔軟な型指定：Author オブジェクトまたは生の参照辞書を受け入れる
         author: Author | dict | None = None
-
 
     # 記事を作成
     writer = Author.from_id(1, db=db)  # 既存の著者を取得
@@ -384,7 +381,6 @@ def _(Author, SQLerModel, db):
         editor: Author | None = None
         publisher: Publisher | None = None
 
-
     # データを作成
     pub = Publisher(name="TechMedia", location="San Francisco").save(db=db)
 
@@ -420,7 +416,6 @@ def _(SQLerModel, db):
         _table = "categories"
         name: str
         parent: Optional["Category"] = None
-
 
     # カテゴリツリーを作成
     root = Category(name="電子機器").save(db=db)

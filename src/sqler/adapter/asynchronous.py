@@ -133,6 +133,7 @@ class PoolStats:
             "created_at": self.created_at.isoformat(),
         }
 
+
 _ENDED = "the transaction this nested transaction was part of has ended; nothing written in it was committed"
 
 
@@ -167,7 +168,9 @@ class _Turn:
         self.future: asyncio.Future = asyncio.get_running_loop().create_future()
 
 
-_OWN_ENDED = _Savepoint(None)  # the place of a context whose own nested transaction has ended under it
+_OWN_ENDED = _Savepoint(
+    None
+)  # the place of a context whose own nested transaction has ended under it
 
 
 class _Lease:
@@ -179,7 +182,16 @@ class _Lease:
     """
 
     __slots__ = (
-        "conn", "holders", "returned", "interrupted", "settling", "txn", "savepoints", "turns", "broken", "last",
+        "conn",
+        "holders",
+        "returned",
+        "interrupted",
+        "settling",
+        "txn",
+        "savepoints",
+        "turns",
+        "broken",
+        "last",
     )
 
     def __init__(self, conn: aiosqlite.Connection):
@@ -198,7 +210,9 @@ class _Lease:
         # why the transaction can no longer be trusted (sentence, cause), as ``_broken`` reads it: a
         # nested end failed, or a statement ended it behind the adapter; it ends rolled back
         self.broken: Optional[tuple[str, Optional[BaseException]]] = None
-        self.last: Optional[weakref.ref] = None  # the cursor of the last statement ``execute`` sent on it
+        self.last: Optional[weakref.ref] = (
+            None  # the cursor of the last statement ``execute`` sent on it
+        )
 
 
 class _Sent:
@@ -239,7 +253,11 @@ class _InThread:
 
     @staticmethod
     def execute(
-        db: sqlite3.Connection, cursor: "weakref.ref[_Cursor]", sql: str, params, adapter: "AsyncSQLiteAdapter"
+        db: sqlite3.Connection,
+        cursor: "weakref.ref[_Cursor]",
+        sql: str,
+        params,
+        adapter: "AsyncSQLiteAdapter",
     ) -> sqlite3.Cursor:
         """Send a cursor's statement; a read ahead queued behind it finds it there.
 
@@ -252,7 +270,14 @@ class _InThread:
             try:
                 raw = db.execute(sql, params)
             except sqlite3.OperationalError as exc:
-                raw = _through_lock(exc, adapter.timeout_ms, db.execute, sql, params, closed=adapter._closed_under(db))
+                raw = _through_lock(
+                    exc,
+                    adapter.timeout_ms,
+                    db.execute,
+                    sql,
+                    params,
+                    closed=adapter._closed_under(db),
+                )
         except BaseException:
             if held is not None:
                 held._open = _open_after_failure(db)
@@ -273,7 +298,9 @@ class _InThread:
                 raw = db.executemany(sql, param_list)
             except sqlite3.OperationalError as exc:
                 wait = adapter.timeout_ms if isinstance(param_list, (list, tuple)) else 0
-                raw = _through_lock(exc, wait, db.executemany, sql, param_list, closed=adapter._closed_under(db))
+                raw = _through_lock(
+                    exc, wait, db.executemany, sql, param_list, closed=adapter._closed_under(db)
+                )
         except BaseException:
             sent._open = _open_after_failure(db)
             raise
@@ -281,7 +308,9 @@ class _InThread:
         return raw
 
     @staticmethod
-    def set_up(db: sqlite3.Connection, pragma: str, adapter: "AsyncSQLiteAdapter") -> Optional[tuple]:
+    def set_up(
+        db: sqlite3.Connection, pragma: str, adapter: "AsyncSQLiteAdapter"
+    ) -> Optional[tuple]:
         """Send a pragma of a new connection's set-up; its first row. A connection reads the
         schema with its first statement, and a table another connection has made and not
         committed locks it."""
@@ -326,7 +355,9 @@ class _InThread:
             pass  # the connection is closed: its statements ended with it
 
     @staticmethod
-    def read_rest(db: sqlite3.Connection, cursor: "_Cursor") -> tuple[list[Any], Optional[Exception]]:
+    def read_rest(
+        db: sqlite3.Connection, cursor: "_Cursor"
+    ) -> tuple[list[Any], Optional[Exception]]:
         """The rows ``cursor`` has not returned yet, and the error that stopped them.
 
         None of them if its statement failed (the task that sent it gets that error), and
@@ -371,13 +402,27 @@ class _Cursor(_Sent):
     """
 
     __slots__ = (
-        "_cursor", "_raw", "_adapter", "_lease", "_judged", "_conn", "_owner", "_taking", "_rows", "_error", "_gone",
+        "_cursor",
+        "_raw",
+        "_adapter",
+        "_lease",
+        "_judged",
+        "_conn",
+        "_owner",
+        "_taking",
+        "_rows",
+        "_error",
+        "_gone",
         "__weakref__",
     )
     _OWN = frozenset((*__slots__, "_open"))
 
     def __init__(
-        self, adapter: "AsyncSQLiteAdapter", lease: _Lease, conn: aiosqlite.Connection, judged: bool = False
+        self,
+        adapter: "AsyncSQLiteAdapter",
+        lease: _Lease,
+        conn: aiosqlite.Connection,
+        judged: bool = False,
     ):
         # made before its statement is sent; both are set once the statement has run
         self._open = None  # set in the connection's thread after the statement
@@ -386,8 +431,12 @@ class _Cursor(_Sent):
         self._adapter = adapter
         self._lease = lease
         self._judged = judged  # sent by ``_execute_judged``: its caller judges a failure
-        self._conn: Optional[aiosqlite.Connection] = conn  # set while it reads lazily on a connection
-        self._owner = asyncio.current_task()  # the task that sent its statement, and holds the lease for it
+        self._conn: Optional[aiosqlite.Connection] = (
+            conn  # set while it reads lazily on a connection
+        )
+        self._owner = (
+            asyncio.current_task()
+        )  # the task that sent its statement, and holds the lease for it
         self._taking: Optional[asyncio.Task] = None  # the read ahead, once queued
         self._rows: Optional[deque] = None  # the rows read ahead; None while it reads lazily
         self._error: Optional[Exception] = None  # the error that stopped the read ahead
@@ -413,7 +462,9 @@ class _Cursor(_Sent):
         try:
             rows, self._error = await _in_thread(conn, _InThread.read_rest, self)
         except BaseException as exc:
-            self._lose(f"the rows of this cursor could not be read before its connection changed hands ({exc!r})")
+            self._lose(
+                f"the rows of this cursor could not be read before its connection changed hands ({exc!r})"
+            )
             if not isinstance(exc, Exception):
                 raise
             return
@@ -435,7 +486,9 @@ class _Cursor(_Sent):
 
     async def _lazy(self, fetch, *args):
         try:
-            return await _in_thread(self._lease.conn, _InThread.fetch, weakref.ref(self), fetch, *args)
+            return await _in_thread(
+                self._lease.conn, _InThread.fetch, weakref.ref(self), fetch, *args
+            )
         except BaseException as exc:
             await self._failed(exc)
             raise
@@ -456,7 +509,9 @@ class _Cursor(_Sent):
                 error, self._error = self._error, None
                 rows.clear()  # a lazy read that raises drops the rows it had read, too
                 raise error
-            return [rows.popleft() for _ in range(len(rows) if size is None else min(size, len(rows)))]
+            return [
+                rows.popleft() for _ in range(len(rows) if size is None else min(size, len(rows)))
+            ]
         except BaseException as exc:
             await self._failed(exc)
             raise
@@ -506,7 +561,9 @@ class _Cursor(_Sent):
         size = self._cursor.iter_chunk_size  # as aiosqlite iterates: a chunk at a time
         while rows := await self.fetchmany(size):
             for row in rows:
-                if self._gone is not None:  # closed or lost while its chunk is given: as its next read
+                if (
+                    self._gone is not None
+                ):  # closed or lost while its chunk is given: as its next read
                     await self._served(0)
                 yield row
 
@@ -584,7 +641,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         )
         self._task_lease: ContextVar[Optional[_Lease]] = ContextVar("task_lease", default=None)
         # the savepoints this context opened or was started inside, innermost last
-        self._txn_savepoints: ContextVar[tuple[_Savepoint, ...]] = ContextVar("txn_savepoints", default=())
+        self._txn_savepoints: ContextVar[tuple[_Savepoint, ...]] = ContextVar(
+            "txn_savepoints", default=()
+        )
         self._leases: set[_Lease] = set()  # checked out, not yet returned
         self._reclaims: set[asyncio.Task] = set()  # rollbacks of connections left by ended tasks
         # per connection, the cursors alive on it that may have rows left to read lazily
@@ -614,7 +673,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         conn = await conn
         try:
             # not connect(timeout=): Python truncates the seconds to milliseconds (1.001 s waits 1000 ms)
-            await _in_thread(conn, _InThread.set_up, f"PRAGMA busy_timeout = {self.timeout_ms}", self)
+            await _in_thread(
+                conn, _InThread.set_up, f"PRAGMA busy_timeout = {self.timeout_ms}", self
+            )
             for pragma in self.pragmas:
                 await _in_thread(conn, _InThread.set_up, pragma, self)
             await conn.commit()
@@ -717,7 +778,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             if conn not in self._all_conns:  # the adapter closed under us: nothing to give back
                 return
             logger.warning(
-                "rollback of a reclaimed connection failed (%s: %s); replacing it", type(exc).__name__, exc
+                "rollback of a reclaimed connection failed (%s: %s); replacing it",
+                type(exc).__name__,
+                exc,
             )
             await self._replace(conn)
             return
@@ -731,7 +794,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         try:
             fresh = await self._open()
         except Exception:
-            logger.warning("could not open a replacement connection; the pool is one smaller", exc_info=True)
+            logger.warning(
+                "could not open a replacement connection; the pool is one smaller", exc_info=True
+            )
             if bad in self._all_conns:
                 self._all_conns.remove(bad)
             return
@@ -756,7 +821,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             inside = self._txn_savepoints.get()
             if self._turn(lease, inside) or await self._wait_turn(lease, inside, opens=False):
                 return lease.conn
-        if inside := self._txn_savepoints.get():  # the transaction it was in has ended: it is in none
+        if (
+            inside := self._txn_savepoints.get()
+        ):  # the transaction it was in has ended: it is in none
             if self._place((), inside) is _OWN_ENDED:
                 raise TransactionStateError(_ENDED)
             self._txn_savepoints.set(())
@@ -908,7 +975,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         if (settling := lease.settling) is not None:
             await asyncio.wait({settling})
 
-    def _ended_behind(self, lease: _Lease, cause: Optional[BaseException] = None) -> TransactionStateError:
+    def _ended_behind(
+        self, lease: _Lease, cause: Optional[BaseException] = None
+    ) -> TransactionStateError:
         """A statement ended ``lease``'s transaction behind the adapter: from here it is broken
         (every waiting context is woken to raise). Returns the error to raise."""
         lease.broken = lease.broken or (_ENDED_BEHIND, cause)
@@ -951,7 +1020,13 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         if conn is not None and cursor._raw is not None:
             self._background(self._end_statement(conn, cursor._raw), eager=True)
         lease = cursor._lease
-        if lease is None or lease.returned or lease.txn or lease.last is None or lease.last() is not cursor:
+        if (
+            lease is None
+            or lease.returned
+            or lease.txn
+            or lease.last is None
+            or lease.last() is not cursor
+        ):
             return
         if cursor._open or lease.conn.in_transaction:
             return
@@ -1009,10 +1084,14 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         for lease in list(self._leases):
             self._give_back(lease)
         for conn in list(self._unread):
-            self._lose_cursors(conn, "the adapter was closed before the rows of this cursor were read")
+            self._lose_cursors(
+                conn, "the adapter was closed before the rows of this cursor were read"
+            )
         if self._reclaims:
             await asyncio.gather(*self._reclaims, return_exceptions=True)
-        async with self._connect_lock:  # a connect under way ends first, and this closes what it opened
+        async with (
+            self._connect_lock
+        ):  # a connect under way ends first, and this closes what it opened
             conns = list(self._all_conns)
             self._all_conns.clear()
             while not self._pool.empty():
@@ -1185,7 +1264,11 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         return lease if lease is not None and lease.txn else None
 
     @staticmethod
-    def _place(stack: Sequence[_Savepoint], inside: tuple[_Savepoint, ...], task: Optional[asyncio.Task] = None):
+    def _place(
+        stack: Sequence[_Savepoint],
+        inside: tuple[_Savepoint, ...],
+        task: Optional[asyncio.Task] = None,
+    ):
         """The innermost savepoint of ``inside`` still open on ``stack``; None: the transaction itself.
 
         ``_OWN_ENDED`` if one that ``task`` (default: the current task) opened has ended under it.
@@ -1204,7 +1287,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         if lease is None:
             return 0
         place = self._place(lease.savepoints, self._txn_savepoints.get())
-        return 0 if place is _OWN_ENDED else 1 if place is None else lease.savepoints.index(place) + 2
+        return (
+            0 if place is _OWN_ENDED else 1 if place is None else lease.savepoints.index(place) + 2
+        )
 
     def _turn(self, lease: _Lease, inside: tuple[_Savepoint, ...]) -> bool:
         """Whether the top of ``lease``'s stack is the place of a context inside ``inside``."""
@@ -1233,12 +1318,16 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         lease.turns.append(turn)
         while True:
             try:
-                await asyncio.wait({turn.future}, timeout=None if deadline is None else deadline - loop.time())
+                await asyncio.wait(
+                    {turn.future}, timeout=None if deadline is None else deadline - loop.time()
+                )
             except BaseException:  # cancelled while waiting, or after its turn and before it ran
                 self._drop_turn(lease, turn)
                 raise
             if closing.is_set():
-                raise NotConnectedError("the adapter was closed while a statement waited for its turn")
+                raise NotConnectedError(
+                    "the adapter was closed while a statement waited for its turn"
+                )
             if not lease.txn:
                 return None
             if lease.broken:
@@ -1254,9 +1343,15 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             if granted is None:  # a nested transaction of its own has ended under it
                 raise TransactionStateError(_ENDED)
             stack = lease.savepoints
-            if (granted in stack) if opens else (self._place(stack, inside) is (stack[-1] if stack else None)):
+            if (
+                (granted in stack)
+                if opens
+                else (self._place(stack, inside) is (stack[-1] if stack else None))
+            ):
                 lease.turns.remove(turn)
-                if not opens:  # the place it held is free: its statement is handed over before anyone runs
+                if (
+                    not opens
+                ):  # the place it held is free: its statement is handed over before anyone runs
                     self._hand_turns(lease)
                 return granted
             turn.future = loop.create_future()
@@ -1325,10 +1420,17 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             try:
                 # a BEGIN that meets a lock opens nothing: it is sent again (``_InThread.execute``)
                 await _in_thread(
-                    self._read_ahead(conn), _InThread.execute, _no_cursor, "BEGIN IMMEDIATE", (), self
+                    self._read_ahead(conn),
+                    _InThread.execute,
+                    _no_cursor,
+                    "BEGIN IMMEDIATE",
+                    (),
+                    self,
                 )
             except BaseException as exc:
-                await self._release_after_failure(exc)  # a failed BEGIN leaves no transaction to end
+                await self._release_after_failure(
+                    exc
+                )  # a failed BEGIN leaves no transaction to end
                 raise
             lease = self._task_lease.get()
             assert lease is not None  # ``_acquire`` set the task's lease
@@ -1360,7 +1462,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             del stack[stack.index(sp) :]
         self._hand_turns(lease)
 
-    def _end_savepoint(self, lease: _Lease, sp: _Savepoint, *, rollback: bool) -> Optional[asyncio.Task]:
+    def _end_savepoint(
+        self, lease: _Lease, sp: _Savepoint, *, rollback: bool
+    ) -> Optional[asyncio.Task]:
         """Close ``sp`` and every savepoint above it, in a task that a cancelled caller does not stop.
 
         Their height is held until the end has been sent, so no context sends a statement
@@ -1379,7 +1483,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         held.closing = self._background(self._send_and_close(lease, held, statements, before, how))
         return held.closing
 
-    async def _send_and_close(self, lease: _Lease, held: _Savepoint, statements: list[str], before, how: str):
+    async def _send_and_close(
+        self, lease: _Lease, held: _Savepoint, statements: list[str], before, how: str
+    ):
         """Send ``statements`` in order, then take ``held`` off the stack; return ``(how, error)`` if one
         failed (``how``: the sentence of the failed end).
 
@@ -1390,7 +1496,9 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             if before:
                 await asyncio.wait(before)
             for sql in statements:
-                if not lease.txn:  # the transaction has ended: the connection is no longer this one's
+                if (
+                    not lease.txn
+                ):  # the transaction has ended: the connection is no longer this one's
                     return None
                 try:
                     await self._read_ahead(lease.conn).execute(sql)
@@ -1405,7 +1513,11 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         """Wait until no end of a nested transaction above ``sp`` (None: the transaction) is being sent."""
         while lease.txn and (sp is None or sp in lease.savepoints):
             stack = lease.savepoints
-            closing = [above.closing for above in stack[stack.index(sp) + 1 if sp else 0 :] if above.closing]
+            closing = [
+                above.closing
+                for above in stack[stack.index(sp) + 1 if sp else 0 :]
+                if above.closing
+            ]
             if not closing:
                 return
             await asyncio.wait(closing)
@@ -1508,8 +1620,14 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
         return self._pinned()
 
     _PRAGMA_KEYS = [
-        "foreign_keys", "busy_timeout", "journal_mode", "synchronous",
-        "cache_size", "wal_autocheckpoint", "mmap_size", "temp_store",
+        "foreign_keys",
+        "busy_timeout",
+        "journal_mode",
+        "synchronous",
+        "cache_size",
+        "wal_autocheckpoint",
+        "mmap_size",
+        "temp_store",
     ]
 
     async def pragma_report(self) -> dict[str, Any]:
@@ -1557,7 +1675,13 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             uri = f"file:{ident}?mode=memory&cache=shared"
         else:
             uri = ":memory:"
-        return cls(uri, pragmas=pragmas, pool_size=1, acquire_timeout=acquire_timeout, timeout_ms=timeout_ms)
+        return cls(
+            uri,
+            pragmas=pragmas,
+            pool_size=1,
+            acquire_timeout=acquire_timeout,
+            timeout_ms=timeout_ms,
+        )
 
     @classmethod
     def on_disk(
@@ -1577,4 +1701,10 @@ class AsyncSQLiteAdapter(AsyncAdapterABC):
             "PRAGMA mmap_size = 268435456",
             "PRAGMA temp_store = MEMORY",
         ]
-        return cls(path, pragmas=pragmas, pool_size=4, acquire_timeout=acquire_timeout, timeout_ms=timeout_ms)
+        return cls(
+            path,
+            pragmas=pragmas,
+            pool_size=4,
+            acquire_timeout=acquire_timeout,
+            timeout_ms=timeout_ms,
+        )

@@ -86,7 +86,6 @@ def _(SQLerModel, db):
         name: str
         balance: int
 
-
     # 初期口座を作成
     _alice = Account(name="Alice", balance=1000).save(db=db)
     _bob = Account(name="Bob", balance=500).save(db=db)

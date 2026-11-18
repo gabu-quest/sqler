@@ -75,7 +75,11 @@ def seed_database():
     print("\nSeeding writers...")
     writers = {}
     writer_data = [
-        ("Haruki Tanaka", "Kyoto", "Award-winning novelist exploring themes of memory and identity."),
+        (
+            "Haruki Tanaka",
+            "Kyoto",
+            "Award-winning novelist exploring themes of memory and identity.",
+        ),
         ("Yuki Yamamoto", "Tokyo", "Technology journalist covering AI and robotics."),
         ("Sarah Chen", "San Diego", "Science writer specializing in marine biology."),
         ("Marcus Johnson", "New York", "Financial analyst and economics columnist."),

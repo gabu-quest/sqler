@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -269,7 +270,6 @@ def _(Author, SQLerModel, db):
         # Flexible typing: accepts Author object OR raw ref dict
         author: Author | dict | None = None
 
-
     # Create an article
     writer = Author.from_id(1, db=db)  # Get existing author
     Article(title="Understanding resolve(False)", author=writer).save(db=db)
@@ -353,7 +353,6 @@ def _(Author, SQLerModel, db):
         editor: Author | None = None
         publisher: Publisher | None = None
 
-
     # Create data
     pub = Publisher(name="TechMedia", location="San Francisco").save(db=db)
 
@@ -387,7 +386,6 @@ def _(SQLerModel, db):
         _table = "categories"
         name: str
         parent: Optional["Category"] = None
-
 
     # Create a category tree
     root = Category(name="Electronics").save(db=db)

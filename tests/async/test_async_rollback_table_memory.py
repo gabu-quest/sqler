@@ -78,7 +78,9 @@ async def _statuses(db) -> list[str]:
     return sorted(p.status for p in await AMemPromo.using(db).all())
 
 
-async def test_tables_first_made_in_a_rolled_back_transaction_save_again_and_the_rollback_sends_only_rollback(db):
+async def test_tables_first_made_in_a_rolled_back_transaction_save_again_and_the_rollback_sends_only_rollback(
+    db,
+):
     async with db.transaction() as tx:
         await AMemPromo(name="gone").save(db=db)
         await db.ensure_table("amem_vers", versioned=True)
@@ -88,7 +90,11 @@ async def test_tables_first_made_in_a_rolled_back_transaction_save_again_and_the
     await AMemPromo(name="kept", status="x").save(db=db)
     rid, version = await db.upsert_with_version("amem_vers", None, {"n": 1}, None)
     assert (await _statuses(db), version) == (["x"], 0)
-    assert await db.find_document_with_version("amem_vers", rid) == {"_id": rid, "n": 1, "_version": 0}
+    assert await db.find_document_with_version("amem_vers", rid) == {
+        "_id": rid,
+        "n": 1,
+        "_version": 0,
+    }
 
 
 async def test_inner_level_rolled_back_inside_an_outer_level_that_commits(db):
@@ -174,7 +180,11 @@ async def test_reference_to_a_lite_safe_row_loads_after_the_column_promotion_rol
             await AMemRefChild(name="gone").save()  # adds the promoted column, undone below
             raise RuntimeError("undo")
     got = await AMemRefParent.from_id(pid)
-    assert (type(got.child).__name__, got.child.name, got.child._version) == ("AMemRefChild", "c", 0)
+    assert (type(got.child).__name__, got.child.name, got.child._version) == (
+        "AMemRefChild",
+        "c",
+        0,
+    )
 
 
 class AMemPromoTwo(AsyncSQLerModel):
@@ -189,7 +199,9 @@ class AMemVersioned(AsyncSQLerSafeModel):
     name: str = ""
 
 
-async def test_a_promoted_table_made_in_an_adapter_savepoint_rolled_back_inside_a_level_saves_afterwards(db):
+async def test_a_promoted_table_made_in_an_adapter_savepoint_rolled_back_inside_a_level_saves_afterwards(
+    db,
+):
     async with db:
         await db.adapter.begin_transaction()
         await db.ensure_table("amem_promos", promoted=AMemPromo.__promoted__)
@@ -198,7 +210,9 @@ async def test_a_promoted_table_made_in_an_adapter_savepoint_rolled_back_inside_
     assert await _statuses(db) == ["x"]
 
 
-async def test_a_versioned_table_made_in_an_adapter_savepoint_rolled_back_inside_a_level_saves_afterwards(db):
+async def test_a_versioned_table_made_in_an_adapter_savepoint_rolled_back_inside_a_level_saves_afterwards(
+    db,
+):
     async with db:
         await db.adapter.begin_transaction()
         await AMemVersioned(name="gone").save(db=db)
@@ -217,7 +231,9 @@ async def test_a_level_committed_inside_an_adapter_savepoint_that_rolls_back_is_
     assert await _statuses(db) == ["x"]
 
 
-async def test_a_transaction_ended_in_a_task_without_its_level_raises_nothing_and_merges_nothing(db):
+async def test_a_transaction_ended_in_a_task_without_its_level_raises_nothing_and_merges_nothing(
+    db,
+):
     txn = db.transaction()
     await txn.__aenter__()
 

@@ -30,7 +30,9 @@ def _schema(path, table):
     conn = sqlite3.connect(path)
     try:
         info = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", [table]).fetchone()[0]
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", [table]
+        ).fetchone()[0]
     finally:
         conn.close()
     return info, sql
@@ -61,7 +63,15 @@ class TestSync:
         db.close()
         assert _schema(new, "qler_jobs") == _schema(old, "qler_jobs")
         info, _ = _schema(new, "qler_jobs")
-        assert [c[1] for c in info] == ["_id", "data", "status", "priority", "eta", "ulid", "_version"]
+        assert [c[1] for c in info] == [
+            "_id",
+            "data",
+            "status",
+            "priority",
+            "eta",
+            "ulid",
+            "_version",
+        ]
 
     def test_plain_table(self, tmp_path):
         path = str(tmp_path / "p.db")
@@ -69,7 +79,10 @@ class TestSync:
         db.ensure_table("docs")
         db.close()
         info, _ = _schema(path, "docs")
-        assert [(c[1], c[2], c[3], c[5]) for c in info] == [("_id", "INTEGER", 0, 1), ("data", "JSON", 1, 0)]
+        assert [(c[1], c[2], c[3], c[5]) for c in info] == [
+            ("_id", "INTEGER", 0, 1),
+            ("data", "JSON", 1, 0),
+        ]
 
     def test_versioned_adds_the_column_to_an_existing_table(self, tmp_path):
         path = str(tmp_path / "v.db")

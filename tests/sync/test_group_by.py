@@ -18,14 +18,16 @@ def setup_db():
 
 
 def seed_employees():
-    Employee.save_many([
-        Employee(name="Alice", department="eng", role="senior", salary=150000),
-        Employee(name="Bob", department="eng", role="junior", salary=90000),
-        Employee(name="Charlie", department="eng", role="senior", salary=140000),
-        Employee(name="Diana", department="sales", role="lead", salary=120000),
-        Employee(name="Eve", department="sales", role="junior", salary=80000),
-        Employee(name="Frank", department="hr", role="lead", salary=110000),
-    ])
+    Employee.save_many(
+        [
+            Employee(name="Alice", department="eng", role="senior", salary=150000),
+            Employee(name="Bob", department="eng", role="junior", salary=90000),
+            Employee(name="Charlie", department="eng", role="senior", salary=140000),
+            Employee(name="Diana", department="sales", role="lead", salary=120000),
+            Employee(name="Eve", department="sales", role="junior", salary=80000),
+            Employee(name="Frank", department="hr", role="lead", salary=110000),
+        ]
+    )
 
 
 class TestGroupByOnQuery:
@@ -186,12 +188,7 @@ class TestGroupByOnQuerySet:
         db = setup_db()
         try:
             seed_employees()
-            result = (
-                Employee.query()
-                .filter(F("role") == "senior")
-                .group_by("department")
-                .count()
-            )
+            result = Employee.query().filter(F("role") == "senior").group_by("department").count()
             by_dept = {r["department"]: r["count"] for r in result}
             assert by_dept == {"eng": 2}
         finally:
@@ -201,12 +198,7 @@ class TestGroupByOnQuerySet:
         db = setup_db()
         try:
             seed_employees()
-            result = (
-                Employee.query()
-                .group_by("department")
-                .having(F("_count") >= 2)
-                .count()
-            )
+            result = Employee.query().group_by("department").having(F("_count") >= 2).count()
             depts = {r["department"] for r in result}
             assert depts == {"eng", "sales"}
         finally:
@@ -224,11 +216,13 @@ class TestGroupByWithPromotedFields:
         db = SQLerDB.in_memory(shared=False)
         try:
             Product.set_db(db)
-            Product.save_many([
-                Product(name="Widget", category="tools", price=10.0),
-                Product(name="Gadget", category="tools", price=20.0),
-                Product(name="Phone", category="electronics", price=500.0),
-            ])
+            Product.save_many(
+                [
+                    Product(name="Widget", category="tools", price=10.0),
+                    Product(name="Gadget", category="tools", price=20.0),
+                    Product(name="Phone", category="electronics", price=500.0),
+                ]
+            )
             result = Product.query().group_by("category").sum("price")
             by_cat = {r["category"]: r["sum"] for r in result}
             assert by_cat["tools"] == 30.0

@@ -41,7 +41,10 @@ RULE = re.escape(DATABASE_RULE)
 
 @pytest_asyncio.fixture
 async def two_dbs(tmp_path):
-    made = [AsyncSQLerDB.on_disk(str(tmp_path / "given.db")), AsyncSQLerDB.on_disk(str(tmp_path / "bound.db"))]
+    made = [
+        AsyncSQLerDB.on_disk(str(tmp_path / "given.db")),
+        AsyncSQLerDB.on_disk(str(tmp_path / "bound.db")),
+    ]
     for db in made:
         await db.connect()
     yield made
@@ -164,7 +167,9 @@ async def test_an_async_model_given_a_database_it_cannot_use_raises_before_anyth
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["active", "with_deleted", "only_deleted"])
-async def test_an_async_soft_delete_queryset_given_a_sync_database_raises_as_using_does(name, tmp_path):
+async def test_an_async_soft_delete_queryset_given_a_sync_database_raises_as_using_does(
+    name, tmp_path
+):
     """A soft-delete queryset is a query: given a sync database it raises as ``using(db)``
     does, when it is asked for, before it reads anything."""
     sync_db = SQLerDB.on_disk(str(tmp_path / "sync.db"))
@@ -234,7 +239,9 @@ async def test_a_subclass_of_the_async_database_is_taken_as_the_database_is(base
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("base", [b for b in _bases() if is_async(b)], ids=lambda b: b.__name__)
-async def test_the_async_import_given_db_writes_there_and_not_to_the_bound_database(base, two_dbs, tmp_path):
+async def test_the_async_import_given_db_writes_there_and_not_to_the_bound_database(
+    base, two_dbs, tmp_path
+):
     db, bound = two_dbs
     cls, _ = make_class(base, None, own_table=True)
     with warnings.catch_warnings():
@@ -263,7 +270,9 @@ class AccResident(sqler.AsyncSQLerModel):
 
 
 @pytest.mark.asyncio
-async def test_the_async_update_import_looks_for_the_referenced_rows_in_the_given_database(two_dbs, tmp_path):
+async def test_the_async_update_import_looks_for_the_referenced_rows_in_the_given_database(
+    two_dbs, tmp_path
+):
     """As the sync import does: the resident class bound to A, the city class to none; B's
     resident and the city it refers to are read from B."""
     b, a = two_dbs

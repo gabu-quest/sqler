@@ -107,9 +107,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
             skip_file_prefixes=_SQLER_PREFIXES,
         )
         explicit = getattr(cls, "__tablename__", None)
-        chosen = validate_table_name(
-            table or explicit or _default_table_name(cls.__name__)
-        )
+        chosen = validate_table_name(table or explicit or _default_table_name(cls.__name__))
         cls._db = db
         cls._table = chosen
         cls.__tablename__ = chosen  # type: ignore[attr-defined]
@@ -413,7 +411,9 @@ class SQLerLiteModel(SQLerLiteModelBase):
         db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = _write_rules.refresh_row(_read_document(db, table, self._id, cls._versioned_rows), self._id)
+        doc = _write_rules.refresh_row(
+            _read_document(db, table, self._id, cls._versioned_rows), self._id
+        )
         own = {(table, self._id): self}
         return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]
 

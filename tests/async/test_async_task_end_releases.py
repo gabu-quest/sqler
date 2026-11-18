@@ -75,6 +75,7 @@ async def _read(adapter: AsyncSQLiteAdapter) -> list[str]:
 
 async def _pool_full(adapter: AsyncSQLiteAdapter) -> None:
     """Wait (bounded) until every pooled connection is back in the queue."""
+
     async def poll():
         while adapter._pool.qsize() != adapter._pool_size:
             await asyncio.sleep(0.01)
@@ -133,9 +134,7 @@ async def test_task_cancelled_between_acquire_and_first_statement(disk_adapter):
 
 
 @pytest.mark.asyncio
-async def test_task_cancelled_inside_explicit_transaction_rolls_back(
-    disk_adapter, hang_fetchone
-):
+async def test_task_cancelled_inside_explicit_transaction_rolls_back(disk_adapter, hang_fetchone):
     adapter = disk_adapter
 
     async def txn():
@@ -237,7 +236,9 @@ async def test_child_inheriting_a_returned_connection_takes_a_fresh_one(disk_ada
 
     async def parent():
         await adapter.execute("INSERT INTO t (v) VALUES ('parent')")
-        holder["child"] = asyncio.ensure_future(child())  # inherits the pin, never acquires before release
+        holder["child"] = asyncio.ensure_future(
+            child()
+        )  # inherits the pin, never acquires before release
         await adapter.auto_commit()
         released.set()
 

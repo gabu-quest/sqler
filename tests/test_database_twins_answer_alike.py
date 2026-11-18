@@ -149,54 +149,191 @@ CALLS = [
     ("on_disk", "on_disk", _on_disk),
     ("connect", "connect", _call("connect")),
     ("close", "close", _close_then_connect),
-    ("ensure_table", "ensure_table", _call("ensure_table", "t2", promoted={"n": "INTEGER NOT NULL DEFAULT 0"}, versioned=True)),
+    (
+        "ensure_table",
+        "ensure_table",
+        _call("ensure_table", "t2", promoted={"n": "INTEGER NOT NULL DEFAULT 0"}, versioned=True),
+    ),
     ("ensure_table-existing", "ensure_table", _call("ensure_table", "us", versioned=True)),
     ("ensure_table-bad-name", "ensure_table", _call("ensure_table", "1us")),
-    ("ensure_table-not-null-no-default", "ensure_table", _call("ensure_table", "us", promoted={"n": "INTEGER NOT NULL"})),
-    ("insert_many_promoted-missing-column", "insert_many_promoted",
-     _call("insert_many_promoted", "us", [{"zz": 1}], ["zz"])),
-    ("upsert_with_version-missing-table", "upsert_with_version", _call("upsert_with_version", "nope", 1, {"a": 1}, 0)),
-    ("find_document_with_version-versioned", "find_document_with_version",
-     _call("find_document_with_version", "us", 1, before=_call("ensure_table", "us", versioned=True))),
+    (
+        "ensure_table-not-null-no-default",
+        "ensure_table",
+        _call("ensure_table", "us", promoted={"n": "INTEGER NOT NULL"}),
+    ),
+    (
+        "insert_many_promoted-missing-column",
+        "insert_many_promoted",
+        _call("insert_many_promoted", "us", [{"zz": 1}], ["zz"]),
+    ),
+    (
+        "upsert_with_version-missing-table",
+        "upsert_with_version",
+        _call("upsert_with_version", "nope", 1, {"a": 1}, 0),
+    ),
+    (
+        "find_document_with_version-versioned",
+        "find_document_with_version",
+        _call(
+            "find_document_with_version",
+            "us",
+            1,
+            before=_call("ensure_table", "us", versioned=True),
+        ),
+    ),
     ("query-missing-table", "query", _query_missing),
-    ("create_index-bad-where", "create_index", _call("create_index", "us", "age", where="1; DROP TABLE us")),
+    (
+        "create_index-bad-where",
+        "create_index",
+        _call("create_index", "us", "age", where="1; DROP TABLE us"),
+    ),
     ("move_promoted", "move_promoted", _move_promoted),
-    ("move_promoted-not-promoted", "move_promoted", _call("move_promoted", "us", "age", keep="document")),
-    ("upsert_document_promoted", "upsert_document_promoted",
-     _call("upsert_document_promoted", "pt", None, {"n": 5, "x": 2}, ["n"], before=_promoted_table)),
-    ("upsert_with_version_promoted", "upsert_with_version_promoted",
-     _call("upsert_with_version_promoted", "pt", None, {"n": 5, "x": 2}, None, ["n"], before=_promoted_and_versioned)),
-    ("insert_document", "insert_document", _call("insert_document", "us", {"name": "dan", "age": 9})),
-    ("insert_document-new-table", "insert_document", _call("insert_document", "other", {"k": [1, 2]})),
-    ("upsert_document", "upsert_document", _call("upsert_document", "us", 2, {"name": "bo", "age": 31})),
-    ("upsert_document-missing-row", "upsert_document", _call("upsert_document", "us", 9, {"name": "x"})),
+    (
+        "move_promoted-not-promoted",
+        "move_promoted",
+        _call("move_promoted", "us", "age", keep="document"),
+    ),
+    (
+        "upsert_document_promoted",
+        "upsert_document_promoted",
+        _call(
+            "upsert_document_promoted", "pt", None, {"n": 5, "x": 2}, ["n"], before=_promoted_table
+        ),
+    ),
+    (
+        "upsert_with_version_promoted",
+        "upsert_with_version_promoted",
+        _call(
+            "upsert_with_version_promoted",
+            "pt",
+            None,
+            {"n": 5, "x": 2},
+            None,
+            ["n"],
+            before=_promoted_and_versioned,
+        ),
+    ),
+    (
+        "insert_document",
+        "insert_document",
+        _call("insert_document", "us", {"name": "dan", "age": 9}),
+    ),
+    (
+        "insert_document-new-table",
+        "insert_document",
+        _call("insert_document", "other", {"k": [1, 2]}),
+    ),
+    (
+        "upsert_document",
+        "upsert_document",
+        _call("upsert_document", "us", 2, {"name": "bo", "age": 31}),
+    ),
+    (
+        "upsert_document-missing-row",
+        "upsert_document",
+        _call("upsert_document", "us", 9, {"name": "x"}),
+    ),
     ("find_document", "find_document", _call("find_document", "us", 2)),
     ("find_document-missing-table", "find_document", _call("find_document", "nope", 1)),
     ("find_documents", "find_documents", _call("find_documents", "us", [3, 1, 9, 1])),
     ("delete_document", "delete_document", _call("delete_document", "us", 2)),
     ("insert_many", "insert_many", _call("insert_many", "us", [{"name": "e"}, {"name": "f"}])),
-    ("insert_many_promoted", "insert_many_promoted",
-     _call("insert_many_promoted", "pt", [{"n": 1}, {"n": 2, "x": 3}], ["n"], before=_promoted_table)),
-    ("insert_many_with_version", "insert_many_with_version", _call("insert_many_with_version", "us", [{"name": "e"}])),
-    ("insert_many_with_version_promoted", "insert_many_with_version_promoted",
-     _call("insert_many_with_version_promoted", "pt", [{"n": 1}, {"n": 2}], ["n"], before=_promoted_table)),
-    ("bulk_upsert", "bulk_upsert", _call("bulk_upsert", "us", [{"_id": 1, "name": "an"}, {"name": "g"}])),
+    (
+        "insert_many_promoted",
+        "insert_many_promoted",
+        _call(
+            "insert_many_promoted",
+            "pt",
+            [{"n": 1}, {"n": 2, "x": 3}],
+            ["n"],
+            before=_promoted_table,
+        ),
+    ),
+    (
+        "insert_many_with_version",
+        "insert_many_with_version",
+        _call("insert_many_with_version", "us", [{"name": "e"}]),
+    ),
+    (
+        "insert_many_with_version_promoted",
+        "insert_many_with_version_promoted",
+        _call(
+            "insert_many_with_version_promoted",
+            "pt",
+            [{"n": 1}, {"n": 2}],
+            ["n"],
+            before=_promoted_table,
+        ),
+    ),
+    (
+        "bulk_upsert",
+        "bulk_upsert",
+        _call("bulk_upsert", "us", [{"_id": 1, "name": "an"}, {"name": "g"}]),
+    ),
     ("create_index", "create_index", _call("create_index", "us", "name", unique=True)),
-    ("create_index-duplicate-values", "create_index", _call("create_index", "us", "age", unique=True)),
-    ("create_index-several-fields", "create_index", _call("create_index", "us", ["name", ("age", "desc")], where="_id > 0")),
-    ("create_index-promoted-field", "create_index", _call("create_index", "pt", ["x", ("n", "desc")], before=_promoted_table)),
+    (
+        "create_index-duplicate-values",
+        "create_index",
+        _call("create_index", "us", "age", unique=True),
+    ),
+    (
+        "create_index-several-fields",
+        "create_index",
+        _call("create_index", "us", ["name", ("age", "desc")], where="_id > 0"),
+    ),
+    (
+        "create_index-promoted-field",
+        "create_index",
+        _call("create_index", "pt", ["x", ("n", "desc")], before=_promoted_table),
+    ),
     ("create_index-empty-list", "create_index", _call("create_index", "us", [])),
     ("create_index-bad-direction", "create_index", _call("create_index", "us", [("age", "down")])),
-    ("create_index-follows-promotion", "create_index",
-     _call("ensure_table", "us", promoted={"age": "INTEGER"}, before=_call("create_index", "us", ["name", ("age", "desc")]))),
-    ("drop_index", "drop_index", _call("drop_index", "idx_us_name", before=_call("create_index", "us", "name"))),
-    ("list_indexes", "list_indexes", _call("list_indexes", "us", before=_call("create_index", "us", "age"))),
-    ("list_indexes-all", "list_indexes", _call("list_indexes", before=_call("create_index", "us", "age"))),
-    ("index_exists", "index_exists", _call("index_exists", "idx_us_age", before=_call("create_index", "us", "age"))),
+    (
+        "create_index-follows-promotion",
+        "create_index",
+        _call(
+            "ensure_table",
+            "us",
+            promoted={"age": "INTEGER"},
+            before=_call("create_index", "us", ["name", ("age", "desc")]),
+        ),
+    ),
+    (
+        "drop_index",
+        "drop_index",
+        _call("drop_index", "idx_us_name", before=_call("create_index", "us", "name")),
+    ),
+    (
+        "list_indexes",
+        "list_indexes",
+        _call("list_indexes", "us", before=_call("create_index", "us", "age")),
+    ),
+    (
+        "list_indexes-all",
+        "list_indexes",
+        _call("list_indexes", before=_call("create_index", "us", "age")),
+    ),
+    (
+        "index_exists",
+        "index_exists",
+        _call("index_exists", "idx_us_age", before=_call("create_index", "us", "age")),
+    ),
     ("index_exists-not", "index_exists", _call("index_exists", "idx_none")),
-    ("upsert_with_version", "upsert_with_version", _call("upsert_with_version", "us", None, {"name": "v"}, None)),
-    ("upsert_with_version-stale", "upsert_with_version", _call("upsert_with_version", "us", 1, {"name": "v"}, 7)),
-    ("find_document_with_version", "find_document_with_version", _call("find_document_with_version", "us", 1)),
+    (
+        "upsert_with_version",
+        "upsert_with_version",
+        _call("upsert_with_version", "us", None, {"name": "v"}, None),
+    ),
+    (
+        "upsert_with_version-stale",
+        "upsert_with_version",
+        _call("upsert_with_version", "us", 1, {"name": "v"}, 7),
+    ),
+    (
+        "find_document_with_version",
+        "find_document_with_version",
+        _call("find_document_with_version", "us", 1),
+    ),
     ("query", "query", _query),
     ("transaction", "transaction", _transaction_commit),
     ("transaction-rollback", "transaction", _transaction_rollback),
@@ -204,21 +341,53 @@ CALLS = [
     ("execute_sql-id-data", "execute_sql", _sql(ALL)),
     ("execute_sql-id", "execute_sql", _sql("SELECT _id FROM us ORDER BY _id")),
     ("execute_sql-count", "execute_sql", _sql("SELECT COUNT(*) AS n FROM us")),
-    ("execute_sql-two-fields", "execute_sql",
-     _sql("SELECT json_extract(data, '$.name') AS name, json_extract(data, '$.age') AS age FROM us ORDER BY _id")),
-    ("execute_sql-group", "execute_sql",
-     _sql("SELECT json_extract(data, '$.age') AS age, COUNT(*) AS n FROM us GROUP BY 1 ORDER BY 1")),
-    ("execute_sql-id-field", "execute_sql", _sql("SELECT _id, json_extract(data, '$.name') AS name FROM us ORDER BY _id")),
+    (
+        "execute_sql-two-fields",
+        "execute_sql",
+        _sql(
+            "SELECT json_extract(data, '$.name') AS name, json_extract(data, '$.age') AS age FROM us ORDER BY _id"
+        ),
+    ),
+    (
+        "execute_sql-group",
+        "execute_sql",
+        _sql(
+            "SELECT json_extract(data, '$.age') AS age, COUNT(*) AS n FROM us GROUP BY 1 ORDER BY 1"
+        ),
+    ),
+    (
+        "execute_sql-id-field",
+        "execute_sql",
+        _sql("SELECT _id, json_extract(data, '$.name') AS name FROM us ORDER BY _id"),
+    ),
     ("execute_sql-data-id", "execute_sql", _sql("SELECT data, _id FROM us ORDER BY _id")),
     ("execute_sql-text-first", "execute_sql", _sql("SELECT 'x' AS k, _id FROM us ORDER BY _id")),
-    ("execute_sql-unnamed", "execute_sql", _sql("SELECT json_extract(data, '$.name'), 1 + 1 FROM us ORDER BY _id")),
-    ("execute_sql-params", "execute_sql", _sql("SELECT _id FROM us WHERE json_extract(data, '$.age') = ?", [30])),
+    (
+        "execute_sql-unnamed",
+        "execute_sql",
+        _sql("SELECT json_extract(data, '$.name'), 1 + 1 FROM us ORDER BY _id"),
+    ),
+    (
+        "execute_sql-params",
+        "execute_sql",
+        _sql("SELECT _id FROM us WHERE json_extract(data, '$.age') = ?", [30]),
+    ),
     ("execute_sql-no-rows", "execute_sql", _sql("SELECT _id, data FROM us WHERE _id > 99")),
     ("execute_sql-same-name-twice", "execute_sql", _sql("SELECT 1 AS n, 2 AS n")),
-    ("execute_sql-data-json-null", "execute_sql",
-     _sql("SELECT _id, CASE WHEN _id = 2 THEN 'null' ELSE data END AS data FROM us ORDER BY _id")),
-    ("execute_sql-data-json-list", "execute_sql",
-     _sql("SELECT _id, CASE WHEN _id = 2 THEN '[1, 2]' ELSE data END AS data FROM us ORDER BY _id")),
+    (
+        "execute_sql-data-json-null",
+        "execute_sql",
+        _sql(
+            "SELECT _id, CASE WHEN _id = 2 THEN 'null' ELSE data END AS data FROM us ORDER BY _id"
+        ),
+    ),
+    (
+        "execute_sql-data-json-list",
+        "execute_sql",
+        _sql(
+            "SELECT _id, CASE WHEN _id = 2 THEN '[1, 2]' ELSE data END AS data FROM us ORDER BY _id"
+        ),
+    ),
     ("execute_sql-pragma", "execute_sql", _sql("PRAGMA table_info('us')")),
     ("execute_sql-write", "execute_sql", _sql("DELETE FROM us")),
     ("execute_sql-two-statements", "execute_sql", _sql("SELECT 1; SELECT 2")),
@@ -284,20 +453,34 @@ def test_a_count_reads_as_its_column_literally(tmp_path):
 
 
 def test_a_group_by_reads_every_column_literally(tmp_path):
-    recipe = _sql("SELECT json_extract(data, '$.age') AS age, COUNT(*) AS n FROM us GROUP BY 1 ORDER BY 1")
+    recipe = _sql(
+        "SELECT json_extract(data, '$.age') AS age, COUNT(*) AS n FROM us GROUP BY 1 ORDER BY 1"
+    )
     sync, asynchronous = _both(recipe, tmp_path)
     expected = ("result", [{"age": 30, "n": 2}, {"age": 41, "n": 1}])
     assert (sync[0], asynchronous[0]) == (expected, expected)
 
 
 def test_an_index_over_several_fields_is_made_where_each_is_stored_literally(tmp_path):
-    recipe = _call("ensure_table", "us", promoted={"age": "INTEGER"}, before=_call("create_index", "us", ["name", ("age", "desc")]))
+    recipe = _call(
+        "ensure_table",
+        "us",
+        promoted={"age": "INTEGER"},
+        before=_call("create_index", "us", ["name", ("age", "desc")]),
+    )
     sync, asynchronous = _both(recipe, tmp_path)
     expected = [
-        ("index", "idx_us_name__age_desc", "us",
-         "CREATE INDEX idx_us_name__age_desc ON us (json_extract(data, '$.name'), age DESC) "),
+        (
+            "index",
+            "idx_us_name__age_desc",
+            "us",
+            "CREATE INDEX idx_us_name__age_desc ON us (json_extract(data, '$.name'), age DESC) ",
+        ),
     ]
-    assert ([r for r in sync[1][0] if r[0] == "index"], [r for r in asynchronous[1][0] if r[0] == "index"]) == (expected, expected)
+    assert (
+        [r for r in sync[1][0] if r[0] == "index"],
+        [r for r in asynchronous[1][0] if r[0] == "index"],
+    ) == (expected, expected)
 
 
 def test_documents_read_by_data_and_id_in_any_order_literally(tmp_path):
@@ -307,7 +490,9 @@ def test_documents_read_by_data_and_id_in_any_order_literally(tmp_path):
 
 
 def test_a_document_that_is_no_object_raises_the_same_type_error_literally(tmp_path):
-    recipe = _sql("SELECT _id, CASE WHEN _id = 2 THEN '[1, 2]' ELSE data END AS data FROM us ORDER BY _id")
+    recipe = _sql(
+        "SELECT _id, CASE WHEN _id = 2 THEN '[1, 2]' ELSE data END AS data FROM us ORDER BY _id"
+    )
     sync, asynchronous = _both(recipe, tmp_path)
     expected = ("raised", TypeError, "list indices must be integers or slices, not str")
     assert (sync[0], asynchronous[0]) == (expected, expected)

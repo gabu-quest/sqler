@@ -336,7 +336,9 @@ def test_queryset_run_again_after_the_class_was_rebound_still_writes_to_its_own_
 
 
 @pytest.mark.asyncio
-async def test_async_queryset_run_again_after_the_class_was_rebound_still_writes_to_its_own_table(adb):
+async def test_async_queryset_run_again_after_the_class_was_rebound_still_writes_to_its_own_table(
+    adb,
+):
     class UtAsRebound(AsyncSQLerModel):
         __tablename__ = "ut_as_rebound"
         name: str = ""
@@ -353,7 +355,9 @@ async def test_async_queryset_run_again_after_the_class_was_rebound_still_writes
     row.name = "changed"
     await row.save()
 
-    cur = await adb.adapter.execute("SELECT json_extract(data, '$.name') FROM ut_as_rebound ORDER BY _id")
+    cur = await adb.adapter.execute(
+        "SELECT json_extract(data, '$.name') FROM ut_as_rebound ORDER BY _id"
+    )
     own = [r[0] for r in await cur.fetchall()]
     cur = await adb.adapter.execute("SELECT count(*) FROM ut_as_rebound_other")
     other = (await cur.fetchone())[0]

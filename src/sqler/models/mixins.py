@@ -30,7 +30,9 @@ _async_current_user_var: ContextVar[Optional[str]] = ContextVar(
 _ONE_MICROSECOND = timedelta(microseconds=1)
 
 
-def _stamp_times(created_at: Optional[datetime], updated_at: Optional[datetime]) -> tuple[datetime, datetime]:
+def _stamp_times(
+    created_at: Optional[datetime], updated_at: Optional[datetime]
+) -> tuple[datetime, datetime]:
     """The one timestamp rule: return the ``(created_at, updated_at)`` to store on save.
 
     * First save of a new object (no ``created_at``): both are the same ``now``.

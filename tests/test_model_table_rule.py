@@ -170,7 +170,9 @@ def test_unbound_default_name_is_the_plural_on_every_route(db):
     ],
     ids=["async-pydantic", "async-lite", "async-msgspec"],
 )
-async def test_unbound_async_class_has_one_table_on_every_route(adb, item_cls, holder_cls, expected):
+async def test_unbound_async_class_has_one_table_on_every_route(
+    adb, item_cls, holder_cls, expected
+):
     item = item_cls(name="it")
     await item.save(db=adb)
     holder = holder_cls(name="h", item=item)

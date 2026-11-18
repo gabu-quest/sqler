@@ -137,14 +137,18 @@ def test_the_adapter_made_with_a_path_only_waits_five_seconds(tmp_path):
 
 @pytest.mark.parametrize("value", [True, False, 1.5, -1, "100", 2**31], ids=repr)
 def test_a_timeout_that_is_not_a_whole_number_of_milliseconds_raises_at_construction(value):
-    with pytest.raises(ValueError, match="^timeout_ms must be a whole number of milliseconds") as raised:
+    with pytest.raises(
+        ValueError, match="^timeout_ms must be a whole number of milliseconds"
+    ) as raised:
         SQLiteAdapter(":memory:", timeout_ms=value)
     assert str(raised.value).endswith(f"not {value!r}")
 
 
 @pytest.mark.parametrize("factory", ["on_disk", "in_memory"])
 @pytest.mark.parametrize("owner", [SQLiteAdapter, SQLerDB], ids=["adapter", "db"])
-def test_a_factory_given_a_negative_timeout_raises_before_it_opens_anything(owner, factory, tmp_path):
+def test_a_factory_given_a_negative_timeout_raises_before_it_opens_anything(
+    owner, factory, tmp_path
+):
     args = (str(tmp_path / "never.db"),) if factory == "on_disk" else ()
     with pytest.raises(ValueError, match="not -1$"):
         getattr(owner, factory)(*args, timeout_ms=-1)
@@ -157,7 +161,9 @@ PRAGMA_FORMS = ["PRAGMA busy_timeout=250;", "pragma BUSY_TIMEOUT = 250"]
 
 
 @pytest.mark.parametrize("pragma", PRAGMA_FORMS)
-def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(pragma, tmp_path, clock_tick):
+def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(
+    pragma, tmp_path, clock_tick
+):
     path = str(tmp_path / "pragma.db")
     adapter = _file_adapter(path, pragmas=[pragma])
     other = _locked_by_another_connection(path)
@@ -186,7 +192,9 @@ def test_a_busy_timeout_pragma_is_the_wait_for_another_thread_on_the_memory_conn
     try:
         assert held.wait(10)
         start = time.monotonic()
-        with pytest.raises(sqlite3.OperationalError, match="^database is locked: another thread's transaction"):
+        with pytest.raises(
+            sqlite3.OperationalError, match="^database is locked: another thread's transaction"
+        ):
             adapter.execute("SELECT 1")
         elapsed = time.monotonic() - start
     finally:
@@ -198,7 +206,9 @@ def test_a_busy_timeout_pragma_is_the_wait_for_another_thread_on_the_memory_conn
 
 
 def test_timeout_ms_and_a_pragma_that_agree_are_one_number(tmp_path):
-    adapter = _file_adapter(str(tmp_path / "agree.db"), timeout_ms=250, pragmas=["PRAGMA busy_timeout = 250"])
+    adapter = _file_adapter(
+        str(tmp_path / "agree.db"), timeout_ms=250, pragmas=["PRAGMA busy_timeout = 250"]
+    )
     try:
         assert (adapter.timeout_ms, _busy_timeouts(adapter)) == (250, [250, 250])
     finally:
@@ -214,11 +224,13 @@ def test_timeout_ms_and_a_pragma_that_disagree_raise_at_connect_naming_both(path
     )
     with pytest.raises(ValueError) as raised:
         adapter.connect()
-    assert str(raised.value) == "timeout_ms=300 and the busy_timeout pragma (250) disagree: give one of them"
+    assert (
+        str(raised.value)
+        == "timeout_ms=300 and the busy_timeout pragma (250) disagree: give one of them"
+    )
     with pytest.raises(NotConnectedError):  # the connect that failed left nothing open
         adapter.execute("SELECT 1")
     adapter.close()
-
 
 
 # ---- a shared-cache in-memory database: the same wait ----
@@ -360,7 +372,13 @@ WAITS = {
     "insert": ("write", _insert_mine, None, ["a", "b", "held", "mine"], ["x", "y"]),
     "select": ("write", _select, ["a", "b", "held"], ["a", "b", "held"], ["x", "y"]),
     "executemany": ("read", _many, None, ["a", "b", "m1", "m2", "m3"], ["x", "y"]),
-    "executemany-inside-a-transaction": ("read", _many_inside, None, ["a", "b", "m1", "m2", "m3"], ["x", "y"]),
+    "executemany-inside-a-transaction": (
+        "read",
+        _many_inside,
+        None,
+        ["a", "b", "m1", "m2", "m3"],
+        ["x", "y"],
+    ),
     "begin_transaction": ("write", _begin, None, ["a", "b", "held", "mine"], ["x", "y"]),
     "inside-a-transaction": ("read", _inside, None, ["a", "b", "mine"], ["x", "y", "mine"]),
     "a-threads-first-statement": ("create", _insert_mine, None, ["a", "b", "mine"], ["x", "y"]),
@@ -368,7 +386,9 @@ WAITS = {
 
 
 @pytest.mark.parametrize("case", list(WAITS))
-def test_a_statement_that_meets_another_connections_table_lock_waits_for_it_and_runs_once(case, pauses):
+def test_a_statement_that_meets_another_connections_table_lock_waits_for_it_and_runs_once(
+    case, pauses
+):
     kind, work, returned, t_rows, u_rows = WAITS[case]
     adapter = _shared()
     try:
@@ -387,7 +407,9 @@ def test_a_statement_that_meets_another_connections_table_lock_waits_for_it_and_
 
 
 @pytest.mark.parametrize("kind", ["write", "read"])
-def test_a_lock_that_is_not_released_raises_sqlites_error_once_timeout_ms_has_passed(kind, clock_tick):
+def test_a_lock_that_is_not_released_raises_sqlites_error_once_timeout_ms_has_passed(
+    kind, clock_tick
+):
     adapter = _shared(timeout_ms=200)
     try:
         holder = _Holder(adapter, kind)
@@ -419,7 +441,10 @@ def test_timeout_ms_zero_raises_the_shared_cache_lock_at_once(pauses):
                 adapter.execute("INSERT INTO t VALUES ('mine')")
         finally:
             holder.release()
-        assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
+        assert (raised.value.sqlite_errorcode, pauses.count) == (
+            sqlite3.SQLITE_LOCKED_SHAREDCACHE,
+            0,
+        )
         assert _values(adapter) == ["a", "b", "held"]
     finally:
         adapter.close()
@@ -430,7 +455,9 @@ def test_a_lock_of_the_same_connection_is_raised_at_once(pauses):
     connection's lock: no wait ends it."""
     adapter = _shared()
     try:
-        reading = adapter._conn().execute("SELECT v FROM t")  # a statement of the thread's own connection
+        reading = adapter._conn().execute(
+            "SELECT v FROM t"
+        )  # a statement of the thread's own connection
         assert reading.fetchone()[0] == "a"
         with pytest.raises(sqlite3.OperationalError) as raised:
             adapter.execute("DROP TABLE t")
@@ -451,7 +478,10 @@ def test_executemany_with_rows_from_an_iterator_raises_at_once(pauses):
                 adapter.executemany("INSERT INTO t VALUES (?)", iter([["m1"], ["m2"]]))
         finally:
             holder.release()
-        assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
+        assert (raised.value.sqlite_errorcode, pauses.count) == (
+            sqlite3.SQLITE_LOCKED_SHAREDCACHE,
+            0,
+        )
         assert _values(adapter) == ["a", "b"]
     finally:
         adapter.close()
@@ -467,7 +497,10 @@ def test_executescript_that_meets_the_lock_raises_at_once_with_its_earlier_state
                 adapter.executescript("INSERT INTO u VALUES ('s1'); INSERT INTO t VALUES ('s2');")
         finally:
             holder.release()
-        assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
+        assert (raised.value.sqlite_errorcode, pauses.count) == (
+            sqlite3.SQLITE_LOCKED_SHAREDCACHE,
+            0,
+        )
         assert (_values(adapter, "t"), _values(adapter, "u")) == (["a", "b"], ["x", "y", "s1"])
     finally:
         adapter.close()
@@ -477,9 +510,15 @@ def test_two_threads_that_each_hold_what_the_other_wants_both_end_after_timeout_
     """A holds the write transaction (it wrote t) and wants u; B reads u through a second adapter
     on the same database and wants t. Neither can go on: each raises once its wait has passed."""
     name = f"lock-cycle-{uuid.uuid4().hex}"
-    first, second = _shared(timeout_ms=300, name=name), _shared(timeout_ms=300, name=name, seed=False)
+    first, second = (
+        _shared(timeout_ms=300, name=name),
+        _shared(timeout_ms=300, name=name, seed=False),
+    )
     wrote, reading = threading.Event(), threading.Event()
-    a_done, b_done = threading.Event(), threading.Event()  # each keeps its lock until both have ended
+    a_done, b_done = (
+        threading.Event(),
+        threading.Event(),
+    )  # each keeps its lock until both have ended
 
     def timed(work) -> tuple[Optional[int], float]:
         start = time.monotonic()
@@ -517,7 +556,9 @@ def test_two_threads_that_each_hold_what_the_other_wants_both_end_after_timeout_
         threads = [_Waiter(a), _Waiter(b)]
         for thread in threads:
             thread.join()
-        assert [(w.error, w.result[0]) for w in threads] == [(None, sqlite3.SQLITE_LOCKED_SHAREDCACHE)] * 2
+        assert [(w.error, w.result[0]) for w in threads] == [
+            (None, sqlite3.SQLITE_LOCKED_SHAREDCACHE)
+        ] * 2
         assert [w.result[1] >= 0.3 - clock_tick for w in threads] == [True, True]
         assert (_values(first, "t"), _values(first, "u")) == (["a", "b"], ["x", "y"])
     finally:
@@ -537,7 +578,9 @@ def test_a_waiter_whose_adapter_is_closed_while_it_waits_ends_with_an_error(paus
             waiter.join()  # it does not wait on for the 60 s it was given
         finally:
             holder.release()
-        assert type(waiter.error) is sqlite3.ProgrammingError  # Python's own, for a closed connection
+        assert (
+            type(waiter.error) is sqlite3.ProgrammingError
+        )  # Python's own, for a closed connection
         assert _values(holding) == ["a", "b", "held"]
     finally:
         holding.close()

@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -73,7 +74,6 @@ def _(SQLerModel, db):
         category: str
         price: float
         in_stock: bool = True
-
 
     # Create sample data
     products = [
@@ -169,7 +169,6 @@ def _(SQLerModel, db):
         age: int
         country: str
 
-
     # Create sample users (reduced for WASM performance)
     for i in range(20):
         User(
@@ -256,7 +255,6 @@ def _(SQLerModel, db):
         _table = "books"
         title: str
         author: Author | None = None
-
 
     # Create test data
     author = Author(name="Alice").save(db=db)

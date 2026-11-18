@@ -113,7 +113,10 @@ def test_a_deep_copy_holds_the_same_database_object(dbs, cls):
     renamed(twin, "deep").save()
     # the copy wrote through the database object itself: a copy of it would be a second
     # connection to a private in-memory database, and a would not hold the row
-    assert (a.find_document(cls.__tablename__, 1)["name"], b.find_document(cls.__tablename__, 1)) == (
+    assert (
+        a.find_document(cls.__tablename__, 1)["name"],
+        b.find_document(cls.__tablename__, 1),
+    ) == (
         "deep",
         None,
     )
@@ -153,7 +156,11 @@ def test_the_home_is_in_no_comparison_dump_or_stored_document(dbs, cls):
     if cls is HomePy:
         assert from_a.model_dump_json() == '{"name":"stored"}'
     elif cls is HomeMsg:
-        assert msgspec.to_builtins(from_a) == {"name": "stored", "_id": 1, "_snapshot": {"name": "stored"}}
+        assert msgspec.to_builtins(from_a) == {
+            "name": "stored",
+            "_id": 1,
+            "_snapshot": {"name": "stored"},
+        }
     else:
         assert dataclasses.asdict(from_a) == {"name": "stored"}
 

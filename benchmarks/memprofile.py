@@ -30,16 +30,20 @@ def _print(msg: str) -> None:
 # -- Complexity classes for extrapolation --
 
 # O(1): fixed overhead regardless of row count
-_O1_SCENARIOS = frozenset({
-    "advanced/connection_pool",
-    "advanced/optimistic_locking",
-    "ops/cold_vs_warm",
-})
+_O1_SCENARIOS = frozenset(
+    {
+        "advanced/connection_pool",
+        "advanced/optimistic_locking",
+        "ops/cold_vs_warm",
+    }
+)
 
 # O(n log n): B-tree index overhead
-_ONLOGN_SCENARIOS = frozenset({
-    "ops/index_creation",
-})
+_ONLOGN_SCENARIOS = frozenset(
+    {
+        "ops/index_creation",
+    }
+)
 
 # Everything else is O(n) — scales linearly with data
 
@@ -53,6 +57,7 @@ def _complexity_class(name: str) -> str:
 
 
 # -- Dataclasses --
+
 
 @dataclass
 class RunProfile:
@@ -76,12 +81,12 @@ class ScenarioMemProfile:
     name: str
     complexity: str
     n_runs: int
-    peak_mb: float         # median total peak across runs
+    peak_mb: float  # median total peak across runs
     peak_min_mb: float
     peak_max_mb: float
-    setup_peak_mb: float   # median setup peak
-    run_peak_mb: float     # median run-only peak
-    duration_s: float      # median duration
+    setup_peak_mb: float  # median setup peak
+    run_peak_mb: float  # median run-only peak
+    duration_s: float  # median duration
     n_results: int
     top_allocators: list[dict] = field(default_factory=list)
     diff_allocators: list[dict] = field(default_factory=list)
@@ -114,6 +119,7 @@ class MemoryReport:
 
 
 # -- Helpers --
+
 
 def _get_system_memory() -> tuple[float, float]:
     """Return (total_mb, available_mb) from /proc/meminfo."""
@@ -157,13 +163,15 @@ def _extract_top_allocators(snapshot: tracemalloc.Snapshot, limit: int = 10) -> 
     top = []
     for stat in stats[:limit]:
         frame = stat.traceback[0]
-        top.append({
-            "file": os.path.basename(frame.filename),
-            "line": frame.lineno,
-            "size_mb": round(stat.size / (1024 * 1024), 2),
-            "count": stat.count,
-            "full_path": f"{frame.filename}:{frame.lineno}",
-        })
+        top.append(
+            {
+                "file": os.path.basename(frame.filename),
+                "line": frame.lineno,
+                "size_mb": round(stat.size / (1024 * 1024), 2),
+                "count": stat.count,
+                "full_path": f"{frame.filename}:{frame.lineno}",
+            }
+        )
     return top
 
 
@@ -179,13 +187,15 @@ def _extract_diff_allocators(
         if stat.size_diff <= 0:
             break
         frame = stat.traceback[0]
-        top.append({
-            "file": os.path.basename(frame.filename),
-            "line": frame.lineno,
-            "size_diff_mb": round(stat.size_diff / (1024 * 1024), 2),
-            "count_diff": stat.count_diff,
-            "full_path": f"{frame.filename}:{frame.lineno}",
-        })
+        top.append(
+            {
+                "file": os.path.basename(frame.filename),
+                "line": frame.lineno,
+                "size_diff_mb": round(stat.size_diff / (1024 * 1024), 2),
+                "count_diff": stat.count_diff,
+                "full_path": f"{frame.filename}:{frame.lineno}",
+            }
+        )
     return top
 
 
@@ -194,6 +204,7 @@ def _median(values: list[float]) -> float:
 
 
 # -- Core profiling --
+
 
 def _profile_run(
     scenario,
@@ -294,10 +305,15 @@ def _aggregate_runs(
             name=name,
             complexity=complexity,
             n_runs=len(runs),
-            peak_mb=0, peak_min_mb=0, peak_max_mb=0,
-            setup_peak_mb=0, run_peak_mb=0,
-            duration_s=0, n_results=0,
-            runs=runs, failed=True,
+            peak_mb=0,
+            peak_min_mb=0,
+            peak_max_mb=0,
+            setup_peak_mb=0,
+            run_peak_mb=0,
+            duration_s=0,
+            n_results=0,
+            runs=runs,
+            failed=True,
         )
 
     peaks = [r.total_peak_mb for r in ok_runs]
@@ -327,6 +343,7 @@ def _aggregate_runs(
 
 
 # -- Extrapolation --
+
 
 def _extrapolate(scenarios: list[ScenarioMemProfile], scale_name: str, available_mb: float) -> None:
     """Print per-class extrapolation estimates."""
@@ -364,7 +381,9 @@ def _extrapolate(scenarios: list[ScenarioMemProfile], scale_name: str, available
             if est > max_est:
                 max_est = est
 
-        fits = "YES" if max_est < available_mb * 0.8 else "RISKY" if max_est < available_mb else "NO"
+        fits = (
+            "YES" if max_est < available_mb * 0.8 else "RISKY" if max_est < available_mb else "NO"
+        )
         _print(f"      Max estimated peak: ~{max_est:,.0f} MB  [{fits}]")
         if fits == "YES":
             _print(f"      Headroom: {available_mb - max_est:,.0f} MB (80% threshold)")
@@ -374,20 +393,32 @@ def _extrapolate(scenarios: list[ScenarioMemProfile], scale_name: str, available
 
 # -- Main --
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark memory profiling")
-    parser.add_argument("--scale", choices=["small", "medium", "large", "xlarge", "xxlarge"],
-                        default="small")
+    parser.add_argument(
+        "--scale", choices=["small", "medium", "large", "xlarge", "xxlarge"], default="small"
+    )
     parser.add_argument("--suite", action="append", help="Run specific suite(s)")
     parser.add_argument("--tag", help="Tag for output filename")
     parser.add_argument("--top", type=int, default=10, help="Top N allocators per scenario")
     parser.add_argument("--runs", type=int, default=3, help="Runs per scenario (default 3)")
-    parser.add_argument("--estimate-overhead", action="store_true",
-                        help="Run extra pass without tracemalloc to estimate overhead")
-    parser.add_argument("--budget", type=float, default=None,
-                        help="Memory budget in MB — exit 1 if any scenario exceeds")
-    parser.add_argument("--save-baseline", action="store_true",
-                        help="Save report as baseline for regression detection")
+    parser.add_argument(
+        "--estimate-overhead",
+        action="store_true",
+        help="Run extra pass without tracemalloc to estimate overhead",
+    )
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        help="Memory budget in MB — exit 1 if any scenario exceeds",
+    )
+    parser.add_argument(
+        "--save-baseline",
+        action="store_true",
+        help="Save report as baseline for regression detection",
+    )
     args = parser.parse_args()
 
     # System context
@@ -440,10 +471,12 @@ def main() -> None:
                 pass
 
             status = "FAIL" if run.failed else "ok"
-            _print(f"       run {run_idx + 1}/{args.runs}: "
-                   f"peak={run.total_peak_mb:.1f} MB "
-                   f"(setup={run.setup_peak_mb:.1f}, run={run.run_peak_mb:.1f}), "
-                   f"{run.duration_s:.1f}s [{status}]")
+            _print(
+                f"       run {run_idx + 1}/{args.runs}: "
+                f"peak={run.total_peak_mb:.1f} MB "
+                f"(setup={run.setup_peak_mb:.1f}, run={run.run_peak_mb:.1f}), "
+                f"{run.duration_s:.1f}s [{status}]"
+            )
 
         # Aggregate across runs
         profile = _aggregate_runs(label, runs, complexity)
@@ -455,24 +488,30 @@ def main() -> None:
             if rss_delta is not None and profile.peak_mb > 0:
                 overhead = ((profile.peak_mb - rss_delta) / profile.peak_mb) * 100
                 profile.overhead_pct = round(max(0, overhead), 1)
-                _print(f"       overhead: ~{profile.overhead_pct}% "
-                       f"(tracemalloc={profile.peak_mb:.1f} MB, RSS delta={rss_delta:.1f} MB)")
+                _print(
+                    f"       overhead: ~{profile.overhead_pct}% "
+                    f"(tracemalloc={profile.peak_mb:.1f} MB, RSS delta={rss_delta:.1f} MB)"
+                )
 
         report.scenarios.append(profile)
 
         # Summary line
         spread = profile.peak_max_mb - profile.peak_min_mb
-        _print(f"       -> median={profile.peak_mb:.1f} MB "
-               f"[{profile.peak_min_mb:.1f}..{profile.peak_max_mb:.1f}], "
-               f"spread={spread:.1f} MB")
+        _print(
+            f"       -> median={profile.peak_mb:.1f} MB "
+            f"[{profile.peak_min_mb:.1f}..{profile.peak_max_mb:.1f}], "
+            f"spread={spread:.1f} MB"
+        )
 
         # Top 3 diff allocators (run-phase only)
         if profile.diff_allocators:
             _print("       run-phase allocators:")
             for alloc in profile.diff_allocators[:3]:
-                _print(f"          {alloc['size_diff_mb']:6.1f} MB  "
-                       f"{alloc['file']}:{alloc['line']} "
-                       f"({alloc['count_diff']:+,} allocs)")
+                _print(
+                    f"          {alloc['size_diff_mb']:6.1f} MB  "
+                    f"{alloc['file']}:{alloc['line']} "
+                    f"({alloc['count_diff']:+,} allocs)"
+                )
 
     # Save memory report as JSON
     tag = args.tag or "memcheck"
@@ -490,9 +529,9 @@ def main() -> None:
         _print(f"\n  Baseline saved: {baseline_path}")
 
     # Summary
-    _print(f"\n{'='*60}")
+    _print(f"\n{'=' * 60}")
     _print(f"  MEMORY PROFILE SUMMARY  (scale={scale.name}, {args.runs} runs)")
-    _print(f"{'='*60}")
+    _print(f"{'=' * 60}")
 
     _print(f"\n  System: {total_mb:,.0f} MB total, {available_mb:,.0f} MB available")
     _print(f"  Python baseline: {baseline_mb:.1f} MB")
@@ -501,8 +540,10 @@ def main() -> None:
     for s in sorted(report.scenarios, key=lambda x: x.peak_mb, reverse=True):
         status = " FAILED" if s.failed else ""
         spread = s.peak_max_mb - s.peak_min_mb
-        _print(f"    {s.peak_mb:7.1f} MB  [{s.peak_min_mb:.0f}..{s.peak_max_mb:.0f}]  "
-               f"{s.duration_s:6.1f}s  {s.name}  ({s.complexity}){status}")
+        _print(
+            f"    {s.peak_mb:7.1f} MB  [{s.peak_min_mb:.0f}..{s.peak_max_mb:.0f}]  "
+            f"{s.duration_s:6.1f}s  {s.name}  ({s.complexity}){status}"
+        )
 
     max_peak = report.max_scenario_peak_mb
     _print(f"\n  Max scenario peak: {max_peak:.1f} MB")
@@ -525,7 +566,9 @@ def main() -> None:
         if violations:
             _print(f"\n  BUDGET VIOLATIONS ({args.budget:.0f} MB limit):")
             for v in violations:
-                _print(f"    {v.name}: {v.peak_mb:.1f} MB (over by {v.peak_mb - args.budget:.1f} MB)")
+                _print(
+                    f"    {v.name}: {v.peak_mb:.1f} MB (over by {v.peak_mb - args.budget:.1f} MB)"
+                )
             sys.exit(1)
         else:
             _print(f"\n  Budget check PASSED (all scenarios under {args.budget:.0f} MB)")

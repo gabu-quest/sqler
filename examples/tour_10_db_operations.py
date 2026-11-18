@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -72,7 +73,6 @@ def _(SQLerModel, db):
         _table = "users"
         name: str
         email: str
-
 
     # Create some data
     for _i in range(10):
@@ -219,7 +219,6 @@ def _(SQLerModel, db):
         _table = "products"
         name: str
         price: float
-
 
     # Create many products
     for _i in range(25):

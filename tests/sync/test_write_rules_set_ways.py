@@ -57,7 +57,9 @@ def make(kind, *mixins, promoted=False):
         ns["__promoted__"] = {"status": "TEXT"}
     ns["__annotations__"] = annotations
     kwds = {"tag": False} if kind == "msgspec" else {}
-    cls = types.new_class(f"Item_{table}", (*mixins, BASES[kind]), kwds, lambda body: body.update(ns))
+    cls = types.new_class(
+        f"Item_{table}", (*mixins, BASES[kind]), kwds, lambda body: body.update(ns)
+    )
     return dataclass(cls) if kind.startswith("lite") else cls
 
 
@@ -115,7 +117,9 @@ def _stored(db, table):
 
 
 def _version_column(db, table):
-    return [r[0] for r in db.adapter.execute(f"SELECT _version FROM {table} ORDER BY _id;").fetchall()]
+    return [
+        r[0] for r in db.adapter.execute(f"SELECT _version FROM {table} ORDER BY _id;").fetchall()
+    ]
 
 
 def _sent(fn):
@@ -163,14 +167,16 @@ PINS = [
         Plain,
         lambda q: q.filter(F("k") == 0).update(name="x", k=F("k") + 1),
         "UPDATE sw_pin_plain SET data = json_set(data, '$.name', ?, '$.k', "
-        "json_extract(data, '$.k') + ?) WHERE JSON_EXTRACT(data, '$.k') = ? AND " + _g("sw_pin_plain", "_id", "data"),
+        "json_extract(data, '$.k') + ?) WHERE JSON_EXTRACT(data, '$.k') = ? AND "
+        + _g("sw_pin_plain", "_id", "data"),
         ["x", 1, 0],
     ),
     (
         "plain update with no filter",
         Plain,
         lambda q: q.update(flag=True),
-        "UPDATE sw_pin_plain SET data = json_set(data, '$.flag', json(?)) WHERE " + _g("sw_pin_plain", "_id", "data"),
+        "UPDATE sw_pin_plain SET data = json_set(data, '$.flag', json(?)) WHERE "
+        + _g("sw_pin_plain", "_id", "data"),
         ["true"],
     ),
     (
@@ -178,7 +184,9 @@ PINS = [
         Plain,
         lambda q: q.filter(F("k") >= 0).order_by("name", desc=True).update_one(name="y"),
         "UPDATE sw_pin_plain SET data = json_set(data, '$.name', ?) WHERE _id = (SELECT _id FROM "
-        "sw_pin_plain WHERE JSON_EXTRACT(data, '$.k') >= ? AND " + _g("sw_pin_plain", "_id", "data") + " ORDER BY json_extract(data, '$.name') "
+        "sw_pin_plain WHERE JSON_EXTRACT(data, '$.k') >= ? AND "
+        + _g("sw_pin_plain", "_id", "data")
+        + " ORDER BY json_extract(data, '$.name') "
         "DESC LIMIT 1) RETURNING _id, data",
         ["y", 0],
     ),
@@ -187,7 +195,9 @@ PINS = [
         Plain,
         lambda q: q.filter(F("k") >= 0).order_by("k").update_n(2, name="z", tags=["a"]),
         "UPDATE sw_pin_plain SET data = json_set(data, '$.name', ?, '$.tags', json(?)) WHERE _id IN "
-        "(SELECT _id FROM sw_pin_plain WHERE JSON_EXTRACT(data, '$.k') >= ? AND " + _g("sw_pin_plain", "_id", "data") + " ORDER BY "
+        "(SELECT _id FROM sw_pin_plain WHERE JSON_EXTRACT(data, '$.k') >= ? AND "
+        + _g("sw_pin_plain", "_id", "data")
+        + " ORDER BY "
         "json_extract(data, '$.k') LIMIT 2) RETURNING _id, data",
         ["z", '["a"]', 0],
     ),
@@ -195,7 +205,8 @@ PINS = [
         "plain delete_all",
         Plain,
         lambda q: q.filter(F("name") == "nope").delete_all(),
-        "DELETE FROM sw_pin_plain WHERE JSON_EXTRACT(data, '$.name') = ? AND " + _g("sw_pin_plain", "_id", "data"),
+        "DELETE FROM sw_pin_plain WHERE JSON_EXTRACT(data, '$.name') = ? AND "
+        + _g("sw_pin_plain", "_id", "data"),
         ["nope"],
     ),
     (
@@ -203,7 +214,9 @@ PINS = [
         Safe,
         lambda q: q.filter(F("_id") == 1).update_one(k=6),
         "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
-        "_id = (SELECT _id FROM sw_pin_safe WHERE _id = ? AND " + _g("sw_pin_safe", "_id", "data", "_version") + " LIMIT 1) RETURNING _id, data, _version",
+        "_id = (SELECT _id FROM sw_pin_safe WHERE _id = ? AND "
+        + _g("sw_pin_safe", "_id", "data", "_version")
+        + " LIMIT 1) RETURNING _id, data, _version",
         [6, 1],
     ),
     (
@@ -211,7 +224,9 @@ PINS = [
         Safe,
         lambda q: q.filter(F("_id") >= 1).update_n(3, k=7),
         "UPDATE sw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
-        "_id IN (SELECT _id FROM sw_pin_safe WHERE _id >= ? AND " + _g("sw_pin_safe", "_id", "data", "_version") + " LIMIT 3) RETURNING _id, data, _version",
+        "_id IN (SELECT _id FROM sw_pin_safe WHERE _id >= ? AND "
+        + _g("sw_pin_safe", "_id", "data", "_version")
+        + " LIMIT 3) RETURNING _id, data, _version",
         [7, 1],
     ),
     (
@@ -223,18 +238,22 @@ PINS = [
         "UPDATE sw_pin_job SET data = json_set(data, '$.attempts', json_extract(data, '$.attempts') "
         "+ ?, '$.updated_at', ?), status = ?, _version = _version + 1 WHERE _id = (SELECT "
         "_id FROM "
-        "sw_pin_job WHERE (status = ?) AND (JSON_EXTRACT(data, '$.attempts') < ?) AND " + _g("sw_pin_job", "_id", "data", "status", "priority", "_version") + " ORDER BY priority "
+        "sw_pin_job WHERE (status = ?) AND (JSON_EXTRACT(data, '$.attempts') < ?) AND "
+        + _g("sw_pin_job", "_id", "data", "status", "priority", "_version")
+        + " ORDER BY priority "
         "DESC LIMIT 1) RETURNING _id, data, _version, status, priority",
         [1, 17, "running", "pending", 3],
     ),
     (
         "job batch update_n",
         Job,
-        lambda q: q.filter(F("status") == "running").order_by("priority").update_n(
-            5, status="pending", priority=F("priority") - 1
-        ),
+        lambda q: q.filter(F("status") == "running")
+        .order_by("priority")
+        .update_n(5, status="pending", priority=F("priority") - 1),
         "UPDATE sw_pin_job SET status = ?, priority = priority - ?, _version = _version + 1 WHERE "
-        "_id IN (SELECT _id FROM sw_pin_job WHERE status = ? AND " + _g("sw_pin_job", "_id", "data", "status", "priority", "_version") + " ORDER BY priority LIMIT 5) RETURNING "
+        "_id IN (SELECT _id FROM sw_pin_job WHERE status = ? AND "
+        + _g("sw_pin_job", "_id", "data", "status", "priority", "_version")
+        + " ORDER BY priority LIMIT 5) RETURNING "
         "_id, data, _version, status, priority",
         ["pending", 1, "running"],
     ),
@@ -242,7 +261,8 @@ PINS = [
         "job delete_all",
         Job,
         lambda q: q.filter(F("priority") > 100).delete_all(),
-        "DELETE FROM sw_pin_job WHERE priority > ? AND " + _g("sw_pin_job", "_id", "data", "status", "priority", "_version"),
+        "DELETE FROM sw_pin_job WHERE priority > ? AND "
+        + _g("sw_pin_job", "_id", "data", "status", "priority", "_version"),
         [100],
     ),
 ]
@@ -275,7 +295,8 @@ def test_job_update_gains_only_the_version_term(db):
     _, sent = _sent(lambda: q.filter(F("status") == "pending").update(priority=3))
     assert sent == [
         (
-            "UPDATE sw_pin_job SET priority = ?, _version = _version + 1 WHERE status = ? AND " + _g("sw_pin_job", "_id", "data", "status", "priority", "_version"),
+            "UPDATE sw_pin_job SET priority = ?, _version = _version + 1 WHERE status = ? AND "
+            + _g("sw_pin_job", "_id", "data", "status", "priority", "_version"),
             [3, "pending"],
         )
     ]
@@ -360,8 +381,11 @@ def test_an_update_in_a_rolled_back_transaction_leaves_the_row_and_version(db, k
 
     with pytest.raises(LookupError):
         with db.transaction():
-            {"update": lambda: q.update(count=2), "update_one": lambda: q.update_one(count=2),
-             "update_n": lambda: q.update_n(5, count=2)}[way]()
+            {
+                "update": lambda: q.update(count=2),
+                "update_one": lambda: q.update_one(count=2),
+                "update_n": lambda: q.update_n(5, count=2),
+            }[way]()
             raise LookupError("the caller changes its mind")
 
     assert _stored(db, Item.__tablename__) == stored_before
@@ -385,7 +409,9 @@ def test_delete_all_in_a_rolled_back_transaction_leaves_the_rows(db):
 
 @pytest.mark.parametrize("way", ["update", "update_one", "update_n", "delete_all"])
 @pytest.mark.parametrize("kind", ["pydantic", "pydantic_safe"])
-def test_a_set_based_write_outside_a_transaction_is_seen_by_another_connection_at_once(tmp_path, kind, way):
+def test_a_set_based_write_outside_a_transaction_is_seen_by_another_connection_at_once(
+    tmp_path, kind, way
+):
     path = str(tmp_path / "set_ways.db")
     db = SQLerDB.on_disk(path)
     try:
@@ -393,12 +419,18 @@ def test_a_set_based_write_outside_a_transaction_is_seen_by_another_connection_a
         Item(name="a", count=1).save(db=db)
         q = bound(Item, db)
 
-        {"update": lambda: q.update(count=2), "update_one": lambda: q.update_one(count=2),
-         "update_n": lambda: q.update_n(5, count=2), "delete_all": q.delete_all}[way]()
+        {
+            "update": lambda: q.update(count=2),
+            "update_one": lambda: q.update_one(count=2),
+            "update_n": lambda: q.update_n(5, count=2),
+            "delete_all": q.delete_all,
+        }[way]()
 
         other = sqlite3.connect(path)
         try:
-            seen = other.execute(f"SELECT json_extract(data, '$.count') FROM {Item.__tablename__};").fetchall()
+            seen = other.execute(
+                f"SELECT json_extract(data, '$.count') FROM {Item.__tablename__};"
+            ).fetchall()
         finally:
             other.close()
         assert seen == ([] if way == "delete_all" else [(2,)])
@@ -441,8 +473,12 @@ def test_a_set_based_update_stamps_updated_at_as_save_stores_it(db, kind, way):
     stamp = stamps.pop()
     assert re.sub(r"\d", "9", stamp) == re.sub(r"\d", "9", saved[0])
     assert _iso(stamp) >= start and _iso(stamp).tzinfo is not None
-    assert [d["created_at"] for _, d in rows] == [d["created_at"] for _, d in _stored(db, Item.__tablename__)]
-    loaded = [i.updated_at for i in bound(Item, db).filter(F("name") == "x").order_by("count").all()]
+    assert [d["created_at"] for _, d in rows] == [
+        d["created_at"] for _, d in _stored(db, Item.__tablename__)
+    ]
+    loaded = [
+        i.updated_at for i in bound(Item, db).filter(F("name") == "x").order_by("count").all()
+    ]
     if way == "update_one":
         assert result.updated_at == loaded[0]
     elif way == "update_n":
@@ -522,7 +558,9 @@ def test_update_writes_the_audit_rows_a_loop_of_save_writes(db, kind, promoted):
     Set, Loop = _twins(db, kind, promoted)
     extra = {"status": "done"} if promoted else {}
 
-    assert bound(Set, db).filter(F("count") >= 1).update(count=F("count") + 10, name="x", **extra) == 2
+    assert (
+        bound(Set, db).filter(F("count") >= 1).update(count=F("count") + 10, name="x", **extra) == 2
+    )
     _loop_save(db, Loop, [2, 3], count=lambda i: i.count + 10, name="x", **extra)
 
     assert len(_after_creates(db, Set)) == 2
@@ -534,8 +572,11 @@ def test_update_writes_the_audit_rows_a_loop_of_save_writes(db, kind, promoted):
 def test_update_one_writes_the_audit_row_a_save_writes(db, kind):
     Set, Loop = _twins(db, kind, promoted=True)
 
-    got = bound(Set, db).filter(F("count") >= 0).order_by("count", desc=True).update_one(
-        status="claimed", count=F("count") + 1
+    got = (
+        bound(Set, db)
+        .filter(F("count") >= 0)
+        .order_by("count", desc=True)
+        .update_one(status="claimed", count=F("count") + 1)
     )
     _loop_save(db, Loop, [3], status="claimed", count=lambda i: i.count + 1)
 
@@ -722,7 +763,17 @@ def test_a_set_based_write_calls_no_hook(db):
     q.delete_all()
 
     assert calls == []
-    assert [r[1] for r in _audit(db, Hooked)] == ["create", "create", "update", "update", "update", "update", "update", "delete", "delete"]
+    assert [r[1] for r in _audit(db, Hooked)] == [
+        "create",
+        "create",
+        "update",
+        "update",
+        "update",
+        "update",
+        "update",
+        "delete",
+        "delete",
+    ]
 
 
 # ----- two writers: each row claimed once, each old value read before its claim ---------------
@@ -751,7 +802,9 @@ def test_two_threads_claim_ten_rows_between_them_never_one_twice(tmp_path):
                 return
             claimed[name].append(got._id)
 
-    threads = [threading.Thread(target=worker, args=(n, d)) for n, d in (("a", first), ("b", second))]
+    threads = [
+        threading.Thread(target=worker, args=(n, d)) for n, d in (("a", first), ("b", second))
+    ]
     for t in threads:
         t.start()
     for t in threads:
@@ -836,8 +889,12 @@ class LiteSheet(SQLerLiteSafeModel):
     binder: Optional[LiteBinder] = None
 
 
-@pytest.mark.parametrize("target, referrer", [(Binder, Sheet), (LiteBinder, LiteSheet)], ids=SAFE_KINDS)
-def test_set_null_moves_the_version_of_a_versioned_referrer_so_a_stale_save_is_refused(db, target, referrer):
+@pytest.mark.parametrize(
+    "target, referrer", [(Binder, Sheet), (LiteBinder, LiteSheet)], ids=SAFE_KINDS
+)
+def test_set_null_moves_the_version_of_a_versioned_referrer_so_a_stale_save_is_refused(
+    db, target, referrer
+):
     binder = target(name="b").save(db=db)
     referrer(title="s", binder=binder).save(db=db)
     held = bound(referrer, db).first()
@@ -860,7 +917,10 @@ def test_set_null_moves_the_version_of_a_versioned_referrer_so_a_stale_save_is_r
     after.title = "edited by a holder who loaded it after the delete"
     after.save(db=db)
     [(_, doc)] = _stored(db, table)
-    assert (doc["title"], doc["binder"]) == ("edited by a holder who loaded it after the delete", None)
+    assert (doc["title"], doc["binder"]) == (
+        "edited by a holder who loaded it after the delete",
+        None,
+    )
     assert _version_column(db, table) == [2]
 
 
@@ -876,7 +936,9 @@ def test_a_cascade_three_levels_deep_logs_the_audited_level_only(db):
     assert _stored(db, "sw_volumes") == [] and _stored(db, "sw_pages") == []
     assert _after_creates(db, Volume) == [(vol._id, "delete", "alice", None, stored_vol)]
     assert [r[1] for r in _audit(db, Shelf)] == ["create", "delete"]
-    page_deletes = [sql for sql, *_ in ((e.sql,) for e in got) if sql.startswith("DELETE FROM sw_pages")]
+    page_deletes = [
+        sql for sql, *_ in ((e.sql,) for e in got) if sql.startswith("DELETE FROM sw_pages")
+    ]
     assert page_deletes == ["DELETE FROM sw_pages WHERE _id = ?;"]
     assert page._id == 1
 
@@ -889,7 +951,13 @@ def test_a_cascade_under_an_unaudited_target_logs_the_audited_grandchildren(db):
     vol.delete_with_policy(db=db, on_delete="cascade")
 
     assert _after_creates(db, Note) == [
-        (note._id, "delete", "alice", None, {"text": "n", "page": {"_table": "sw_pages", "_id": page._id}})
+        (
+            note._id,
+            "delete",
+            "alice",
+            None,
+            {"text": "n", "page": {"_table": "sw_pages", "_id": page._id}},
+        )
     ]
 
 
@@ -939,7 +1007,9 @@ def test_an_instance_edited_and_not_saved_logs_the_stored_row_on_delete(db, kind
 
     inst.delete(db=db)
 
-    assert _after_creates(db, Item) == [(1, "delete", "alice", None, {"name": "stored", "count": 1})]
+    assert _after_creates(db, Item) == [
+        (1, "delete", "alice", None, {"name": "stored", "count": 1})
+    ]
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -969,7 +1039,9 @@ def test_an_f_expression_on_a_promoted_field_logs_the_value_the_row_holds_after(
     got = bound(Ranked, db).order_by("priority", desc=True).update_n(1, priority=F("priority") - 4)
 
     assert [(g._id, g.priority, g._version) for g in got] == [(2, 5, 1)]
-    assert db.adapter.execute("SELECT priority, _version FROM sw_ranked WHERE _id = 2;").fetchone()[:] == (5, 1)
+    assert db.adapter.execute("SELECT priority, _version FROM sw_ranked WHERE _id = 2;").fetchone()[
+        :
+    ] == (5, 1)
     assert _after_creates(db, Ranked) == [
         (2, "update", "alice", {"priority": {"old": 9, "new": 5}}, {"name": "p9", "priority": 5})
     ]
@@ -996,11 +1068,16 @@ def test_delete_all_of_one_row_and_of_ten_thousand_send_the_same_statements(db, 
     Item.save_many([Item(name="one")] + [Item(name="many") for _ in range(10_000)], db=db)
     Holder().save(db=db)
     version = ", _version" if kind in SAFE_KINDS else ""
-    names = [Item.__name__.lower(), Item.__tablename__]  # the names a reference to an Item may give, in order
+    names = [
+        Item.__name__.lower(),
+        Item.__tablename__,
+    ]  # the names a reference to an Item may give, in order
 
     def look(ids):
         """The one read of the look for ``ids``: one id is also looked for by its digits."""
-        digits = "data GLOB ('*' || substr(?1, 2, length(?1) - 2) || '*') AND " if len(ids) == 1 else ""
+        digits = (
+            "data GLOB ('*' || substr(?1, 2, length(?1) - 2) || '*') AND " if len(ids) == 1 else ""
+        )
         sql = (
             f"SELECT _id, data FROM {Holder.__tablename__} WHERE (({digits}(data GLOB '*{names[0]}*' OR "
             f"data GLOB '*{names[1]}*' OR data GLOB '*\\u*')) OR data >= x'') AND "
@@ -1058,8 +1135,14 @@ ROW_TEXTS = {
     "the _id key in \\u escapes": ('{"target": {R}}', True),
     "_id written as 1.0": ('{"target": {R}}', False),
     "_id written as 1e0": ('{"target": {R}}', False),
-    "the id's digits in other fields, no reference": ('{"n": {I}, "note": "{I} {T}", "target": null}', False),
-    "non-ASCII text beside the reference": ('{"note": "\u65e5\u672c\u8a9e \u00fc", "target": {R}}', True),
+    "the id's digits in other fields, no reference": (
+        '{"n": {I}, "note": "{I} {T}", "target": null}',
+        False,
+    ),
+    "non-ASCII text beside the reference": (
+        '{"note": "\u65e5\u672c\u8a9e \u00fc", "target": {R}}',
+        True,
+    ),
     "stored as a BLOB": ('{"target": {R}}', True),
     "stored as a BLOB in UTF-16": ('{"target": {R}}', True),
     "Infinity beside the reference": ('{"limit": Infinity, "target": {R}}', True),
@@ -1106,16 +1189,23 @@ def test_how_a_row_is_written_does_not_change_whether_it_refers(tmp_path, look, 
         text, refers = ROW_TEXTS[case]
         reference = _reference_text(case, Item.__tablename__, item._id)
         held = reference if shape == "one" else f"[{reference}]"
-        doc = text.replace("{R}", held).replace("{T}", Item.__tablename__).replace("{I}", str(item._id))
+        doc = (
+            text.replace("{R}", held)
+            .replace("{T}", Item.__tablename__)
+            .replace("{I}", str(item._id))
+        )
         if case.startswith("stored as a BLOB"):
             doc = doc.encode("utf-16" if case.endswith("UTF-16") else "utf-8")
         db.adapter.execute(f"UPDATE {Holder.__tablename__} SET data = ?;", [doc])
         if case == "a row that is not JSON beside it":
             db.adapter.execute(
-                f"INSERT INTO {Holder.__tablename__} (data) VALUES (?);", [f"{item._id} {Item.__tablename__}"]
+                f"INSERT INTO {Holder.__tablename__} (data) VALUES (?);",
+                [f"{item._id} {Item.__tablename__}"],
             )
         db.adapter.commit()
-        expected = [(Holder.__tablename__, 1, {"paths": ["target" if shape == "one" else "target[0]"]})]
+        expected = [
+            (Holder.__tablename__, 1, {"paths": ["target" if shape == "one" else "target[0]"]})
+        ]
 
         if look == "sync":
             if refers:
@@ -1132,10 +1222,16 @@ def test_how_a_row_is_written_does_not_change_whether_it_refers(tmp_path, look, 
                 await adb.connect()
                 named = f"SELECT json_extract(data, '$.name') FROM {Item.__tablename__};"
                 try:
-                    async with adb.transaction():  # as a delete looks: a failed statement of the look leaves it whole
-                        await adb.adapter.execute(f"UPDATE {Item.__tablename__} SET data = json_set(data, '$.name', 'kept');")
+                    async with (
+                        adb.transaction()
+                    ):  # as a delete looks: a failed statement of the look leaves it whole
+                        await adb.adapter.execute(
+                            f"UPDATE {Item.__tablename__} SET data = json_set(data, '$.name', 'kept');"
+                        )
                         found = await async_find_referrers(adb, Item.__tablename__, [item._id])
-                    return found, [tuple(row) for row in await (await adb.adapter.execute(named)).fetchall()]
+                    return found, [
+                        tuple(row) for row in await (await adb.adapter.execute(named)).fetchall()
+                    ]
                 finally:
                     await adb.close()
 
@@ -1156,7 +1252,13 @@ def test_a_row_sqlite_cannot_read_does_not_hide_the_referrers_of_a_set_of_ids(tm
         Holder = holder_of("pydantic", Item, "one")
         first, second = Item.save_many([Item(name="a"), Item(name="b")], db=db)
         Holder().save(db=db)
-        held = '{"limit": NaN, "target": {"_table": "' + Item.__tablename__ + '", "_id": ' + str(second._id) + "}}"
+        held = (
+            '{"limit": NaN, "target": {"_table": "'
+            + Item.__tablename__
+            + '", "_id": '
+            + str(second._id)
+            + "}}"
+        )
         db.adapter.execute(f"UPDATE {Holder.__tablename__} SET data = ?;", [held])
         not_json = f"{second._id} {Item.__tablename__}"  # it passes the text test
         db.adapter.execute(f"INSERT INTO {Holder.__tablename__} (data) VALUES (?);", [not_json])

@@ -134,7 +134,9 @@ def _mentions(sql: str, table: str) -> bool:
 def _named(kind: str, name: str, refs: dict[str, Any], table: Optional[str] = None) -> type:
     """A model class ``name`` with a ``name`` field and the reference fields ``refs``
     ({field: annotation}, each defaulting to None)."""
-    return _model(kind, {"name": (str, ""), **{f: (a, None) for f, a in refs.items()}}, table, name=name)
+    return _model(
+        kind, {"name": (str, ""), **{f: (a, None) for f, a in refs.items()}}, table, name=name
+    )
 
 
 def _shapes(kind: str, p: str) -> dict[str, tuple]:
@@ -205,7 +207,9 @@ def _shapes(kind: str, p: str) -> dict[str, tuple]:
         f"dn{t}readers",
         f"dn_{t}_str_clubs",
     )
-    captain = _named(kind, f"Dn{p}Captained", {"captain": f"Optional[Dn{p}Captained]"}, f"dn_{t}_crew")
+    captain = _named(
+        kind, f"Dn{p}Captained", {"captain": f"Optional[Dn{p}Captained]"}, f"dn_{t}_crew"
+    )
     rows["reference_to_its_own_class"] = (
         captain,
         "captain",
@@ -316,8 +320,12 @@ def test_a_field_that_admits_no_model_class_keeps_the_table_of_its_name(kind):
 def test_a_field_that_admits_classes_of_two_tables_is_refused(kind):
     one = _model(kind, {}, f"dn_{kind[0]}_union_one")
     two = _model(kind, {}, f"dn_{kind[0]}_union_two")
-    holder = _model(kind, {"pick": (Optional[one | two], None)}, None, name=f"Dn{kind[0]}UnionHolder")
-    with pytest.raises(ValueError, match=rf"^Dn{kind[0]}UnionHolder\.pick: its annotation admits classes"):
+    holder = _model(
+        kind, {"pick": (Optional[one | two], None)}, None, name=f"Dn{kind[0]}UnionHolder"
+    )
+    with pytest.raises(
+        ValueError, match=rf"^Dn{kind[0]}UnionHolder\.pick: its annotation admits classes"
+    ):
         holder.ref("pick").field("name") == "red"  # noqa: B015 - the build under test
 
 
@@ -336,7 +344,11 @@ async def test_a_reference_filter_on_a_queryset_of_another_table(kind, row):
     try:
         arch = f"{outer_table}_arch"
         await _v(db.adapter.execute(f"CREATE TABLE {arch} AS SELECT * FROM {outer_table}"))
-        await _v(db.adapter.execute(f"UPDATE {arch} SET data = json_set(data, '$.name', 'a-' || json_extract(data, '$.name'))"))
+        await _v(
+            db.adapter.execute(
+                f"UPDATE {arch} SET data = json_set(data, '$.name', 'a-' || json_extract(data, '$.name'))"
+            )
+        )
         await _v(db.adapter.commit())
         found = await _v(outer.using(db, arch).filter(expr).all())
         assert [o.name for o in found] == ["a-p-red"]
@@ -369,7 +381,10 @@ async def test_a_reference_filter_beside_a_promoted_field_of_the_queryset_table(
         expr = (player.ref("team").field("name") == "red") & (F("name") == "cid")
         own = await _v(player.using(db).filter(expr).all())
         arch = await _v(player.using(db, f"dn_{t}_pr_arch").filter(expr).all())
-        assert ([(o._id, o.name) for o in own], [(o._id, o.name) for o in arch]) == ([(3, "cid")], [(3, "cid")])
+        assert ([(o._id, o.name) for o in own], [(o._id, o.name) for o in arch]) == (
+            [(3, "cid")],
+            [(3, "cid")],
+        )
     finally:
         await _v(db.close())
 
@@ -401,7 +416,9 @@ def _classes(kind: str, promoted: str, p: str) -> tuple[type, type]:
             "teams": (Optional[list[team]], None),
         },
         f"rp_{p}_players",
-        {"__promoted__": {"name": "TEXT", "rank": "INTEGER", "city": "TEXT"}} if promoted in ("outer", "both") else None,
+        {"__promoted__": {"name": "TEXT", "rank": "INTEGER", "city": "TEXT"}}
+        if promoted in ("outer", "both")
+        else None,
     )
     return team, player
 
@@ -509,7 +526,13 @@ async def _promote(way: str, kind: str, team: type, db, path: Optional[str]) -> 
     if way == "ensure_table":
         await _v(db.ensure_table(table, promoted={"name": "TEXT"}))
     elif way == "a save of a class that declares it":
-        fields = {"name": (str, ""), "rank": (int, 0), "city": (str, ""), "founded": (Optional[datetime], None), "meta": (Optional[dict], None)}
+        fields = {
+            "name": (str, ""),
+            "rank": (int, 0),
+            "city": (str, ""),
+            "founded": (Optional[datetime], None),
+            "meta": (Optional[dict], None),
+        }
         declares = _model(kind, fields, table, {"__promoted__": {"name": "TEXT"}})
         await _v(declares(name="violet").save(db=db))
     else:  # another database object on the file
@@ -520,7 +543,9 @@ async def _promote(way: str, kind: str, team: type, db, path: Optional[str]) -> 
             await _v(other.close())
 
 
-@pytest.mark.parametrize("way", ["ensure_table", "a save of a class that declares it", "another database object"])
+@pytest.mark.parametrize(
+    "way", ["ensure_table", "a save of a class that declares it", "another database object"]
+)
 @pytest.mark.parametrize("kind", list(BASES))
 @pytest.mark.asyncio
 async def test_a_field_promoted_after_the_statement_was_made_is_followed(kind, way, tmp_path):
@@ -535,7 +560,11 @@ async def test_a_field_promoted_after_the_statement_was_made_is_followed(kind, w
         before = (await _ids(qs), await _ids(not_qs))
         await _promote(way, kind, team, db, path)
         after = (await _ids(qs), await _ids(not_qs))
-        assert (before, after, "name" in await _columns(db, team.__tablename__)) == (([1], [2, 3, 4]), ([1], [2, 3, 4]), True)
+        assert (before, after, "name" in await _columns(db, team.__tablename__)) == (
+            ([1], [2, 3, 4]),
+            ([1], [2, 3, 4]),
+            True,
+        )
     finally:
         await _v(db.close())
 

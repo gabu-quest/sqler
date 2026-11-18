@@ -109,9 +109,7 @@ class SQLerModel(BaseModel):
             skip_file_prefixes=_SQLER_PREFIXES,
         )
         explicit = getattr(cls, "__tablename__", None)
-        chosen = validate_table_name(
-            table or explicit or _default_table_name(cls.__name__)
-        )
+        chosen = validate_table_name(table or explicit or _default_table_name(cls.__name__))
         cls._db = db
         cls._table = chosen
         cls.__tablename__ = chosen
@@ -224,9 +222,7 @@ class SQLerModel(BaseModel):
         return cls.query().first()
 
     @classmethod
-    def using(
-        cls: Type[TModel], db: SQLerDB, table: Optional[str] = None
-    ) -> SQLerQuerySet[TModel]:
+    def using(cls: Type[TModel], db: SQLerDB, table: Optional[str] = None) -> SQLerQuerySet[TModel]:
         """Return a queryset bound to a specific DB (no class-level mutation).
 
         Args:
@@ -388,7 +384,9 @@ class SQLerModel(BaseModel):
             self: The same instance (for chaining).
         """
         db, table = _instance_binding(self, db)
-        return _write_rules.save(self, db, table, _partial, lambda: self._write(db, table, _partial))
+        return _write_rules.save(
+            self, db, table, _partial, lambda: self._write(db, table, _partial)
+        )
 
     def _write(self: TModel, db, table: str, _partial: bool) -> TModel:
         """Write this instance's row (``save()`` without the rules of its class)."""
@@ -443,7 +441,9 @@ class SQLerModel(BaseModel):
         db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = _write_rules.refresh_row(_read_document(db, table, self._id, cls._versioned_rows), self._id)
+        doc = _write_rules.refresh_row(
+            _read_document(db, table, self._id, cls._versioned_rows), self._id
+        )
         own = {(table, self._id): self}
         return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]
 

@@ -33,7 +33,14 @@ WORKLOADS = ("threads", "tasks", "procs2", "procs4")
 def soaked(tmp_path_factory):
     """The folder of one short soak of every workload, and the soak's own output."""
     root = tmp_path_factory.mktemp("soak")
-    cmd = [sys.executable, os.path.join(SOAK_DIR, "soak.py"), "--ops", str(OPS), "--seed", str(SEED)]
+    cmd = [
+        sys.executable,
+        os.path.join(SOAK_DIR, "soak.py"),
+        "--ops",
+        str(OPS),
+        "--seed",
+        str(SEED),
+    ]
     cmd += ["--precreate", "--storage", "file", "--dir", str(root)]
     for w in WORKLOADS:
         cmd += ["--workload", w]
@@ -53,7 +60,9 @@ def test_the_soak_passes_and_says_so_in_its_last_line(soaked):
     _root, done = soaked
     last = done.stdout.strip().splitlines()[-1]
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    assert last.startswith(f"SOAK PASS seed={SEED} storage=file {OPS} ops/worker workloads=threads,tasks,procs2,procs4 ops=1920 ")
+    assert last.startswith(
+        f"SOAK PASS seed={SEED} storage=file {OPS} ops/worker workloads=threads,tasks,procs2,procs4 ops=1920 "
+    )
     assert " errors=0 " in last and " violations=0 " in last
 
 
@@ -61,10 +70,30 @@ def test_the_soak_passes_and_says_so_in_its_last_line(soaked):
 # workload), in the order of ``soak_check.INVARIANTS``. Counted from that run; any change to
 # the operations or their weights changes them.
 CHECKED = {
-    "threads": dict(zip(soak_check.INVARIANTS, [268, 268, 49, 268, 32, 4, 32, 10, 41, 40, 1, 29, 16, 1, 68, 2, 1, 1])),
-    "tasks": dict(zip(soak_check.INVARIANTS, [252, 252, 70, 252, 31, 4, 31, 1, 17, 16, 1, 19, 17, 1, 36, 4, 1, 1])),
-    "procs2": dict(zip(soak_check.INVARIANTS, [288, 288, 40, 288, 33, 4, 34, 8, 37, 36, 1, 38, 7, 1, 68, 2, 1, 1])),
-    "procs4": dict(zip(soak_check.INVARIANTS, [244, 244, 52, 244, 28, 4, 29, 8, 35, 34, 1, 25, 15, 1, 60, 2, 1, 1])),
+    "threads": dict(
+        zip(
+            soak_check.INVARIANTS,
+            [268, 268, 49, 268, 32, 4, 32, 10, 41, 40, 1, 29, 16, 1, 68, 2, 1, 1],
+        )
+    ),
+    "tasks": dict(
+        zip(
+            soak_check.INVARIANTS,
+            [252, 252, 70, 252, 31, 4, 31, 1, 17, 16, 1, 19, 17, 1, 36, 4, 1, 1],
+        )
+    ),
+    "procs2": dict(
+        zip(
+            soak_check.INVARIANTS,
+            [288, 288, 40, 288, 33, 4, 34, 8, 37, 36, 1, 38, 7, 1, 68, 2, 1, 1],
+        )
+    ),
+    "procs4": dict(
+        zip(
+            soak_check.INVARIANTS,
+            [244, 244, 52, 244, 28, 4, 29, 8, 35, 34, 1, 25, 15, 1, 60, 2, 1, 1],
+        )
+    ),
 }
 
 
@@ -110,7 +139,9 @@ def _ghost_key(exp, table):
 
 
 def _set(conn, table, _id, path, value):
-    conn.execute(f"UPDATE {table} SET data = json_set(data, '{path}', ?) WHERE _id = ?", [value, _id])
+    conn.execute(
+        f"UPDATE {table} SET data = json_set(data, '{path}', ?) WHERE _id = ?", [value, _id]
+    )
 
 
 def d_row_missing(conn, exp):
@@ -127,12 +158,18 @@ def d_row_doc(conn, exp):
 
 def d_row_deleted_present(conn, exp):
     i = _gone(exp, "soak_plain_m")
-    conn.execute("INSERT INTO soak_plain_m (_id, data) VALUES (?, ?)", [i, '{"owner":"t0","key":"back","n":0,"note":""}'])
+    conn.execute(
+        "INSERT INTO soak_plain_m (_id, data) VALUES (?, ?)",
+        [i, '{"owner":"t0","key":"back","n":0,"note":""}'],
+    )
     return "row_deleted_present", "soak_plain_m", i
 
 
 def d_row_unknown(conn, exp):
-    cur = conn.execute("INSERT INTO soak_plain_p (data) VALUES (?)", ['{"owner":"x","key":"stranger","n":0,"note":""}'])
+    cur = conn.execute(
+        "INSERT INTO soak_plain_p (data) VALUES (?)",
+        ['{"owner":"x","key":"stranger","n":0,"note":""}'],
+    )
     return "row_unknown", "soak_plain_p", cur.lastrowid
 
 
@@ -153,7 +190,10 @@ def d_counter(conn, exp):
 
 def d_audit_missing(conn, exp):
     i = _live(exp, "soak_audit")
-    conn.execute("DELETE FROM soak_audit_audit WHERE _id = (SELECT max(_id) FROM soak_audit_audit WHERE record_id = ?)", [i])
+    conn.execute(
+        "DELETE FROM soak_audit_audit WHERE _id = (SELECT max(_id) FROM soak_audit_audit WHERE record_id = ?)",
+        [i],
+    )
     return "audit", "soak_audit", i
 
 
@@ -184,7 +224,9 @@ def d_promoted_in_data(conn, exp):
 
 
 def d_index(conn, exp):
-    (name,) = conn.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'soak_promo'").fetchone()
+    (name,) = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'soak_promo'"
+    ).fetchone()
     conn.execute(f"DROP INDEX {name}")
     return "index", "soak_promo", None
 
@@ -192,7 +234,9 @@ def d_index(conn, exp):
 def d_index_on_the_path_of_a_promoted_field(conn, exp):
     """``stage`` is a column (promoted before the writers start); an index left on its JSON
     path can never serve a query by it."""
-    (name,) = conn.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'soak_promo'").fetchone()
+    (name,) = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'soak_promo'"
+    ).fetchone()
     conn.execute(f"DROP INDEX {name}")
     conn.execute(f"CREATE INDEX {name} ON soak_promo (prio, json_extract(data, '$.stage'))")
     return "index", "soak_promo", None
@@ -206,24 +250,34 @@ def d_search_missing(conn, exp):
 
 def d_search_deleted(conn, exp):
     i = _gone(exp, "soak_search_s")
-    conn.execute("INSERT INTO soak_search_s_fts (rowid, body) VALUES (?, 'soak gonev0 common')", [i])
+    conn.execute(
+        "INSERT INTO soak_search_s_fts (rowid, body) VALUES (?, 'soak gonev0 common')", [i]
+    )
     return "search_deleted", "soak_search_s_fts", i
 
 
 def d_search_integrity(conn, exp):
-    conn.execute("DELETE FROM soak_search_s_fts_docsize WHERE id = ?", [_live(exp, "soak_search_s")])
+    conn.execute(
+        "DELETE FROM soak_search_s_fts_docsize WHERE id = ?", [_live(exp, "soak_search_s")]
+    )
     return "search_integrity", "soak_search_s_fts", None
 
 
 def d_rollback_left(conn, exp):
     key = _ghost_key(exp, "soak_plain_p")
-    cur = conn.execute("INSERT INTO soak_plain_p (data) VALUES (json_object('owner', 't0', 'key', ?, 'n', 2, 'note', 'ghost'))", [key])
+    cur = conn.execute(
+        "INSERT INTO soak_plain_p (data) VALUES (json_object('owner', 't0', 'key', ?, 'n', 2, 'note', 'ghost'))",
+        [key],
+    )
     return "rollback_left", "soak_plain_p", cur.lastrowid
 
 
 def d_archive_in_both(conn, exp):
     i = sorted(exp.archived)[0]
-    conn.execute("INSERT INTO soak_task (_id, data) SELECT _id, data FROM soak_task_archive WHERE _id = ?", [i])
+    conn.execute(
+        "INSERT INTO soak_task (_id, data) SELECT _id, data FROM soak_task_archive WHERE _id = ?",
+        [i],
+    )
     return "archive", "soak_task", i
 
 
@@ -298,11 +352,17 @@ def test_a_killed_workers_call_in_flight_is_tolerated_and_only_for_that_worker(s
     shutil.copytree(root / "soak-threads", folder)
     conn = sqlite3.connect(folder / "soak.db")
     cur = conn.execute(
-        "INSERT INTO soak_plain_p (data) VALUES ('{\"owner\":\"t0\",\"key\":\"t0x99999\",\"n\":1,\"note\":\"new\"}')"
+        'INSERT INTO soak_plain_p (data) VALUES (\'{"owner":"t0","key":"t0x99999","n":1,"note":"new"}\')'
     )
     conn.commit()
     conn.close()
-    plan = ["put", "soak_plain_p", {"key": "t0x99999"}, {"owner": "t0", "key": "t0x99999", "n": 1, "note": "new"}, 0]
+    plan = [
+        "put",
+        "soak_plain_p",
+        {"key": "t0x99999"},
+        {"owner": "t0", "key": "t0x99999", "n": 1, "note": "new"},
+        0,
+    ]
     _intent(folder, "t0", "new_plain", keys=["t0x99999"], fx=[plan])
     killed = _check(folder, killed=["t0"])
     assert [v.line() for v in killed.violations] == []
@@ -311,7 +371,9 @@ def test_a_killed_workers_call_in_flight_is_tolerated_and_only_for_that_worker(s
     assert alive.names() == {("row_unknown", "soak_plain_p", cur.lastrowid)}
 
 
-def test_a_killed_workers_call_in_flight_covers_the_index_entries_of_the_rows_it_names(soaked, tmp_path):
+def test_a_killed_workers_call_in_flight_covers_the_index_entries_of_the_rows_it_names(
+    soaked, tmp_path
+):
     """A killed worker's last intent deleted a row that has an index entry, with no ``done``
     line: the row and its entry are gone together, which is tolerated for that worker."""
     root, _ = soaked
@@ -323,12 +385,21 @@ def test_a_killed_workers_call_in_flight_covers_the_index_entries_of_the_rows_it
     conn.execute("DELETE FROM soak_search_s WHERE _id = ?", [i])  # the trigger takes the entry
     conn.commit()
     conn.close()
-    _intent(folder, owner, "delete_search", ids=[["soak_search_s", i]], fx=[["del", "soak_search_s", i, 0]])
+    _intent(
+        folder,
+        owner,
+        "delete_search",
+        ids=[["soak_search_s", i]],
+        fx=[["del", "soak_search_s", i, 0]],
+    )
     killed = _check(folder, killed=[owner])
     assert [v.line() for v in killed.violations] == []
     assert killed.tolerated == 1  # one call, wholly stored: the row and its index entry
     alive = _check(folder)
-    assert alive.names() == {("row_missing", "soak_search_s", i), ("search_missing", "soak_search_s_fts", i)}
+    assert alive.names() == {
+        ("row_missing", "soak_search_s", i),
+        ("search_missing", "soak_search_s_fts", i),
+    }
 
 
 def _intent(folder, worker, op, ids=(), keys=(), fx=()):
@@ -368,7 +439,10 @@ def k_txn_commit(folder, exp, state):
     """A transaction saving a plain row and an audited row; half: the audited row is missing."""
     a = {"owner": "t0", "key": "t0x90001", "n": 1, "note": "txn"}
     b = {"owner": "t0", "key": "t0x90002", "n": 1}
-    fx = [["put", "soak_plain_p", {"key": a["key"]}, a, 0], ["put", "soak_audit", {"key": b["key"]}, b, 1]]
+    fx = [
+        ["put", "soak_plain_p", {"key": a["key"]}, a, 0],
+        ["put", "soak_audit", {"key": b["key"]}, b, 1],
+    ]
     _intent(folder, "t0", "txn_commit", keys=[a["key"], b["key"]], fx=fx)
     if state == "none":
         return "t0", set()
@@ -386,10 +460,19 @@ def k_archive(folder, exp, state):
     in its table."""
     owner, i = sorted((doc["owner"], j) for j, doc in exp.live["soak_task"].items())[0]
     doc = exp.live["soak_task"][i]
-    _intent(folder, owner, "archive", ids=[["soak_task", i], ["soak_task_archive", i]], fx=[["arch", "soak_task", "soak_task_archive", i, doc]])
+    _intent(
+        folder,
+        owner,
+        "archive",
+        ids=[["soak_task", i], ["soak_task_archive", i]],
+        fx=[["arch", "soak_task", "soak_task_archive", i, doc]],
+    )
     conn = sqlite3.connect(folder / "soak.db")
     if state != "none":
-        conn.execute("INSERT INTO soak_task_archive (_id, data) SELECT _id, data FROM soak_task WHERE _id = ?", [i])
+        conn.execute(
+            "INSERT INTO soak_task_archive (_id, data) SELECT _id, data FROM soak_task WHERE _id = ?",
+            [i],
+        )
     if state == "all":
         conn.execute("DELETE FROM soak_task WHERE _id = ?", [i])
     conn.commit()
@@ -400,7 +483,13 @@ def k_archive(folder, exp, state):
 def k_new_audit(folder, exp, state):
     """A save of a new audited row; half: the row is saved, its audit row is not."""
     b = {"owner": "t0", "key": "t0x90003", "n": 0}
-    _intent(folder, "t0", "new_audit", keys=[b["key"]], fx=[["put", "soak_audit", {"key": b["key"]}, b, 1]])
+    _intent(
+        folder,
+        "t0",
+        "new_audit",
+        keys=[b["key"]],
+        fx=[["put", "soak_audit", {"key": b["key"]}, b, 1]],
+    )
     if state == "none":
         return "t0", set()
     models, db = _sqler_db(folder)
@@ -418,7 +507,13 @@ def k_new_search_s(folder, exp, state):
     """A save of a new row of the class whose triggers keep its index; half: the row is
     saved, its index entry is not."""
     s = {"owner": "t0", "key": "t0x90004", "n": 0, "body": "soak t0x90004v0 common"}
-    _intent(folder, "t0", "new_search", keys=[s["key"]], fx=[["put", "soak_search_s", {"key": s["key"]}, s, 0]])
+    _intent(
+        folder,
+        "t0",
+        "new_search",
+        keys=[s["key"]],
+        fx=[["put", "soak_search_s", {"key": s["key"]}, s, 0]],
+    )
     if state == "none":
         return "t0", set()
     models, db = _sqler_db(folder)
@@ -429,7 +524,10 @@ def k_new_search_s(folder, exp, state):
         conn.execute("DELETE FROM soak_search_s_fts WHERE rowid = ?", [row._id])
         conn.commit()
         conn.close()
-    return "t0", {("row_unknown", "soak_search_s", row._id), ("search_missing", "soak_search_s_fts", row._id)}
+    return "t0", {
+        ("row_unknown", "soak_search_s", row._id),
+        ("search_missing", "soak_search_s_fts", row._id),
+    }
 
 
 KILLED_CALLS = [k_txn_commit, k_archive, k_new_audit, k_new_search_s]
@@ -463,7 +561,9 @@ def test_two_killed_increments_of_one_counter_pass_only_as_whole_increments(copi
     c = sorted(exp.live["soak_counter"])[0]
     want = exp.incs.get(c, 0)
     for w in ("t0", "t1"):
-        _intent(folder, w, "counter_inc", ids=[["soak_counter", c]], fx=[["inc", "soak_counter", c]])
+        _intent(
+            folder, w, "counter_inc", ids=[["soak_counter", c]], fx=[["inc", "soak_counter", c]]
+        )
     conn = sqlite3.connect(folder / "soak.db")
     for more, ok in [(0, True), (1, True), (2, True), (3, False)]:
         conn.execute(
@@ -485,8 +585,13 @@ from soak_ops import Journal, Stats, Worker, drive_sync, errors_path, read_error
 
 def _summary(stats, kill=True, kills=1):
     args = argparse.Namespace(seed=1, storage="file", minutes=1.0, ops=None, kill=kill)
-    run = SimpleNamespace(totals=lambda: stats, checks=1, kills=kills, reports=[{"violations": 0, "lines": []}])
-    res = {"interrupted": False, "report": {"summary": "", "checked": {}, "rows": 0, "tolerated": 0}}
+    run = SimpleNamespace(
+        totals=lambda: stats, checks=1, kills=kills, reports=[{"violations": 0, "lines": []}]
+    )
+    res = {
+        "interrupted": False,
+        "report": {"summary": "", "checked": {}, "rows": 0, "tolerated": 0},
+    }
     lines = []
     out = SimpleNamespace(write=lines.append, flush=lambda: None)
     code = soak.summarize(args, "/x", {"procs2": (run, res)}, False, out)
@@ -500,14 +605,28 @@ def test_a_worker_puts_each_error_on_disk_before_it_goes_on(tmp_path):
     # read before the journal is closed: the line is on disk already
     got = read_errors(errors_path(journal.path))
     journal.close()
-    assert [(e["worker"], e["error"], e["op"]) for e in got] == [("p0g0w0", "OperationalError locked at once", "new_search")]
+    assert [(e["worker"], e["error"], e["op"]) for e in got] == [
+        ("p0g0w0", "OperationalError locked at once", "new_search")
+    ]
 
 
 def test_a_killed_process_errors_after_its_last_poll_fail_the_run(tmp_path):
     """The parent last polled the process before the error: its polled stats have none. The
     error file has one, and a line the kill cut short: both are counted, and the run fails."""
     with open(tmp_path / "errors-p0g0w0.jsonl", "w", encoding="utf-8") as f:
-        f.write(json.dumps({"worker": "p0g0w0", "seed": 1, "op_no": 7, "op": "new_search", "error": "OperationalError locked at once", "text": "database is locked"}) + "\n")
+        f.write(
+            json.dumps(
+                {
+                    "worker": "p0g0w0",
+                    "seed": 1,
+                    "op_no": 7,
+                    "op": "new_search",
+                    "error": "OperationalError locked at once",
+                    "text": "database is locked",
+                }
+            )
+            + "\n"
+        )
     with open(tmp_path / "errors-p0g0w1.jsonl", "w", encoding="utf-8") as f:
         f.write('{"worker": "p0g0w1", "se')
     polled = {"ops": 40, "conflicts": 0, "expected": {}, "errors": {}, "first": []}
@@ -518,7 +637,9 @@ def test_a_killed_process_errors_after_its_last_poll_fail_the_run(tmp_path):
     total.merge(dead)
     code, lines = _summary(total)
     assert code == 1
-    assert lines[-1].startswith("SOAK FAIL seed=1 storage=file 1 min workloads=procs2 ops=40 conflicts=0 errors=2 ")
+    assert lines[-1].startswith(
+        "SOAK FAIL seed=1 storage=file 1 min workloads=procs2 ops=40 conflicts=0 errors=2 "
+    )
 
 
 def test_a_run_asked_to_kill_that_killed_nothing_fails():
@@ -551,7 +672,11 @@ def test_a_partial_save_that_draws_the_note_the_row_has_is_not_counted_as_a_writ
     journal = Journal(str(folder / "journal-t9.jsonl"))
     w = Worker("t9", 1, models.MODELS, db, journal, Stats(), [])
     w.rng = _SameDraw()
-    for name, op in [("new_safe", w.op_new_safe), ("partial_safe", w.op_partial_safe), ("partial_safe", w.op_partial_safe)]:
+    for name, op in [
+        ("new_safe", w.op_new_safe),
+        ("partial_safe", w.op_partial_safe),
+        ("partial_safe", w.op_partial_safe),
+    ]:
         w.opno += 1
         w.fx = []
         drive_sync(op())
@@ -571,7 +696,9 @@ def test_kill_with_ops_is_refused(capsys):
     with pytest.raises(SystemExit) as stop:
         soak.parse(["--ops", "5", "--seed", "1", "--kill", "--workload", "procs2"])
     assert stop.value.code == 2
-    assert "--kill needs --minutes: the kills are placed in the run's time" in capsys.readouterr().err
+    assert (
+        "--kill needs --minutes: the kills are placed in the run's time" in capsys.readouterr().err
+    )
 
 
 def test_a_lock_waited_out_for_the_whole_timeout_is_counted_and_does_not_fail_the_run():

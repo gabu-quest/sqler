@@ -158,7 +158,9 @@ async def delete_writer(writer_id: int):
             raise HTTPException(status_code=404, detail="Writer not found")
 
         # Check for dependent articles
-        dependent_articles = Article.using(get_db()).filter(F(["writer", "_id"]) == writer_id).count()
+        dependent_articles = (
+            Article.using(get_db()).filter(F(["writer", "_id"]) == writer_id).count()
+        )
         if dependent_articles > 0:
             raise HTTPException(
                 status_code=409,

@@ -257,7 +257,12 @@ class QueryCache:
         self._store(key, value, ttl_seconds, _table_name(table), None)
 
     def _store(
-        self, key: str, value: Any, ttl_seconds: Optional[float], table: Optional[str], generation: Optional[int]
+        self,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[float],
+        table: Optional[str],
+        generation: Optional[int],
     ) -> None:
         """Store ``value``, unless ``table`` is held or was written since ``generation``
         (``None``: not checked)."""
@@ -266,7 +271,8 @@ class QueryCache:
 
         with self._lock:
             if table is not None and (
-                table in _held or (generation is not None and self._generations.get(table, 0) != generation)
+                table in _held
+                or (generation is not None and self._generations.get(table, 0) != generation)
             ):
                 return
             # Evict if at capacity and this is a new key
@@ -558,9 +564,7 @@ def cached_query(
         # Add cache control methods
         wrapper.invalidate = lambda: (  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
             get_cache() if cache is None else cache
-        ).invalidate(
-            key or _make_cache_key(func, (), {})
-        )
+        ).invalidate(key or _make_cache_key(func, (), {}))
         wrapper.cache_key = key  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
 
         return wrapper
@@ -592,9 +596,7 @@ def async_cached_query(
 
         wrapper.invalidate = lambda: (  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
             get_cache() if cache is None else cache
-        ).invalidate(
-            key or _make_cache_key(func, (), {})
-        )
+        ).invalidate(key or _make_cache_key(func, (), {}))
         wrapper.cache_key = key  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
 
         return wrapper
@@ -667,7 +669,9 @@ class CacheAwareModel(WriteRules):
     def _get_cache_table(cls) -> str:
         """The name of this class's cached results besides its table: ``Meta.cache_table``
         where the class sets one, else its table."""
-        return getattr(getattr(cls, "Meta", None), "cache_table", None) or _unchecked_table_name(cls)
+        return getattr(getattr(cls, "Meta", None), "cache_table", None) or _unchecked_table_name(
+            cls
+        )
 
     @classmethod
     def _table_written(cls, db, table: str) -> None:

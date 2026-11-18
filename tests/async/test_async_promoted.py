@@ -152,9 +152,11 @@ class TestAsyncPromotedAggregates:
         await AsyncJob(name="b", status="pending", priority=10).save()
         await AsyncJob(name="c", status="running", priority=10).save()
 
-        count = await AsyncJob.query().filter(
-            (F("status") == "pending") & (F("priority") == 10)
-        ).count()
+        count = (
+            await AsyncJob.query()
+            .filter((F("status") == "pending") & (F("priority") == 10))
+            .count()
+        )
         assert count == 1
 
     async def test_count_with_in_list_promoted(self, async_db_promoted):
@@ -162,9 +164,7 @@ class TestAsyncPromotedAggregates:
         await AsyncJob(name="b", status="running").save()
         await AsyncJob(name="c", status="failed").save()
 
-        count = await AsyncJob.query().filter(
-            F("status").in_list(["pending", "running"])
-        ).count()
+        count = await AsyncJob.query().filter(F("status").in_list(["pending", "running"])).count()
         assert count == 2
 
     async def test_sum_on_promoted_field(self, async_db_promoted):
@@ -221,9 +221,9 @@ class TestAsyncPromotedDelete:
         await AsyncJob(name="b", status="running").save()
         await AsyncJob(name="c", status="failed").save()
 
-        deleted = await AsyncJob.query().filter(
-            F("status").in_list(["pending", "failed"])
-        ).delete_all()
+        deleted = (
+            await AsyncJob.query().filter(F("status").in_list(["pending", "failed"])).delete_all()
+        )
         assert deleted == 2
 
         remaining = await AsyncJob.query().all()
@@ -235,9 +235,11 @@ class TestAsyncPromotedDelete:
         await AsyncJob(name="b", status="pending", priority=10).save()
         await AsyncJob(name="c", status="running", priority=10).save()
 
-        deleted = await AsyncJob.query().filter(
-            (F("status") == "pending") & (F("priority") == 10)
-        ).delete_all()
+        deleted = (
+            await AsyncJob.query()
+            .filter((F("status") == "pending") & (F("priority") == 10))
+            .delete_all()
+        )
         assert deleted == 1
 
         remaining = await AsyncJob.query().all()

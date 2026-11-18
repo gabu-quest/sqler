@@ -170,7 +170,9 @@ class TestAsyncLimitAndOffsetTakeOnlyWholeNumbers:
     @pytest.mark.parametrize("method", ["limit", "offset"])
     @pytest.mark.parametrize("value,error,message", BAD_COUNTS, ids=BAD_IDS)
     @pytest.mark.asyncio
-    async def test_a_model_queryset_refuses_at_the_call(self, scored, method, value, error, message):
+    async def test_a_model_queryset_refuses_at_the_call(
+        self, scored, method, value, error, message
+    ):
         with pytest.raises(error, match=rf"^{method}(\(\) | ){message}$"):
             getattr(_AItem.using(scored), method)(value)
 
@@ -189,11 +191,20 @@ class TestAsyncLimitAndOffsetTakeOnlyWholeNumbers:
             lambda q: q.limit(2.5).delete(),
             lambda q: q.limit(-1).update_n(2, score=0),
         ],
-        ids=["limit-str-delete", "limit-str-update", "offset-str-delete", "limit-float-delete", "limit-negative-update-n"],
+        ids=[
+            "limit-str-delete",
+            "limit-str-update",
+            "offset-str-delete",
+            "limit-float-delete",
+            "limit-negative-update-n",
+        ],
     )
     @pytest.mark.asyncio
     async def test_a_write_is_refused_before_any_row_is_written(self, scored, write):
-        with pytest.raises((TypeError, ValueError), match=r"^(limit|offset)(\(\) takes a whole number| must be >= 0)"):
+        with pytest.raises(
+            (TypeError, ValueError),
+            match=r"^(limit|offset)(\(\) takes a whole number| must be >= 0)",
+        ):
             await write(_AItem.using(scored))
         assert await _scores((await scored.query("items")).order_by("_id")) == [1, 2, 3, 4, 5]
 
@@ -209,7 +220,11 @@ class TestAsyncLimitAndOffsetTakeOnlyWholeNumbers:
     async def test_an_int_like_is_taken_as_its_int(self, scored):
         items = await scored.query("items")
         q = items.limit(Three.THREE).offset(Three.THREE)
-        assert (type(q._limit), type(q._offset), await _scores(items.limit(Three.THREE))) == (int, int, [1, 2, 3])
+        assert (type(q._limit), type(q._offset), await _scores(items.limit(Three.THREE))) == (
+            int,
+            int,
+            [1, 2, 3],
+        )
         assert q.debug() == items.limit(3).offset(3).debug()
 
     @pytest.mark.asyncio
@@ -605,8 +620,10 @@ class TestAsyncModelFieldAndIntegrityNames:
         elif key == "a[0]":
             decoy = {"a": [5]} if position == "last" else {"a": [{"v": 5}]}
         a_decoy = await amfdb.insert_document("addresses", decoy) if decoy is not None else None
-        wrap = (lambda i: [{"_table": "addresses", "_id": i}]) if any_ else (
-            lambda i: {"_table": "addresses", "_id": i}
+        wrap = (
+            (lambda i: [{"_table": "addresses", "_id": i}])
+            if any_
+            else (lambda i: {"_table": "addresses", "_id": i})
         )
         u_hit = await amfdb.insert_document("mfowners", {"addresses": wrap(a_hit)})
         await amfdb.insert_document("mfowners", {"addresses": wrap(a_miss)})
@@ -673,10 +690,16 @@ from sqler.exceptions import InvalidIdentifierError as _InvalidIdentifierError  
 
 _ASYNC_PROMOTED_WRITES = {
     "upsert_document_promoted": lambda d, t, f: d.upsert_document_promoted(t, None, {"s": "a"}, f),
-    "upsert_document_promoted_update": lambda d, t, f: d.upsert_document_promoted(t, 1, {"s": "a"}, f),
+    "upsert_document_promoted_update": lambda d, t, f: d.upsert_document_promoted(
+        t, 1, {"s": "a"}, f
+    ),
     "insert_many_promoted": lambda d, t, f: d.insert_many_promoted(t, [{"s": "a"}], f),
-    "upsert_with_version_promoted": lambda d, t, f: d.upsert_with_version_promoted(t, None, {"s": "a"}, None, f),
-    "upsert_with_version_promoted_update": lambda d, t, f: d.upsert_with_version_promoted(t, 1, {"s": "a"}, 0, f),
+    "upsert_with_version_promoted": lambda d, t, f: d.upsert_with_version_promoted(
+        t, None, {"s": "a"}, None, f
+    ),
+    "upsert_with_version_promoted_update": lambda d, t, f: d.upsert_with_version_promoted(
+        t, 1, {"s": "a"}, 0, f
+    ),
 }
 
 
@@ -708,7 +731,11 @@ class TestAsyncPromotedWriteNames:
         before = await self._state(pdb)
         with pytest.raises(_InvalidTableNameError):
             await _ASYNC_PROMOTED_WRITES[method](pdb, "jobs\n", ["s"])
-        assert await self._state(pdb) == before == [[(1, "first", 0)], [("_sqler_promoted",), ("jobs",), ("sqlite_sequence",)]]
+        assert (
+            await self._state(pdb)
+            == before
+            == [[(1, "first", 0)], [("_sqler_promoted",), ("jobs",), ("sqlite_sequence",)]]
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("method", list(_ASYNC_PROMOTED_WRITES))

@@ -81,7 +81,9 @@ def class_callables(cls: type) -> set[str]:
         for klass in cls.__mro__:
             if name in vars(klass):
                 attr = vars(klass)[name]
-                if isinstance(attr, (classmethod, staticmethod)) and klass.__module__.startswith("sqler"):
+                if isinstance(attr, (classmethod, staticmethod)) and klass.__module__.startswith(
+                    "sqler"
+                ):
                     names.add(name)
                 break
     return names
@@ -120,7 +122,10 @@ def _snapshot(path) -> list:
             "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall()
         tables = [name for kind, name, _ in objects if kind == "table"]
-        return [objects, {t: con.execute(f'SELECT * FROM "{t}" ORDER BY rowid').fetchall() for t in tables}]
+        return [
+            objects,
+            {t: con.execute(f'SELECT * FROM "{t}" ORDER BY rowid').fetchall() for t in tables},
+        ]
 
 
 def _db_path(db) -> str:
@@ -253,7 +258,10 @@ async def r_model_validate(cls, db, table):
 
 
 async def r_get_field_names(cls, db, table):
-    return sorted(cls.get_field_names() - {"deleted_at", "created_at", "updated_at", "created_by", "updated_by"})
+    return sorted(
+        cls.get_field_names()
+        - {"deleted_at", "created_at", "updated_at", "created_by", "updated_by"}
+    )
 
 
 async def r_current_user(cls, db, table):
@@ -338,7 +346,9 @@ def expected_of(name: str, table: str):
 
 
 def is_async(cls: type) -> bool:
-    return any(k.__name__.startswith("Async") for k in cls.__mro__ if k.__module__.startswith("sqler"))
+    return any(
+        k.__name__.startswith("Async") for k in cls.__mro__ if k.__module__.startswith("sqler")
+    )
 
 
 def _bases() -> list[type]:
@@ -406,7 +416,9 @@ def subject_cases(want_async: bool) -> list:
             if not _fits(mixin, base):
                 continue
             for name in sorted(class_callables(mixin)):
-                cases.append(pytest.param(base, mixin, name, id=f"{mixin.__name__}+{base.__name__}.{name}"))
+                cases.append(
+                    pytest.param(base, mixin, name, id=f"{mixin.__name__}+{base.__name__}.{name}")
+                )
     return cases
 
 
@@ -427,14 +439,35 @@ def test_every_class_callable_has_a_way():
 def test_the_subjects_are_every_base_and_mixin():
     assert sorted(c.__name__ for c in _subjects()) == sorted(
         [
-            "SQLerModel", "SQLerSafeModel", "AsyncSQLerModel", "AsyncSQLerSafeModel",
-            "SQLerLiteModel", "SQLerLiteModelBase", "SQLerLiteSafeModel",
-            "AsyncSQLerLiteModel", "AsyncSQLerLiteSafeModel",
-            "SQLerMsgspecModel", "SQLerMsgspecModelBase", "AsyncSQLerMsgspecModel",
-            "TimestampMixin", "SoftDeleteMixin", "AsyncSoftDeleteMixin", "HooksMixin",
-            "AsyncHooksMixin", "FullMixin", "AsyncFullMixin", "AuditMixin", "AsyncAuditMixin",
-            "AuditLogMixin", "AsyncAuditLogMixin", "SearchableMixin", "AsyncSearchableMixin",
-            "TrackedModel", "AsyncTrackedModel", "PartialUpdateMixin", "AsyncPartialUpdateMixin",
+            "SQLerModel",
+            "SQLerSafeModel",
+            "AsyncSQLerModel",
+            "AsyncSQLerSafeModel",
+            "SQLerLiteModel",
+            "SQLerLiteModelBase",
+            "SQLerLiteSafeModel",
+            "AsyncSQLerLiteModel",
+            "AsyncSQLerLiteSafeModel",
+            "SQLerMsgspecModel",
+            "SQLerMsgspecModelBase",
+            "AsyncSQLerMsgspecModel",
+            "TimestampMixin",
+            "SoftDeleteMixin",
+            "AsyncSoftDeleteMixin",
+            "HooksMixin",
+            "AsyncHooksMixin",
+            "FullMixin",
+            "AsyncFullMixin",
+            "AuditMixin",
+            "AsyncAuditMixin",
+            "AuditLogMixin",
+            "AsyncAuditLogMixin",
+            "SearchableMixin",
+            "AsyncSearchableMixin",
+            "TrackedModel",
+            "AsyncTrackedModel",
+            "PartialUpdateMixin",
+            "AsyncPartialUpdateMixin",
             "DiffMixin",
         ]
     )
@@ -453,7 +486,11 @@ POSITIONAL_DB = {"create_search_index"}
 def test_each_db_call_takes_db_keyword_only_defaulting_to_none(name):
     """``db`` is keyword-only and defaults to ``None`` wherever a class has the call (a mixin
     that passes its keywords on, ``**kwargs``, takes it as the call it wraps does)."""
-    kind = inspect.Parameter.POSITIONAL_OR_KEYWORD if name in POSITIONAL_DB else inspect.Parameter.KEYWORD_ONLY
+    kind = (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD
+        if name in POSITIONAL_DB
+        else inspect.Parameter.KEYWORD_ONLY
+    )
     owners = [cls for cls in _subjects() if name in class_callables(cls)]
     assert owners != []
     for cls in owners:
@@ -473,7 +510,10 @@ def _run(coro):
 
 @pytest.fixture
 def two_dbs(tmp_path):
-    made = [SQLerDB.on_disk(str(tmp_path / "given.db")), SQLerDB.on_disk(str(tmp_path / "bound.db"))]
+    made = [
+        SQLerDB.on_disk(str(tmp_path / "given.db")),
+        SQLerDB.on_disk(str(tmp_path / "bound.db")),
+    ]
     yield made
     for db in made:
         db.close()
@@ -538,9 +578,7 @@ def test_the_rule_names_using_for_queries_and_db_for_every_other_call():
     )
 
 
-@pytest.mark.parametrize(
-    "base", [b for b in _bases() if not is_async(b)], ids=lambda b: b.__name__
-)
+@pytest.mark.parametrize("base", [b for b in _bases() if not is_async(b)], ids=lambda b: b.__name__)
 def test_the_set_db_warning_of_every_sync_base_says_the_rule(base, two_dbs):
     cls, _ = make_class(base, None, own_table=True)
     with pytest.warns(DeprecationWarning) as caught:
@@ -625,7 +663,9 @@ def test_a_class_that_made_no_index_searches_the_one_a_database_has(way, two_dbs
         ns["__annotations__"] = {"name": str}
         ns["__tablename__"] = table
 
-    reader = types.new_class(f"{maker.__name__}Reader", (SearchableMixin, sqler.SQLerModel), {}, body)
+    reader = types.new_class(
+        f"{maker.__name__}Reader", (SearchableMixin, sqler.SQLerModel), {}, body
+    )
     assert SEARCHES[way](reader, a) == ONLY_BANANA_OF_A[way]
     assert reader._fts_index is None
 
@@ -748,9 +788,7 @@ class _OwnDB(SQLerDB):
     """A database class of the program's own, on ``SQLerDB``."""
 
 
-@pytest.mark.parametrize(
-    "base", [b for b in _bases() if not is_async(b)], ids=lambda b: b.__name__
-)
+@pytest.mark.parametrize("base", [b for b in _bases() if not is_async(b)], ids=lambda b: b.__name__)
 def test_a_subclass_of_the_sync_database_is_taken_as_the_database_is(base, tmp_path):
     db = _OwnDB.on_disk(str(tmp_path / "own.db"))
     try:
@@ -777,15 +815,27 @@ def _write(tmp_path, name: str, text: str) -> str:
 
 
 IMPORTS = {
-    "import_csv": lambda cls, db, tmp, **kw: import_csv(cls, _write(tmp, "r.csv", "_id,name\n,damson\n"), db=db, **kw),
+    "import_csv": lambda cls, db, tmp, **kw: import_csv(
+        cls, _write(tmp, "r.csv", "_id,name\n,damson\n"), db=db, **kw
+    ),
     "import_csv_batched": lambda cls, db, tmp, **kw: import_csv(
         cls, _write(tmp, "r.csv", "_id,name\n,damson\n"), batch_size=10, db=db, **kw
     ),
-    "import_json": lambda cls, db, tmp, **kw: import_json(cls, _write(tmp, "r.json", '[{"name": "damson"}]'), db=db, **kw),
-    "import_jsonl": lambda cls, db, tmp, **kw: import_jsonl(cls, _write(tmp, "r.jsonl", '{"name": "damson"}\n'), db=db, **kw),
-    "import_csv_string": lambda cls, db, tmp, **kw: import_csv_string(cls, "_id,name\n,damson\n", db=db, **kw),
-    "import_json_string": lambda cls, db, tmp, **kw: import_json_string(cls, '[{"name": "damson"}]', db=db, **kw),
-    "import_jsonl_string": lambda cls, db, tmp, **kw: import_jsonl_string(cls, '{"name": "damson"}', db=db, **kw),
+    "import_json": lambda cls, db, tmp, **kw: import_json(
+        cls, _write(tmp, "r.json", '[{"name": "damson"}]'), db=db, **kw
+    ),
+    "import_jsonl": lambda cls, db, tmp, **kw: import_jsonl(
+        cls, _write(tmp, "r.jsonl", '{"name": "damson"}\n'), db=db, **kw
+    ),
+    "import_csv_string": lambda cls, db, tmp, **kw: import_csv_string(
+        cls, "_id,name\n,damson\n", db=db, **kw
+    ),
+    "import_json_string": lambda cls, db, tmp, **kw: import_json_string(
+        cls, '[{"name": "damson"}]', db=db, **kw
+    ),
+    "import_jsonl_string": lambda cls, db, tmp, **kw: import_jsonl_string(
+        cls, '{"name": "damson"}', db=db, **kw
+    ),
 }
 
 
@@ -797,13 +847,14 @@ def _import_cases() -> list:
         pytest.param(way, base, id=f"{way}-{base.__name__}")
         for way in sorted(IMPORTS)
         for base in _bases()
-        if not is_async(base)
-        and ("csv" not in way or issubclass(base, sqler.SQLerModel))
+        if not is_async(base) and ("csv" not in way or issubclass(base, sqler.SQLerModel))
     ]
 
 
 @pytest.mark.parametrize(("way", "base"), _import_cases())
-def test_an_import_given_db_writes_there_and_not_to_the_bound_database(way, base, two_dbs, tmp_path):
+def test_an_import_given_db_writes_there_and_not_to_the_bound_database(
+    way, base, two_dbs, tmp_path
+):
     db, bound = two_dbs
     cls, _ = make_class(base, None, own_table=True)
     with warnings.catch_warnings():

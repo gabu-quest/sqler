@@ -13,6 +13,7 @@ import sqlite3
 # PRAGMA helpers — exact copies of sqler's adapter PRAGMAs
 # ---------------------------------------------------------------------------
 
+
 def apply_in_memory_pragmas(conn: sqlite3.Connection) -> None:
     """Apply sqler's in-memory PRAGMAs to a raw sqlite3 connection.
 
@@ -67,6 +68,7 @@ def apply_on_disk_pragmas(conn: sqlite3.Connection) -> None:
 # Connection factory
 # ---------------------------------------------------------------------------
 
+
 def create_conn(path: str = ":memory:", storage: str = "memory") -> sqlite3.Connection:
     """Create a baseline connection with matched PRAGMAs and row_factory.
 
@@ -90,6 +92,7 @@ def create_conn(path: str = ":memory:", storage: str = "memory") -> sqlite3.Conn
 # Result helpers
 # ---------------------------------------------------------------------------
 
+
 def fetch_as_strings(cursor) -> list[str]:
     """Fetch all rows as raw JSON strings, matching sqler's .all() behavior.
 
@@ -112,6 +115,7 @@ def fetch_as_dicts(cursor) -> list[dict]:
 # ---------------------------------------------------------------------------
 # DDL + DML
 # ---------------------------------------------------------------------------
+
 
 def create_table(conn: sqlite3.Connection, table: str) -> None:
     """Create table with same schema sqler uses internally."""
@@ -146,14 +150,12 @@ def insert_loop(conn: sqlite3.Connection, table: str, docs: list[dict]) -> None:
 # Query operations
 # ---------------------------------------------------------------------------
 
+
 def query_filter(
     conn: sqlite3.Connection, table: str, field: str, op: str, value: object
 ) -> list[str]:
     """SELECT data WHERE json_extract(data, '$.field') op ?"""
-    sql = (
-        f"SELECT data FROM [{table}] "
-        f"WHERE json_extract(data, '$.{field}') {op} ?"
-    )
+    sql = f"SELECT data FROM [{table}] WHERE json_extract(data, '$.{field}') {op} ?"
     return fetch_as_strings(conn.execute(sql, (value,)))
 
 
@@ -169,14 +171,9 @@ def query_range(
     return fetch_as_strings(conn.execute(sql, (lo, hi)))
 
 
-def query_top_n(
-    conn: sqlite3.Connection, table: str, field: str, n: int
-) -> list[str]:
+def query_top_n(conn: sqlite3.Connection, table: str, field: str, n: int) -> list[str]:
     """ORDER BY json_extract + LIMIT."""
-    sql = (
-        f"SELECT data FROM [{table}] "
-        f"ORDER BY json_extract(data, '$.{field}') LIMIT ?"
-    )
+    sql = f"SELECT data FROM [{table}] ORDER BY json_extract(data, '$.{field}') LIMIT ?"
     return fetch_as_strings(conn.execute(sql, (n,)))
 
 
@@ -185,38 +182,23 @@ def query_paginate(
 ) -> list[str]:
     """ORDER BY + LIMIT + OFFSET pagination."""
     offset = (page - 1) * per_page
-    sql = (
-        f"SELECT data FROM [{table}] "
-        f"ORDER BY json_extract(data, '$.{field}') LIMIT ? OFFSET ?"
-    )
+    sql = f"SELECT data FROM [{table}] ORDER BY json_extract(data, '$.{field}') LIMIT ? OFFSET ?"
     return fetch_as_strings(conn.execute(sql, (per_page, offset)))
 
 
-def count_filter(
-    conn: sqlite3.Connection, table: str, field: str, op: str, value: object
-) -> int:
+def count_filter(conn: sqlite3.Connection, table: str, field: str, op: str, value: object) -> int:
     """SELECT COUNT(*) with json_extract filter."""
-    sql = (
-        f"SELECT COUNT(*) FROM [{table}] "
-        f"WHERE json_extract(data, '$.{field}') {op} ?"
-    )
+    sql = f"SELECT COUNT(*) FROM [{table}] WHERE json_extract(data, '$.{field}') {op} ?"
     return conn.execute(sql, (value,)).fetchone()[0]
 
 
-def exists_filter(
-    conn: sqlite3.Connection, table: str, field: str, op: str, value: object
-) -> bool:
+def exists_filter(conn: sqlite3.Connection, table: str, field: str, op: str, value: object) -> bool:
     """SELECT EXISTS(...) with json_extract filter."""
-    sql = (
-        f"SELECT EXISTS(SELECT 1 FROM [{table}] "
-        f"WHERE json_extract(data, '$.{field}') {op} ?)"
-    )
+    sql = f"SELECT EXISTS(SELECT 1 FROM [{table}] WHERE json_extract(data, '$.{field}') {op} ?)"
     return bool(conn.execute(sql, (value,)).fetchone()[0])
 
 
-def aggregate(
-    conn: sqlite3.Connection, table: str, agg_fn: str, field: str
-) -> float:
+def aggregate(conn: sqlite3.Connection, table: str, agg_fn: str, field: str) -> float:
     """SELECT AGG(json_extract(data, '$.field'))."""
     sql = f"SELECT {agg_fn}(json_extract(data, '$.{field}')) FROM [{table}]"
     result = conn.execute(sql).fetchone()[0]
@@ -227,8 +209,7 @@ def create_index(conn: sqlite3.Connection, table: str, field: str) -> None:
     """CREATE INDEX on json_extract expression."""
     idx_name = f"idx_{table}_{field}"
     conn.execute(
-        f"CREATE INDEX IF NOT EXISTS [{idx_name}] ON [{table}] "
-        f"(json_extract(data, '$.{field}'))"
+        f"CREATE INDEX IF NOT EXISTS [{idx_name}] ON [{table}] (json_extract(data, '$.{field}'))"
     )
     conn.commit()
 
@@ -241,6 +222,7 @@ def create_index(conn: sqlite3.Connection, table: str, field: str) -> None:
 # sqler generates json_each(data, '$.field') which is a direct path
 # traversal — faster and correct. Now both arms use the same SQL.
 # ---------------------------------------------------------------------------
+
 
 def any_where_eq(
     conn: sqlite3.Connection,
@@ -290,9 +272,7 @@ def array_contains(
     return fetch_as_strings(conn.execute(sql, (value,)))
 
 
-def array_isin(
-    conn: sqlite3.Connection, table: str, array_field: str, values: list
-) -> list[str]:
+def array_isin(conn: sqlite3.Connection, table: str, array_field: str, values: list) -> list[str]:
     """EXISTS + json_each + IN(...) for multi-value membership.
 
     v1.2: uses json_each(data, '$.field') — direct path, matches sqler's SQL.
@@ -310,10 +290,7 @@ def query_nested(
     conn: sqlite3.Connection, table: str, json_path: str, op: str, value: object
 ) -> list[str]:
     """Query nested JSON path like '$.level_0.level_1.target'."""
-    sql = (
-        f"SELECT data FROM [{table}] "
-        f"WHERE json_extract(data, '{json_path}') {op} ?"
-    )
+    sql = f"SELECT data FROM [{table}] WHERE json_extract(data, '{json_path}') {op} ?"
     return fetch_as_strings(conn.execute(sql, (value,)))
 
 
@@ -321,8 +298,10 @@ def query_nested(
 # Complex filter queries (for S7 ComplexFilterChains)
 # ---------------------------------------------------------------------------
 
-def query_complex_filter(conn: sqlite3.Connection, table: str,
-                         sql_where: str, params: tuple) -> list[str]:
+
+def query_complex_filter(
+    conn: sqlite3.Connection, table: str, sql_where: str, params: tuple
+) -> list[str]:
     """Execute a complex filter query and return raw JSON strings.
 
     Matches sqler's db.query().all() which returns list[str].
@@ -334,6 +313,7 @@ def query_complex_filter(conn: sqlite3.Connection, table: str,
 # ---------------------------------------------------------------------------
 # FTS5 baseline
 # ---------------------------------------------------------------------------
+
 
 class SQLiteFTSBaseline:
     """Raw FTS5 operations for baseline comparison.
@@ -381,9 +361,7 @@ class SQLiteFTSBaseline:
         comparison.
         """
         self.conn.execute(f"DELETE FROM [{self.fts_table}]")
-        extract_cols = ", ".join(
-            f"json_extract(data, '$.{f}')" for f in self.fields
-        )
+        extract_cols = ", ".join(f"json_extract(data, '$.{f}')" for f in self.fields)
         cols = ", ".join(self.fields)
         self.conn.execute(
             f"INSERT INTO [{self.fts_table}](rowid, {cols}) "
@@ -401,10 +379,7 @@ class SQLiteFTSBaseline:
 
         v1.2: Returned raw tuples from FTS table only (no source lookup).
         """
-        sql = (
-            f"SELECT rowid FROM [{self.fts_table}] "
-            f"WHERE [{self.fts_table}] MATCH ? LIMIT ?"
-        )
+        sql = f"SELECT rowid FROM [{self.fts_table}] WHERE [{self.fts_table}] MATCH ? LIMIT ?"
         rows = self.conn.execute(sql, (query, limit)).fetchall()
         if not rows:
             return []
@@ -414,9 +389,7 @@ class SQLiteFTSBaseline:
             f"SELECT _id, data FROM [{self.table}] WHERE _id IN ({placeholders})",
             ids,
         ).fetchall()
-        return [
-            {**json.loads(row[1]), "_id": row[0]} for row in doc_rows
-        ]
+        return [{**json.loads(row[1]), "_id": row[0]} for row in doc_rows]
 
     def search_ranked(self, query: str, limit: int = 20) -> list[dict]:
         """FTS5 search with BM25 ranking — matched to sqler's search_ranked() work.
@@ -453,8 +426,7 @@ class SQLiteFTSBaseline:
         v1.1: Missing — sqler highlights had no baseline comparison (M-9).
         """
         highlight_exprs = ", ".join(
-            f"highlight([{self.fts_table}], {i}, '<b>', '</b>')"
-            for i in range(len(self.fields))
+            f"highlight([{self.fts_table}], {i}, '<b>', '</b>')" for i in range(len(self.fields))
         )
         sql = (
             f"SELECT rowid, {highlight_exprs} FROM [{self.fts_table}] "

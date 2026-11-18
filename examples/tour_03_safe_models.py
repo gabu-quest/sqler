@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -289,7 +290,6 @@ def _(RebaseConfig, SQLerSafeModel, StaleVersionError, db):
         # Only allow rebasing 'overdraft_count' with small deltas
         _rebase_config = RebaseConfig(allowed_fields={"overdraft_count"}, max_delta=5)
 
-
     # Create account
     acct = BankAccount(owner="Dana", balance=1000, overdraft_count=0).save(db=db)
 
@@ -339,7 +339,6 @@ def _(SQLerSafeModel, StaleVersionError, db):
 
         # No rebasing - all conflicts raise errors
         _rebase_config = NO_REBASE_CONFIG
-
 
     record = StrictRecord(data="original", revision=1).save(db=db)
 

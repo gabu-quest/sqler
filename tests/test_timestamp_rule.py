@@ -152,6 +152,7 @@ def db():
     """Create an in-memory database for testing."""
     return SQLerDB.in_memory()
 
+
 class TestTimestampMixin:
     """Tests for TimestampMixin functionality."""
 

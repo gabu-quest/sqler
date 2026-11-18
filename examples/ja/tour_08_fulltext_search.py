@@ -69,7 +69,6 @@ def _(SQLerModel, db):
         content: str
         author: str
 
-
     # サンプル記事を作成
     _articles = [
         ("Python 入門", "Python プログラミングの基礎。変数、ループ、関数。", "Alice"),
@@ -274,9 +273,7 @@ def _(mo):
 @app.cell
 def _(fts):
     # ハイライト付き検索 - highlights 辞書付きの SearchResult を返す
-    _highlighted = fts.search_with_highlights(
-        "python", highlight_start="**", highlight_end="**"
-    )
+    _highlighted = fts.search_with_highlights("python", highlight_start="**", highlight_end="**")
 
     print("ハイライト付き結果：")
     for _r in _highlighted:
@@ -335,7 +332,6 @@ def _(SQLerModel, db):
 
         class FTS:
             fields = ["title", "body"]
-
 
     # 検索インデックスを作成
     BlogPost.create_search_index(db=db)

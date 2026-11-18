@@ -69,7 +69,9 @@ async def _afetch_all(adapter: Any, sql: str, params: list, send: Any = None) ->
         await cur.close()
 
 
-async def _aselect_rows(adapter: Any, table: str, columns: tuple[str, ...], ids: list) -> Optional[list]:
+async def _aselect_rows(
+    adapter: Any, table: str, columns: tuple[str, ...], ids: list
+) -> Optional[list]:
     """Async twin of :func:`sqler.db._rows._select_rows`."""
     n, params = _id_params(ids)
     sql = _rows_sql(table, columns, n)
@@ -111,7 +113,9 @@ class AsyncSQLerDB(_TableMemory):
         timeout_ms: int = 5000,
     ) -> "AsyncSQLerDB":
         """Database file at ``path``; ``acquire_timeout`` and ``timeout_ms`` are the two waits of ``AsyncSQLiteAdapter``."""
-        adapter = AsyncSQLiteAdapter.on_disk(path, acquire_timeout=acquire_timeout, timeout_ms=timeout_ms)
+        adapter = AsyncSQLiteAdapter.on_disk(
+            path, acquire_timeout=acquire_timeout, timeout_ms=timeout_ms
+        )
         return cls(adapter)
 
     def __init__(self, adapter: AsyncSQLiteAdapter):
@@ -123,9 +127,7 @@ class AsyncSQLerDB(_TableMemory):
         self._looks: dict[str, asyncio.Lock] = {}
         # what each open level of this object's own transactions learned, innermost last;
         # per task, like the adapter's depth (a task started inside a level shares it)
-        self._open: ContextVar[tuple[_Level, ...]] = ContextVar(
-            "sqler_open_levels", default=()
-        )
+        self._open: ContextVar[tuple[_Level, ...]] = ContextVar("sqler_open_levels", default=())
 
     def _levels(self) -> tuple[_Level, ...]:
         return self._open.get()
@@ -162,7 +164,9 @@ class AsyncSQLerDB(_TableMemory):
         if versioned:
             await self._ensure_versioned_table(table)
 
-    async def _copy_target(self, source: str, target: str, checks: Optional[dict[str, str]] = None) -> bool:
+    async def _copy_target(
+        self, source: str, target: str, checks: Optional[dict[str, str]] = None
+    ) -> bool:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._copy_target`."""
         layout = await self._run(_copy_layout(source, target))
         if layout is None:
@@ -290,7 +294,9 @@ class AsyncSQLerDB(_TableMemory):
         if names is None:
             return False  # SQLite refused it for itself
         shared = not self._levels() and self._adapter_depth() == 0
-        async with self._looks.setdefault(table, asyncio.Lock()) if shared else contextlib.nullcontext():
+        async with (
+            self._looks.setdefault(table, asyncio.Lock()) if shared else contextlib.nullcontext()
+        ):
             now = self._layout_of(table)
             if now is None or now == names:
                 try:
@@ -321,11 +327,15 @@ class AsyncSQLerDB(_TableMemory):
         except StopIteration as done:
             return done.value
 
-    async def _memory_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]]]:
+    async def _memory_of(
+        self, table: str, fields: Any = ()
+    ) -> tuple[list[str], Optional[tuple[str, ...]]]:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._memory_of`."""
         return (await self._shape_of(table, fields))[:2]
 
-    async def _shape_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]], bool]:
+    async def _shape_of(
+        self, table: str, fields: Any = ()
+    ) -> tuple[list[str], Optional[tuple[str, ...]], bool]:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._shape_of`."""
         known = self._known(table)
         if known is None or known[1] is None:
@@ -366,7 +376,9 @@ class AsyncSQLerDB(_TableMemory):
         """Insert or update, splitting promoted fields into real columns (async)."""
         return await self._upsert(validate_table_name(table), _id, doc, promoted_fields)
 
-    async def _upsert(self, table: str, _id: Optional[int], doc: dict[str, Any], fields: Any = ()) -> int:
+    async def _upsert(
+        self, table: str, _id: Optional[int], doc: dict[str, Any], fields: Any = ()
+    ) -> int:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._upsert`."""
 
         async def make() -> tuple[str, list[Any], Any]:
@@ -401,7 +413,9 @@ class AsyncSQLerDB(_TableMemory):
         promoted_fields: list[str],
     ) -> tuple[int, int]:
         """Insert or update with optimistic locking, splitting promoted columns (async)."""
-        return await self._upsert_versioned(validate_table_name(table), _id, doc, expected_version, promoted_fields)
+        return await self._upsert_versioned(
+            validate_table_name(table), _id, doc, expected_version, promoted_fields
+        )
 
     async def _upsert_versioned(
         self,
@@ -428,7 +442,9 @@ class AsyncSQLerDB(_TableMemory):
         except sqlite3.OperationalError as exc:
             if _id is None or not is_missing_table(exc, table):
                 raise
-            _refuse_unwritten(False, table, _id)  # a row at another version, as with the table there
+            _refuse_unwritten(
+                False, table, _id
+            )  # a row at another version, as with the table there
         if _id is None:
             try:
                 await self.adapter.auto_commit()
@@ -467,7 +483,11 @@ class AsyncSQLerDB(_TableMemory):
         table = validate_table_name(table)
 
         async def make() -> Optional[tuple[str, list[Any], Any]]:
-            if expected_version is not None and not self._is_versioned(table) and await self._has_version_column(table) is not None:
+            if (
+                expected_version is not None
+                and not self._is_versioned(table)
+                and await self._has_version_column(table) is not None
+            ):
                 await self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
             columns, layout, has = await self._shape_of(table, promoted)
             return _fields_update(table, _id, doc, fields, columns, expected_version, layout, has)
@@ -514,7 +534,9 @@ class AsyncSQLerDB(_TableMemory):
         rows, columns = await self._read_rows(table, ids)
         return _row_documents(_in_order(rows or [], ids), columns)
 
-    async def _read_rows(self, table: str, ids: list, *, versioned: bool = False) -> tuple[Optional[list], tuple[str, ...]]:
+    async def _read_rows(
+        self, table: str, ids: list, *, versioned: bool = False
+    ) -> tuple[Optional[list], tuple[str, ...]]:
         """Async twin of :meth:`sqler.db.sqler_db.SQLerDB._read_rows`."""
         table = validate_table_name(table)
         n, params = _id_params(ids)
@@ -624,7 +646,9 @@ class AsyncSQLerDB(_TableMemory):
         if not docs:
             return []
         table = validate_table_name(table)
-        await self._columns_of(table)  # an unsettled table is refused before it is given ``_version``
+        await self._columns_of(
+            table
+        )  # an unsettled table is refused before it is given ``_version``
         await self._ensure_versioned_table(table)
         ids = await self._insert_many_chunked(table, docs)
         return [(id_, 0) for id_ in ids]
@@ -828,7 +852,9 @@ class AsyncSQLerDB(_TableMemory):
         """Return an AsyncSQLerQuery that reads ``table`` through this DB, as a model's query set does."""
         from sqler.query.async_query import AsyncSQLerQuery
 
-        return AsyncSQLerQuery(table=validate_table_name(table), adapter=self.adapter)._clone(db=self)
+        return AsyncSQLerQuery(table=validate_table_name(table), adapter=self.adapter)._clone(
+            db=self
+        )
 
     def transaction(self) -> "AsyncTransaction":
         """Return a context manager for explicit transactions.

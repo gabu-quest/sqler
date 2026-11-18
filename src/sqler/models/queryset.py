@@ -258,7 +258,9 @@ class SQLerQuerySet(Generic[T]):
         """
         if not _write_rules.set_delete(self._model_cls, self._query._table, on_delete):
             return self._told(self._checked().delete())
-        return len(self._written("rows", lambda q: [(doc, None) for doc in q._deleted()], on_delete))
+        return len(
+            self._written("rows", lambda q: [(doc, None) for doc in q._deleted()], on_delete)
+        )
 
     def delete(self, on_delete: str = "restrict") -> int:
         """Delete the rows :meth:`all` would return: :meth:`delete_all`, with the same
@@ -297,7 +299,9 @@ class SQLerQuerySet(Generic[T]):
         _write_rules.refuse_self_copy(self._model_cls, self._query._table)
         db = self._db
         if db is None:
-            raise RuntimeError(f"{self._model_cls.__name__}: copy_to() needs the queryset's database")
+            raise RuntimeError(
+                f"{self._model_cls.__name__}: copy_to() needs the queryset's database"
+            )
         source = self._query._table
         with db.transaction():
             if not db._copy_target(source, target, getattr(self._model_cls, "__checks__", None)):

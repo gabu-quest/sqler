@@ -30,13 +30,15 @@ def setup_db():
 
 
 def seed_items():
-    Item.save_many([
-        Item(name="A", category="x", price=10.0),
-        Item(name="B", category="x", price=20.0),
-        Item(name="C", category="y", price=30.0),
-        Item(name="D", category="y", price=40.0),
-        Item(name="E", category="z", price=50.0),
-    ])
+    Item.save_many(
+        [
+            Item(name="A", category="x", price=10.0),
+            Item(name="B", category="x", price=20.0),
+            Item(name="C", category="y", price=30.0),
+            Item(name="D", category="y", price=40.0),
+            Item(name="E", category="z", price=50.0),
+        ]
+    )
 
 
 class TestIterDicts:
@@ -288,7 +290,9 @@ class Stepped:
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("unit", ["no transaction", "transaction"])
 @pytest.mark.parametrize("way", [*BASES, "raw cursor"])
-def test_a_loop_that_writes_each_row_gets_each_row_once_as_its_statement_saw_it(way, unit, kind, tmp_path):
+def test_a_loop_that_writes_each_row_gets_each_row_once_as_its_statement_saw_it(
+    way, unit, kind, tmp_path
+):
     db = _database(kind, tmp_path)
     try:
         seen = []
@@ -301,7 +305,9 @@ def test_a_loop_that_writes_each_row_gets_each_row_once_as_its_statement_saw_it(
                         break
                     adapter.execute("UPDATE t SET n = n + ? WHERE id = ?", [ROWS, row[0]])
                     adapter.auto_commit()
-            stored = [tuple(r) for r in adapter.execute("SELECT id, n FROM t ORDER BY id").fetchall()]
+            stored = [
+                tuple(r) for r in adapter.execute("SELECT id, n FROM t ORDER BY id").fetchall()
+            ]
         else:
             cls = _declare(BASES[way])
             cls.save_many([cls(n=i) for i in range(ROWS)], db=db)
@@ -316,10 +322,15 @@ def test_a_loop_that_writes_each_row_gets_each_row_once_as_its_statement_saw_it(
             stored = sorted((m._id, m.n) for m in cls.using(db).all())
     finally:
         db.close()
-    assert (seen, stored) == ([(i, i - 1) for i in range(1, ROWS + 1)], [(i, i - 1 + ROWS) for i in range(1, ROWS + 1)])
+    assert (seen, stored) == (
+        [(i, i - 1) for i in range(1, ROWS + 1)],
+        [(i, i - 1 + ROWS) for i in range(1, ROWS + 1)],
+    )
 
 
-def test_two_cursors_of_one_connection_read_in_turn_with_a_write_between_give_their_statements_rows(tmp_path):
+def test_two_cursors_of_one_connection_read_in_turn_with_a_write_between_give_their_statements_rows(
+    tmp_path,
+):
     db = _database("file", tmp_path)
     try:
         adapter = _table(db)
@@ -334,7 +345,11 @@ def test_two_cursors_of_one_connection_read_in_turn_with_a_write_between_give_th
         after = (up.fetchone(), down.fetchone())
     finally:
         db.close()
-    assert (got_up, got_down, after) == (list(range(ROWS)), list(range(ROWS - 1, -1, -1)), (None, None))
+    assert (got_up, got_down, after) == (
+        list(range(ROWS)),
+        list(range(ROWS - 1, -1, -1)),
+        (None, None),
+    )
 
 
 @pytest.mark.parametrize("read", ["lazily", "ahead"])
@@ -348,7 +363,9 @@ def test_a_cursor_closed_inside_its_own_loop_gives_no_row_after_the_close(read, 
             for row in cursor:
                 given.append(row[0])
                 if read == "ahead":
-                    adapter.execute("SELECT 1").fetchall()  # a statement on the connection: the rest is read ahead
+                    adapter.execute(
+                        "SELECT 1"
+                    ).fetchall()  # a statement on the connection: the rest is read ahead
                 cursor.close()
         failures = [str(in_loop.value)]
         for fetch in (cursor.fetchone, cursor.fetchall, cursor.fetchmany):
@@ -377,7 +394,9 @@ def _bad_row(qs, kept):
 
 
 @pytest.mark.parametrize("ending", [_raised, _bad_row], ids=lambda f: f.__name__.strip("_"))
-def test_a_write_after_a_loop_left_part_read_goes_through_after_another_connections_commit(ending, tmp_path):
+def test_a_write_after_a_loop_left_part_read_goes_through_after_another_connections_commit(
+    ending, tmp_path
+):
     db = _database("file", tmp_path)
     other = sqlite3.connect(db.adapter.path)
     try:
@@ -398,7 +417,9 @@ def test_a_write_after_a_loop_left_part_read_goes_through_after_another_connecti
 
 
 @pytest.mark.parametrize("kind", ["file", "memory"])
-def test_a_write_that_fails_inside_the_loop_leaves_the_rest_as_the_statement_saw_them(kind, tmp_path):
+def test_a_write_that_fails_inside_the_loop_leaves_the_rest_as_the_statement_saw_them(
+    kind, tmp_path
+):
     db = _database(kind, tmp_path)
     try:
         adapter = _table(db)
@@ -409,7 +430,9 @@ def test_a_write_that_fails_inside_the_loop_leaves_the_rest_as_the_statement_saw
             given.append(row[1])
             adapter.execute("UPDATE t SET n = n + ? WHERE id = ?", [ROWS, row[0]])
             try:
-                adapter.execute("INSERT INTO t (n) VALUES (?)", [row[1] + ROWS])  # taken by the update
+                adapter.execute(
+                    "INSERT INTO t (n) VALUES (?)", [row[1] + ROWS]
+                )  # taken by the update
             except sqlite3.IntegrityError:
                 failed += 1
             adapter.auto_commit()
@@ -436,7 +459,9 @@ def test_a_loop_that_sends_nothing_reads_its_rows_as_it_gives_them(tmp_path):
     assert (first, handed_out, rest) == (0, 2, 199_999)
 
 
-def test_a_thread_reading_while_another_thread_writes_on_its_own_connection_gets_its_statements_rows(tmp_path):
+def test_a_thread_reading_while_another_thread_writes_on_its_own_connection_gets_its_statements_rows(
+    tmp_path,
+):
     db = _database("file", tmp_path)
     try:
         adapter = _table(db)
@@ -465,14 +490,18 @@ def test_a_thread_reading_while_another_thread_writes_on_its_own_connection_gets
     assert got == {"stepped before the rest": 2, "rows": list(range(ROWS))}
 
 
-def test_a_statement_that_fails_while_its_rows_are_read_ahead_raises_at_the_read_that_runs_out(tmp_path):
+def test_a_statement_that_fails_while_its_rows_are_read_ahead_raises_at_the_read_that_runs_out(
+    tmp_path,
+):
     db = _database("file", tmp_path)
     try:
         adapter = _table(db)
         adapter._conn().create_function("stepped", 1, Stepped(fail_at=10))
         cursor = adapter.execute("SELECT stepped(n) FROM t ORDER BY n")
         given = [next(cursor)[0]]
-        adapter.execute("UPDATE t SET n = n + ?", [ROWS])  # the rest of the cursor is read before it
+        adapter.execute(
+            "UPDATE t SET n = n + ?", [ROWS]
+        )  # the rest of the cursor is read before it
         adapter.commit()
         with pytest.raises(sqlite3.OperationalError) as raised:
             for row in cursor:
@@ -480,17 +509,24 @@ def test_a_statement_that_fails_while_its_rows_are_read_ahead_raises_at_the_read
     finally:
         db.close()
     # read lazily, sqlite3 drops the row it gives as the step after it fails: 9 is not given either
-    assert (given, "user-defined function raised exception" in str(raised.value)) == (list(range(9)), True)
+    assert (given, "user-defined function raised exception" in str(raised.value)) == (
+        list(range(9)),
+        True,
+    )
 
 
 # --- a rollback reads nothing on -------------------------------------------------------------
 
-ROLLED_BACK_UNREAD = "the transaction was rolled back before the rest of this cursor's rows were read"
+ROLLED_BACK_UNREAD = (
+    "the transaction was rolled back before the rest of this cursor's rows were read"
+)
 
 
 @pytest.mark.parametrize("kind", ["file", "shared-cache memory"])
 @pytest.mark.parametrize("unit", ["transaction", "savepoint"])
-def test_a_rollback_reads_none_of_the_rows_a_cursor_has_left_and_its_next_read_says_so(unit, kind, tmp_path):
+def test_a_rollback_reads_none_of_the_rows_a_cursor_has_left_and_its_next_read_says_so(
+    unit, kind, tmp_path
+):
     db = _database(kind, tmp_path)
     try:
         adapter = _table(db)
@@ -519,7 +555,9 @@ def test_a_cursor_read_ahead_before_the_rollback_keeps_the_rows_its_statement_sa
             with db.transaction():
                 cursor = adapter.execute("SELECT n FROM t ORDER BY n")
                 first = next(cursor)[0]
-                adapter.execute("UPDATE t SET n = n + ?", [ROWS])  # the rest of the cursor is read before it
+                adapter.execute(
+                    "UPDATE t SET n = n + ?", [ROWS]
+                )  # the rest of the cursor is read before it
                 raise LookupError
         rest = [row[0] for row in cursor]
         stored = [r[0] for r in adapter.execute("SELECT n FROM t ORDER BY n").fetchall()]
@@ -528,7 +566,9 @@ def test_a_cursor_read_ahead_before_the_rollback_keeps_the_rows_its_statement_sa
     assert (first, rest, stored) == (0, list(range(1, ROWS)), list(range(ROWS)))
 
 
-def test_a_write_after_a_rollback_that_left_a_cursor_part_read_goes_through_after_another_connections_commit(tmp_path):
+def test_a_write_after_a_rollback_that_left_a_cursor_part_read_goes_through_after_another_connections_commit(
+    tmp_path,
+):
     db = _database("file", tmp_path)
     other = sqlite3.connect(db.adapter.path, timeout=0)
     try:
@@ -551,11 +591,15 @@ def test_a_write_after_a_rollback_that_left_a_cursor_part_read_goes_through_afte
 
 # --- what a cursor the adapter returned is not for; a reading ahead that is cut short -----------
 
-ONE_STATEMENT = "a cursor the adapter returned runs no other statement; send it with the adapter's execute()"
+ONE_STATEMENT = (
+    "a cursor the adapter returned runs no other statement; send it with the adapter's execute()"
+)
 
 
 @pytest.mark.parametrize("state", ["read lazily", "read ahead"])
-def test_a_cursor_the_adapter_returned_sends_no_statement_of_its_own_and_keeps_its_rows(state, tmp_path):
+def test_a_cursor_the_adapter_returned_sends_no_statement_of_its_own_and_keeps_its_rows(
+    state, tmp_path
+):
     db = _database("file", tmp_path)
     try:
         adapter = _table(db)
@@ -579,7 +623,9 @@ def test_a_cursor_the_adapter_returned_sends_no_statement_of_its_own_and_keeps_i
 
 
 @needs_libc_raise
-def test_an_interrupt_while_the_rest_is_read_ahead_is_raised_and_the_cursor_says_its_rows_stop(tmp_path):
+def test_an_interrupt_while_the_rest_is_read_ahead_is_raised_and_the_cursor_says_its_rows_stop(
+    tmp_path,
+):
     if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
         pytest.skip("this process does not turn SIGINT into KeyboardInterrupt")
     db = _database("file", tmp_path)
@@ -590,7 +636,9 @@ def test_an_interrupt_while_the_rest_is_read_ahead_is_raised_and_the_cursor_says
         given = [next(cursor)[0]]
         stop_once_and_interrupt(conn)
         with pytest.raises(KeyboardInterrupt):
-            adapter.execute("UPDATE t SET n = n + ?", [ROWS])  # reads the rest ahead first: stopped there
+            adapter.execute(
+                "UPDATE t SET n = n + ?", [ROWS]
+            )  # reads the rest ahead first: stopped there
         with pytest.raises(sqlite3.OperationalError) as raised:
             for row in cursor:
                 given.append(row[0])

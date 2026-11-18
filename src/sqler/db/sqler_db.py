@@ -71,7 +71,9 @@ class SQLerDB(_TableMemory):
     """
 
     @classmethod
-    def in_memory(cls, shared: bool = True, *, name: Optional[str] = None, timeout_ms: int = 5000) -> "SQLerDB":
+    def in_memory(
+        cls, shared: bool = True, *, name: Optional[str] = None, timeout_ms: int = 5000
+    ) -> "SQLerDB":
         """Create a SQLerDB backed by an in-memory SQLite database.
 
         Args:
@@ -161,7 +163,9 @@ class SQLerDB(_TableMemory):
         if versioned:
             self._ensure_versioned_table(table)
 
-    def _copy_target(self, source: str, target: str, checks: Optional[dict[str, str]] = None) -> bool:
+    def _copy_target(
+        self, source: str, target: str, checks: Optional[dict[str, str]] = None
+    ) -> bool:
         """Make ``target`` ready for a copy of the rows of ``source`` as they are stored
         (``copy_to``), both validated: a missing ``target`` is made in the layout of
         ``source`` (its promoted columns, ``checks``, ``_version`` where ``source`` has it), an
@@ -354,7 +358,9 @@ class SQLerDB(_TableMemory):
             cursor = self.adapter.execute(sql, params)
             self.adapter.auto_commit()
         except BaseException as exc:
-            self.adapter.__exit__(type(exc), exc, exc.__traceback__)  # rolls back what is still open
+            self.adapter.__exit__(
+                type(exc), exc, exc.__traceback__
+            )  # rolls back what is still open
             raise
         return cursor
 
@@ -383,11 +389,15 @@ class SQLerDB(_TableMemory):
                 return False
         return now != names
 
-    def _memory_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]]]:
+    def _memory_of(
+        self, table: str, fields: Any = ()
+    ) -> tuple[list[str], Optional[tuple[str, ...]]]:
         """The promoted columns and remembered names of :meth:`_shape_of`."""
         return self._shape_of(table, fields)[:2]
 
-    def _shape_of(self, table: str, fields: Any = ()) -> tuple[list[str], Optional[tuple[str, ...]], bool]:
+    def _shape_of(
+        self, table: str, fields: Any = ()
+    ) -> tuple[list[str], Optional[tuple[str, ...]], bool]:
         """The promoted columns of the validated ``table`` (:meth:`_columns_of`), the names
         remembered beside them, whose guard a statement built from those columns carries
         (``None``: none remembered, as where nothing can be remembered, a transaction that is
@@ -516,7 +526,9 @@ class SQLerDB(_TableMemory):
         Returns:
             tuple[int, int]: The row id and new version.
         """
-        return self._upsert_versioned(validate_table_name(table), _id, doc, expected_version, promoted_fields)
+        return self._upsert_versioned(
+            validate_table_name(table), _id, doc, expected_version, promoted_fields
+        )
 
     def _upsert_versioned(
         self,
@@ -548,7 +560,9 @@ class SQLerDB(_TableMemory):
         except sqlite3.OperationalError as exc:
             if not is_missing_table(exc, table):
                 raise
-            _refuse_unwritten(False, table, _id)  # a row at another version, as with the table there
+            _refuse_unwritten(
+                False, table, _id
+            )  # a row at another version, as with the table there
         if cursor.rowcount <= 0:
             raise StaleVersionError("Stale version: update rejected")
         assert expected_version is not None  # refused above for a write by ``_id``
@@ -608,7 +622,11 @@ class SQLerDB(_TableMemory):
         table = validate_table_name(table)
 
         def make() -> Optional[tuple[str, list[Any], Any]]:
-            if expected_version is not None and not self._is_versioned(table) and self._has_version_column(table) is not None:
+            if (
+                expected_version is not None
+                and not self._is_versioned(table)
+                and self._has_version_column(table) is not None
+            ):
                 self._ensure_versioned_table(table)  # a write by ``_id`` makes no table
             columns, layout, has = self._shape_of(table, promoted)
             return _fields_update(table, _id, doc, fields, columns, expected_version, layout, has)
@@ -787,6 +805,7 @@ class SQLerDB(_TableMemory):
         self._ensure_table(table)
         if not docs:
             return []
+
         def make() -> Any:
             columns, layout, has = self._shape_of(table)
             return _bulk_upserts(table, docs, has, columns, layout)
@@ -828,7 +847,9 @@ class SQLerDB(_TableMemory):
         rows, columns = self._read_rows(table, ids)
         return _row_documents(_in_order(rows or [], ids), columns)
 
-    def _read_rows(self, table: str, ids: list, *, versioned: bool = False) -> tuple[Optional[list], tuple[str, ...]]:
+    def _read_rows(
+        self, table: str, ids: list, *, versioned: bool = False
+    ) -> tuple[Optional[list], tuple[str, ...]]:
         """The by-id read every reader of this database goes through; it writes nothing.
 
         Returns the stored rows of ``ids`` (stored order) and the columns they were read

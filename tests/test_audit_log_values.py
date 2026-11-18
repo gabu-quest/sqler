@@ -71,7 +71,11 @@ def make(spec: Base, name: str, **fields):
         ann[key] = annotation if spec.typed else Any
         body[key] = default
     body["__annotations__"] = ann
-    kwargs = {"kw_only": True, "tag": False} if spec.cls in (SQLerMsgspecModel, AsyncSQLerMsgspecModel) else {}
+    kwargs = (
+        {"kw_only": True, "tag": False}
+        if spec.cls in (SQLerMsgspecModel, AsyncSQLerMsgspecModel)
+        else {}
+    )
     cls = type(name, (spec.mixin, spec.cls), body, **kwargs)
     return dataclass(cls) if spec.cls is AsyncSQLerLiteModel else cls
 

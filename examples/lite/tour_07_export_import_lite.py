@@ -116,13 +116,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import csv
     import importlib
@@ -152,7 +148,6 @@ def _(SQLerLiteModel, dataclass, db):
         email: str
         age: int
         active: bool = True
-
 
     # Create sample data
     users_data = [
@@ -284,13 +279,24 @@ def _(User, csv, db, io, json):
 
     # JSON with selected fields (name and age only)
     json_partial = json.dumps(
-        [{k: v for k, v in u_p.model_dump().items() if k in ["name", "age"]}
-         for u_p in users_partial],
-        indent=2
+        [
+            {k: v for k, v in u_p.model_dump().items() if k in ["name", "age"]}
+            for u_p in users_partial
+        ],
+        indent=2,
     )
     print("\nJSON with selected fields:")
     print(json_partial)
-    return csv_partial, csv_partial_buffer, json_partial, row, selected_fields, u_p, users_partial, writer_partial
+    return (
+        csv_partial,
+        csv_partial_buffer,
+        json_partial,
+        row,
+        selected_fields,
+        u_p,
+        users_partial,
+        writer_partial,
+    )
 
 
 @app.cell
@@ -312,7 +318,6 @@ def _(SQLerLiteModel, csv, dataclass, db, io):
         name: str
         price: float
         category: str
-
 
     # Simulate CSV data (in real usage, this would come from a file)
     csv_content = """name,price,category
@@ -354,7 +359,6 @@ def _(SQLerLiteModel, dataclass, db, json):
         customer: str
         total: float
         status: str = "pending"
-
 
     # Simulate JSON data
     json_content = """[
@@ -425,7 +429,6 @@ def _(SQLerLiteModel, dataclass, db, json):
         event_type: str
         timestamp: str
         user_id: int
-
 
     # Simulate JSONL data
     jsonl_import = """{"event_type": "login", "timestamp": "2024-01-01T10:00:00", "user_id": 1}

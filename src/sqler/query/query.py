@@ -33,8 +33,6 @@ def _rewritten(sql: str, promoted_fields: tuple[str, ...]) -> str:
     return sql
 
 
-
-
 @functools.lru_cache(maxsize=1024)
 def _squeezed(sql: str, guard: str) -> str:
     """:meth:`_Statements._squeezed` of ``sql`` with ``guard``, done once per text."""
@@ -63,7 +61,9 @@ def related_rows(table: str, where: str, *, missing: bool = False) -> str:
 
 def related_tables(expression: Optional[SQLerExpression]) -> tuple[str, ...]:
     """The tables, once each, whose rows the filter ``expression`` reads through a reference."""
-    related = getattr(expression, "related", ())  # a filter may be any object with ``sql`` and ``params``
+    related = getattr(
+        expression, "related", ()
+    )  # a filter may be any object with ``sql`` and ``params``
     return tuple(dict.fromkeys(r.table for r in related)) if related else ()
 
 
@@ -194,7 +194,9 @@ class _Statements:
     _use = ""
     _guard = ""
     _names: Optional[tuple[str, ...]] = None
-    _laid: Optional[tuple[Any, Any]] = None  # the last query :meth:`_laid_out` made, by what it was made from
+    _laid: Optional[tuple[Any, Any]] = (
+        None  # the last query :meth:`_laid_out` made, by what it was made from
+    )
     # the related tables a statement built from this query reads, with the names each was laid out from
     _others: tuple[tuple[str, Optional[tuple[str, ...]]], ...] = ()
 
@@ -202,7 +204,9 @@ class _Statements:
         """The ``WHERE`` of a statement on the query's rows: its filter, and the guard of a
         query built from its database's memory of the table (a term that is always 1); empty
         with neither."""
-        terms = ([self._expression.sql] if self._expression else []) + ([self._guard] if self._guard else [])
+        terms = ([self._expression.sql] if self._expression else []) + (
+            [self._guard] if self._guard else []
+        )
         return f"WHERE {' AND '.join(terms)}" if terms else ""
 
     def _squeezed(self, sql: str) -> str:
@@ -412,7 +416,9 @@ class _Statements:
                 raise ValueError("n must be >= 1")
         for key in fields:
             validate_field_name(key)
-        self._refuse_version(fields)  # a query that is versioned whatever its table has: before the table is touched
+        self._refuse_version(
+            fields
+        )  # a query that is versioned whatever its table has: before the table is touched
         return n
 
     def _refuse_version(self, fields: dict) -> None:
@@ -425,7 +431,9 @@ class _Statements:
         columns, then the version; each value in stored form."""
         from sqler.query.field import SQLerUpdateExpression
 
-        self._refuse_version(fields)  # a query that learned from its table that the rows are versioned
+        self._refuse_version(
+            fields
+        )  # a query that learned from its table that the rows are versioned
         json_parts: list[str] = []
         json_params: list[Any] = []
         columns: list[str] = []
@@ -452,7 +460,9 @@ class _Statements:
         return ", ".join(columns), json_params + column_params
 
     def _where(self) -> tuple[str, list[Any]]:
-        return self._on_columns(self._filter_sql()), self._expression.params if self._expression else []
+        return self._on_columns(
+            self._filter_sql()
+        ), self._expression.params if self._expression else []
 
     def _order_clause(self) -> str:
         if self._order_fields:
@@ -462,7 +472,9 @@ class _Statements:
             ]
             return self._on_columns("ORDER BY " + ", ".join(parts))
         if self._order:
-            order = f"ORDER BY json_extract(data, '$.{self._order}')" + (" DESC" if self._desc else "")
+            order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
+                " DESC" if self._desc else ""
+            )
             return self._on_columns(order)
         return ""
 
@@ -503,7 +515,9 @@ class _Statements:
     def _returning(self) -> str:
         """The columns a written row is read back with."""
         return ", ".join(
-            ["_id", "data"] + (["_version"] if self._include_version else []) + self._promoted_fields
+            ["_id", "data"]
+            + (["_version"] if self._include_version else [])
+            + self._promoted_fields
         )
 
     def _returned(self, row) -> dict[str, Any]:
@@ -538,7 +552,9 @@ class _Statements:
         """``UPDATE`` of exactly the rows ``ids``, returning them."""
         return self._update_sql(fields, *self._touched(ids), returning=True)
 
-    def _delete_sql(self, returning: bool = False, ids: Optional[list] = None) -> tuple[str, list[Any]]:
+    def _delete_sql(
+        self, returning: bool = False, ids: Optional[list] = None
+    ) -> tuple[str, list[Any]]:
         """``DELETE`` of the rows :meth:`all` returns (:meth:`_touched`, ``ids`` as it takes them)."""
         where, params = self._touched(ids)
         sql = f"DELETE FROM {self._table} {where}"
@@ -552,8 +568,13 @@ class _Statements:
         whole rows."""
         target = validate_table_name(table)
         if target.lower() == self._table.lower():
-            raise ValueError(f"copy_to: {target} is the table the query reads; copy to another table")
-        for name, used in (("select()", self._select_fields), ("group_by()", self._group_by_fields or self._having)):
+            raise ValueError(
+                f"copy_to: {target} is the table the query reads; copy to another table"
+            )
+        for name, used in (
+            ("select()", self._select_fields),
+            ("group_by()", self._group_by_fields or self._having),
+        ):
             if used:
                 raise ValueError(f"copy_to: a query with {name} is refused: it copies whole rows")
         return target
@@ -565,7 +586,9 @@ class _Statements:
         column (:meth:`_returning`)."""
         where, params = self._touched(ids)
         columns = self._returning()
-        return self._squeezed(f"INSERT INTO {target} ({columns}) SELECT {columns} FROM {self._table} {where}"), params
+        return self._squeezed(
+            f"INSERT INTO {target} ({columns}) SELECT {columns} FROM {self._table} {where}"
+        ), params
 
 
 class SQLerQuery(_Statements):
@@ -650,7 +673,12 @@ class SQLerQuery(_Statements):
         """
         db, table = self._db, self._table
         promoted, names, version = db._shape_of(table)
-        if not version and self._include_version and self._use == "update" and db._has_version_column(table) is False:
+        if (
+            not version
+            and self._include_version
+            and self._use == "update"
+            and db._has_version_column(table) is False
+        ):
             db._ensure_versioned_table(table)
             promoted, names, version = db._shape_of(table)
         key: Any = (names, promoted, version)
@@ -660,7 +688,11 @@ class SQLerQuery(_Statements):
         laid = self._laid
         if laid is None or laid[0] != key:
             made = self._clone(
-                promoted_fields=promoted, include_version=version, db=None, guard=db._guard_of(table, names), names=names
+                promoted_fields=promoted,
+                include_version=version,
+                db=None,
+                guard=db._guard_of(table, names),
+                names=names,
             )
             if others:
                 made._expression, made._others = self._related_laid_out()
@@ -681,7 +713,10 @@ class SQLerQuery(_Statements):
             used._db = db
             used = used._laid_out()
             if part.table not in names:  # a table not remembered may be missing: it is read once
-                names[part.table] = (used._names, used._names is None and not db._names(part.table)[0])
+                names[part.table] = (
+                    used._names,
+                    used._names is None and not db._names(part.table)[0],
+                )
             laid[part] = (used._where()[0], names[part.table][1])
         return with_related(expression, laid), tuple((table, n) for table, (n, _) in names.items())
 
@@ -706,7 +741,9 @@ class SQLerQuery(_Statements):
                 cursor = self._db._sent(self._table, make)
                 return used, cursor
             sql, params = build(self)
-            assert self._adapter is not None  # with no database behind the query its caller refused a query with no adapter
+            assert (
+                self._adapter is not None
+            )  # with no database behind the query its caller refused a query with no adapter
             try:
                 return self, self._adapter._execute_judged(sql, params)
             except Exception as exc:
@@ -1305,9 +1342,13 @@ class SQLerQuery(_Statements):
                 ids = self._picked_ids()
                 if not ids:
                     return 0
-                _, cur = self._updating()._execute(lambda q: q._update_sql(fields, *q._touched(ids), returning=False))
+                _, cur = self._updating()._execute(
+                    lambda q: q._update_sql(fields, *q._touched(ids), returning=False)
+                )
                 return 0 if cur is None else cur.rowcount
-        _, cur = self._updating()._execute(lambda q: q._update_sql(fields, *q._touched(), returning=False))
+        _, cur = self._updating()._execute(
+            lambda q: q._update_sql(fields, *q._touched(), returning=False)
+        )
         if cur is None:
             return 0
         assert self._adapter is not None  # _write_checks refused a query with no adapter

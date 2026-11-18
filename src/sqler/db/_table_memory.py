@@ -46,7 +46,9 @@ class _TableMemory:
         # tables seen settled whose record could not be written then: the next ensure writes it
         self._unrecorded: set[str] = set()
 
-    def _learned(self) -> Optional[tuple[set[str], dict[str, list[str]], dict[str, tuple[str, ...]]]]:
+    def _learned(
+        self,
+    ) -> Optional[tuple[set[str], dict[str, list[str]], dict[str, tuple[str, ...]]]]:
         """Where a statement's lesson about a table is kept.
 
         The innermost open level of this object's own transactions, if the adapter's depth is
@@ -59,10 +61,16 @@ class _TableMemory:
         levels = self._levels()
         if levels:
             level = levels[-1]
-            return (level.versioned, level.promoted, level.layouts) if level.depth == depth else None
-        return (self._versioned_tables, self._promoted_columns, self._layouts) if depth == 0 else None
+            return (
+                (level.versioned, level.promoted, level.layouts) if level.depth == depth else None
+            )
+        return (
+            (self._versioned_tables, self._promoted_columns, self._layouts) if depth == 0 else None
+        )
 
-    def _remember(self, table: str, names: tuple[str, ...], *, promoted: Optional[list[str]] = None) -> None:
+    def _remember(
+        self, table: str, names: tuple[str, ...], *, promoted: Optional[list[str]] = None
+    ) -> None:
         """Remember that ``table`` has the columns ``names`` (as ``SELECT *`` gives them), and,
         when given, its ``promoted`` columns. Promoted columns remembered for other names are
         forgotten."""
@@ -73,7 +81,10 @@ class _TableMemory:
     def _forget(self, table: str) -> None:
         """Forget everything remembered about ``table``, in every level and in the shared memory."""
         places = [(level.versioned, level.promoted, level.layouts) for level in self._levels()]
-        for versioned, promoted, layouts in [*places, (self._versioned_tables, self._promoted_columns, self._layouts)]:
+        for versioned, promoted, layouts in [
+            *places,
+            (self._versioned_tables, self._promoted_columns, self._layouts),
+        ]:
             versioned.discard(table)
             promoted.pop(table, None)
             layouts.pop(table, None)
@@ -107,7 +118,11 @@ class _TableMemory:
             if names is not None:
                 return names, level.promoted.get(table), table in level.versioned
         names = self._layouts.get(table)
-        return None if names is None else (names, self._promoted_columns.get(table), table in self._versioned_tables)
+        return (
+            None
+            if names is None
+            else (names, self._promoted_columns.get(table), table in self._versioned_tables)
+        )
 
     def _is_versioned(self, table: str) -> bool:
         """Whether ``table`` is remembered to have its ``_version`` column, here and now."""
@@ -124,7 +139,9 @@ class _TableMemory:
         known = self._known(table)
         return None if known is None else known[0]
 
-    def _seen(self, table: str, layout: tuple[str, ...], names: list[str], added: tuple[str, ...] = ()) -> None:
+    def _seen(
+        self, table: str, layout: tuple[str, ...], names: list[str], added: tuple[str, ...] = ()
+    ) -> None:
         """Remember ``table`` as just read (``_names``), with the columns ``added`` since by
         this object: the promoted columns remembered for that layout stay, and a table with
         none is remembered as having none (an ensure's check needs no statement for it)."""

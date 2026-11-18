@@ -79,6 +79,7 @@ def db():
     """Create an in-memory database for testing."""
     return SQLerDB.in_memory()
 
+
 class TestNullComparison:
     """Tests for proper NULL comparison handling in queries."""
 

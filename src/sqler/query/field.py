@@ -65,7 +65,9 @@ def _json_path_literal(path: "list[Union[str, int]]") -> str:
 
 
 def _normalize_alias_stack(
-    alias_stack: list[Union[tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]]],
+    alias_stack: list[
+        Union[tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]]
+    ],
 ) -> list[tuple[str, Union[str, int], Optional[SQLerExpression]]]:
     norm: list[tuple[str, Union[str, int], Optional[SQLerExpression]]] = []
     for entry in alias_stack:
@@ -124,7 +126,12 @@ class SQLerField:
         self,
         path: Union[str, list[Union[str, int]]],
         alias_stack: Optional[
-            list[Union[tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]]]
+            list[
+                Union[
+                    tuple[str, Union[str, int]],
+                    tuple[str, Union[str, int], Optional[SQLerExpression]],
+                ]
+            ]
         ] = None,
     ):
         """
@@ -142,7 +149,9 @@ class SQLerField:
             if isinstance(segment, str):
                 _check_not_empty(segment)
         self.alias_stack: list[
-            Union[tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]]
+            Union[
+                tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]
+            ]
         ] = alias_stack or []
 
     def __repr__(self) -> str:
@@ -409,7 +418,11 @@ class SQLerAnyExpression(SQLerExpression):
     def __init__(
         self,
         path: list[Union[str, int]],
-        alias_stack: list[Union[tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]]],
+        alias_stack: list[
+            Union[
+                tuple[str, Union[str, int]], tuple[str, Union[str, int], Optional[SQLerExpression]]
+            ]
+        ],
         op: str,
         val: Any,
     ):
@@ -611,34 +624,24 @@ class SQLerUpdateExpression:
         self.field_name = field_name
 
     def __add__(self, other: Any) -> "SQLerUpdateExpression":
-        return SQLerUpdateExpression(
-            f"{self.sql_expr} + ?", self.params + [other], self.field_name
-        )
+        return SQLerUpdateExpression(f"{self.sql_expr} + ?", self.params + [other], self.field_name)
 
     def __radd__(self, other: Any) -> "SQLerUpdateExpression":
-        return SQLerUpdateExpression(
-            f"? + {self.sql_expr}", [other] + self.params, self.field_name
-        )
+        return SQLerUpdateExpression(f"? + {self.sql_expr}", [other] + self.params, self.field_name)
 
     def __sub__(self, other: Any) -> "SQLerUpdateExpression":
-        return SQLerUpdateExpression(
-            f"{self.sql_expr} - ?", self.params + [other], self.field_name
-        )
+        return SQLerUpdateExpression(f"{self.sql_expr} - ?", self.params + [other], self.field_name)
 
     def __rsub__(self, other: Any) -> "SQLerUpdateExpression":
-        return SQLerUpdateExpression(
-            f"? - {self.sql_expr}", [other] + self.params, self.field_name
-        )
+        return SQLerUpdateExpression(f"? - {self.sql_expr}", [other] + self.params, self.field_name)
 
     def __mul__(self, other: Any) -> "SQLerUpdateExpression":
-        return SQLerUpdateExpression(
-            f"{self.sql_expr} * ?", self.params + [other], self.field_name
-        )
+        return SQLerUpdateExpression(f"{self.sql_expr} * ?", self.params + [other], self.field_name)
 
     def __rmul__(self, other: Any) -> "SQLerUpdateExpression":
-        return SQLerUpdateExpression(
-            f"? * {self.sql_expr}", [other] + self.params, self.field_name
-        )
+        return SQLerUpdateExpression(f"? * {self.sql_expr}", [other] + self.params, self.field_name)
 
     def __repr__(self) -> str:
-        return f"SQLerUpdateExpression({self.sql_expr!r}, {self.params!r}, field={self.field_name!r})"
+        return (
+            f"SQLerUpdateExpression({self.sql_expr!r}, {self.params!r}, field={self.field_name!r})"
+        )

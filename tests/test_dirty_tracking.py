@@ -534,8 +534,10 @@ def test_model_loaded_through_using_another_table_is_not_dirty(kind):
     )
     db.adapter.execute(
         f"INSERT INTO dt_{kind}_other (data) VALUES (?)",
-        ['{"title": "o", "n": 2, "tags": ["t"], "meta": {}, "grid": [], "x": 0.0, "big": 0,'
-         ' "opt": null}'],
+        [
+            '{"title": "o", "n": 2, "tags": ["t"], "meta": {}, "grid": [], "x": 0.0, "big": 0,'
+            ' "opt": null}'
+        ],
     )
     db.adapter.commit()
     got = plain.using(db, f"dt_{kind}_other").all()
@@ -701,6 +703,7 @@ async def _delete_row_with_sql(db, table, rid):
 @pytest.mark.parametrize("kind", ["pyd", "pydsafe"])
 def test_reference_to_a_row_deleted_with_sql_reads_none_and_is_dirty(kind):
     way = "from_id"
+
     async def scenario():
         db = await bind(kind, "g")
         child, _, linked, _ = KINDS[kind]

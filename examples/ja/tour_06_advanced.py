@@ -79,7 +79,6 @@ def _(SQLerModel, db):
         price: float
         in_stock: bool = True
 
-
     # サンプルデータを作成
     products = [
         ("ウィジェット A", "electronics", 29.99),
@@ -180,7 +179,6 @@ def _(SQLerModel, db):
         age: int
         country: str
 
-
     # サンプルユーザーを作成（WASM パフォーマンスのため削減）
     for i in range(20):
         User(
@@ -271,7 +269,6 @@ def _(SQLerModel, db):
         _table = "books"
         title: str
         author: Author | None = None
-
 
     # テストデータを作成
     author = Author(name="Alice").save(db=db)

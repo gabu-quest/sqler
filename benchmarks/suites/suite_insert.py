@@ -74,7 +74,10 @@ class BulkInsertScaling:
 
                     def measure_sqler():
                         if mode == "memory":
-                            sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                            sqler_dbs = [
+                                SQLerDB.in_memory()
+                                for _ in range(config.warmup + config.iterations)
+                            ]
                         else:
                             sqler_dbs = [
                                 SQLerDB.on_disk(os.path.join(tmpdir, f"sqler_{i}.db"))
@@ -94,7 +97,9 @@ class BulkInsertScaling:
 
                     def measure_sqlite():
                         if mode == "memory":
-                            sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                            sqlite_conns = [
+                                create_conn() for _ in range(config.warmup + config.iterations)
+                            ]
                         else:
                             sqlite_conns = [
                                 create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
@@ -124,13 +129,18 @@ class BulkInsertScaling:
                     for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
                         stats = arm_results[arm_label]
                         tp = size / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="rows", value=f"{arm_label}_{prefix}_{size}",
-                            timing=stats, rows=size,
-                            throughput=round(tp, 1),
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="rows",
+                                value=f"{arm_label}_{prefix}_{size}",
+                                timing=stats,
+                                rows=size,
+                                throughput=round(tp, 1),
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
         return results
 
@@ -168,7 +178,10 @@ class SingleVsBulk:
                     def measure_sqler_arms():
                         # sqler bulk insert
                         if mode == "memory":
-                            sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                            sqler_dbs = [
+                                SQLerDB.in_memory()
+                                for _ in range(config.warmup + config.iterations)
+                            ]
                         else:
                             sqler_dbs = [
                                 SQLerDB.on_disk(os.path.join(tmpdir, f"bulk_{i}.db"))
@@ -186,7 +199,10 @@ class SingleVsBulk:
 
                         # sqler single save
                         if mode == "memory":
-                            single_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                            single_dbs = [
+                                SQLerDB.in_memory()
+                                for _ in range(config.warmup + config.iterations)
+                            ]
                         else:
                             single_dbs = [
                                 SQLerDB.on_disk(os.path.join(tmpdir, f"single_{i}.db"))
@@ -206,7 +222,9 @@ class SingleVsBulk:
                     def measure_sqlite_arms():
                         # SQLite batch
                         if mode == "memory":
-                            batch_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                            batch_conns = [
+                                create_conn() for _ in range(config.warmup + config.iterations)
+                            ]
                         else:
                             batch_conns = [
                                 create_conn(os.path.join(tmpdir, f"batch_{i}.db"), "disk")
@@ -226,7 +244,9 @@ class SingleVsBulk:
 
                         # SQLite loop
                         if mode == "memory":
-                            loop_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                            loop_conns = [
+                                create_conn() for _ in range(config.warmup + config.iterations)
+                            ]
                         else:
                             loop_conns = [
                                 create_conn(os.path.join(tmpdir, f"loop_{i}.db"), "disk")
@@ -263,13 +283,18 @@ class SingleVsBulk:
                     ]:
                         stats = arm_results[stats_key]
                         tp = size / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="method", value=label,
-                            timing=stats, rows=size,
-                            throughput=round(tp, 1),
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="method",
+                                value=label,
+                                timing=stats,
+                                rows=size,
+                                throughput=round(tp, 1),
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
         return results
 
@@ -304,7 +329,10 @@ class DocumentSizeImpact:
 
                     def measure_sqler():
                         if mode == "memory":
-                            sqler_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                            sqler_dbs = [
+                                SQLerDB.in_memory()
+                                for _ in range(config.warmup + config.iterations)
+                            ]
                         else:
                             sqler_dbs = [
                                 SQLerDB.on_disk(os.path.join(tmpdir, f"sqler_{i}.db"))
@@ -320,7 +348,9 @@ class DocumentSizeImpact:
 
                     def measure_sqlite():
                         if mode == "memory":
-                            sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                            sqlite_conns = [
+                                create_conn() for _ in range(config.warmup + config.iterations)
+                            ]
                         else:
                             sqlite_conns = [
                                 create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
@@ -350,13 +380,22 @@ class DocumentSizeImpact:
                     for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
                         stats = arm_results[arm_label]
                         tp = row_count / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="profile", value=f"{arm_label}_{prefix}_{profile}",
-                            timing=stats, rows=row_count,
-                            throughput=round(tp, 1),
-                            metadata={"avg_doc_bytes": avg_doc_bytes, "storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="profile",
+                                value=f"{arm_label}_{prefix}_{profile}",
+                                timing=stats,
+                                rows=row_count,
+                                throughput=round(tp, 1),
+                                metadata={
+                                    "avg_doc_bytes": avg_doc_bytes,
+                                    "storage_mode": mode,
+                                    "baseline": baseline,
+                                },
+                            )
+                        )
 
         return results
 
@@ -389,7 +428,9 @@ class ModelOverhead:
                 def measure_sqler_arms():
                     # Raw insert_document
                     if mode == "memory":
-                        raw_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                        raw_dbs = [
+                            SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)
+                        ]
                     else:
                         raw_dbs = [
                             SQLerDB.on_disk(os.path.join(tmpdir, f"raw_{i}.db"))
@@ -408,7 +449,9 @@ class ModelOverhead:
 
                     # SQLerModel.save()
                     if mode == "memory":
-                        model_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                        model_dbs = [
+                            SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)
+                        ]
                     else:
                         model_dbs = [
                             SQLerDB.on_disk(os.path.join(tmpdir, f"model_{i}.db"))
@@ -429,7 +472,9 @@ class ModelOverhead:
 
                     # SQLerLiteModel.save()
                     if mode == "memory":
-                        lite_dbs = [SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)]
+                        lite_dbs = [
+                            SQLerDB.in_memory() for _ in range(config.warmup + config.iterations)
+                        ]
                     else:
                         lite_dbs = [
                             SQLerDB.on_disk(os.path.join(tmpdir, f"lite_{i}.db"))
@@ -448,7 +493,9 @@ class ModelOverhead:
 
                 def measure_sqlite():
                     if mode == "memory":
-                        sqlite_conns = [create_conn() for _ in range(config.warmup + config.iterations)]
+                        sqlite_conns = [
+                            create_conn() for _ in range(config.warmup + config.iterations)
+                        ]
                     else:
                         sqlite_conns = [
                             create_conn(os.path.join(tmpdir, f"sqlite_{i}.db"), "disk")
@@ -483,13 +530,18 @@ class ModelOverhead:
                 ]:
                     stats = arm_results[stats_key]
                     tp = row_count / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                    results.append(BenchmarkResult(
-                        scenario=self.name, suite=self.suite,
-                        parameter="method", value=label,
-                        timing=stats, rows=row_count,
-                        throughput=round(tp, 1),
-                        metadata={"storage_mode": mode, "baseline": baseline},
-                    ))
+                    results.append(
+                        BenchmarkResult(
+                            scenario=self.name,
+                            suite=self.suite,
+                            parameter="method",
+                            value=label,
+                            timing=stats,
+                            rows=row_count,
+                            throughput=round(tp, 1),
+                            metadata={"storage_mode": mode, "baseline": baseline},
+                        )
+                    )
 
         return results
 

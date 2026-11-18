@@ -130,7 +130,9 @@ def test_an_async_class_has_every_public_name_of_its_sync_twin(sync_name, async_
     sync_cls, async_cls = getattr(sqler, sync_name), getattr(sqler, async_name)
     theirs = {n for n in dir(async_cls) if not n.startswith("_")}
     missing = sorted(
-        n for n in dir(sync_cls) if not n.startswith("_") and n not in theirs and "a" + n not in theirs
+        n
+        for n in dir(sync_cls)
+        if not n.startswith("_") and n not in theirs and "a" + n not in theirs
     )
     assert missing == []
 

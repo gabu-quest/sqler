@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from sqler.db.async_db import AsyncSQLerDB
 
 
-
 async def _aread(db: "AsyncSQLerDB", read: Read) -> Rows:
     table, sql, params = read
     try:
@@ -104,7 +103,9 @@ async def async_cascade_delete(
         for table, ids in rows.items():
             for row_id in ids:
                 await _write_rules.adelete_referrer(db, table, row_id)
-        level = [ref for table, ids in rows.items() for ref in await async_find_referrers(db, table, ids)]
+        level = [
+            ref for table, ids in rows.items() for ref in await async_find_referrers(db, table, ids)
+        ]
 
 
 async def async_validate_references(db: "AsyncSQLerDB"):

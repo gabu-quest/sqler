@@ -32,7 +32,9 @@ _SETTLED_DDL = (
 )
 
 # a column definition ``validate_column_def`` accepted: TYPE [NOT NULL] [DEFAULT <literal>]
-_DEFINITION = re.compile(r"\s*\w+(?:\s*\([^)]*\))?(\s+NOT\s+NULL)?(?:\s+DEFAULT\s+(.+?))?\s*$", re.IGNORECASE | re.DOTALL)
+_DEFINITION = re.compile(
+    r"\s*\w+(?:\s*\([^)]*\))?(\s+NOT\s+NULL)?(?:\s+DEFAULT\s+(.+?))?\s*$", re.IGNORECASE | re.DOTALL
+)
 
 _NO_FILL = object()  # a row without the key keeps what ADD COLUMN gave it: the DEFAULT, or NULL
 _KEEP = object()  # the column keeps its values; only the key leaves the documents
@@ -48,7 +50,9 @@ def _fill_of(model: Any, name: str) -> Any:
     fields = getattr(model, "__dataclass_fields__", None)
     if fields is not None:  # a lite class
         f = fields.get(name)
-        if f is None or (f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING):
+        if f is None or (
+            f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+        ):
             return _NO_FILL
         value = f.default_factory() if f.default is dataclasses.MISSING else f.default
     elif hasattr(model, "__struct_fields__"):  # a msgspec class
@@ -75,8 +79,13 @@ def _tally_sql(table: str, columns: list[str], conditions: list[str]) -> tuple[s
     """One pass over ``table`` that counts, for each of ``columns``, the rows that meet its
     condition, and finds the first of them. A condition reads ``t<i>``, the JSON type of the
     i-th column's key in the document (NULL: no key), and ``v<i>``, the SQL type of its value."""
-    picks = ", ".join(f"json_type(data, ?) AS t{i}, typeof(json_extract(data, ?)) AS v{i}" for i in range(len(columns)))
-    tallies = ", ".join(f"COUNT(CASE WHEN {c} THEN 1 END), MIN(CASE WHEN {c} THEN _id END)" for c in conditions)
+    picks = ", ".join(
+        f"json_type(data, ?) AS t{i}, typeof(json_extract(data, ?)) AS v{i}"
+        for i in range(len(columns))
+    )
+    tallies = ", ".join(
+        f"COUNT(CASE WHEN {c} THEN 1 END), MIN(CASE WHEN {c} THEN _id END)" for c in conditions
+    )
     params = [p for col in columns for p in (_json_path(col),) * 2]
     return f"SELECT {tallies} FROM (SELECT _id, {picks} FROM {table});", params
 
@@ -102,18 +111,24 @@ def _move_sql(table: str, fills: dict[str, Any], versioned: bool = False) -> tup
         if fill is _KEEP:
             continue
         absent = col if fill is _NO_FILL else "?"
-        sets.append(f"{col} = CASE WHEN json_type(data, ?) IS NULL THEN {absent} ELSE json_extract(data, ?) END")
+        sets.append(
+            f"{col} = CASE WHEN json_type(data, ?) IS NULL THEN {absent} ELSE json_extract(data, ?) END"
+        )
         params += [_json_path(col)] if fill is _NO_FILL else [_json_path(col), fill]
         params.append(_json_path(col))
     moved = [col for col, fill in fills.items() if fill is _NO_FILL] if versioned else []
     if moved:
-        same = " AND ".join(f"(json_type(data, ?) IS NULL OR {col} IS json_extract(data, ?))" for col in moved)
+        same = " AND ".join(
+            f"(json_type(data, ?) IS NULL OR {col} IS json_extract(data, ?))" for col in moved
+        )
         sets.append(f"_version = CASE WHEN {same} THEN _version ELSE _version + 1 END")
         params += [_json_path(col) for col in moved for _ in range(2)]
     paths = [_json_path(col) for col in fills]
     sets.append(f"data = json_remove(data{', ?' * len(paths)})")
     sql = f"UPDATE {table} SET {', '.join(sets)}"
-    if all(fill is _NO_FILL or fill is _KEEP for fill in fills.values()):  # only the rows with a key change
+    if all(
+        fill is _NO_FILL or fill is _KEEP for fill in fills.values()
+    ):  # only the rows with a key change
         sql += " WHERE " + " OR ".join(["json_type(data, ?) IS NOT NULL"] * len(paths))
         paths *= 2
     return sql + ";", params + paths
@@ -147,10 +162,18 @@ def _settled(table: Any, names: list[str]) -> Any:
     unsettled = [col for col in promoted if col.lower() not in settled]
     if not unsettled:
         return []
-    (row,) = yield _tally_sql(table, unsettled, [f"t{i} IS NOT NULL" for i in range(len(unsettled))])
-    held = {c: {"rows": row[2 * i], "first_id": row[2 * i + 1]} for i, c in enumerate(unsettled) if row[2 * i]}
+    (row,) = yield _tally_sql(
+        table, unsettled, [f"t{i} IS NOT NULL" for i in range(len(unsettled))]
+    )
+    held = {
+        c: {"rows": row[2 * i], "first_id": row[2 * i + 1]}
+        for i, c in enumerate(unsettled)
+        if row[2 * i]
+    }
     if held:
-        found = "; ".join(f"{c}: {h['rows']} row(s), the first _id {h['first_id']}" for c, h in held.items())
+        found = "; ".join(
+            f"{c}: {h['rows']} row(s), the first _id {h['first_id']}" for c, h in held.items()
+        )
         raise SchemaError(
             f"Table {table} has columns beside data whose key is still in the documents of some rows "
             f"({found}): a read gives the column's value, not the document's. An earlier version of "
@@ -173,9 +196,10 @@ def _record(table: str, columns: list[str], *, made: bool = False) -> Any:
     yield _SETTLED_DDL, []
     if made:
         yield f"DELETE FROM {_SETTLED} WHERE tbl = ?;", [table]
-    yield f"INSERT OR IGNORE INTO {_SETTLED} (tbl, col) VALUES {', '.join(['(?, ?)'] * len(columns))};", [
-        v for col in columns for v in (table, col)
-    ]
+    yield (
+        f"INSERT OR IGNORE INTO {_SETTLED} (tbl, col) VALUES {', '.join(['(?, ?)'] * len(columns))};",
+        [v for col in columns for v in (table, col)],
+    )
 
 
 def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], model: Any) -> Any:
@@ -187,16 +211,23 @@ def _promotion(table: str, promoted: dict[str, str], checks: dict[str, str], mod
     Nothing is changed when a row's value cannot be kept (``SchemaError``)."""
     layout, names = _layout((yield _columns_sql(table), []))
     if not names:
-        defs = [f"{col} {d}" for col, d in promoted.items()] + [f"CHECK ({c})" for c in checks.values()]
+        defs = [f"{col} {d}" for col, d in promoted.items()] + [
+            f"CHECK ({c})" for c in checks.values()
+        ]
         yield from _record(table, list(promoted), made=True)
-        yield f"CREATE TABLE IF NOT EXISTS {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL{''.join(', ' + d for d in defs)});", []
+        yield (
+            f"CREATE TABLE IF NOT EXISTS {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL{''.join(', ' + d for d in defs)});",
+            [],
+        )
         return list(promoted), ("_id", "data", *promoted)
     added = {col: d for col, d in promoted.items() if col not in names}
     if added:
         fills, conditions = {}, []
         for i, (col, definition) in enumerate(added.items()):
             matched = _DEFINITION.match(definition)
-            assert matched is not None  # ``validate_column_def`` accepted it, and its grammar is a part of this one
+            assert (
+                matched is not None
+            )  # ``validate_column_def`` accepted it, and its grammar is a part of this one
             not_null, default = matched.groups()
             if not_null and (default is None or default.upper() == "NULL"):
                 raise SchemaError(
@@ -243,14 +274,17 @@ def _moved(table: str, column: str, keep: str) -> Any:
         raise TableNotFoundError(f"Table {table} does not exist", table=table)
     if column not in _promoted_in(info):
         raise SchemaError(
-            f"{column} is not a promoted column of {table}", details={"table": table, "column": column}
+            f"{column} is not a promoted column of {table}",
+            details={"table": table, "column": column},
         )
     if keep == "document":
         (row,) = yield _tally_sql(table, [column], [_unkept(0, bool(info[column][3]), False)])
         if row[0]:
             raise _refused(table, column, row[0], row[1])
     yield from _record(table, [column])
-    yield _move_sql(table, {column: _NO_FILL if keep == "document" else _KEEP}, _has_version(tuple(info)))
+    yield _move_sql(
+        table, {column: _NO_FILL if keep == "document" else _KEEP}, _has_version(tuple(info))
+    )
     yield from _follow_promotion(table, [column], _promoted_in(info))
     yield from _follow_indexes(table, [column], _promoted_in(info))
 
@@ -259,14 +293,20 @@ def _unwritable(exc: sqlite3.OperationalError) -> bool:
     """Whether ``exc`` says the database takes no write now: opened read-only or ``query_only``,
     or another connection holds the write lock past the busy timeout."""
     code = getattr(exc, "sqlite_errorcode", None)  # an error sqler raised itself carries none
-    return code is not None and (code & 0xFF) in (sqlite3.SQLITE_READONLY, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    return code is not None and (code & 0xFF) in (
+        sqlite3.SQLITE_READONLY,
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    )
 
 
 def _definition(row: Any) -> str:
     """The definition of a stored column, from its row of :func:`_columns_sql`, as
     ``ensure_table`` takes it: its type, ``NOT NULL``, ``DEFAULT`` as SQLite keeps it."""
     _, _, kind, not_null, default = row[:5]
-    return f"{kind}{' NOT NULL' if not_null else ''}{'' if default is None else f' DEFAULT {default}'}"
+    return (
+        f"{kind}{' NOT NULL' if not_null else ''}{'' if default is None else f' DEFAULT {default}'}"
+    )
 
 
 def _copy_layout(source: str, target: str) -> Any:
@@ -290,10 +330,14 @@ def _copy_layout(source: str, target: str) -> Any:
     if not dst:
         return True, promoted, versioned
     have = {name.lower() for name in _promoted_in(dst)}
-    extra = [name for name in _promoted_in(dst) if name.lower() not in {c.lower() for c in promoted}]
+    extra = [
+        name for name in _promoted_in(dst) if name.lower() not in {c.lower() for c in promoted}
+    ]
     if extra:
         what = f"the column {extra[0]}" if len(extra) == 1 else f"the columns {', '.join(extra)}"
-        raise ValueError(f"copy_to: {target} has {what}, which {source} has not: a copied row would leave it empty")
+        raise ValueError(
+            f"copy_to: {target} has {what}, which {source} has not: a copied row would leave it empty"
+        )
     if _has_version(tuple(dst)) != versioned:
         said = (
             f"has no _version column and {source} has: the copied rows would lose their versions"

@@ -238,8 +238,15 @@ def _msgspec_frozen():
 
 @pytest.mark.parametrize(
     "make",
-    [_pydantic_dataclass, _pydantic_frozen, _pydantic_slots, _lite_frozen, _lite_slots,
-     _lite_frozen_slots, _msgspec_frozen],
+    [
+        _pydantic_dataclass,
+        _pydantic_frozen,
+        _pydantic_slots,
+        _lite_frozen,
+        _lite_slots,
+        _lite_frozen_slots,
+        _msgspec_frozen,
+    ],
 )
 def test_each_shape_of_class_reads_its_rows_twice_the_same(db, make):
     cls = make()
@@ -255,11 +262,20 @@ def test_each_shape_of_class_reads_its_rows_twice_the_same(db, make):
 @pytest.mark.parametrize("frozen", [False, True], ids=["plain", "frozen"])
 def test_a_msgspec_class_is_a_msgspec_model_on_the_sync_and_the_async_base(base, frozen):
     cls = types.new_class(
-        "KMsKind", (base,), {"frozen": frozen}, lambda ns: ns.update({"__annotations__": {"name": str}, "name": ""})
+        "KMsKind",
+        (base,),
+        {"frozen": frozen},
+        lambda ns: ns.update({"__annotations__": {"name": str}, "name": ""}),
     )
     kind = _refs._kind(cls)
     assert (is_msgspec_model(cls), is_lite_model(cls)) == (True, False)
-    assert (kind.struct, kind.model, kind.lite, kind.pydantic, kind.forbids) == (True, True, False, False, False)
+    assert (kind.struct, kind.model, kind.lite, kind.pydantic, kind.forbids) == (
+        True,
+        True,
+        False,
+        False,
+        False,
+    )
 
 
 # ---- two threads use a class for the first time at once -------------------------------
@@ -287,12 +303,16 @@ def test_two_threads_that_use_a_class_first_at_once_read_one_answer(db):
     for t in threads:
         t.join(30)
     assert not any(t.is_alive() for t in threads), "a thread was still running after 30 s"
-    assert failed == [], "a thread failed (a BrokenBarrierError means the barrier timed out after 30 s)"
+    assert failed == [], (
+        "a thread failed (a BrokenBarrierError means the barrier timed out after 30 s)"
+    )
     assert read == [[("a", 1)], [("a", 1)]]
     assert len(kinds) == 2 and kinds[0] is kinds[1] is _refs._kind(KThreads)
 
 
-def test_an_answer_left_under_the_id_of_a_class_that_is_gone_is_not_given_to_the_class_that_has_the_id_now(db):
+def test_an_answer_left_under_the_id_of_a_class_that_is_gone_is_not_given_to_the_class_that_has_the_id_now(
+    db,
+):
     """An id is used again once its class is gone; where the weak reference's callback runs
     late, the old answer is still there when the new class asks."""
 
@@ -320,14 +340,29 @@ def test_an_answer_left_under_the_id_of_a_class_that_is_gone_is_not_given_to_the
 def _forbidding(base, child_base):
     """A parent and a child class on ``base`` that both set ``extra="forbid"``."""
     config = ConfigDict(extra="forbid")
-    child = type("FbChild", (child_base,), {
-        "__tablename__": "fb_child", "__module__": __name__, "model_config": config,
-        "__annotations__": {"label": str}, "label": "",
-    })
-    parent = type("FbParent", (base,), {
-        "__tablename__": "fb_parent", "__module__": __name__, "model_config": config,
-        "__annotations__": {"name": str, "child": Optional[child]}, "name": "", "child": None,
-    })
+    child = type(
+        "FbChild",
+        (child_base,),
+        {
+            "__tablename__": "fb_child",
+            "__module__": __name__,
+            "model_config": config,
+            "__annotations__": {"label": str},
+            "label": "",
+        },
+    )
+    parent = type(
+        "FbParent",
+        (base,),
+        {
+            "__tablename__": "fb_parent",
+            "__module__": __name__,
+            "model_config": config,
+            "__annotations__": {"name": str, "child": Optional[child]},
+            "name": "",
+            "child": None,
+        },
+    )
     return parent, child
 
 

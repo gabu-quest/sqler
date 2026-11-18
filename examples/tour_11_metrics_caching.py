@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -74,7 +75,6 @@ def _(SQLerModel, db):
         email: str
         active: bool = True
 
-
     # Create sample users
     for _i in range(10):
         User(name=f"User{_i}", email=f"user{_i}@example.com", active=_i % 2 == 0).save(db=db)
@@ -124,7 +124,7 @@ def _(metrics):
 
     # Per-table operations
     print("\nPer-table operations:")
-    for _table, _ops in _m['tables'].items():
+    for _table, _ops in _m["tables"].items():
         print(f"  {_table}: {_ops}")
     return
 
@@ -298,7 +298,6 @@ def _(CacheAwareModel, SQLerModel, db):
         class Meta:
             cache_table = "products"
 
-
     # Cache some product data in global cache
     _global_cache.set("all_products", "cached data", table="products")
     print(f"Cached 'all_products': {_global_cache.has('all_products')}")
@@ -359,10 +358,7 @@ def _(mo):
 def _(MetricsCollector, User, db):
     # Create collector with custom labels
     _collector = MetricsCollector()
-    _collector.enable(
-        slow_threshold_ms=100,
-        labels={"service": "api", "environment": "production"}
-    )
+    _collector.enable(slow_threshold_ms=100, labels={"service": "api", "environment": "production"})
 
     # Run a query
     User.using(db).count()

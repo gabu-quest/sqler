@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -78,7 +79,6 @@ def _(SQLerModel, TrackedModel, db):
         name: str
         email: str
         age: int
-
 
     # Create a user
     _user = User(name="Alice", email="alice@example.com", age=30).save(db=db)
@@ -224,7 +224,6 @@ def _(DiffMixin, SQLerModel, db):
         price: float
         stock: int
 
-
     # Create two products to compare
     _prod1 = Product(name="Widget", price=29.99, stock=100).save(db=db)
     _prod2 = Product(name="Widget", price=24.99, stock=85).save(db=db)
@@ -273,7 +272,6 @@ def _(PartialUpdateMixin, SQLerModel, TrackedModel, db):
         key: str
         value: str
         description: str = ""
-
 
     _config = Config(key="theme", value="dark", description="UI theme setting").save(db=db)
     print(f"Created: {_config.key}={_config.value}")

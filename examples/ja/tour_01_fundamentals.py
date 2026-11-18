@@ -12,6 +12,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -292,12 +293,7 @@ def _(mo):
 @app.cell
 def _(F, User, db):
     # 複数フィルター（AND）
-    active_and_young = (
-        User.using(db)
-        .filter(F("is_active") == True)
-        .filter(F("age") < 30)
-        .all()
-    )
+    active_and_young = User.using(db).filter(F("is_active") == True).filter(F("age") < 30).all()
     print(f"アクティブ かつ 30歳未満: {[u.name for u in active_and_young]}")
 
     # 除外

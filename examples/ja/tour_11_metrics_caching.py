@@ -81,7 +81,6 @@ def _(SQLerModel, db):
         email: str
         active: bool = True
 
-
     # サンプルユーザーを作成
     for _i in range(10):
         User(name=f"User{_i}", email=f"user{_i}@example.com", active=_i % 2 == 0).save(db=db)
@@ -317,7 +316,6 @@ def _(CacheAwareModel, SQLerModel, db):
         class Meta:
             cache_table = "products"
 
-
     # グローバルキャッシュに商品データをキャッシュ
     _global_cache.set("all_products", "キャッシュされたデータ", table="products")
     print(f"'all_products' キャッシュ: {_global_cache.has('all_products')}")
@@ -383,9 +381,7 @@ def _(mo):
 def _(MetricsCollector, User, db):
     # カスタムラベル付きコレクターを作成
     _collector = MetricsCollector()
-    _collector.enable(
-        slow_threshold_ms=100, labels={"service": "api", "environment": "production"}
-    )
+    _collector.enable(slow_threshold_ms=100, labels={"service": "api", "environment": "production"})
 
     # クエリを実行
     User.using(db).count()

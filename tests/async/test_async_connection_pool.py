@@ -246,13 +246,17 @@ async def test_pool_exhaustion_blocks_then_completes():
     """pool_size=2, 30 concurrent inserts: tasks queue for connections, all complete."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "exhaust_test.db")
-        adapter = AsyncSQLiteAdapter(db_path, pragmas=[
-            "PRAGMA foreign_keys = ON",
-            "PRAGMA busy_timeout = 5000",
-            "PRAGMA journal_mode = WAL",
-            "PRAGMA synchronous = NORMAL",
-            "PRAGMA temp_store = MEMORY",
-        ], pool_size=2)
+        adapter = AsyncSQLiteAdapter(
+            db_path,
+            pragmas=[
+                "PRAGMA foreign_keys = ON",
+                "PRAGMA busy_timeout = 5000",
+                "PRAGMA journal_mode = WAL",
+                "PRAGMA synchronous = NORMAL",
+                "PRAGMA temp_store = MEMORY",
+            ],
+            pool_size=2,
+        )
         db = AsyncSQLerDB(adapter)
         await db.connect()
         PoolItem.set_db(db)

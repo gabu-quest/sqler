@@ -54,7 +54,9 @@ def _init_names(cls: type) -> tuple[frozenset, tuple[tuple[str, _stored.Load], .
     names = frozenset(f.name for f in fields(cls) if not f.name.startswith("_"))  # type: ignore[arg-type]
     hints = field_types(cls)
     loads = tuple(
-        (name, load) for name in sorted(names) if (load := _stored.loader(hints.get(name))) is not None
+        (name, load)
+        for name in sorted(names)
+        if (load := _stored.loader(hints.get(name))) is not None
     )
     return names, loads
 

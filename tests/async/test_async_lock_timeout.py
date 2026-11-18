@@ -110,7 +110,9 @@ async def test_the_adapter_made_with_a_path_only_waits_five_seconds(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_lock_held_by_a_second_async_adapter_is_waited_for_timeout_ms(tmp_path, clock_tick):
+async def test_the_lock_held_by_a_second_async_adapter_is_waited_for_timeout_ms(
+    tmp_path, clock_tick
+):
     path = str(tmp_path / "two.db")
     holder = await _file_adapter(path)
     waiter = await _file_adapter(path, timeout_ms=200)
@@ -127,7 +129,9 @@ async def test_the_lock_held_by_a_second_async_adapter_is_waited_for_timeout_ms(
 
 
 @pytest.mark.asyncio
-async def test_a_statement_cancelled_while_it_waits_for_the_lock_gives_its_connection_back(tmp_path):
+async def test_a_statement_cancelled_while_it_waits_for_the_lock_gives_its_connection_back(
+    tmp_path,
+):
     path = str(tmp_path / "cancel.db")
     adapter = await _file_adapter(path, timeout_ms=4000)
     loop = asyncio.get_running_loop()
@@ -182,7 +186,10 @@ async def test_every_factory_passes_timeout_ms_to_every_connection(factory, tmp_
     adapter = FACTORIES[factory](str(tmp_path / "f.db"), timeout_ms=1234)
     await adapter.connect()
     try:
-        assert (adapter.timeout_ms, await _busy_timeouts(adapter)) == (1234, [1234] * adapter._pool_size)
+        assert (adapter.timeout_ms, await _busy_timeouts(adapter)) == (
+            1234,
+            [1234] * adapter._pool_size,
+        )
     finally:
         await adapter.close()
 
@@ -193,7 +200,10 @@ async def test_every_factory_waits_five_seconds_by_default(factory, tmp_path):
     adapter = FACTORIES[factory](str(tmp_path / "f.db"))
     await adapter.connect()
     try:
-        assert (adapter.timeout_ms, await _busy_timeouts(adapter)) == (5000, [5000] * adapter._pool_size)
+        assert (adapter.timeout_ms, await _busy_timeouts(adapter)) == (
+            5000,
+            [5000] * adapter._pool_size,
+        )
     finally:
         await adapter.close()
 
@@ -210,14 +220,18 @@ async def test_a_pool_of_four_reads_timeout_ms_on_all_four_connections(tmp_path)
 
 @pytest.mark.parametrize("value", [True, False, 1.5, -1, "100", 2**31], ids=repr)
 def test_a_timeout_that_is_not_a_whole_number_of_milliseconds_raises_at_construction(value):
-    with pytest.raises(ValueError, match="^timeout_ms must be a whole number of milliseconds") as raised:
+    with pytest.raises(
+        ValueError, match="^timeout_ms must be a whole number of milliseconds"
+    ) as raised:
         AsyncSQLiteAdapter(":memory:", timeout_ms=value)
     assert str(raised.value).endswith(f"not {value!r}")
 
 
 @pytest.mark.parametrize("factory", ["on_disk", "in_memory"])
 @pytest.mark.parametrize("owner", [AsyncSQLiteAdapter, AsyncSQLerDB], ids=["adapter", "db"])
-def test_a_factory_given_a_negative_timeout_raises_before_it_opens_anything(owner, factory, tmp_path):
+def test_a_factory_given_a_negative_timeout_raises_before_it_opens_anything(
+    owner, factory, tmp_path
+):
     args = (str(tmp_path / "never.db"),) if factory == "on_disk" else ()
     with pytest.raises(ValueError, match="not -1$"):
         getattr(owner, factory)(*args, timeout_ms=-1)
@@ -231,7 +245,9 @@ PRAGMA_FORMS = ["PRAGMA busy_timeout=250;", "pragma BUSY_TIMEOUT = 250"]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pragma", PRAGMA_FORMS)
-async def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(pragma, tmp_path, clock_tick):
+async def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(
+    pragma, tmp_path, clock_tick
+):
     path = str(tmp_path / "pragma.db")
     adapter = await _file_adapter(path, pragmas=[pragma], pool_size=2)
     other = _locked_by_another_connection(path)
@@ -247,7 +263,10 @@ async def test_a_busy_timeout_pragma_is_the_number_when_timeout_ms_is_not_given(
 @pytest.mark.asyncio
 async def test_timeout_ms_and_a_pragma_that_agree_are_one_number(tmp_path):
     adapter = await _file_adapter(
-        str(tmp_path / "agree.db"), timeout_ms=250, pragmas=["PRAGMA busy_timeout = 250"], pool_size=2
+        str(tmp_path / "agree.db"),
+        timeout_ms=250,
+        pragmas=["PRAGMA busy_timeout = 250"],
+        pool_size=2,
     )
     try:
         assert (adapter.timeout_ms, await _busy_timeouts(adapter)) == (250, [250, 250])
@@ -268,7 +287,10 @@ async def test_timeout_ms_and_a_pragma_that_disagree_raise_at_connect_naming_bot
     for attempt in (adapter.connect, adapter.connect, lambda: adapter.execute("SELECT 1")):
         with pytest.raises(ValueError) as raised:
             await attempt()
-        assert str(raised.value) == "timeout_ms=300 and the busy_timeout pragma (250) disagree: give one of them"
+        assert (
+            str(raised.value)
+            == "timeout_ms=300 and the busy_timeout pragma (250) disagree: give one of them"
+        )
         # the connect that failed left nothing open and the adapter not connected
         assert (adapter._all_conns, adapter._pool.qsize(), adapter._connected) == ([], 0, False)
     await adapter.close()
@@ -378,7 +400,13 @@ WAITS = {
     "insert": ("write", _insert_mine, None, ["a", "b", "held", "mine"], ["x", "y"]),
     "select": ("write", _values, ["a", "b", "held"], ["a", "b", "held"], ["x", "y"]),
     "executemany": ("read", _many, None, ["a", "b", "m1", "m2", "m3"], ["x", "y"]),
-    "executemany-inside-a-transaction": ("read", _many_inside, None, ["a", "b", "m1", "m2", "m3"], ["x", "y"]),
+    "executemany-inside-a-transaction": (
+        "read",
+        _many_inside,
+        None,
+        ["a", "b", "m1", "m2", "m3"],
+        ["x", "y"],
+    ),
     "begin_transaction": ("write", _begin, None, ["a", "b", "held", "mine"], ["x", "y"]),
     "inside-a-transaction": ("read", _inside, None, ["a", "b", "mine"], ["x", "y", "mine"]),
 }
@@ -386,7 +414,9 @@ WAITS = {
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", list(WAITS))
-async def test_a_statement_that_meets_another_adapters_table_lock_waits_for_it_and_runs_once(case, pair, pauses):
+async def test_a_statement_that_meets_another_adapters_table_lock_waits_for_it_and_runs_once(
+    case, pair, pauses
+):
     kind, work, returned, t_rows, u_rows = WAITS[case]
     holder, waiter = await pair()
     release = await _hold(holder, kind)
@@ -402,7 +432,9 @@ async def test_a_statement_that_meets_another_adapters_table_lock_waits_for_it_a
 
 
 @pytest.mark.asyncio
-async def test_an_adapter_that_connects_while_another_holds_an_uncommitted_table_waits_and_connects(pauses):
+async def test_an_adapter_that_connects_while_another_holds_an_uncommitted_table_waits_and_connects(
+    pauses,
+):
     """A new connection reads the schema with its first statement; a table another adapter has
     made and not committed locks it."""
     name = f"lock-wait-{uuid.uuid4().hex}"
@@ -427,7 +459,9 @@ async def test_an_adapter_that_connects_while_another_holds_an_uncommitted_table
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["write", "read"])
-async def test_a_lock_that_is_not_released_raises_sqlites_error_once_timeout_ms_has_passed(kind, pair, clock_tick):
+async def test_a_lock_that_is_not_released_raises_sqlites_error_once_timeout_ms_has_passed(
+    kind, pair, clock_tick
+):
     holder, waiter = await pair(timeout_ms=200)
     release = await _hold(holder, kind)
     try:
@@ -476,7 +510,9 @@ async def test_executemany_with_rows_from_an_iterator_raises_at_once(pair, pause
 
 
 @pytest.mark.asyncio
-async def test_executescript_that_meets_the_lock_raises_at_once_with_its_earlier_statements_run(pair, pauses):
+async def test_executescript_that_meets_the_lock_raises_at_once_with_its_earlier_statements_run(
+    pair, pauses
+):
     """The statements before the one that met the lock have run: the script is not sent again."""
     holder, waiter = await pair()
     release = await _hold(holder, "read")
@@ -486,11 +522,16 @@ async def test_executescript_that_meets_the_lock_raises_at_once_with_its_earlier
     finally:
         await release()
     assert (raised.value.sqlite_errorcode, pauses.count) == (sqlite3.SQLITE_LOCKED_SHAREDCACHE, 0)
-    assert (await _values(waiter, "t"), await _values(waiter, "u")) == (["a", "b"], ["x", "y", "s1"])
+    assert (await _values(waiter, "t"), await _values(waiter, "u")) == (
+        ["a", "b"],
+        ["x", "y", "s1"],
+    )
 
 
 @pytest.mark.asyncio
-async def test_two_tasks_that_each_hold_what_the_other_wants_both_end_after_timeout_ms(pair, clock_tick):
+async def test_two_tasks_that_each_hold_what_the_other_wants_both_end_after_timeout_ms(
+    pair, clock_tick
+):
     """The holder's transaction has written t and wants u; the other task reads u through the
     waiter and wants t through a third adapter. Neither can go on: each raises once its wait has passed."""
     holder, waiter = await pair(timeout_ms=300)
@@ -536,7 +577,10 @@ async def test_a_waiter_whose_adapter_is_closed_while_it_waits_ends_with_an_erro
             await asyncio.wait_for(task, 30)
     finally:
         await release()
-    assert str(raised.value) == "the adapter was closed while a statement waited for another connection's lock"
+    assert (
+        str(raised.value)
+        == "the adapter was closed while a statement waited for another connection's lock"
+    )
     assert await _values(holder) == ["a", "b", "held"]
 
 
@@ -574,7 +618,9 @@ async def test_the_pool_is_opened_once_however_connect_is_called(twice, tmp_path
         await asyncio.gather(adapter.connect(), adapter.connect())
     else:
         await asyncio.gather(adapter.connect(), adapter.execute("SELECT 1"))
-        await asyncio.gather(*adapter._reclaims)  # the statement's task ended: its connection goes back
+        await asyncio.gather(
+            *adapter._reclaims
+        )  # the statement's task ended: its connection goes back
     try:
         assert (len(adapter._all_conns), adapter._pool.qsize(), _new_threads(before)) == (4, 4, 4)
     finally:
@@ -596,14 +642,25 @@ async def test_connect_after_close_opens_the_pool_again(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pool_size", [2, 3], ids=["the-last-open-fails", "the-second-of-three-fails"])
-async def test_a_connect_whose_second_open_fails_closes_what_it_opened_and_raises_that_error(pool_size, tmp_path):
+@pytest.mark.parametrize(
+    "pool_size", [2, 3], ids=["the-last-open-fails", "the-second-of-three-fails"]
+)
+async def test_a_connect_whose_second_open_fails_closes_what_it_opened_and_raises_that_error(
+    pool_size, tmp_path
+):
     path = str(tmp_path / "fails.db")
     before = set(threading.enumerate())
-    adapter = AsyncSQLiteAdapter(path, pragmas=SECOND_OPEN_FAILS, pool_size=pool_size, timeout_ms=50)
+    adapter = AsyncSQLiteAdapter(
+        path, pragmas=SECOND_OPEN_FAILS, pool_size=pool_size, timeout_ms=50
+    )
     with pytest.raises(sqlite3.OperationalError, match="^database is locked$"):
         await adapter.connect()
-    assert (_threads_left(before), adapter._all_conns, adapter._pool.qsize(), adapter._connected) == (
+    assert (
+        _threads_left(before),
+        adapter._all_conns,
+        adapter._pool.qsize(),
+        adapter._connected,
+    ) == (
         [],
         [],
         0,
@@ -674,6 +731,7 @@ async def test_a_connection_whose_close_raises_does_not_stop_the_others_closing(
     before = set(threading.enumerate())
     adapter = AsyncSQLiteAdapter(str(tmp_path / "raises.db"), pool_size=3)
     await adapter.connect()
+
     def thread_of(conn):  # aiosqlite's connection is its thread, or holds it
         return conn if isinstance(conn, threading.Thread) else conn._thread
 
@@ -702,18 +760,29 @@ async def test_close_beside_connect_leaves_what_the_later_of_the_two_says(first,
     adapter = AsyncSQLiteAdapter.on_disk(str(tmp_path / "beside.db"))
     if first == "connect":  # the close waits for the connect and closes what it opened
         await asyncio.gather(adapter.connect(), adapter.close())
-        assert (adapter._connected, adapter._all_conns, adapter._pool.qsize(), _threads_left(before)) == (False, [], 0, [])
+        assert (
+            adapter._connected,
+            adapter._all_conns,
+            adapter._pool.qsize(),
+            _threads_left(before),
+        ) == (False, [], 0, [])
     else:
         await asyncio.gather(adapter.close(), adapter.connect())
         try:
-            assert (adapter._connected, len(adapter._all_conns), adapter._pool.qsize()) == (True, 4, 4)
+            assert (adapter._connected, len(adapter._all_conns), adapter._pool.qsize()) == (
+                True,
+                4,
+                4,
+            )
         finally:
             await adapter.close()
         assert _threads_left(before) == []
 
 
 @pytest.mark.asyncio
-async def test_a_close_cancelled_while_its_connections_close_leaves_an_adapter_that_opens_again(tmp_path):
+async def test_a_close_cancelled_while_its_connections_close_leaves_an_adapter_that_opens_again(
+    tmp_path,
+):
     before = set(threading.enumerate())
     adapter = AsyncSQLiteAdapter.on_disk(str(tmp_path / "cancelled_close.db"))
     await adapter.connect()
@@ -817,8 +886,9 @@ async def test_a_search_save_after_the_connections_own_schema_reset_waits_for_th
 
 
 @pytest.mark.asyncio
-async def test_eight_tasks_saving_search_rows_beside_first_saves_of_a_new_class_never_fail(tmp_path):
-
+async def test_eight_tasks_saving_search_rows_beside_first_saves_of_a_new_class_never_fail(
+    tmp_path,
+):
     path = str(tmp_path / "search-tasks.db")
     db, Note, Fresh = await _search_classes(path)
 

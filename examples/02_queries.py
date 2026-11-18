@@ -37,7 +37,8 @@ def main():
         [p.name for p in Product.using(db).filter(F("tags").isin(["computers"])).all()],
     )
     print(
-        "any qty>3:", [p.name for p in Product.using(db).filter(F(["items"]).any()["qty"] > 3).all()]
+        "any qty>3:",
+        [p.name for p in Product.using(db).filter(F(["items"]).any()["qty"] > 3).all()],
     )
 
     db.close()

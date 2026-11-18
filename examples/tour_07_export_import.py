@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -68,7 +69,6 @@ def _(SQLerModel, db):
         email: str
         age: int
         active: bool = True
-
 
     # Create sample data
     users_data = [
@@ -183,7 +183,6 @@ def _(SQLerModel, db):
         price: float
         category: str
 
-
     # Simulate CSV data (in real usage, this would come from a file)
     csv_content = """name,price,category
     Widget,29.99,electronics
@@ -225,7 +224,6 @@ def _(SQLerModel, db):
         total: float
         status: str = "pending"
 
-
     # Simulate JSON data
     json_content = """[
         {"customer": "Alice", "total": 99.99, "status": "shipped"},
@@ -256,7 +254,6 @@ def _(mo):
 
 @app.cell
 def _():
-
     # When exporting to files, you get an ExportResult
     # (In WASM we can't write files, so we show the concept)
 
@@ -294,7 +291,9 @@ def _(ImpResult):
     print("  - success_rate: succeeded / count")
 
     # Example result
-    example = ImpResult(count=10, succeeded=8, failed=2, errors=[{"row": 3, "error": "invalid email"}])
+    example = ImpResult(
+        count=10, succeeded=8, failed=2, errors=[{"row": 3, "error": "invalid email"}]
+    )
     print(f"\nExample: {example.succeeded}/{example.count} succeeded ({example.success_rate:.0%})")
     return
 

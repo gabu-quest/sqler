@@ -108,13 +108,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import importlib
     from dataclasses import dataclass
@@ -168,7 +164,6 @@ def _(SQLerLiteModel, dataclass, db):
 
         name: str
         email: str
-
 
     # Create some data
     for _i in range(10):
@@ -315,7 +310,6 @@ def _(SQLerLiteModel, dataclass, db):
 
         name: str
         price: float
-
 
     # Create many products
     for _i in range(25):

@@ -40,8 +40,10 @@ async def lifespan(app: FastAPI):
     if is_db_empty():
         print("Database empty, seeding with sample data...")
         result = seed_db()
-        print(f"Seeded: {result['countries']} countries, {result['cities']} cities, "
-              f"{result['writers']} writers, {result['articles']} articles")
+        print(
+            f"Seeded: {result['countries']} countries, {result['cities']} cities, "
+            f"{result['writers']} writers, {result['articles']} articles"
+        )
 
     yield
     close_db()
@@ -128,8 +130,12 @@ if __name__ == "__main__":
         raise RuntimeError(f"No open port found in range {start}-{start + max_attempts}")
 
     parser = argparse.ArgumentParser(description="SQLer FastAPI Demo")
-    parser.add_argument("-p", "--port", type=int, default=8000, help="Port to run on (default: 8000)")
-    parser.add_argument("--auto-port", action="store_true", help="Auto-find open port if default is busy")
+    parser.add_argument(
+        "-p", "--port", type=int, default=8000, help="Port to run on (default: 8000)"
+    )
+    parser.add_argument(
+        "--auto-port", action="store_true", help="Auto-find open port if default is busy"
+    )
     args = parser.parse_args()
 
     port = args.port

@@ -41,7 +41,11 @@ pytestmark = pytest.mark.asyncio
 async def adapter():
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, "f.db")
-        pragmas = ["PRAGMA busy_timeout = 5000", "PRAGMA journal_mode = WAL", "PRAGMA synchronous = OFF"]
+        pragmas = [
+            "PRAGMA busy_timeout = 5000",
+            "PRAGMA journal_mode = WAL",
+            "PRAGMA synchronous = OFF",
+        ]
         ad = AsyncSQLiteAdapter(path, pragmas=pragmas, pool_size=1, acquire_timeout=20)
         await ad.connect()
         await ad.execute("CREATE TABLE t (v TEXT)")
@@ -78,7 +82,12 @@ async def _iterate(cur):
         pass
 
 
-FETCHES = {"fetchone": _fetchone, "fetchall": _fetchall, "fetchmany": _fetchmany, "iterate": _iterate}
+FETCHES = {
+    "fetchone": _fetchone,
+    "fetchall": _fetchall,
+    "fetchmany": _fetchmany,
+    "iterate": _iterate,
+}
 
 
 @pytest.mark.parametrize("fetch", list(FETCHES))
@@ -101,7 +110,9 @@ async def test_failed_fetch_lets_another_task_read(adapter):
         await adapter.auto_commit()
         return row[0]
 
-    assert await asyncio.wait_for(asyncio.create_task(other(), context=contextvars.Context()), 2) == 1
+    assert (
+        await asyncio.wait_for(asyncio.create_task(other(), context=contextvars.Context()), 2) == 1
+    )
 
 
 async def test_failed_fetch_in_a_transaction_keeps_it(adapter):
@@ -172,7 +183,9 @@ async def test_statement_cancelled_in_a_transaction_does_not_hold_the_caller(ada
     waited = time.perf_counter() - start
     assert waited < CANCEL_DELIVERED_S, f"the caller waited {waited:.2f}s"
     # once the thread is done the connection is back, rolled back
-    c = await asyncio.wait_for(adapter.execute("SELECT count(*) FROM t WHERE v = '{\"a\": 10}'"), 30)
+    c = await asyncio.wait_for(
+        adapter.execute("SELECT count(*) FROM t WHERE v = '{\"a\": 10}'"), 30
+    )
     assert (await c.fetchone())[0] == 0
     await c.close()
     await adapter.auto_commit()

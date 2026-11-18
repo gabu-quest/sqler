@@ -215,7 +215,9 @@ LOADERS = {
     "using().first()": lambda cls, db: cls.using(db).first(),
     "using().all()": lambda cls, db: _first(cls.using(db).all()),
     "using().resolve(False).all()": lambda cls, db: _first(cls.using(db).resolve(False).all()),
-    "using().update_one()": lambda cls, db: cls.using(db).filter(F("_id") == 1).update_one(name="u"),
+    "using().update_one()": lambda cls, db: cls.using(db)
+    .filter(F("_id") == 1)
+    .update_one(name="u"),
     "using().update_n()": lambda cls, db: _first(
         cls.using(db).filter(F("_id") == 1).update_n(1, name="u")
     ),
@@ -248,7 +250,9 @@ async def test_a_row_each_loader_reads_from_another_database_is_saved_there(base
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("base", [b for b in BASES if b not in ASYNC_BASES], ids=lambda b: b.__name__)
+@pytest.mark.parametrize(
+    "base", [b for b in BASES if b not in ASYNC_BASES], ids=lambda b: b.__name__
+)
 async def test_a_row_streamed_from_another_database_is_saved_there(base):
     home, elsewhere = await open_db(base), await open_db(base)
     try:
@@ -420,7 +424,9 @@ async def test_an_instance_read_before_its_class_is_rebound_saves_where_it_was_r
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("base", [b for b in BASES if b not in ASYNC_BASES], ids=lambda b: b.__name__)
+@pytest.mark.parametrize(
+    "base", [b for b in BASES if b not in ASYNC_BASES], ids=lambda b: b.__name__
+)
 async def test_a_save_whose_home_is_closed_raises_its_error_and_writes_nowhere_else(base):
     gone, bound = await open_db(base), await open_db(base)
     try:
@@ -622,7 +628,7 @@ async def _old_table(base, path: str, table: str, origin: str) -> None:
         _sqlite(
             path,
             f"CREATE TABLE {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)",
-            f"INSERT INTO {table} (data) VALUES ('{{\"name\": \"old\"}}')",
+            f'INSERT INTO {table} (data) VALUES (\'{{"name": "old"}}\')',
         )
         return
     maker = row_class(_plain_of_bound(base) if origin == "plain class" else base)
@@ -661,7 +667,15 @@ async def _door(door: str, Row, Parent, Other, db):
     raise AssertionError(door)
 
 
-READ_DOORS = ["from_id", "from_ids", "refresh", "reference", "query()", "using(db)", "using(db, table)"]
+READ_DOORS = [
+    "from_id",
+    "from_ids",
+    "refresh",
+    "reference",
+    "query()",
+    "using(db)",
+    "using(db, table)",
+]
 DOORED = [
     (base, door)
     for base in SAFE_BASES
@@ -753,7 +767,9 @@ async def _sent(run):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("door", SET_DOORS)
 @pytest.mark.parametrize("base", SAFE_BASES, ids=lambda b: b.__name__)
-async def test_count_and_exists_on_a_table_without_the_column_send_their_one_statement(base, door, tmp_path):
+async def test_count_and_exists_on_a_table_without_the_column_send_their_one_statement(
+    base, door, tmp_path
+):
     path = str(tmp_path / "old.db")
     Row, _, Other = await _world(base, path, "plain SQL")
     db = await open_db(base, path)
@@ -777,7 +793,9 @@ async def test_count_and_exists_on_a_table_without_the_column_send_their_one_sta
 @pytest.mark.asyncio
 @pytest.mark.parametrize("door", SET_DOORS)
 @pytest.mark.parametrize("base", SAFE_BASES, ids=lambda b: b.__name__)
-async def test_delete_all_on_a_table_without_the_column_deletes_and_keeps_the_schema(base, door, tmp_path):
+async def test_delete_all_on_a_table_without_the_column_deletes_and_keeps_the_schema(
+    base, door, tmp_path
+):
     path = str(tmp_path / "old.db")
     Row, _, Other = await _world(base, path, "plain SQL")
     db = await open_db(base, path)
@@ -794,13 +812,18 @@ async def test_delete_all_on_a_table_without_the_column_deletes_and_keeps_the_sc
 @pytest.mark.asyncio
 @pytest.mark.parametrize("door", SET_DOORS)
 @pytest.mark.parametrize("base", SAFE_BASES, ids=lambda b: b.__name__)
-async def test_a_set_update_of_a_table_without_the_column_adds_it_and_moves_the_version(base, door, tmp_path):
+async def test_a_set_update_of_a_table_without_the_column_adds_it_and_moves_the_version(
+    base, door, tmp_path
+):
     path = str(tmp_path / "old.db")
     Row, _, Other = await _world(base, path, "plain SQL")
     db = await open_db(base, path)
     try:
         bind_unversioned(Row, db)
-        assert await settle(_set_query(door, Row, Other, db).filter(F("_id") == 1).update(name="u")) == 1
+        assert (
+            await settle(_set_query(door, Row, Other, db).filter(F("_id") == 1).update(name="u"))
+            == 1
+        )
         got = await settle(Row.from_id(1, db=db))
         assert (got.name, got._version) == ("u", 1)
         got.name = "saved"
@@ -841,7 +864,9 @@ SET_WRITES = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", list(SET_WRITES))
 @pytest.mark.parametrize("base", SAFE_BASES, ids=lambda b: b.__name__)
-async def test_a_set_update_of_a_missing_table_finds_no_row_and_creates_nothing(base, way, tmp_path):
+async def test_a_set_update_of_a_missing_table_finds_no_row_and_creates_nothing(
+    base, way, tmp_path
+):
     path = str(tmp_path / "empty.db")
     _sqlite(path, "PRAGMA journal_mode = WAL")
     write, nothing = SET_WRITES[way]
@@ -857,7 +882,9 @@ async def test_a_set_update_of_a_missing_table_finds_no_row_and_creates_nothing(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", ["update_one", "update_n"])
 @pytest.mark.parametrize("base", SAFE_BASES, ids=lambda b: b.__name__)
-async def test_a_set_update_that_returns_rows_adds_the_column_to_a_table_without_it(base, way, tmp_path):
+async def test_a_set_update_that_returns_rows_adds_the_column_to_a_table_without_it(
+    base, way, tmp_path
+):
     path = str(tmp_path / "old.db")
     Row, _, _ = await _world(base, path, "plain SQL")
     write, _ = SET_WRITES[way]
@@ -909,13 +936,24 @@ async def test_each_door_asks_for_the_version_column_once_per_database_object(ba
             count = (await _sent(lambda: Row.using(db).count()))[1]
         finally:
             await close(db)
-        read = f"SELECT _id, data, _version FROM {t} WHERE {guard}" if door.startswith("using") else by_id
-        assert (door, first, second, count) == (door, [look, read], [read], [f"SELECT COUNT(*) FROM {t} WHERE {guard}"])
+        read = (
+            f"SELECT _id, data, _version FROM {t} WHERE {guard}"
+            if door.startswith("using")
+            else by_id
+        )
+        assert (door, first, second, count) == (
+            door,
+            [look, read],
+            [read],
+            [f"SELECT COUNT(*) FROM {t} WHERE {guard}"],
+        )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("base", SAFE_BASES, ids=lambda b: b.__name__)
-async def test_a_query_made_before_another_database_object_adds_the_column_reads_it_after(base, tmp_path):
+async def test_a_query_made_before_another_database_object_adds_the_column_reads_it_after(
+    base, tmp_path
+):
     path = str(tmp_path / "old.db")
     Row, _, _ = await _world(base, path, "plain SQL")
     t = Row.__tablename__
@@ -932,7 +970,10 @@ async def test_a_query_made_before_another_database_object_adds_the_column_reads
         held.name = "written"
         await settle(held.save())  # the writer adds the column
         got, sent = await _sent(lambda: Row.using(reader).all())
-        assert ([(g.name, g._version) for g in got], sent) == ([("written", 1)], [old, look, new])  # refused, learned
+        assert ([(g.name, g._version) for g in got], sent) == (
+            [("written", 1)],
+            [old, look, new],
+        )  # refused, learned
         _, sent = await _sent(lambda: Row.using(reader).all())
         assert sent == [new]
     finally:
@@ -949,7 +990,10 @@ async def test_what_a_rolled_back_transaction_learned_of_the_column_is_asked_aga
     path = str(tmp_path / "v.db")
     Row = await _with_version_column(base, path)
     t = Row.__tablename__
-    look, read = f'PRAGMA table_xinfo("{t}");', f"SELECT _id, data, _version FROM {t} WHERE {_g(t, '_id', 'data', '_version')}"
+    look, read = (
+        f'PRAGMA table_xinfo("{t}");',
+        f"SELECT _id, data, _version FROM {t} WHERE {_g(t, '_id', 'data', '_version')}",
+    )
     db = await open_db(base, path)
     try:
         with pytest.raises(_Undone):
@@ -980,7 +1024,9 @@ UPDATES = {
 @pytest.mark.parametrize("door", ["query()", "using(db)"])
 @pytest.mark.parametrize("way", list(UPDATES))
 @pytest.mark.parametrize("base", SAFE_BASES, ids=lambda b: b.__name__)
-async def test_an_instance_a_set_update_returns_holds_its_home_and_version_and_saves(base, way, door):
+async def test_an_instance_a_set_update_returns_holds_its_home_and_version_and_saves(
+    base, way, door
+):
     db = await open_db(base)
     try:
         Row = row_class(base)
@@ -1053,7 +1099,9 @@ async def test_a_save_elsewhere_that_fails_after_the_write_leaves_the_home(base,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", FAILURES)
 @pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
-async def test_a_save_many_elsewhere_that_fails_after_the_write_leaves_no_home(base, failure, tmp_path):
+async def test_a_save_many_elsewhere_that_fails_after_the_write_leaves_no_home(
+    base, failure, tmp_path
+):
     home_path, other_path = str(tmp_path / "home.db"), str(tmp_path / "other.db")
     Row = _audited(base)
     home, other = await open_db(base, home_path), await open_db(base, other_path)
@@ -1087,7 +1135,10 @@ def _cancel_at_the_audit_row(task_box: list, table: str):
 @pytest.mark.parametrize("base", ASYNC_BASES, ids=lambda b: b.__name__)
 async def test_a_save_elsewhere_cancelled_after_the_write_leaves_the_home(base, tmp_path):
     Row = _audited(base)
-    home, other = await open_db(base, tmp_path / "home.db"), await open_db(base, tmp_path / "other.db")
+    home, other = (
+        await open_db(base, tmp_path / "home.db"),
+        await open_db(base, tmp_path / "other.db"),
+    )
     callback = _cancel_at_the_audit_row([], Row.__tablename__)
     try:
         m = await Row(name="mine").save(db=home)
@@ -1115,7 +1166,10 @@ async def test_a_save_elsewhere_cancelled_after_the_write_leaves_the_home(base, 
 @pytest.mark.parametrize("base", ASYNC_BASES, ids=lambda b: b.__name__)
 async def test_a_save_many_elsewhere_cancelled_after_the_write_leaves_no_home(base, tmp_path):
     Row = _audited(base)
-    home, other = await open_db(base, tmp_path / "home.db"), await open_db(base, tmp_path / "other.db")
+    home, other = (
+        await open_db(base, tmp_path / "home.db"),
+        await open_db(base, tmp_path / "other.db"),
+    )
     box: list = []
     callback = _cancel_at_the_audit_row(box, Row.__tablename__)
     try:

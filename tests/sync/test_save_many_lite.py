@@ -11,6 +11,7 @@ from sqler.models.lite.safe import SQLerLiteSafeModel
 
 # ---- test models ----
 
+
 @dataclass
 class LItem(SQLerLiteModel):
     __tablename__ = "lite_items"
@@ -52,6 +53,7 @@ class LSafePromotedItem(SQLerLiteSafeModel):
 
 # ---- fixtures ----
 
+
 @pytest.fixture
 def db():
     db = SQLerDB.in_memory(shared=False)
@@ -60,6 +62,7 @@ def db():
 
 
 # ---- SQLerLiteModel.save_many tests ----
+
 
 def test_save_many_basic(db):
     LItem.set_db(db)
@@ -220,6 +223,7 @@ def test_save_many_chunking(db):
 
 
 # ---- SQLerLiteSafeModel.save_many tests ----
+
 
 def test_save_many_safe_model(db):
     LSafeItem.set_db(db)

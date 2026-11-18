@@ -35,9 +35,7 @@ class TestMultiOrderSQL:
     def test_multi_field_mixed(self, dummy_adapter):
         from sqler.query.query import SQLerQuery
 
-        q = SQLerQuery("jobs", adapter=dummy_adapter).order_by(
-            "-priority", "eta", "ulid"
-        )
+        q = SQLerQuery("jobs", adapter=dummy_adapter).order_by("-priority", "eta", "ulid")
         sql = q.sql
         assert "ORDER BY" in sql
         assert "json_extract(data, '$.priority') DESC" in sql

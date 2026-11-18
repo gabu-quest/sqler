@@ -230,7 +230,9 @@ def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]
             insert(db, table, instances)
             cls._table_written(db, table)
             _written_to(instances, db, table)
-            cls._rows_written(db, table, [("create", inst._id, None, inst._snapshot) for inst in instances])
+            cls._rows_written(
+                db, table, [("create", inst._id, None, inst._snapshot) for inst in instances]
+            )
     except BaseException:
         for inst, k in zip(instances, kept):
             _restore_identity(inst, k)
@@ -307,7 +309,9 @@ def row_write(db, table: str, inst: Any, payload: dict, partial: bool, promoted:
     return db.upsert_document(table, inst._id, payload)
 
 
-def versioned_write(db, table: str, _id: Any, payload: dict, base: Any, partial: bool, promoted: Any, version: Any) -> Call:
+def versioned_write(
+    db, table: str, _id: Any, payload: dict, base: Any, partial: bool, promoted: Any, version: Any
+) -> Call:
     """The call that writes the row ``payload`` of a safe model as ``_id`` only at row
     version ``version``, as :func:`row_write` decides it (``base`` the snapshot a partial
     write compares with); the whole-row ones return ``(id, new version)``."""
@@ -315,8 +319,16 @@ def versioned_write(db, table: str, _id: Any, payload: dict, base: Any, partial:
         changed = _dirty.changed_fields(base or {}, payload)
         return db._update_fields, (table, _id, payload, changed, promoted or (), version)
     if promoted:
-        return db.upsert_with_version_promoted, (table, _id, payload, version, list(promoted.keys()))
+        return db.upsert_with_version_promoted, (
+            table,
+            _id,
+            payload,
+            version,
+            list(promoted.keys()),
+        )
     return db.upsert_with_version, (table, _id, payload, version)
+
+
 def rows_insert(db, table: str, payloads: list, promoted: Any, versioned: bool = False) -> Call:
     """The call that inserts the new rows ``payloads`` of a class whose ``__promoted__`` is
     ``promoted`` in one batch, with the promoted columns where it has any; it returns their
@@ -445,7 +457,9 @@ def _referrer_change(on_delete: str, table: str, ids: list, referrers: list):
         return None
     if on_delete == "restrict":
         rows = f"{table}:{ids[0]}" if len(ids) == 1 else f"{len(ids)} rows of {table}"
-        raise ReferentialIntegrityError(f"Cannot delete {rows}; referenced by {len(referrers)} row(s)")
+        raise ReferentialIntegrityError(
+            f"Cannot delete {rows}; referenced by {len(referrers)} row(s)"
+        )
     return _CHANGES[on_delete]
 
 
@@ -551,7 +565,9 @@ def copied(cls, db, table: str, count: int) -> int:
     return count
 
 
-def set_write(cls, db, table: str, write: Callable[[], list], on_delete: Optional[str] = None) -> list:
+def set_write(
+    cls, db, table: str, write: Callable[[], list], on_delete: Optional[str] = None
+) -> list:
     """A set-based write: ``write()`` writes the rows and returns each as
     ``(before, after)`` (``after`` ``None`` for a delete); it, what ``on_delete`` does about
     the rows that refer to the deleted ones (:func:`deleted`) and the class's row rules are

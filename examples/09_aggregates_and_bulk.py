@@ -31,7 +31,9 @@ def main():
         ("Widget", "electronics", 7, 29.99, "west"),
     ]
     for product, category, qty, price, region in sales_data:
-        Sale(product=product, category=category, quantity=qty, price=price, region=region).save(db=db)
+        Sale(product=product, category=category, quantity=qty, price=price, region=region).save(
+            db=db
+        )
 
     print("=== Aggregate Functions ===")
 

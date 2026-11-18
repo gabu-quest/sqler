@@ -360,10 +360,19 @@ class TestLimitAndOffsetTakeOnlyWholeNumbers:
             lambda q: q.limit(2.5).delete(),
             lambda q: q.limit(-1).update_n(2, score=0),
         ],
-        ids=["limit-str-delete", "limit-str-update", "offset-str-delete", "limit-float-delete", "limit-negative-update-n"],
+        ids=[
+            "limit-str-delete",
+            "limit-str-update",
+            "offset-str-delete",
+            "limit-float-delete",
+            "limit-negative-update-n",
+        ],
     )
     def test_a_write_is_refused_before_any_row_is_written(self, scored, write):
-        with pytest.raises((TypeError, ValueError), match=r"^(limit|offset)(\(\) takes a whole number| must be >= 0)"):
+        with pytest.raises(
+            (TypeError, ValueError),
+            match=r"^(limit|offset)(\(\) takes a whole number| must be >= 0)",
+        ):
             write(_Item.using(scored))
         assert _scores(scored, scored.query("items").order_by("_id")) == [1, 2, 3, 4, 5]
 
@@ -375,7 +384,11 @@ class TestLimitAndOffsetTakeOnlyWholeNumbers:
 
     def test_an_int_like_is_taken_as_its_int(self, scored):
         q = scored.query("items").limit(Three.THREE).offset(Three.THREE)
-        assert (type(q._limit), type(q._offset), _scores(scored, scored.query("items").limit(Three.THREE))) == (int, int, [1, 2, 3])
+        assert (
+            type(q._limit),
+            type(q._offset),
+            _scores(scored, scored.query("items").limit(Three.THREE)),
+        ) == (int, int, [1, 2, 3])
         assert q.debug() == scored.query("items").limit(3).offset(3).debug()
 
     def test_the_sql_of_a_valid_limit_and_offset(self, query):
@@ -642,7 +655,7 @@ class TestFTSIndexRejectsInjection:
         [
             "porter'); DROP TABLE t; --",
             "unicode61'; DELETE FROM t; --",
-            "x\"); DROP TABLE t",
+            'x"); DROP TABLE t',
             "",
         ],
     )
@@ -703,12 +716,49 @@ class TestCheckpointModeValidation:
 # ---------------------------------------------------------------------------
 
 RESERVED_COLUMN_NAMES = [
-    "index", "order", "group", "table", "select", "from", "where",
-    "values", "set", "key", "primary", "column", "create", "drop",
-    "insert", "update", "delete", "join", "on", "having", "limit",
-    "offset", "union", "check", "default", "foreign", "references",
-    "constraint", "unique", "case", "when", "then", "else", "end",
-    "between", "like", "in", "is", "not", "null", "and", "or", "as",
+    "index",
+    "order",
+    "group",
+    "table",
+    "select",
+    "from",
+    "where",
+    "values",
+    "set",
+    "key",
+    "primary",
+    "column",
+    "create",
+    "drop",
+    "insert",
+    "update",
+    "delete",
+    "join",
+    "on",
+    "having",
+    "limit",
+    "offset",
+    "union",
+    "check",
+    "default",
+    "foreign",
+    "references",
+    "constraint",
+    "unique",
+    "case",
+    "when",
+    "then",
+    "else",
+    "end",
+    "between",
+    "like",
+    "in",
+    "is",
+    "not",
+    "null",
+    "and",
+    "or",
+    "as",
 ]
 
 
@@ -860,7 +910,7 @@ LITERAL_NAMES = [
     ".a",
     "n" * 10000,
     "名前",
-    "two words"
+    "two words",
 ]
 UNMATCHABLE_NAMES = ['a\\"b', "a\\'b", "a\\b", "a\x00b", "a\nb", "a\tb", "a\u00a0b", "a  b"]
 
@@ -1026,9 +1076,7 @@ class TestModelFieldSearchAndIntegrityNames:
     @pytest.mark.parametrize("key", _CARRIABLE_KEYS, ids=repr)
     @pytest.mark.parametrize("position", ["last", "middle"])
     @pytest.mark.parametrize("any_", [False, True])
-    def test_model_field_matches_only_the_document_with_that_key(
-        self, mfdb, key, position, any_
-    ):
+    def test_model_field_matches_only_the_document_with_that_key(self, mfdb, key, position, any_):
         if position == "last":
             hit, miss, rest = {key: 5}, {"zzz": 5}, [key]
         else:
@@ -1264,10 +1312,16 @@ from sqler.exceptions import InvalidIdentifierError as _InvalidIdentifierError  
 
 _PROMOTED_WRITES = {
     "upsert_document_promoted": lambda d, t, f: d.upsert_document_promoted(t, None, {"s": "a"}, f),
-    "upsert_document_promoted_update": lambda d, t, f: d.upsert_document_promoted(t, 1, {"s": "a"}, f),
+    "upsert_document_promoted_update": lambda d, t, f: d.upsert_document_promoted(
+        t, 1, {"s": "a"}, f
+    ),
     "insert_many_promoted": lambda d, t, f: d.insert_many_promoted(t, [{"s": "a"}], f),
-    "upsert_with_version_promoted": lambda d, t, f: d.upsert_with_version_promoted(t, None, {"s": "a"}, None, f),
-    "upsert_with_version_promoted_update": lambda d, t, f: d.upsert_with_version_promoted(t, 1, {"s": "a"}, 0, f),
+    "upsert_with_version_promoted": lambda d, t, f: d.upsert_with_version_promoted(
+        t, None, {"s": "a"}, None, f
+    ),
+    "upsert_with_version_promoted_update": lambda d, t, f: d.upsert_with_version_promoted(
+        t, 1, {"s": "a"}, 0, f
+    ),
 }
 
 
@@ -1282,7 +1336,9 @@ class TestPromotedWriteNames:
 
     def _untouched(self, d):
         rows = d.adapter.execute("SELECT _id, s, _version FROM jobs").fetchall()
-        tables = d.adapter.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+        tables = d.adapter.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
         return [tuple(r) for r in rows], [r[0] for r in tables]
 
     @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
@@ -1290,7 +1346,11 @@ class TestPromotedWriteNames:
         before = self._untouched(pdb)
         with pytest.raises(InvalidTableNameError):
             _PROMOTED_WRITES[method](pdb, "jobs\n", ["s"])
-        assert self._untouched(pdb) == before == ([(1, "first", 0)], ["_sqler_promoted", "jobs", "sqlite_sequence"])
+        assert (
+            self._untouched(pdb)
+            == before
+            == ([(1, "first", 0)], ["_sqler_promoted", "jobs", "sqlite_sequence"])
+        )
 
     @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
     def test_hostile_promoted_field_is_refused(self, pdb, method):

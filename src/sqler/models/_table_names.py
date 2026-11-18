@@ -245,8 +245,6 @@ def _instance_binding(inst: object, db=None) -> tuple[Any, str]:
     return db, home.table
 
 
-
-
 def _read_document(db, table: str, rid, versioned: bool = False):
     """``db.find_document`` for a read through a model: a missing table is a missing row, ``None``.
     ``versioned``: the row with its ``_version`` (``find_document_with_version``)."""

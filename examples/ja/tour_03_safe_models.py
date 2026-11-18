@@ -12,6 +12,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -304,11 +305,7 @@ def _(RebaseConfig, SQLerSafeModel, StaleVersionError, db):
         overdraft_count: int = 0
 
         # 'overdraft_count' のみ小さいデルタでリベーシングを許可
-        _rebase_config = RebaseConfig(
-            allowed_fields={"overdraft_count"},
-            max_delta=5
-        )
-
+        _rebase_config = RebaseConfig(allowed_fields={"overdraft_count"}, max_delta=5)
 
     # アカウントを作成
     acct = BankAccount(owner="Dana", balance=1000, overdraft_count=0).save(db=db)
@@ -361,7 +358,6 @@ def _(SQLerSafeModel, StaleVersionError, db):
 
         # リベーシングなし - すべての競合でエラーを発生
         _rebase_config = NO_REBASE_CONFIG
-
 
     record = StrictRecord(data="original", revision=1).save(db=db)
 

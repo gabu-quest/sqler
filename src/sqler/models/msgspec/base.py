@@ -98,7 +98,9 @@ def _row_names(cls: Type[msgspec.Struct]) -> _RowNames:
     pairs = zip(cls.__struct_fields__, cls.__struct_encode_fields__)
     renamed = {name: encoded for name, encoded in pairs if name != encoded}
     hints = field_types(cls)
-    loads = tuple((name, _stored.loader(hints.get(name))) for name in sorted(_mixin_field_names(cls)))
+    loads = tuple(
+        (name, _stored.loader(hints.get(name))) for name in sorted(_mixin_field_names(cls))
+    )
     _ROW_NAMES_CACHE[cls] = result = (renamed, loads)
     return result
 
@@ -137,7 +139,9 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
     def __deepcopy__(self: T, memo: dict) -> T:
         """A deep copy that also holds a deep copy of this instance's state that is not a field."""
         reduced = self.__reduce__()
-        assert isinstance(reduced, tuple)  # a Struct reduces to (class, field values), never to a name
+        assert isinstance(
+            reduced, tuple
+        )  # a Struct reduces to (class, field values), never to a name
         rebuild, args = reduced
         new = rebuild(*copy.deepcopy(args, memo))
         new.__dict__.update(copy.deepcopy(self.__dict__, memo))
@@ -305,7 +309,9 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
         """The table ``using(db, table)`` reads, once ``db`` is checked: ``table``, else the
         class's own."""
         _table_names._check_database(cls, db)
-        return validate_table_name(table) if table is not None else _table_names._model_table_name(cls)
+        return (
+            validate_table_name(table) if table is not None else _table_names._model_table_name(cls)
+        )
 
     @classmethod
     def _shaped(cls, q: Any) -> Any:
@@ -389,7 +395,10 @@ class SQLerMsgspecModelBase(msgspec.Struct, kw_only=True, dict=True):
         ``_reference_bases`` as the reference to its row. It awaits nothing."""
         cls = type(self)
         bases = cls._reference_bases
-        payload = {f.name: _stored.stored(getattr(self, f.name), bases, f.name) for f in _public_fields(cls)}
+        payload = {
+            f.name: _stored.stored(getattr(self, f.name), bases, f.name)
+            for f in _public_fields(cls)
+        }
         # Include mixin fields (not visible to msgspec.structs.fields)
         for name in _mixin_field_names(cls):
             payload[name] = _stored.stored(getattr(self, name, None), bases, name)

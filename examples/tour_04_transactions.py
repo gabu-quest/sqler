@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -79,7 +80,6 @@ def _(SQLerModel, db):
         _table = "accounts"
         name: str
         balance: int
-
 
     # Create initial accounts
     _alice = Account(name="Alice", balance=1000).save(db=db)

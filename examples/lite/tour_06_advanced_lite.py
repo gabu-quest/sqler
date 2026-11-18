@@ -115,13 +115,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import importlib
     from dataclasses import dataclass
@@ -158,7 +154,6 @@ def _(SQLerLiteModel, dataclass, db):
         category: str
         price: float
         in_stock: bool = True
-
 
     # Create sample data
     products = [
@@ -255,7 +250,6 @@ def _(SQLerLiteModel, dataclass, db):
         age: int
         country: str
 
-
     # Create sample users (reduced for WASM performance)
     for i in range(20):
         User(
@@ -344,7 +338,6 @@ def _(SQLerLiteModel, dataclass, db):
         __tablename__ = "books"
         title: str
         author: Author | None = None
-
 
     # Create test data
     author = Author(name="Alice").save(db=db)

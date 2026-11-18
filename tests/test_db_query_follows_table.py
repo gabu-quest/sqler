@@ -15,12 +15,18 @@ import pytest
 from sqler import AsyncSQLerDB, F, SQLerDB
 
 TABLE = "tickets"
-DOCS = [{"name": "a", "status": "new"}, {"name": "b", "status": "open"}, {"name": "c", "status": "new"}]
+DOCS = [
+    {"name": "a", "status": "new"},
+    {"name": "b", "status": "open"},
+    {"name": "c", "status": "new"},
+]
 
 
 def _seed(path):
     conn = sqlite3.connect(path)
-    conn.execute(f"CREATE TABLE {TABLE} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)")
+    conn.execute(
+        f"CREATE TABLE {TABLE} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)"
+    )
     for doc in DOCS:
         conn.execute(f"INSERT INTO {TABLE} (data) VALUES (json(?))", [json.dumps(doc)])
     conn.commit()
@@ -99,7 +105,10 @@ def test_every_read_after_promotion(side):
     assert (first["name"], first["status"]) == ("a", "new")
     assert side.run(q, "count") == 3
     assert side.run(q.filter(F("status") == "new"), "count") == 2
-    assert _statuses(side.run(q.filter(F("status") == "new"), "all_dicts")) == [("a", "new"), ("c", "new")]
+    assert _statuses(side.run(q.filter(F("status") == "new"), "all_dicts")) == [
+        ("a", "new"),
+        ("c", "new"),
+    ]
 
 
 def test_promoted_between_build_and_first_send(side):
@@ -123,8 +132,12 @@ def test_table_dropped_and_made_again_with_another_layout(side):
     side.run(q, "all_dicts")
     conn = sqlite3.connect(side.path)
     conn.execute(f"DROP TABLE {TABLE}")
-    conn.execute(f"CREATE TABLE {TABLE} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL, name TEXT)")
-    conn.execute(f"INSERT INTO {TABLE} (data, name) VALUES (json(?), ?)", [json.dumps({"status": "z"}), "q"])
+    conn.execute(
+        f"CREATE TABLE {TABLE} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL, name TEXT)"
+    )
+    conn.execute(
+        f"INSERT INTO {TABLE} (data, name) VALUES (json(?), ?)", [json.dumps({"status": "z"}), "q"]
+    )
     conn.commit()
     conn.close()
     rows = side.run(q, "all_dicts")

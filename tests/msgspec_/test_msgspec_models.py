@@ -343,9 +343,16 @@ class TestMsgspecPersistenceOnBothBases:
 
         assert await aw(Product.count()) == 3
         assert sorted(p.name for p in await aw(Product.all())) == ["Apple", "Banana", "Cherry"]
-        assert sorted(p.name for p in await aw(Product.filter(F("price") > 1.00).all())) == ["Apple", "Cherry"]
+        assert sorted(p.name for p in await aw(Product.filter(F("price") > 1.00).all())) == [
+            "Apple",
+            "Cherry",
+        ]
         first = await aw(Product.first())
-        assert (first._id, first.name, first._snapshot) == (1, "Apple", {"name": "Apple", "price": 1.5})
+        assert (first._id, first.name, first._snapshot) == (
+            1,
+            "Apple",
+            {"name": "Apple", "price": 1.5},
+        )
 
     async def test_from_ids_batch(self, kit):
         class Item(kit.base):
@@ -365,7 +372,11 @@ class TestMsgspecPersistenceOnBothBases:
 
         bind(Item, kit.db)
         item = await aw(Item(value=100).save())
-        await sql(kit.db, "UPDATE msg_refresh_items SET data = ? WHERE _id = ?", ['{"value": 999}', item._id])
+        await sql(
+            kit.db,
+            "UPDATE msg_refresh_items SET data = ? WHERE _id = ?",
+            ['{"value": 999}', item._id],
+        )
 
         assert await aw(item.refresh()) is item
         assert (item.value, item._snapshot, item.is_dirty()) == (999, {"value": 999}, False)
@@ -438,7 +449,10 @@ class TestMsgspecPersistenceOnBothBases:
         await aw(Item(name="a").save(db=kit.db))
         await aw(Item.add_index("name", unique=True, db=kit.db))
         await aw(Item.ensure_index("name", unique=True, db=kit.db))
-        names = await sql(kit.db, "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'msg_indexed'")
+        names = await sql(
+            kit.db,
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'msg_indexed'",
+        )
         assert names == [("idx_msg_indexed_name",)]
 
     async def test_first_or_create(self, kit):
@@ -449,7 +463,14 @@ class TestMsgspecPersistenceOnBothBases:
 
         made, created = await aw(Item.first_or_create({"name": "a"}, {"n": 5}, db=kit.db))
         again, created_again = await aw(Item.first_or_create({"name": "a"}, {"n": 7}, db=kit.db))
-        assert (made._id, made.n, created, again._id, again.n, created_again) == (1, 5, True, 1, 5, False)
+        assert (made._id, made.n, created, again._id, again.n, created_again) == (
+            1,
+            5,
+            True,
+            1,
+            5,
+            False,
+        )
 
     async def test_set_db_emits_one_deprecation_warning(self, kit):
         class Item(kit.base):
@@ -535,7 +556,9 @@ async def test_eight_tasks_saving_new_rows_at_once_on_a_new_async_database(stora
             f"MsRace{round_}",
             (AsyncSQLerMsgspecModel,),
             {},
-            lambda ns: ns.update({"__tablename__": "ms_race", "__annotations__": {"n": int}, "n": 0}),
+            lambda ns: ns.update(
+                {"__tablename__": "ms_race", "__annotations__": {"n": int}, "n": 0}
+            ),
         )
         db = await open_db("async", tmp_path / f"race{round_}.db" if storage == "file" else None)
         try:
@@ -643,7 +666,9 @@ async def test_a_query_and_a_refresh_load_a_renamed_field(kit, shape):
     held = await aw(Cm(first_name="Ann", home_city="Oslo").save(db=kit.db))
     await aw(Cm(first_name="Bo", home_city="Oslo").save(db=kit.db))
     found = await aw(Cm.using(kit.db).filter(F("first_name") == "Bo").all())
-    await sql(kit.db, "UPDATE ms_renamed SET data = json_set(data, '$.first_name', 'Cy') WHERE _id = 1")
+    await sql(
+        kit.db, "UPDATE ms_renamed SET data = json_set(data, '$.first_name', 'Cy') WHERE _id = 1"
+    )
     await aw(held.refresh(db=kit.db))
     assert ([(m._id, m.first_name) for m in found], held.first_name) == ([(2, "Bo")], "Cy")
 
@@ -661,7 +686,11 @@ async def test_a_datetime_a_decimal_and_a_struct_field_are_stored_and_loaded(kit
         price: Decimal = Decimal("0")
         at: MsPoint = msgspec.field(default_factory=MsPoint)
 
-    saved = await aw(Mv(when=datetime(2024, 5, 6, 7, 8, 9), price=Decimal("1.25"), at=MsPoint(3, 4)).save(db=kit.db))
+    saved = await aw(
+        Mv(when=datetime(2024, 5, 6, 7, 8, 9), price=Decimal("1.25"), at=MsPoint(3, 4)).save(
+            db=kit.db
+        )
+    )
     assert await aw(kit.db.find_document("ms_values", saved._id)) == {
         "_id": 1,
         "when": "2024-05-06T07:08:09",
@@ -669,7 +698,11 @@ async def test_a_datetime_a_decimal_and_a_struct_field_are_stored_and_loaded(kit
         "at": {"x": 3, "y": 4},
     }
     got = await aw(Mv.from_id(1, db=kit.db))
-    assert (got.when, got.price, got.at) == (datetime(2024, 5, 6, 7, 8, 9), Decimal("1.25"), MsPoint(3, 4))
+    assert (got.when, got.price, got.at) == (
+        datetime(2024, 5, 6, 7, 8, 9),
+        Decimal("1.25"),
+        MsPoint(3, 4),
+    )
 
 
 @pytest.mark.asyncio
@@ -680,7 +713,9 @@ async def test_bytes_in_a_field_is_refused_with_its_path(kit):
         raw: Optional[bytes] = None
 
     item = Mb(name="a", raw=b"\x00")
-    with pytest.raises(UnstorableValueError, match=r"bytes cannot be stored in a JSON document.*\(at raw\)$") as caught:
+    with pytest.raises(
+        UnstorableValueError, match=r"bytes cannot be stored in a JSON document.*\(at raw\)$"
+    ) as caught:
         await aw(item.save(db=kit.db))
     assert (caught.value.field, item._id) == ("raw", None)
 
@@ -764,11 +799,17 @@ async def test_a_row_saved_through_one_database_object_loads_through_a_second(ki
 
 
 def _lite(base):
-    return dataclass(types.new_class("Wk", (base,), {}, lambda ns: ns.update({"__annotations__": {"name": str}, "name": ""})))
+    return dataclass(
+        types.new_class(
+            "Wk", (base,), {}, lambda ns: ns.update({"__annotations__": {"name": str}, "name": ""})
+        )
+    )
 
 
 def _msgspec(base):
-    return types.new_class("Wk", (base,), {}, lambda ns: ns.update({"__annotations__": {"name": str}, "name": ""}))
+    return types.new_class(
+        "Wk", (base,), {}, lambda ns: ns.update({"__annotations__": {"name": str}, "name": ""})
+    )
 
 
 WRONG_KIND = {
@@ -797,7 +838,9 @@ async def test_a_database_of_the_other_kind_is_refused_as_on_the_lite_pair(case,
             await aw(CALLS[call](cls, db))
     finally:
         await aw(db.close())
-    takes, given = ("an AsyncSQLerDB", "SQLerDB") if wrong == "sync" else ("a SQLerDB", "AsyncSQLerDB")
+    takes, given = (
+        ("an AsyncSQLerDB", "SQLerDB") if wrong == "sync" else ("a SQLerDB", "AsyncSQLerDB")
+    )
     assert str(caught.value) == (
         f"Wk takes {takes} as its database, not an object of type {given}: a sync model reads and "
         "writes through a SQLerDB, an async model through an AsyncSQLerDB."
@@ -811,24 +854,39 @@ async def test_a_database_of_the_other_kind_is_refused_as_on_the_lite_pair(case,
 def _with(kind: str, sync_mixins: tuple, async_mixins: tuple, name: str, fields: dict):
     """A class on the base of ``kind`` with its kind's mixins and ``fields`` ({name: default})."""
     mixins = async_mixins if kind == "async" else sync_mixins
-    ns = {"__tablename__": f"ms_mx_{name}", "__annotations__": {k: type(v) for k, v in fields.items()}, **fields}
+    ns = {
+        "__tablename__": f"ms_mx_{name}",
+        "__annotations__": {k: type(v) for k, v in fields.items()},
+        **fields,
+    }
     return types.new_class(f"Mx{name}", (*mixins, BASES[kind]), {}, lambda body: body.update(ns))
 
 
 @pytest.mark.asyncio
 async def test_tracked_model_and_partial_update_write_the_changed_field_only(kit):
     cls = _with(
-        kit.kind, (PartialUpdateMixin, TrackedModel), (AsyncPartialUpdateMixin, AsyncTrackedModel),
-        "tracked", {"name": "", "note": ""},
+        kit.kind,
+        (PartialUpdateMixin, TrackedModel),
+        (AsyncPartialUpdateMixin, AsyncTrackedModel),
+        "tracked",
+        {"name": "", "note": ""},
     )
     item = await aw(cls(name="a", note="n").save(db=kit.db))
     assert (item.is_dirty, item.changed_fields) == (False, set())
     item.name = "b"
-    assert (item.is_dirty, item.changed_fields, item.get_changes()) == (True, {"name"}, {"name": ("a", "b")})
+    assert (item.is_dirty, item.changed_fields, item.get_changes()) == (
+        True,
+        {"name"},
+        {"name": ("a", "b")},
+    )
     await sql(kit.db, "UPDATE ms_mx_tracked SET data = json_set(data, '$.note', 'elsewhere')")
     await aw(item.save_partial())
     assert item.is_dirty is False
-    assert await aw(kit.db.find_document("ms_mx_tracked", 1)) == {"_id": 1, "name": "b", "note": "elsewhere"}
+    assert await aw(kit.db.find_document("ms_mx_tracked", 1)) == {
+        "_id": 1,
+        "name": "b",
+        "note": "elsewhere",
+    }
 
 
 def test_the_sync_tracked_model_is_refused_on_the_async_base_as_on_the_async_lite_base():
@@ -836,9 +894,13 @@ def test_the_sync_tracked_model_is_refused_on_the_async_base_as_on_the_async_lit
         types.new_class("MxRefused", (TrackedModel, AsyncSQLerMsgspecModel), {}, lambda ns: None)
     with pytest.raises(TypeError) as on_lite:
         types.new_class("MxRefused", (TrackedModel, AsyncSQLerLiteModel), {}, lambda ns: None)
-    assert str(on_msgspec.value) == str(on_lite.value) == (
-        "MxRefused is an async model: use AsyncTrackedModel (and AsyncPartialUpdateMixin) in place "
-        "of TrackedModel (and PartialUpdateMixin)"
+    assert (
+        str(on_msgspec.value)
+        == str(on_lite.value)
+        == (
+            "MxRefused is an async model: use AsyncTrackedModel (and AsyncPartialUpdateMixin) in place "
+            "of TrackedModel (and PartialUpdateMixin)"
+        )
     )
 
 
@@ -874,13 +936,18 @@ async def test_a_cached_query_is_fresh_after_a_save(kit):
 async def test_timestamps_soft_delete_and_hooks_of_the_full_mixin(kit):
     cls = _with(kit.kind, (FullMixin,), (AsyncFullMixin,), "full", {"name": ""})
     item = await aw(cls(name="a").save(db=kit.db))
-    assert (item._id, item.created_at == item.updated_at, item.created_at.tzinfo, item.is_deleted) == (
-        1, True, timezone.utc, False
-    )
+    assert (
+        item._id,
+        item.created_at == item.updated_at,
+        item.created_at.tzinfo,
+        item.is_deleted,
+    ) == (1, True, timezone.utc, False)
     await aw(item.soft_delete())
-    assert (item.is_deleted, await aw(cls.active(db=kit.db).count()), await aw(cls.only_deleted(db=kit.db).count())) == (
-        True, 0, 1
-    )
+    assert (
+        item.is_deleted,
+        await aw(cls.active(db=kit.db).count()),
+        await aw(cls.only_deleted(db=kit.db).count()),
+    ) == (True, 0, 1)
     await aw(item.restore())
     assert await aw(cls.active(db=kit.db).count()) == 1
 
@@ -930,7 +997,9 @@ async def test_hooks_fire_in_order_and_a_veto_saves_nothing(kit):
 
     item = await aw(Hooked(name="a").save(db=kit.db))
     vetoed = Hooked(name="veto")
-    with pytest.raises(RuntimeError, match="^before_save\\(\\) returned False, save aborted for Hooked$"):
+    with pytest.raises(
+        RuntimeError, match="^before_save\\(\\) returned False, save aborted for Hooked$"
+    ):
         await aw(vetoed.save(db=kit.db))
     await aw(item.delete())
     assert log == ["before_save", "after_save", "before_save", "before_delete", "after_delete"]
@@ -940,7 +1009,13 @@ async def test_hooks_fire_in_order_and_a_veto_saves_nothing(kit):
 @pytest.mark.asyncio
 async def test_audit_fields_and_the_audit_log(kit):
     mixin = AsyncAuditMixin if kit.kind == "async" else AuditMixin
-    cls = _with(kit.kind, (AuditMixin, AuditLogMixin), (AsyncAuditMixin, AsyncAuditLogMixin), "audited", {"name": ""})
+    cls = _with(
+        kit.kind,
+        (AuditMixin, AuditLogMixin),
+        (AsyncAuditMixin, AsyncAuditLogMixin),
+        "audited",
+        {"name": ""},
+    )
     mixin.set_current_user("ann")
     try:
         item = await aw(cls(name="a").save(db=kit.db))
@@ -954,7 +1029,10 @@ async def test_audit_fields_and_the_audit_log(kit):
     assert [log["action"] for log in logs] == ["update", "create"]
     changes = logs[0]["changes"]
     assert sorted(changes) == ["name", "updated_at", "updated_by"]
-    assert (changes["name"], changes["updated_by"]) == ({"old": "a", "new": "b"}, {"old": "ann", "new": "bob"})
+    assert (changes["name"], changes["updated_by"]) == (
+        {"old": "a", "new": "b"},
+        {"old": "ann", "new": "bob"},
+    )
     assert (logs[1]["changes"], logs[1]["snapshot"]["name"]) == (None, "a")
 
 

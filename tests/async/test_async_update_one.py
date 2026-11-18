@@ -64,9 +64,7 @@ class TestAsyncUpdateOneBasic:
 
     async def test_returns_none_no_match(self, async_db_tasks):
         result = await (
-            AsyncTask.query()
-            .filter(F("status") == "nonexistent")
-            .update_one(status="running")
+            AsyncTask.query().filter(F("status") == "nonexistent").update_one(status="running")
         )
         assert result is None
 

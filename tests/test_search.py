@@ -317,7 +317,19 @@ def _expected(method, titles):
 
 
 # Every string of the probe that SQLite refuses as an FTS5 query.
-REFUSED = ["C++", "it's", "foo-bar", "AT&T", "100%", 'say "hello', "NOT", "", "   ", "templates AND", "*"]
+REFUSED = [
+    "C++",
+    "it's",
+    "foo-bar",
+    "AT&T",
+    "100%",
+    'say "hello',
+    "NOT",
+    "",
+    "   ",
+    "templates AND",
+    "*",
+]
 
 # The strings SQLite reads as FTS5 queries: the same rows as before.
 QUERIES = {
@@ -368,11 +380,18 @@ def _cases(texts, kept):
     ``_plain_query``, so ``search`` runs every text, which is the promise about the query
     rules, and each other method runs the one text (``kept``) that fails first if the method
     drops or changes the text it is given, which is the promise that it passes the text on."""
-    return [(method, text) for method in SEARCH_METHODS for text in texts if method == "search" or text == kept]
+    return [
+        (method, text)
+        for method in SEARCH_METHODS
+        for text in texts
+        if method == "search" or text == kept
+    ]
 
 
 @pytest.mark.parametrize("method, text", _cases(REFUSED, kept="C++"))
-def test_a_query_sqlite_refuses_raises_a_search_query_error_that_names_it(articles, posts, method, text):
+def test_a_query_sqlite_refuses_raises_a_search_query_error_that_names_it(
+    articles, posts, method, text
+):
     with pytest.raises(SearchQueryError) as caught:
         _found(articles, posts, method, text, plain=False)
     err = caught.value
@@ -462,10 +481,15 @@ def test_plain_text_in_japanese_and_with_accents():
     index.create()
     SearchArticle(title="日本語のテキスト", body="café naïve").save()
     SearchArticle(title="english", body="cafe").save()
-    assert sorted(m.title for m in index.search("日本語のテキスト", plain=True)) == ["日本語のテキスト"]
+    assert sorted(m.title for m in index.search("日本語のテキスト", plain=True)) == [
+        "日本語のテキスト"
+    ]
     assert sorted(m.title for m in index.search("naïve", plain=True)) == ["日本語のテキスト"]
     assert sorted(m.title for m in index.search("naive", plain=True)) == ["日本語のテキスト"]
-    assert sorted(m.title for m in index.search("CAFÉ", plain=True)) == ["english", "日本語のテキスト"]
+    assert sorted(m.title for m in index.search("CAFÉ", plain=True)) == [
+        "english",
+        "日本語のテキスト",
+    ]
     db.close()
 
 
@@ -626,7 +650,11 @@ def test_create_on_a_table_that_does_not_exist_creates_it():
 
     index = FTSIndex(SearchNew, ["title"], db=db)
     index.create()
-    assert _triggers(db, "searchnews") == ["searchnews_fts_ad", "searchnews_fts_ai", "searchnews_fts_au"]
+    assert _triggers(db, "searchnews") == [
+        "searchnews_fts_ad",
+        "searchnews_fts_ai",
+        "searchnews_fts_au",
+    ]
     db.insert_document("searchnews", {"title": "hello"})
     assert index.count("hello") == 1
     db.close()
@@ -648,9 +676,10 @@ def test_drop_removes_the_triggers_with_the_index(synced):
     index.drop()
     assert _triggers(db) == []
     SearchArticle(title="after drop", body="").save()
-    assert db.adapter.execute(
-        "SELECT name FROM sqlite_master WHERE name = 'articles_fts'"
-    ).fetchall() == []
+    assert (
+        db.adapter.execute("SELECT name FROM sqlite_master WHERE name = 'articles_fts'").fetchall()
+        == []
+    )
 
 
 def test_create_twice_and_from_two_objects_gives_one_set_of_triggers(synced):
@@ -690,7 +719,11 @@ def test_a_renamed_table_keeps_its_triggers(synced):
     db, index = synced
     db.adapter.execute("ALTER TABLE articles RENAME TO articles_old")
     db.adapter.auto_commit()
-    assert _triggers(db, "articles_old") == ["articles_fts_ad", "articles_fts_ai", "articles_fts_au"]
+    assert _triggers(db, "articles_old") == [
+        "articles_fts_ad",
+        "articles_fts_ai",
+        "articles_fts_au",
+    ]
     db.adapter.execute("INSERT INTO articles_old (data) VALUES (?)", ['{"title": "renamed table"}'])
     db.adapter.auto_commit()
     assert index.count("renamed") == 1
@@ -853,8 +886,12 @@ def test_an_index_made_by_the_released_version_heals_on_the_first_create():
     db.close()
 
 
-@pytest.mark.parametrize("tokenizer", ["porter unicode61", "porter   unicode61", "porter unicode61 "])
-def test_an_index_of_the_same_fields_and_tokenizer_is_the_same_index_whatever_its_spelling(tokenizer):
+@pytest.mark.parametrize(
+    "tokenizer", ["porter unicode61", "porter   unicode61", "porter unicode61 "]
+)
+def test_an_index_of_the_same_fields_and_tokenizer_is_the_same_index_whatever_its_spelling(
+    tokenizer,
+):
     db = _table_with(ARTICLES)
     _commit(db, RELEASED_CREATE)
     before = _schema(db)
@@ -932,7 +969,9 @@ def test_create_replaces_a_missing_trigger_and_refills_the_index():
     db, index = _articles_index()
     _commit(db, "DROP TRIGGER articles_fts_au")
     # an update while the trigger is missing leaves the index behind the table
-    _commit(db, "UPDATE articles SET data = json_set(data, '$.title', 'Rust for experts') WHERE _id = 1")
+    _commit(
+        db, "UPDATE articles SET data = json_set(data, '$.title', 'Rust for experts') WHERE _id = 1"
+    )
     assert _titles(index, "experts") == []
     index.create()
     assert _triggers(db) == SYNC_TRIGGERS
@@ -992,7 +1031,9 @@ def test_create_after_a_raw_drop_of_the_source_table_leaves_an_empty_index():
 
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
 def test_content_sync_is_not_an_argument_of_an_index_or_create_search_index(is_async):
-    index_class, mixin = (AsyncFTSIndex, AsyncSearchableMixin) if is_async else (FTSIndex, SearchableMixin)
+    index_class, mixin = (
+        (AsyncFTSIndex, AsyncSearchableMixin) if is_async else (FTSIndex, SearchableMixin)
+    )
 
     class Doc(mixin, AsyncSQLerModel if is_async else SQLerModel):
         title: str = ""
@@ -1005,7 +1046,10 @@ def test_content_sync_is_not_an_argument_of_an_index_or_create_search_index(is_a
 
 def test_create_on_a_table_with_no_rows_gives_an_empty_index():
     db = _table_with([])
-    _commit(db, "CREATE TABLE IF NOT EXISTS articles (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)")
+    _commit(
+        db,
+        "CREATE TABLE IF NOT EXISTS articles (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)",
+    )
     index = FTSIndex(SearchArticle, ["title", "body"], db=db)
     index.create()
     assert _index_rows(db, index) == []
@@ -1087,7 +1131,9 @@ def test_the_first_search_of_a_mixin_model_in_a_new_process_writes_nothing(posts
 def _shadow(db, index):
     """Every row of every table FTS5 keeps for the index."""
     return {
-        part: [tuple(row) for row in db.adapter.execute(f"SELECT * FROM {index.index_table}_{part}")]
+        part: [
+            tuple(row) for row in db.adapter.execute(f"SELECT * FROM {index.index_table}_{part}")
+        ]
         for part in ("data", "idx", "content", "docsize", "config")
     }
 
@@ -1101,7 +1147,9 @@ def test_an_update_that_changes_no_indexed_field_does_not_write_the_index(synced
     before = _shadow(db, index)
     _commit(db, "UPDATE articles SET data = json_set(data, '$.extra', 'raw')")
     SearchArticle.query().filter(F("title") == PYTHON).update(extra="model")
-    _commit(db, "UPDATE articles SET data = json_set(data, '$.title', json_extract(data, '$.title'))")
+    _commit(
+        db, "UPDATE articles SET data = json_set(data, '$.title', json_extract(data, '$.title'))"
+    )
     assert _shadow(db, index) == before
     _integrity_check(db, index)
     SearchArticle.query().filter(F("title") == PYTHON).update(title="Rust for experts")
@@ -1154,7 +1202,9 @@ def test_an_index_on_an_async_database_raises_type_error_before_anything_is_sent
         try:
             if given == "binding":
                 SearchAsyncArticle.set_db(adb, "async_articles")
-            index = FTSIndex(SearchAsyncArticle, ["title"], db=adb if given == "constructor" else None)
+            index = FTSIndex(
+                SearchAsyncArticle, ["title"], db=adb if given == "constructor" else None
+            )
             with warnings.catch_warnings(record=True) as warned, query_logger.capture() as sent:
                 warnings.simplefilter("always")
                 with pytest.raises(TypeError) as refused:
@@ -1237,7 +1287,11 @@ class _Twin:
         self.ix = None
 
     def model(self, table, fields=("title", "body"), fts=("title", "body"), promoted=None):
-        ns = {"__module__": __name__, "__annotations__": {f: str for f in fields}, **{f: "" for f in fields}}
+        ns = {
+            "__module__": __name__,
+            "__annotations__": {f: str for f in fields},
+            **{f: "" for f in fields},
+        }
         if table is not None:
             ns["__tablename__"] = table
         if promoted:
@@ -1284,7 +1338,9 @@ async def _twin_state(db) -> list:
         await _v(db.adapter.auto_commit())
         return got
 
-    schema = await rows("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
+    schema = await rows(
+        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name"
+    )
     shadow = ("_data", "_idx", "_content", "_docsize", "_config")
     tables = [n for k, n, _ in schema if k == "table" and not n.endswith(shadow)]
     return [schema, *[sorted(await rows(f'SELECT * FROM "{t}"'), key=repr) for t in tables]]
@@ -1315,7 +1371,9 @@ async def _create_other_definition(t):
 
 
 async def _create_unknown_tokenizer(t):
-    return await _v(t.Index(t.Model, ["title"], index_name="tk_fts", tokenizer="nosuch", db=t.db).create())
+    return await _v(
+        t.Index(t.Model, ["title"], index_name="tk_fts", tokenizer="nosuch", db=t.db).create()
+    )
 
 
 async def _create_field_not_of_class(t):
@@ -1374,7 +1432,9 @@ async def _snippet(t):
     first = await _v(t.Model.from_id(2, db=t.db))
     return [
         await _v(t.ix.snippet("apple", first)),
-        await _v(t.ix.snippet("baked", first, field="body", highlight_start="[", highlight_end="]")),
+        await _v(
+            t.ix.snippet("baked", first, field="body", highlight_start="[", highlight_end="]")
+        ),
         await _v(t.ix.snippet("sky", first)),
     ]
 
@@ -1384,7 +1444,11 @@ async def _snippet_bad_tokens(t):
 
 
 async def _count(t):
-    return [await _v(t.ix.count("apple")), await _v(t.ix.count("fruit")), await _v(t.ix.count("C++", plain=True))]
+    return [
+        await _v(t.ix.count("apple")),
+        await _v(t.ix.count("fruit")),
+        await _v(t.ix.count("C++", plain=True)),
+    ]
 
 
 async def _count_refused(t):
@@ -1456,7 +1520,11 @@ async def _mixin_default_fields(t):
     Plain = t.model("plaindocs", fts=None)
     index = await _v(Plain.create_search_index(t.db))
     await t.save(Plain, title="red apple", body="memo")
-    return [(index.fields, index.tokenizer), index.fields, await t.titles(Plain.search("memo", db=t.db))]
+    return [
+        (index.fields, index.tokenizer),
+        index.fields,
+        await t.titles(Plain.search("memo", db=t.db)),
+    ]
 
 
 async def _mixin_rebuild(t):
@@ -1498,7 +1566,10 @@ async def _mixin_search_ranked(t):
 
 
 async def _mixin_search_count(t):
-    return [await _v(t.Model.search_count("apple", db=t.db)), await _v(t.Model.search_count("fruit*", db=t.db))]
+    return [
+        await _v(t.Model.search_count("apple", db=t.db)),
+        await _v(t.Model.search_count("fruit*", db=t.db)),
+    ]
 
 
 async def _mixin_save(t):
@@ -1523,12 +1594,24 @@ NO_INDEX = ("raised", sqlite3.OperationalError, "no such table: twindocs_fts")
 TWIN_CALLS = [
     ("create", "create", _create_second, [None, 2]),
     ("create-again", "create", _create_twice, [None, 2]),
-    ("create-other-definition", "create", _create_other_definition,
-     ("raised", SchemaError, "search index 'twindocs_fts' has fields ['title', 'body'] and tokenizer "
-      "'porter unicode61'; asked for fields ['body'] and tokenizer 'porter unicode61'. "
-      "To change it, call drop() then create().")),
-    ("create-unknown-tokenizer", "create", _create_unknown_tokenizer,
-     ("raised", sqlite3.OperationalError, "no such tokenizer: nosuch")),
+    (
+        "create-other-definition",
+        "create",
+        _create_other_definition,
+        (
+            "raised",
+            SchemaError,
+            "search index 'twindocs_fts' has fields ['title', 'body'] and tokenizer "
+            "'porter unicode61'; asked for fields ['body'] and tokenizer 'porter unicode61'. "
+            "To change it, call drop() then create().",
+        ),
+    ),
+    (
+        "create-unknown-tokenizer",
+        "create",
+        _create_unknown_tokenizer,
+        ("raised", sqlite3.OperationalError, "no such tokenizer: nosuch"),
+    ),
     ("create-field-not-of-class", "create", _create_field_not_of_class, [0, 3]),
     ("drop", "drop", _drop, NO_INDEX),
     ("rebuild", "rebuild", _rebuild, [3, 2]),
@@ -1546,38 +1629,104 @@ TWIN_CALLS = [
     ("search-quote-plain", "search", _search('apple "pie', plain=True), ["green apple pie"]),
     ("search-plain-words", "search", _search("C++ apple", plain=True), []),
     ("search-deleted-row", "search", _search_deleted_row, ["green apple pie"]),
-    ("search-no-database", "search", _no_database,
-     ("raised", ValueError, "Model has no database bound: pass db= to the class's search call, to "
-      "{index} or to create()/rebuild()")),
-    ("search-in-transaction", "search", _in_transaction, [[["yellow apple"]], [], ["red apple", "green apple pie"]]),
-    ("search-promoted-after", "search", _promoted_after,
-     [["red apple", "green apple pie", "yellow apple"], 4]),
-    ("search-bound-table", "search", _bound_table, ["bound_docs", "bound_docs_fts", ["tart apple"]]),
-    ("search_ranked", "search_ranked", _search_ranked, [("green apple pie", -0.5274), ("red apple", -0.0)]),
-    ("search_with_highlights", "search_with_highlights", _search_with_highlights,
-     [("green apple pie", -0.5274, {"title": "green apple <mark>pie</mark>", "body": "baked"}),
-      ("blue sky", -0.4806, {"title": "blue <mark>sky</mark>", "body": "no fruit here"})]),
+    (
+        "search-no-database",
+        "search",
+        _no_database,
+        (
+            "raised",
+            ValueError,
+            "Model has no database bound: pass db= to the class's search call, to "
+            "{index} or to create()/rebuild()",
+        ),
+    ),
+    (
+        "search-in-transaction",
+        "search",
+        _in_transaction,
+        [[["yellow apple"]], [], ["red apple", "green apple pie"]],
+    ),
+    (
+        "search-promoted-after",
+        "search",
+        _promoted_after,
+        [["red apple", "green apple pie", "yellow apple"], 4],
+    ),
+    (
+        "search-bound-table",
+        "search",
+        _bound_table,
+        ["bound_docs", "bound_docs_fts", ["tart apple"]],
+    ),
+    (
+        "search_ranked",
+        "search_ranked",
+        _search_ranked,
+        [("green apple pie", -0.5274), ("red apple", -0.0)],
+    ),
+    (
+        "search_with_highlights",
+        "search_with_highlights",
+        _search_with_highlights,
+        [
+            (
+                "green apple pie",
+                -0.5274,
+                {"title": "green apple <mark>pie</mark>", "body": "baked"},
+            ),
+            ("blue sky", -0.4806, {"title": "blue <mark>sky</mark>", "body": "no fruit here"}),
+        ],
+    ),
     ("search_with_highlights-none", "search_with_highlights", _search_with_highlights_none, []),
     ("snippet", "snippet", _snippet, ["green <b>apple</b> pie", "[baked]", ""]),
-    ("snippet-bad-tokens", "snippet", _snippet_bad_tokens,
-     ("raised", TypeError, "max_tokens must be an integer, got str")),
+    (
+        "snippet-bad-tokens",
+        "snippet",
+        _snippet_bad_tokens,
+        ("raised", TypeError, "max_tokens must be an integer, got str"),
+    ),
     ("count", "count", _count, [2, 2, 0]),
-    ("count-refused", "count", _count_refused,
-     ("raised", SearchQueryError, "search query 'C++' refused by SQLite: fts5: syntax error near \"+\"")),
+    (
+        "count-refused",
+        "count",
+        _count_refused,
+        (
+            "raised",
+            SearchQueryError,
+            "search query 'C++' refused by SQLite: fts5: syntax error near \"+\"",
+        ),
+    ),
     ("stats", "stats", _stats, FTSStats("twindocs_fts", 3, 6, ["title", "body"])),
     ("optimize", "optimize", _optimize, [None, 2]),
-    ("create_search_index", "create_search_index", _mixin_create,
-     [["title", "body"], "twindocs_fts", 2]),
-    ("create_search_index-default-fields", "create_search_index", _mixin_default_fields,
-     [(["title", "body"], "porter unicode61"), ["title", "body"], ["red apple"]]),
+    (
+        "create_search_index",
+        "create_search_index",
+        _mixin_create,
+        [["title", "body"], "twindocs_fts", 2],
+    ),
+    (
+        "create_search_index-default-fields",
+        "create_search_index",
+        _mixin_default_fields,
+        [(["title", "body"], "porter unicode61"), ["title", "body"], ["red apple"]],
+    ),
     ("rebuild_search_index", "rebuild_search_index", _mixin_rebuild, 3),
     ("drop_search_index", "drop_search_index", _mixin_drop, NO_INDEX),
     ("drop_search_index-held", "drop_search_index", _mixin_drop_held, NO_INDEX),
-    ("mixin-search", "search", _mixin_search, [["red apple", "green apple pie"], ["green apple pie"], []]),
+    (
+        "mixin-search",
+        "search",
+        _mixin_search,
+        [["red apple", "green apple pie"], ["green apple pie"], []],
+    ),
     ("mixin-search-refused", "search", _mixin_search_refused, SEARCH_SQL_REFUSED),
     ("mixin-search-held-index", "search", _mixin_search_held, ["green apple pie"]),
-    ("mixin-search_ranked", "search_ranked", _mixin_search_ranked,
-     [("blue sky", -0.4806), ("red apple", -0.0), ("green apple pie", -0.0)]),
+    (
+        "mixin-search_ranked",
+        "search_ranked",
+        _mixin_search_ranked,
+        [("blue sky", -0.4806), ("red apple", -0.0), ("green apple pie", -0.0)],
+    ),
     ("search_count", "search_count", _mixin_search_count, [2, 2]),
     ("save", "save", _mixin_save, [4, ["red apple", "green apple pie", "yellow apple"]]),
     ("delete", "delete", _mixin_delete, [None, ["red apple", "green apple pie"]]),
@@ -1607,7 +1756,9 @@ async def _twin_outcome(kind: str, recipe, tmp) -> tuple:
 
 def _twin_both(recipe, tmp_path) -> tuple:
     async def run():
-        return await _twin_outcome("sync", recipe, tmp_path), await _twin_outcome("async", recipe, tmp_path)
+        return await _twin_outcome("sync", recipe, tmp_path), await _twin_outcome(
+            "async", recipe, tmp_path
+        )
 
     return asyncio.run(run())
 
@@ -1617,7 +1768,9 @@ def _public_calls(*classes) -> set[str]:
         n
         for cls in classes
         for n in dir(cls)
-        if not n.startswith("_") and callable(getattr(cls, n)) and not isinstance(getattr(cls, n), type)
+        if not n.startswith("_")
+        and callable(getattr(cls, n))
+        and not isinstance(getattr(cls, n), type)
     }
 
 
@@ -1640,7 +1793,11 @@ def test_the_twin_row_ids_are_unique():
 )
 def test_the_search_twins_answer_alike(recipe, expected, tmp_path):
     (sync, sync_db), (asynchronous, async_db) = _twin_both(recipe, tmp_path)
-    want = expected if isinstance(expected, tuple) and expected[:1] == ("raised",) else ("result", expected)
+    want = (
+        expected
+        if isinstance(expected, tuple) and expected[:1] == ("raised",)
+        else ("result", expected)
+    )
     assert (sync, asynchronous, async_db == sync_db) == (want, want, True)
 
 
@@ -1703,7 +1860,11 @@ def _base_model(base, lite, mixin, table, fts=None, mixin_first=True):
 
 @pytest.mark.parametrize("base, is_async, lite", SEARCH_BASES, ids=BASE_IDS)
 def test_the_mixin_of_the_other_kind_is_refused_when_the_class_is_made(base, is_async, lite):
-    wrong, right = (SearchableMixin, AsyncSearchableMixin) if is_async else (AsyncSearchableMixin, SearchableMixin)
+    wrong, right = (
+        (SearchableMixin, AsyncSearchableMixin)
+        if is_async
+        else (AsyncSearchableMixin, SearchableMixin)
+    )
     with pytest.raises(TypeError) as refused:
         _base_model(base, lite, wrong, "refused_docs")
     kind = "an async" if is_async else "a sync"
@@ -1826,7 +1987,10 @@ def test_an_index_made_through_one_database_object_is_searched_through_the_other
                 await AsyncCrossDoc(title="red apple").save(db=adb)
                 CrossDoc(title="green apple").save(db=sdb)
             other = []
-            for refused in (FTSIndex(CrossDoc, ["body"], db=sdb).create, AsyncFTSIndex(AsyncCrossDoc, ["body"], db=adb).create):
+            for refused in (
+                FTSIndex(CrossDoc, ["body"], db=sdb).create,
+                AsyncFTSIndex(AsyncCrossDoc, ["body"], db=adb).create,
+            ):
                 try:
                     await _v(refused())
                 except SchemaError as exc:
@@ -1867,7 +2031,9 @@ def test_eight_tasks_creating_the_index_at_once_all_succeed_with_one_index(where
         )
         await db.connect()
         try:
-            got = await asyncio.gather(*(RaceDoc.create_search_index(db) for _ in range(8)), return_exceptions=True)
+            got = await asyncio.gather(
+                *(RaceDoc.create_search_index(db) for _ in range(8)), return_exceptions=True
+            )
             failed = [repr(g) for g in got if isinstance(g, BaseException)]
             cur = await db.adapter.execute(
                 "SELECT type, name FROM sqlite_master WHERE name LIKE 'racedocs_fts%' "
@@ -1887,7 +2053,12 @@ def test_eight_tasks_creating_the_index_at_once_all_succeed_with_one_index(where
 
     one = (
         [],
-        [("table", "racedocs_fts"), ("trigger", "racedocs_fts_ad"), ("trigger", "racedocs_fts_ai"), ("trigger", "racedocs_fts_au")],
+        [
+            ("table", "racedocs_fts"),
+            ("trigger", "racedocs_fts_ad"),
+            ("trigger", "racedocs_fts_ai"),
+            ("trigger", "racedocs_fts_au"),
+        ],
     )
     assert asyncio.run(run()) == [one] * 20
 
@@ -1899,7 +2070,9 @@ def _stored(path, table, index_table):
     """The rows of ``table`` and the entries of ``index_table`` as a connection of its own reads them."""
     raw = sqlite3.connect(path)
     try:
-        rows = raw.execute(f"SELECT _id, json_extract(data, '$.title') FROM {table} ORDER BY _id").fetchall()
+        rows = raw.execute(
+            f"SELECT _id, json_extract(data, '$.title') FROM {table} ORDER BY _id"
+        ).fetchall()
         entries = raw.execute(f"SELECT rowid, title FROM {index_table} ORDER BY rowid").fetchall()
     finally:
         raw.close()

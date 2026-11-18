@@ -62,7 +62,9 @@ def db(tmp_path):
 def no_wait_db(tmp_path):
     """A file database whose writes fail at once on a held lock instead of waiting."""
     path = str(tmp_path / "locks.db")
-    database = SQLerDB(SQLiteAdapter(path, pragmas=["PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 0"]))
+    database = SQLerDB(
+        SQLiteAdapter(path, pragmas=["PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 0"])
+    )
     database.insert_document("items", {"who": "main"})
     yield database
     database.close()
@@ -201,12 +203,16 @@ def _end_inside_raw_transaction(database):
 
 
 @pytest.mark.parametrize(
-    "end_thread", [_end_inside_db_transaction, _end_inside_raw_transaction], ids=["db.transaction", "begin_transaction"]
+    "end_thread",
+    [_end_inside_db_transaction, _end_inside_raw_transaction],
+    ids=["db.transaction", "begin_transaction"],
 )
 def test_a_thread_that_ends_in_a_transaction_frees_the_write_lock(no_wait_db, end_thread):
     _run_in_thread(lambda: end_thread(no_wait_db))
     _run_in_thread(lambda: no_wait_db.insert_document("items", {"who": "next"}))
-    rows = no_wait_db.execute_sql("SELECT json_extract(data, '$.who') AS who FROM items ORDER BY _id")
+    rows = no_wait_db.execute_sql(
+        "SELECT json_extract(data, '$.who') AS who FROM items ORDER BY _id"
+    )
     assert [row["who"] for row in rows] == ["main", "next"]
     assert no_wait_db.adapter._txn_depth == 0
 
@@ -235,7 +241,11 @@ def test_threads_ending_while_another_thread_closes(tmp_path):
             except BaseException as exc:  # noqa: BLE001 - reported below
                 errors.append(exc)
 
-        threads = [threading.Thread(target=reader), threading.Thread(target=reader), threading.Thread(target=closer)]
+        threads = [
+            threading.Thread(target=reader),
+            threading.Thread(target=reader),
+            threading.Thread(target=closer),
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -363,7 +373,11 @@ def test_a_shared_memory_database_handed_on_with_no_thread_alive():
     _run_in_thread(make)
     _run_in_thread(lambda: box["db"].insert_document("things", {"name": "b"}))
     box["rows"] = []
-    _run_in_thread(lambda: box["rows"].append(box["db"].adapter.execute("SELECT count(*) FROM things").fetchone()[0]))
+    _run_in_thread(
+        lambda: box["rows"].append(
+            box["db"].adapter.execute("SELECT count(*) FROM things").fetchone()[0]
+        )
+    )
     try:
         assert box["rows"] == [2]
     finally:
@@ -422,7 +436,11 @@ def test_a_file_database_and_a_private_memory_database_open_no_anchor(db):
 
 @pytest.mark.parametrize(
     "uri",
-    ["file::memory:?cache=shared", "file:tc_by_hand?cache=shared&mode=memory", "file:/tc_by_hand?vfs=memdb"],
+    [
+        "file::memory:?cache=shared",
+        "file:tc_by_hand?cache=shared&mode=memory",
+        "file:/tc_by_hand?vfs=memdb",
+    ],
     ids=["memory-path", "mode-memory", "vfs-memdb"],
 )
 def test_a_shared_memory_database_named_by_hand_lives_until_close(uri):

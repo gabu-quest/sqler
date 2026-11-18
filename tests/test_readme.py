@@ -505,9 +505,16 @@ def test_C20_index_over_several_fields():
     )
     (index,) = db.list_indexes("jobs")
     assert index["name"] == "idx_jobs_queue__priority_desc__eta"
-    assert "(json_extract(data, '$.queue'), priority DESC, json_extract(data, '$.eta'))" in index["sql"]
+    assert (
+        "(json_extract(data, '$.queue'), priority DESC, json_extract(data, '$.eta'))"
+        in index["sql"]
+    )
 
-    q = db.query("jobs").filter((F("queue") == "a") & (F("status") == "pending")).order_by("priority", desc=True)
+    q = (
+        db.query("jobs")
+        .filter((F("queue") == "a") & (F("status") == "pending"))
+        .order_by("priority", desc=True)
+    )
     assert [d["priority"] for d in q.all_dicts()] == [2, 1, 0]
 
 
@@ -644,6 +651,7 @@ def test_C26_timestamp_mixin():
     post = post.save()
 
     from datetime import datetime, timezone
+
     now = datetime.now(timezone.utc)
     assert isinstance(post.created_at, datetime)
     assert isinstance(post.updated_at, datetime)
@@ -666,6 +674,7 @@ def test_C27_soft_delete_mixin():
     c.soft_delete()
     assert c.is_deleted == True
     from datetime import datetime, timezone
+
     now = datetime.now(timezone.utc)
     assert isinstance(c.deleted_at, datetime)
     assert abs((now - c.deleted_at.replace(tzinfo=timezone.utc)).total_seconds()) < 5
@@ -968,6 +977,7 @@ def test_C36_rebase_config():
 
     s2.value += 1
     import pytest
+
     with pytest.raises(StaleVersionError):
         s2.save()  # Should raise because rebasing is disabled
 
@@ -1169,7 +1179,9 @@ def test_C43_schema_migrations():
         Migration(
             version=1,
             name="create_items",
-            up=lambda d: d.adapter.execute("CREATE TABLE items (_id INTEGER PRIMARY KEY, data JSON)"),
+            up=lambda d: d.adapter.execute(
+                "CREATE TABLE items (_id INTEGER PRIMARY KEY, data JSON)"
+            ),
             down=lambda d: d.adapter.execute("DROP TABLE items"),
         ),
         Migration(

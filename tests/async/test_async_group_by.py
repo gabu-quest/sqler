@@ -25,14 +25,16 @@ async def db():
 
 
 async def seed_employees():
-    await Employee.save_many([
-        Employee(name="Alice", department="eng", role="senior", salary=150000),
-        Employee(name="Bob", department="eng", role="junior", salary=90000),
-        Employee(name="Charlie", department="eng", role="senior", salary=140000),
-        Employee(name="Diana", department="sales", role="lead", salary=120000),
-        Employee(name="Eve", department="sales", role="junior", salary=80000),
-        Employee(name="Frank", department="hr", role="lead", salary=110000),
-    ])
+    await Employee.save_many(
+        [
+            Employee(name="Alice", department="eng", role="senior", salary=150000),
+            Employee(name="Bob", department="eng", role="junior", salary=90000),
+            Employee(name="Charlie", department="eng", role="senior", salary=140000),
+            Employee(name="Diana", department="sales", role="lead", salary=120000),
+            Employee(name="Eve", department="sales", role="junior", salary=80000),
+            Employee(name="Frank", department="hr", role="lead", salary=110000),
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -92,12 +94,7 @@ async def test_group_by_max(db):
 @pytest.mark.asyncio
 async def test_group_by_with_filter(db):
     await seed_employees()
-    result = (
-        await Employee.query()
-        .filter(F("salary") >= 100000)
-        .group_by("department")
-        .count()
-    )
+    result = await Employee.query().filter(F("salary") >= 100000).group_by("department").count()
     assert len(result) == 3
     by_dept = {r["department"]: r["count"] for r in result}
     assert by_dept == {"eng": 2, "sales": 1, "hr": 1}
@@ -106,12 +103,7 @@ async def test_group_by_with_filter(db):
 @pytest.mark.asyncio
 async def test_group_by_with_having(db):
     await seed_employees()
-    result = (
-        await Employee.query()
-        .group_by("department")
-        .having(F("_count") > 1)
-        .count()
-    )
+    result = await Employee.query().group_by("department").having(F("_count") > 1).count()
     assert len(result) == 2
     by_dept = {r["department"]: r["count"] for r in result}
     assert "hr" not in by_dept

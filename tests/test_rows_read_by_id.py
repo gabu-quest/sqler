@@ -134,8 +134,17 @@ def db(path):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         for cls in (
-            RbiJob, RbiHolder, RbiSafeJob, RbiSafeHolder, RbiLiteJob, RbiLiteHolder,
-            RbiLiteSafeJob, RbiLiteSafeHolder, RbiPlain, RbiSafe, RbiLiteSafe,
+            RbiJob,
+            RbiHolder,
+            RbiSafeJob,
+            RbiSafeHolder,
+            RbiLiteJob,
+            RbiLiteHolder,
+            RbiLiteSafeJob,
+            RbiLiteSafeHolder,
+            RbiPlain,
+            RbiSafe,
+            RbiLiteSafe,
         ):
             cls.set_db(d)
     yield d
@@ -192,7 +201,8 @@ def test_a_null_column_and_a_json_key_of_its_name_read_as_find_document_reads_th
         "INSERT INTO rbi_jobs (data, status) VALUES (?, NULL)", ['{"name": "n", "status": "json"}']
     )
     db.adapter.execute(
-        "INSERT INTO rbi_jobs (data, status) VALUES (?, ?)", ['{"name": "m", "status": "json"}', "col"]
+        "INSERT INTO rbi_jobs (data, status) VALUES (?, ?)",
+        ['{"name": "m", "status": "json"}', "col"],
     )
     db.adapter.commit()
     one = [db.find_document("rbi_jobs", 1), db.find_document("rbi_jobs", 2)]
@@ -298,7 +308,9 @@ def test_from_ids_holds_the_version_and_save_moves_it_by_one(db, path, cls):
     got[0].name = "d"
     got[0].save()
     with sqlite3.connect(path) as conn:
-        assert conn.execute(f"SELECT _version FROM {cls.__tablename__} WHERE _id = 1").fetchone() == (3,)
+        assert conn.execute(
+            f"SELECT _version FROM {cls.__tablename__} WHERE _id = 1"
+        ).fetchone() == (3,)
     assert got[0]._version == 3
 
 
@@ -323,7 +335,9 @@ def test_from_ids_of_the_safe_base_sets_what_it_set_before_and_its_snapshot(db):
 def test_from_ids_on_a_table_made_before_versioning_does_what_from_id_does(tmp_path, cls):
     table, path = cls.__tablename__, str(tmp_path / "old.db")
     with sqlite3.connect(path) as conn:
-        conn.execute(f"CREATE TABLE {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)")
+        conn.execute(
+            f"CREATE TABLE {table} (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)"
+        )
         conn.execute(f"INSERT INTO {table} (data) VALUES (?)", ['{"name": "old"}'])
     db = SQLerDB.on_disk(path)
     got = cls.from_ids([1], db=db)
@@ -401,7 +415,9 @@ def test_a_parent_with_a_referenced_row_reads_one_statement_per_table(db):
     job = RbiJob(name="j", status="ready")
     job.save()
     RbiHolder(name="h", typed=job, held=job).save()
-    assert len(_reads(lambda: RbiHolder.from_ids([1]))) == 2  # the holders' columns learned by its save
+    assert (
+        len(_reads(lambda: RbiHolder.from_ids([1]))) == 2
+    )  # the holders' columns learned by its save
     assert len(_reads(lambda: RbiHolder.from_ids([1]))) == 2
     assert len(_reads(lambda: RbiHolder.query().all())) == 2
 
@@ -436,7 +452,9 @@ def test_a_fresh_database_object_reads_the_promoted_column_of_a_row(db, fresh):
     assert fresh.find_documents("rbi_jobs", [1]) == [{"name": "j", "_id": 1, "status": "ready"}]
 
 
-def test_from_ids_through_a_fresh_database_object_gives_the_column_and_save_keeps_it(db, fresh, path):
+def test_from_ids_through_a_fresh_database_object_gives_the_column_and_save_keeps_it(
+    db, fresh, path
+):
     _with_ready_job()
     got = RbiJob.from_ids([1], db=fresh)
     assert [g.status for g in got] == ["ready"]
@@ -457,10 +475,14 @@ def test_a_table_is_learned_once_and_a_known_table_asks_nothing(db, fresh):
     _with_ready_job()
     RbiPlain(name="p").save()
     first = _reads(lambda: fresh.find_document("rbi_jobs", 1))
-    assert len(first) == 3  # its columns, then its record of settled columns (read once), then the row
+    assert (
+        len(first) == 3
+    )  # its columns, then its record of settled columns (read once), then the row
     assert _reads(lambda: fresh.find_document("rbi_jobs", 1)) == first[2:]
     assert len(_reads(lambda: fresh.find_documents("rbi_plains", [1]))) == 2
-    assert len(_reads(lambda: fresh.find_documents("rbi_plains", [1]))) == 1  # remembered as having none
+    assert (
+        len(_reads(lambda: fresh.find_documents("rbi_plains", [1]))) == 1
+    )  # remembered as having none
     assert len(_reads(lambda: db.find_document("rbi_jobs", 1))) == 1  # the object that ensured it
 
 
@@ -469,7 +491,9 @@ def test_a_missing_table_is_not_remembered_and_not_created(db, fresh, path):
     assert fresh.find_document("rbi_later", 1) is None
     assert "rbi_later" not in _tables(path)
     with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE rbi_later (_id INTEGER PRIMARY KEY, data JSON NOT NULL, kind TEXT)")
+        conn.execute(
+            "CREATE TABLE rbi_later (_id INTEGER PRIMARY KEY, data JSON NOT NULL, kind TEXT)"
+        )
         conn.execute("""INSERT INTO rbi_later (data, kind) VALUES ('{"name": "l"}', 'k')""")
     assert fresh.find_document("rbi_later", 1) == {"name": "l", "_id": 1, "kind": "k"}
 
@@ -480,13 +504,17 @@ def test_what_is_learned_inside_a_transaction_that_rolls_back_is_dropped(db, fre
             fresh.adapter.execute(
                 "CREATE TABLE rbi_txn (_id INTEGER PRIMARY KEY, data JSON NOT NULL, status TEXT)"
             )
-            fresh.adapter.execute("""INSERT INTO rbi_txn (data, status) VALUES ('{"name": "t"}', 'in')""")
+            fresh.adapter.execute(
+                """INSERT INTO rbi_txn (data, status) VALUES ('{"name": "t"}', 'in')"""
+            )
             assert fresh.find_document("rbi_txn", 1) == {"name": "t", "_id": 1, "status": "in"}
             raise RuntimeError("undo")
     assert fresh.find_document("rbi_txn", 1) is None
     assert "rbi_txn" not in _tables(path)
     with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE rbi_txn (_id INTEGER PRIMARY KEY, data JSON NOT NULL, note TEXT)")
+        conn.execute(
+            "CREATE TABLE rbi_txn (_id INTEGER PRIMARY KEY, data JSON NOT NULL, note TEXT)"
+        )
         conn.execute("""INSERT INTO rbi_txn (data, note) VALUES ('{"name": "u"}', 'after')""")
     assert fresh.find_document("rbi_txn", 1) == {"name": "u", "_id": 1, "note": "after"}
 
@@ -506,7 +534,12 @@ def test_a_column_promoted_later_on_the_same_object_is_read_next(db, fresh):
     fresh.ensure_table("rbi_jobs", promoted={"note": "TEXT"})
     fresh.adapter.execute("UPDATE rbi_jobs SET note = 'n' WHERE _id = 1")
     fresh.adapter.commit()
-    assert fresh.find_document("rbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready", "note": "n"}
+    assert fresh.find_document("rbi_jobs", 1) == {
+        "name": "j",
+        "_id": 1,
+        "status": "ready",
+        "note": "n",
+    }
 
 
 def test_a_column_promoted_by_another_object_after_this_one_learned_is_seen(db, fresh):
@@ -517,8 +550,18 @@ def test_a_column_promoted_by_another_object_after_this_one_learned_is_seen(db, 
     db.ensure_table("rbi_jobs", promoted={"note": "TEXT"})
     db.adapter.execute("UPDATE rbi_jobs SET note = 'n' WHERE _id = 1")
     db.adapter.commit()
-    assert fresh.find_document("rbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready", "note": "n"}
-    assert db.find_document("rbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready", "note": "n"}
+    assert fresh.find_document("rbi_jobs", 1) == {
+        "name": "j",
+        "_id": 1,
+        "status": "ready",
+        "note": "n",
+    }
+    assert db.find_document("rbi_jobs", 1) == {
+        "name": "j",
+        "_id": 1,
+        "status": "ready",
+        "note": "n",
+    }
 
 
 def test_a_class_with_a_promoted_column_saves_through_an_object_that_learned_its_table_without_it(
@@ -543,7 +586,11 @@ def test_a_class_with_a_promoted_column_saves_through_an_object_that_learned_its
             "CREATE TABLE rbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, "
             "_version INTEGER NOT NULL DEFAULT 0)",
             ("""'{"name": "a"}'""",),
-            {"name": "a", "_id": 1, "_version": 0},  # the column is the row's version: every read gives it
+            {
+                "name": "a",
+                "_id": 1,
+                "_version": 0,
+            },  # the column is the row's version: every read gives it
         ),
         (
             "CREATE TABLE rbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, extra TEXT)",
@@ -562,7 +609,11 @@ def test_a_class_with_a_promoted_column_saves_through_an_object_that_learned_its
 def test_which_columns_of_a_table_count(db, fresh, path, ddl, row, expected):
     with sqlite3.connect(path) as conn:
         conn.execute(ddl)
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(rbi_shape)") if r[1] not in ("_id", "_version")]
+        cols = [
+            r[1]
+            for r in conn.execute("PRAGMA table_info(rbi_shape)")
+            if r[1] not in ("_id", "_version")
+        ]
         names = ", ".join(f'"{c}"' for c in cols)
         conn.execute(f"INSERT INTO rbi_shape ({names}) VALUES ({', '.join(row)})")
     assert fresh.find_document("rbi_shape", 1) == expected
@@ -581,7 +632,9 @@ def test_a_hostile_table_name_is_refused_before_any_statement(db, fresh):
     assert captured == []
 
 
-def test_a_child_of_a_bound_class_is_read_from_its_class_database_through_any_queryset(db, tmp_path):
+def test_a_child_of_a_bound_class_is_read_from_its_class_database_through_any_queryset(
+    db, tmp_path
+):
     """The parent rows are read from the queryset's database; a referenced row of a class
     bound to a database is read from that one, where its ``save()`` writes it back."""
     _with_ready_job(status="here")
@@ -624,7 +677,17 @@ CHAINS = {
     "having": lambda qs: qs.group_by("name").having(_name_is_h()),
     "resolve": lambda qs: qs.resolve(qs._resolve),
 }
-ROWS = {"filter", "exclude", "or_filter", "distinct", "select", "order_by", "limit", "offset", "resolve"}
+ROWS = {
+    "filter",
+    "exclude",
+    "or_filter",
+    "distinct",
+    "select",
+    "order_by",
+    "limit",
+    "offset",
+    "resolve",
+}
 
 
 def _name_is(value):
@@ -663,7 +726,9 @@ def test_every_chaining_method_keeps_the_database_of_using(db, fresh, method):
 MANY = 40_000
 
 
-@pytest.mark.parametrize("cls", [RbiPlain, RbiSafe, RbiLiteJob, RbiLiteSafe], ids=lambda c: c.__name__)
+@pytest.mark.parametrize(
+    "cls", [RbiPlain, RbiSafe, RbiLiteJob, RbiLiteSafe], ids=lambda c: c.__name__
+)
 def test_from_ids_and_find_documents_of_40000_ids(db, cls):
     """More ids than SQLite takes as variables in one statement: read in groups, order and
     repeats as asked."""
@@ -687,7 +752,11 @@ def test_ids_up_to_the_bound_are_one_variable_each_and_past_it_one_json_array(db
     under = _reads(lambda: db.find_documents("rbi_plains", list(range(1, 1000))))
     assert [s.count("?") for s in under] == [999]
     over = _reads(lambda: db.find_documents("rbi_plains", list(range(1, 1001))))
-    assert over == ["SELECT _id, data FROM rbi_plains WHERE _id IN (SELECT value FROM json_each(?)) AND " + _G_PLAINS + ";"]
+    assert over == [
+        "SELECT _id, data FROM rbi_plains WHERE _id IN (SELECT value FROM json_each(?)) AND "
+        + _G_PLAINS
+        + ";"
+    ]
 
 
 # --- a save inside a transaction that rolls back ------------------------------------------

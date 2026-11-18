@@ -840,7 +840,9 @@ class TestNegativeInputs:
         db = SQLerDB.in_memory(shared=False)
         Item.set_db(db)
         item = Item(name="test", value=1)
-        with pytest.raises(TypeError, match="^Item takes a SQLerDB as its database, not an object of type int: "):
+        with pytest.raises(
+            TypeError, match="^Item takes a SQLerDB as its database, not an object of type int: "
+        ):
             item.save(db=42)
         assert item._id is None
 
@@ -849,7 +851,9 @@ class TestNegativeInputs:
         db = SQLerDB.in_memory(shared=False)
         Item.set_db(db)
         item = Item(name="test", value=1).save()
-        with pytest.raises(TypeError, match="^Item takes a SQLerDB as its database, not an object of type str: "):
+        with pytest.raises(
+            TypeError, match="^Item takes a SQLerDB as its database, not an object of type str: "
+        ):
             item.delete(db="wrong")
         assert Item.count() == 1
 
@@ -857,14 +861,19 @@ class TestNegativeInputs:
         """using(None) raises TypeError: a query needs a database."""
         db = SQLerDB.in_memory(shared=False)
         Item.set_db(db)
-        with pytest.raises(TypeError, match="^Item takes a SQLerDB as its database, not an object of type NoneType: "):
+        with pytest.raises(
+            TypeError,
+            match="^Item takes a SQLerDB as its database, not an object of type NoneType: ",
+        ):
             Item.using(None)
 
     def test_using_wrong_type_raises(self):
         """using(42) raises TypeError naming what it was given."""
         db = SQLerDB.in_memory(shared=False)
         Item.set_db(db)
-        with pytest.raises(TypeError, match="^Item takes a SQLerDB as its database, not an object of type int: "):
+        with pytest.raises(
+            TypeError, match="^Item takes a SQLerDB as its database, not an object of type int: "
+        ):
             Item.using(42)
 
     def test_save_unbound_model_no_db_raises(self):

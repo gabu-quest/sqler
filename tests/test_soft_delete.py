@@ -10,6 +10,7 @@ def db():
     """Create an in-memory database for testing."""
     return SQLerDB.in_memory()
 
+
 class TestSoftDeleteMixin:
     """Tests for the enhanced SoftDeleteMixin with auto-filtering methods."""
 

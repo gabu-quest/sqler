@@ -11,6 +11,7 @@ from sqler.models.async_safe import AsyncSQLerSafeModel
 
 # ---- test models ----
 
+
 class AItem(AsyncSQLerModel):
     __tablename__ = "items"
     name: str = ""
@@ -48,6 +49,7 @@ class ASafePromotedItem(AsyncSQLerSafeModel):
 
 # ---- fixtures ----
 
+
 @pytest_asyncio.fixture
 async def db():
     db = AsyncSQLerDB.in_memory(shared=False)
@@ -59,6 +61,7 @@ async def db():
 
 
 # ---- AsyncSQLerModel.save_many tests ----
+
 
 @pytest.mark.asyncio
 async def test_save_many_basic(db):
@@ -202,6 +205,7 @@ async def test_save_many_chunking(db):
 
 
 # ---- AsyncSQLerSafeModel.save_many tests ----
+
 
 @pytest.mark.asyncio
 async def test_save_many_safe_model(db):

@@ -131,13 +131,18 @@ class PureHydration:
         ]:
             stats = arm_results[stats_key]
             tp = row_count / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-            results.append(BenchmarkResult(
-                scenario=self.name, suite=self.suite,
-                parameter="backend", value=f"{label}_{row_count}",
-                timing=stats, rows=row_count,
-                throughput=round(tp, 1),
-                metadata={"baseline": label},
-            ))
+            results.append(
+                BenchmarkResult(
+                    scenario=self.name,
+                    suite=self.suite,
+                    parameter="backend",
+                    value=f"{label}_{row_count}",
+                    timing=stats,
+                    rows=row_count,
+                    throughput=round(tp, 1),
+                    metadata={"baseline": label},
+                )
+            )
 
         return results
 
@@ -229,13 +234,18 @@ class QuerysetHydration:
                 ]:
                     stats = arm_results[stats_key]
                     tp = row_count / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                    results.append(BenchmarkResult(
-                        scenario=self.name, suite=self.suite,
-                        parameter="backend", value=f"{label}_{row_count}",
-                        timing=stats, rows=row_count,
-                        throughput=round(tp, 1),
-                        metadata={"storage_mode": mode, "baseline": stats_key},
-                    ))
+                    results.append(
+                        BenchmarkResult(
+                            scenario=self.name,
+                            suite=self.suite,
+                            parameter="backend",
+                            value=f"{label}_{row_count}",
+                            timing=stats,
+                            rows=row_count,
+                            throughput=round(tp, 1),
+                            metadata={"storage_mode": mode, "baseline": stats_key},
+                        )
+                    )
 
                 if mode == "disk":
                     db.close()

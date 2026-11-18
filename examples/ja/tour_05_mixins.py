@@ -303,7 +303,6 @@ def _(HooksMixin, SQLerModel, db):
                 return False  # 削除を中止
             return True
 
-
     # ロックされたレコードを作成
     _record = ProtectedRecord(data="重要なデータ", locked=True).save(db=db)
     print(f"ロックされたレコードを作成: {_record.data}")
@@ -439,7 +438,6 @@ def _(AuditMixin, SQLerModel, db):
         title: str
         content: str
 
-
     # 現在のユーザーを設定（通常はミドルウェアで行う）
     AuditMixin.set_current_user("alice@example.com")
 
@@ -479,7 +477,6 @@ def _(AuditLogMixin, AuditMixin, SQLerModel, db):
         name: str
         price: float
         in_stock: bool = True
-
 
     # 監査ログ用にユーザーを設定
     AuditMixin.set_current_user("admin@shop.com")

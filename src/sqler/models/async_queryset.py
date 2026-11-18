@@ -231,10 +231,14 @@ class AsyncSQLerQuerySet(Generic[T]):
         _write_rules.refuse_self_copy(self._model_cls, self._query._table)
         db = self._db
         if db is None:
-            raise RuntimeError(f"{self._model_cls.__name__}: copy_to() needs the queryset's database")
+            raise RuntimeError(
+                f"{self._model_cls.__name__}: copy_to() needs the queryset's database"
+            )
         source = self._query._table
         async with db.transaction():
-            if not await db._copy_target(source, target, getattr(self._model_cls, "__checks__", None)):
+            if not await db._copy_target(
+                source, target, getattr(self._model_cls, "__checks__", None)
+            ):
                 return 0
             count = await self._checked("rows")._copied(target)
             return _write_rules.copied(self._model_cls, db, target, count)
@@ -249,7 +253,9 @@ class AsyncSQLerQuerySet(Generic[T]):
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
             return self._told(await self._checked("update")._update_picked(fields, n, op))
-        return [after for _, after in await self._written("update", lambda q: q._changed(fields, n))]
+        return [
+            after for _, after in await self._written("update", lambda q: q._changed(fields, n))
+        ]
 
     def _told(self, result):
         """``result`` of a write that went past the row rules; the class is told of it."""

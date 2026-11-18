@@ -92,18 +92,12 @@ class TestSyncUpdateNBasic:
 
     def test_empty_match_returns_empty_list(self, db_with_items):
         results = (
-            SyncItem.query()
-            .filter(F("status") == "nonexistent")
-            .update_n(5, status="running")
+            SyncItem.query().filter(F("status") == "nonexistent").update_n(5, status="running")
         )
         assert results == []
 
     def test_n_exceeds_available(self, db_with_items):
-        results = (
-            SyncItem.query()
-            .filter(F("status") == "pending")
-            .update_n(100, status="running")
-        )
+        results = SyncItem.query().filter(F("status") == "pending").update_n(100, status="running")
         assert len(results) == 4
 
     def test_f_expression_in_update(self, db_with_items):

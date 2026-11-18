@@ -194,7 +194,9 @@ async def setup_async(models: Any, db: Any, journal: Journal, precreate: bool = 
     if precreate:
         for name, table in TABLE.items():
             promoted = {"prio": PROMOTED_LATER["prio"]} if name == "promo" else None
-            await db.ensure_table(table, promoted=promoted, versioned=name in SAFE or name == "counter")
+            await db.ensure_table(
+                table, promoted=promoted, versioned=name in SAFE or name == "counter"
+            )
         a = await models.Audited(owner="setup", key="setup", n=0).save(db=db)
         aid = a._id
         fx.append(["put", TABLE["audit"], aid, {"owner": "setup", "key": "setup", "n": 0}, 1])
@@ -428,7 +430,9 @@ class Run:
             if os.path.exists(self.db_path) and not _is_soak_db(self.db_path):
                 raise Refused(f"{self.db_path} is not a database this harness made")
             raise Refused(f"{self.folder} is left by an earlier run; give a new --dir")
-        self.lock_fd = os.open(os.path.join(self.folder, "soak.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        self.lock_fd = os.open(
+            os.path.join(self.folder, "soak.lock"), os.O_RDWR | os.O_CREAT, 0o600
+        )
         fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def setup(self) -> None:
@@ -436,7 +440,9 @@ class Run:
             return  # the child makes its database and its counters
         conn = sqlite3.connect(self.db_path)
         conn.execute(f"CREATE TABLE {MARKER} (seed INTEGER, workload TEXT, pid INTEGER)")
-        conn.execute(f"INSERT INTO {MARKER} VALUES (?, ?, ?)", [self.args.seed, self.name, os.getpid()])
+        conn.execute(
+            f"INSERT INTO {MARKER} VALUES (?, ?, ?)", [self.args.seed, self.name, os.getpid()]
+        )
         conn.commit()
         conn.close()
         import soak_models_sync as models
@@ -513,7 +519,9 @@ class Run:
             else:
                 left = deadline - time.monotonic()
                 if left <= 0:
-                    raise RuntimeError(f"{self.name}: child {proc.index} sent no {ev!r} in {timeout}s")
+                    raise RuntimeError(
+                        f"{self.name}: child {proc.index} sent no {ev!r} in {timeout}s"
+                    )
                 try:
                     who, msg = self.events.get(timeout=left)
                 except queue.Empty:
@@ -599,7 +607,11 @@ class Run:
         self.checks += 1
         self.reports.append(rep)
         if not rep["ok"]:
-            print(f"soak [{self.name}] check {self.checks}: {rep['violations']} violations", file=self.out, flush=True)
+            print(
+                f"soak [{self.name}] check {self.checks}: {rep['violations']} violations",
+                file=self.out,
+                flush=True,
+            )
         return rep
 
     def check_file(self) -> dict:
@@ -650,7 +662,8 @@ class Run:
             next_progress = self.started + self.args.progress
             next_check = self.started + self.args.checkpoint
             kill_times = sorted(
-                self.started + self.rng.uniform(0.05, 0.95) * (self.seconds or 0) for _ in range(kills)
+                self.started + self.rng.uniform(0.05, 0.95) * (self.seconds or 0)
+                for _ in range(kills)
             )
             while True:
                 now = time.monotonic()
@@ -673,7 +686,11 @@ class Run:
                 time.sleep(0.05)
         except KeyboardInterrupt:
             interrupted = True
-            print(f"soak [{self.name}] interrupted: stopping the workers, then the check", file=self.out, flush=True)
+            print(
+                f"soak [{self.name}] interrupted: stopping the workers, then the check",
+                file=self.out,
+                flush=True,
+            )
         # from here a Ctrl-C (or the second one a terminal sends) waits for the check
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
@@ -681,7 +698,11 @@ class Run:
             if self.args.storage == "file":
                 rep = self.checkpoint(final=True)
             else:
-                rep = self.report or {"ok": False, "violations": 1, "lines": ["VIOLATION no final report"]}
+                rep = self.report or {
+                    "ok": False,
+                    "violations": 1,
+                    "lines": ["VIOLATION no final report"],
+                }
                 self.checks += 1
                 self.reports.append(rep)
             self.progress()
@@ -727,7 +748,9 @@ def _is_soak_db(path: str) -> bool:
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
-            row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [MARKER]).fetchone()
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [MARKER]
+            ).fetchone()
         finally:
             conn.close()
     except sqlite3.DatabaseError:
@@ -738,11 +761,16 @@ def _is_soak_db(path: str) -> bool:
 def parse(argv: list[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="tests/soak/soak.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("--minutes", type=float, help="total time, shared by the workloads")
-    ap.add_argument("--ops", type=int, help="operations per worker in place of a time (the checker test)")
+    ap.add_argument(
+        "--ops", type=int, help="operations per worker in place of a time (the checker test)"
+    )
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--storage", choices=("file", "memory"), default="file")
     ap.add_argument("--workload", choices=tuple(WORKLOADS), action="append")
-    ap.add_argument("--dir", help="an existing folder for the databases and journals (default: a new temp folder)")
+    ap.add_argument(
+        "--dir",
+        help="an existing folder for the databases and journals (default: a new temp folder)",
+    )
     ap.add_argument(
         "--only",
         type=lambda text: [n for n in text.split(",") if n],
@@ -756,8 +784,12 @@ def parse(argv: list[str]) -> argparse.Namespace:
         "(default: the first writes make them, and a writer promotes stage while the others run)",
     )
     ap.add_argument("--kill", action="store_true", help="kill a writer process 20 times in the run")
-    ap.add_argument("--checkpoint", type=float, default=30.0, help="seconds between checks while running")
-    ap.add_argument("--progress", type=float, default=30.0, help="seconds between progress lines (at most 60)")
+    ap.add_argument(
+        "--checkpoint", type=float, default=30.0, help="seconds between checks while running"
+    )
+    ap.add_argument(
+        "--progress", type=float, default=30.0, help="seconds between progress lines (at most 60)"
+    )
     args = ap.parse_args(argv)
     if (args.minutes is None) == (args.ops is None):
         ap.error("give one of --minutes or --ops")
@@ -770,14 +802,20 @@ def parse(argv: list[str]) -> argparse.Namespace:
     unknown = set(args.only) - set(Worker.WEIGHTS)
     if unknown:
         ap.error(f"--only: no such operation: {', '.join(sorted(unknown))}")
-    names = args.workload or [n for n, (_k, _w, f) in WORKLOADS.items() if args.storage == "file" or not f]
+    names = args.workload or [
+        n for n, (_k, _w, f) in WORKLOADS.items() if args.storage == "file" or not f
+    ]
     for n in names:
         if WORKLOADS[n][2] and args.storage == "memory":
-            ap.error(f"workload {n} needs --storage file: two processes cannot share an in-memory database")
+            ap.error(
+                f"workload {n} needs --storage file: two processes cannot share an in-memory database"
+            )
     if args.kill and not any(WORKLOADS[n][2] for n in names):
         ap.error("--kill needs a process workload (procs2 or procs4)")
     if args.kill and args.ops is not None:
-        ap.error("--kill needs --minutes: the kills are placed in the run's time, and an --ops run has none to place them in")
+        ap.error(
+            "--kill needs --minutes: the kills are placed in the run's time, and an --ops run has none to place them in"
+        )
     args.names = names
     return args
 
@@ -809,7 +847,9 @@ def main(argv: list[str]) -> int:
     for name in args.names:
         kills = 0
         if args.kill and name in proc_names:
-            kills = KILLS // len(proc_names) + (1 if proc_names.index(name) < KILLS % len(proc_names) else 0)
+            kills = KILLS // len(proc_names) + (
+                1 if proc_names.index(name) < KILLS % len(proc_names) else 0
+            )
         run = Run(args, name, root, seconds, out)
         try:
             results[name] = (run, run.run(kills))
@@ -846,7 +886,9 @@ def summarize(args: Any, root: str, results: dict, interrupted: bool, out: Any) 
         print(f"soak [{name}] final check: {final.get('summary', '')}", file=out)
         empty = [k for k, v in checked.items() if not v]
         if empty and not interrupted:
-            print(f"soak [{name}] note: invariants that checked no row: {', '.join(empty)}", file=out)
+            print(
+                f"soak [{name}] note: invariants that checked no row: {', '.join(empty)}", file=out
+            )
     waited = {k: v for k, v in total.errors.items() if k in WAITED_OUT}
     failing = {k: v for k, v in total.errors.items() if k not in WAITED_OUT}
     errors = sum(failing.values())

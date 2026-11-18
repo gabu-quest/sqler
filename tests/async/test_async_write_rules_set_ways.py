@@ -58,7 +58,9 @@ def make(kind, *mixins, promoted=False):
         ns["status"] = None
         ns["__promoted__"] = {"status": "TEXT"}
     ns["__annotations__"] = annotations
-    cls = types.new_class(f"Item_{table}", (*mixins, BASES[kind]), _kwds(kind), lambda body: body.update(ns))
+    cls = types.new_class(
+        f"Item_{table}", (*mixins, BASES[kind]), _kwds(kind), lambda body: body.update(ns)
+    )
     return dataclass(cls) if kind.startswith("lite") else cls
 
 
@@ -151,35 +153,43 @@ PINS = [
         Plain,
         lambda q: q.filter(F("k") == 0).update(name="x", k=F("k") + 1),
         "UPDATE asw_pin_plain SET data = json_set(data, '$.name', ?, '$.k', "
-        "json_extract(data, '$.k') + ?) WHERE JSON_EXTRACT(data, '$.k') = ? AND " + _g("asw_pin_plain", "_id", "data"),
+        "json_extract(data, '$.k') + ?) WHERE JSON_EXTRACT(data, '$.k') = ? AND "
+        + _g("asw_pin_plain", "_id", "data"),
         ["x", 1, 0],
     ),
     (
         Plain,
         lambda q: q.filter(F("k") >= 0).order_by("name", desc=True).update_one(name="y"),
         "UPDATE asw_pin_plain SET data = json_set(data, '$.name', ?) WHERE _id = (SELECT _id FROM "
-        "asw_pin_plain WHERE JSON_EXTRACT(data, '$.k') >= ? AND " + _g("asw_pin_plain", "_id", "data") + " ORDER BY json_extract(data, '$.name') "
+        "asw_pin_plain WHERE JSON_EXTRACT(data, '$.k') >= ? AND "
+        + _g("asw_pin_plain", "_id", "data")
+        + " ORDER BY json_extract(data, '$.name') "
         "DESC LIMIT 1) RETURNING _id, data",
         ["y", 0],
     ),
     (
         Plain,
         lambda q: q.filter(F("name") == "nope").delete_all(),
-        "DELETE FROM asw_pin_plain WHERE JSON_EXTRACT(data, '$.name') = ? AND " + _g("asw_pin_plain", "_id", "data"),
+        "DELETE FROM asw_pin_plain WHERE JSON_EXTRACT(data, '$.name') = ? AND "
+        + _g("asw_pin_plain", "_id", "data"),
         ["nope"],
     ),
     (
         Safe,
         lambda q: q.filter(F("_id") == 1).update_one(k=6),
         "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
-        "_id = (SELECT _id FROM asw_pin_safe WHERE _id = ? AND " + _g("asw_pin_safe", "_id", "data", "_version") + " LIMIT 1) RETURNING _id, data, _version",
+        "_id = (SELECT _id FROM asw_pin_safe WHERE _id = ? AND "
+        + _g("asw_pin_safe", "_id", "data", "_version")
+        + " LIMIT 1) RETURNING _id, data, _version",
         [6, 1],
     ),
     (
         Safe,
         lambda q: q.filter(F("_id") >= 1).update_n(3, k=7),
         "UPDATE asw_pin_safe SET data = json_set(data, '$.k', ?), _version = _version + 1 WHERE "
-        "_id IN (SELECT _id FROM asw_pin_safe WHERE _id >= ? AND " + _g("asw_pin_safe", "_id", "data", "_version") + " LIMIT 3) RETURNING _id, data, _version",
+        "_id IN (SELECT _id FROM asw_pin_safe WHERE _id >= ? AND "
+        + _g("asw_pin_safe", "_id", "data", "_version")
+        + " LIMIT 3) RETURNING _id, data, _version",
         [7, 1],
     ),
     (
@@ -195,7 +205,14 @@ PINS = [
 @pytest.mark.parametrize(
     "cls,way,sql,params",
     PINS,
-    ids=["plain update", "plain update_one", "plain delete_all", "safe update_one", "safe update_n", "safe update"],
+    ids=[
+        "plain update",
+        "plain update_one",
+        "plain delete_all",
+        "safe update_one",
+        "safe update_n",
+        "safe update",
+    ],
 )
 async def test_a_class_with_no_audit_log_sends_one_statement(db, cls, way, sql, params):
     await cls().save(db=db)
@@ -294,7 +311,9 @@ async def test_a_set_based_update_stamps_updated_at_as_save_stores_it(db, kind, 
     stamp = stamps.pop()
     assert re.sub(r"\d", "9", stamp) == re.sub(r"\d", "9", saved)
     assert datetime.fromisoformat(stamp) > datetime.fromisoformat(saved)
-    loaded = [i.updated_at for i in await bound(Item, db).filter(F("name") == "x").order_by("count").all()]
+    loaded = [
+        i.updated_at for i in await bound(Item, db).filter(F("name") == "x").order_by("count").all()
+    ]
     if way == "update_one":
         assert result.updated_at == loaded[0]
     elif way == "update_n":
@@ -338,7 +357,10 @@ async def _loop_save(db, Item, ids, **changes):
 async def test_update_writes_the_audit_rows_a_loop_of_save_writes(db, kind):
     Set, Loop = await _twins(db, kind, promoted=True)
 
-    assert await bound(Set, db).filter(F("count") >= 1).update(count=F("count") + 10, status="done") == 2
+    assert (
+        await bound(Set, db).filter(F("count") >= 1).update(count=F("count") + 10, status="done")
+        == 2
+    )
     await _loop_save(db, Loop, [2, 3], count=lambda i: i.count + 10, status="done")
 
     assert len(await _after_creates(db, Set)) == 2
@@ -445,7 +467,13 @@ async def test_a_set_based_write_awaits_no_hook(db):
     await q.delete_all()
 
     assert calls == []
-    assert [r[1] for r in await _audit(db, Hooked)] == ["create", "update", "update", "update", "delete"]
+    assert [r[1] for r in await _audit(db, Hooked)] == [
+        "create",
+        "update",
+        "update",
+        "update",
+        "delete",
+    ]
 
 
 # ----- two tasks on two adapters claim each row once ------------------------------------------
@@ -553,8 +581,12 @@ class LiteSheet(AsyncSQLerLiteSafeModel):
     binder: Optional[LiteBinder] = None
 
 
-@pytest.mark.parametrize("target, referrer", [(Binder, Sheet), (LiteBinder, LiteSheet)], ids=SAFE_KINDS)
-async def test_set_null_moves_the_version_of_a_versioned_referrer_so_a_stale_save_is_refused(db, target, referrer):
+@pytest.mark.parametrize(
+    "target, referrer", [(Binder, Sheet), (LiteBinder, LiteSheet)], ids=SAFE_KINDS
+)
+async def test_set_null_moves_the_version_of_a_versioned_referrer_so_a_stale_save_is_refused(
+    db, target, referrer
+):
     binder = await target(name="b").save(db=db)
     await referrer(title="s", binder=binder).save(db=db)
     held = await bound(referrer, db).first()
@@ -603,7 +635,9 @@ async def test_an_instance_edited_and_not_saved_logs_the_stored_row_on_delete(db
 
     await inst.delete(db=db)
 
-    assert await _after_creates(db, Item) == [(1, "delete", "alice", None, {"name": "stored", "count": 1})]
+    assert await _after_creates(db, Item) == [
+        (1, "delete", "alice", None, {"name": "stored", "count": 1})
+    ]
 
 
 # ----- delete_all() looks for the rows that refer to the set, once per referring table -----------
@@ -613,7 +647,9 @@ def holder_of(kind, target):
     """A class of ``kind`` whose ``target`` field holds a row of ``target``."""
     table = f"asw_holder_{kind}_{next(_tables)}"
     ns = {"__tablename__": table, "target": None, "__annotations__": {"target": Optional[target]}}
-    cls = types.new_class(f"Holder_{table}", (BASES[kind],), _kwds(kind), lambda body: body.update(ns))
+    cls = types.new_class(
+        f"Holder_{table}", (BASES[kind],), _kwds(kind), lambda body: body.update(ns)
+    )
     return dataclass(cls) if kind.startswith("lite") else cls
 
 
@@ -624,11 +660,16 @@ async def test_delete_all_of_one_row_and_of_ten_thousand_send_the_same_statement
     await Item.save_many([Item(name="one")] + [Item(name="many") for _ in range(10_000)], db=db)
     await Holder().save(db=db)
     version = ", _version" if kind in SAFE_KINDS else ""
-    names = [Item.__tablename__, Item.__name__.lower()]  # the names a reference to an Item may give, in order
+    names = [
+        Item.__tablename__,
+        Item.__name__.lower(),
+    ]  # the names a reference to an Item may give, in order
 
     def look(ids):
         """The one read of the look for ``ids``: one id is also looked for by its digits."""
-        digits = "data GLOB ('*' || substr(?1, 2, length(?1) - 2) || '*') AND " if len(ids) == 1 else ""
+        digits = (
+            "data GLOB ('*' || substr(?1, 2, length(?1) - 2) || '*') AND " if len(ids) == 1 else ""
+        )
         sql = (
             f"SELECT _id, data FROM {Holder.__tablename__} WHERE (({digits}(data GLOB '*{names[0]}*' OR "
             f"data GLOB '*{names[1]}*' OR data GLOB '*\\u*')) OR data >= x'') AND "

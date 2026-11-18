@@ -234,7 +234,13 @@ def load(
 
 
 def _walk(
-    cls: Any, rows: list, keys: list, db: Any, shells: dict, make: Any = None, only_linked: bool = False
+    cls: Any,
+    rows: list,
+    keys: list,
+    db: Any,
+    shells: dict,
+    make: Any = None,
+    only_linked: bool = False,
 ) -> Generator[Read, Any, dict]:
     """Read and build the graph of ``rows`` (see :func:`load`); ``{key: model}`` of every
     row built. ``shells``: ``{key: object}`` of rows whose model is that object (``own``);
@@ -309,7 +315,9 @@ def _walk(
         mdl, doc, row, home = docs[key]
         resolved = replace(doc, typed_fields(mdl), get)
         if key in shells:
-            built[key] = _homed(make(resolved, row), home)  # its model exists: the row is read onto it
+            built[key] = _homed(
+                make(resolved, row), home
+            )  # its model exists: the row is read onto it
             return
         try:
             # on the object a cycle holds for the row, when one reached it first
@@ -777,7 +785,9 @@ _ITEM_NAMES = frozenset(
 )
 _VALUE_NAMES = frozenset({"dict", "Dict", "Mapping", "MutableMapping"})
 _NOT_A_MODEL = frozenset({"None", "Any", "ClassVar", "typing", "Literal", "..."})
-_ANY_LENGTH: list[tuple[str, list]] = [("...", [])]  # the ``...`` of ``tuple[Child, ...]``, as :func:`_parse` gives it
+_ANY_LENGTH: list[tuple[str, list]] = [
+    ("...", [])
+]  # the ``...`` of ``tuple[Child, ...]``, as :func:`_parse` gives it
 
 
 def typed_fields(cls: Any) -> dict[str, Position]:
@@ -1017,7 +1027,9 @@ def read_rows(adapter: Any, db: Any, table: str, ids: list, versioned: bool) -> 
     return _documents(rows, columns, versioned)
 
 
-async def aread_rows(adapter: Any, db: Any, table: str, ids: list, versioned: bool) -> Optional[tuple]:
+async def aread_rows(
+    adapter: Any, db: Any, table: str, ids: list, versioned: bool
+) -> Optional[tuple]:
     """Async twin of :func:`read_rows`. A class bound to a sync database is read through it."""
     if db is None:
         columns = _row_columns()
@@ -1056,4 +1068,3 @@ async def aread_versioned(db: Any, table: str, ids: list) -> list:
         return []
     rows, columns = await db._read_rows(table, ids, versioned=True)
     return _row_documents(_in_order(rows or [], ids), columns)
-

@@ -82,6 +82,7 @@ class BrokenRef:
     target_table: str
     target_id: int
 
+
 # Conditionally import Pydantic-based models
 if PYDANTIC_AVAILABLE:
     from .async_integrity import (
@@ -155,8 +156,7 @@ except ImportError:
         class _Stub:
             def __init__(self, *args, **kwargs):
                 raise ImportError(
-                    f"{name} requires aiosqlite.\n"
-                    f"Install with: pip install aiosqlite"
+                    f"{name} requires aiosqlite.\nInstall with: pip install aiosqlite"
                 )
 
         _Stub.__name__ = name

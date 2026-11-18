@@ -112,7 +112,11 @@ def _follow_promotion(table: str, moved: list[str], promoted: list[str]) -> Any:
     moving = {c.lower() for c in moved}
     for kind, idx, sql in rows:
         found = _stored_definition(sql) if kind == "table" else None
-        if found is None or found[2] or not {f"{idx}_{s}".lower() for s in _SYNC_TRIGGERS} <= triggers:
+        if (
+            found is None
+            or found[2]
+            or not {f"{idx}_{s}".lower() for s in _SYNC_TRIGGERS} <= triggers
+        ):
             continue
         fields = found[0]
         if not moving & {f.lower() for f in fields}:

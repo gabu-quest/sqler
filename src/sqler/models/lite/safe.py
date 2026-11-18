@@ -127,7 +127,9 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         Raises:
             StaleVersionError: If the version is stale and cannot be rebased.
         """
-        return _retry.run(self, db, table, _partial, self._dump_with_relations(), _resolve, object.__setattr__)
+        return _retry.run(
+            self, db, table, _partial, self._dump_with_relations(), _resolve, object.__setattr__
+        )
 
     def _refreshed(self: TSafe, doc: dict, row: dict) -> TSafe:
         super()._refreshed(doc, row)

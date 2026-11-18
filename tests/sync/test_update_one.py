@@ -39,11 +39,7 @@ class TestUpdateOneBasic:
         assert result.attempts == 1
 
     def test_returns_none_when_no_match(self, db_with_tasks):
-        result = (
-            Task.query()
-            .filter(F("status") == "nonexistent")
-            .update_one(status="running")
-        )
+        result = Task.query().filter(F("status") == "nonexistent").update_one(status="running")
         assert result is None
 
     def test_only_updates_one_row(self, db_with_tasks):
@@ -122,9 +118,9 @@ class TestUpdateOneVersioned:
         assert result._version == 1  # bumped from 0
 
     def test_version_persisted(self, db_with_versioned):
-        VersionedTask.query().filter(F("status") == "pending").order_by(
-            "-priority"
-        ).update_one(status="running")
+        VersionedTask.query().filter(F("status") == "pending").order_by("-priority").update_one(
+            status="running"
+        )
         loaded = VersionedTask.query().filter(F("name") == "b").first()
         assert loaded._version == 1
 

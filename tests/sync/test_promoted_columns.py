@@ -260,12 +260,7 @@ class TestPromotedSafeModel:
         Job(name="a", status="pending", priority=1).save()
         Job(name="b", status="running", priority=10).save()
 
-        results = (
-            Job.query()
-            .filter(F("status") == "pending")
-            .order_by("-priority")
-            .all()
-        )
+        results = Job.query().filter(F("status") == "pending").order_by("-priority").all()
         assert len(results) == 1
         assert results[0].name == "a"
         db.close()
@@ -366,9 +361,7 @@ class TestPromotedAggregates:
         Job(name="b", status="pending", priority=10).save()
         Job(name="c", status="running", priority=10).save()
 
-        count = Job.query().filter(
-            (F("status") == "pending") & (F("priority") == 10)
-        ).count()
+        count = Job.query().filter((F("status") == "pending") & (F("priority") == 10)).count()
         assert count == 1
         db.close()
 
@@ -385,9 +378,7 @@ class TestPromotedAggregates:
         Job(name="b", status="running").save()
         Job(name="c", status="failed").save()
 
-        count = Job.query().filter(
-            F("status").in_list(["pending", "running"])
-        ).count()
+        count = Job.query().filter(F("status").in_list(["pending", "running"])).count()
         assert count == 2
         db.close()
 
@@ -467,9 +458,7 @@ class TestPromotedDelete:
         Job(name="b", status="running").save()
         Job(name="c", status="failed").save()
 
-        deleted = Job.query().filter(
-            F("status").in_list(["pending", "failed"])
-        ).delete_all()
+        deleted = Job.query().filter(F("status").in_list(["pending", "failed"])).delete_all()
         assert deleted == 2
 
         remaining = Job.query().all()
@@ -494,9 +483,9 @@ class TestPromotedDelete:
         Job(name="b", status="pending", priority=10).save()
         Job(name="c", status="running", priority=10).save()
 
-        deleted = Job.query().filter(
-            (F("status") == "pending") & (F("priority") == 10)
-        ).delete_all()
+        deleted = (
+            Job.query().filter((F("status") == "pending") & (F("priority") == 10)).delete_all()
+        )
         assert deleted == 1
 
         remaining = Job.query().all()

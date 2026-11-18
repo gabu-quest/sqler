@@ -12,6 +12,7 @@ from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 
 # ---- test models ----
 
+
 @dataclass
 class ALItem(AsyncSQLerLiteModel):
     __tablename__ = "lite_items"
@@ -53,6 +54,7 @@ class ALSafePromotedItem(AsyncSQLerLiteSafeModel):
 
 # ---- fixtures ----
 
+
 @pytest_asyncio.fixture
 async def db():
     db = AsyncSQLerDB.in_memory(shared=False)
@@ -64,6 +66,7 @@ async def db():
 
 
 # ---- AsyncSQLerLiteModel.save_many tests ----
+
 
 @pytest.mark.asyncio
 async def test_save_many_basic(db):
@@ -231,6 +234,7 @@ async def test_save_many_chunking(db):
 
 
 # ---- AsyncSQLerLiteSafeModel.save_many tests ----
+
 
 @pytest.mark.asyncio
 async def test_save_many_safe_model(db):

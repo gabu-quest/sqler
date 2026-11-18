@@ -88,7 +88,6 @@ def _(SQLerModel, db):
         email: str
         age: int
 
-
     # サンプルユーザーを作成
     _users = [
         ("Alice", "alice@example.com", 30),
@@ -202,7 +201,6 @@ def _(SQLerModel, db, import_csv_string):
         email: str
         age: int
 
-
     _csv_input = """name,email,age
 John,john@example.com,45
 Jane,jane@example.com,38
@@ -239,7 +237,6 @@ def _(SQLerModel, db, import_json_string):
         name: str
         price: float
 
-
     _json_input = """[
         {"name": "Widget", "price": 29.99},
         {"name": "Gadget", "price": 49.99},
@@ -274,7 +271,6 @@ def _(SQLerModel, db, import_jsonl_string):
         _table = "log_entries"
         level: str
         message: str
-
 
     _jsonl_input = """{"level": "INFO", "message": "Application started"}
 {"level": "DEBUG", "message": "Processing request"}
@@ -316,7 +312,6 @@ def _(SQLerModel, User, db, export_jsonl_string, import_jsonl_string):
         name: str
         email: str
         age: int
-
 
     _result = import_jsonl_string(UserBackup, _exported, db=db)
     print(f"\nバックアップにインポート：{_result.success_count} 件")

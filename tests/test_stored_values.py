@@ -48,7 +48,9 @@ AT_TEXT = "09:30:00"
 UID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 UID_TEXT = "12345678-1234-5678-1234-567812345678"
 PATH = pathlib.Path("a", "b")
-PATH_TEXT = "a\\b" if os.sep == "\\" else "a/b"  # a path is stored as str(path): the writing OS's form
+PATH_TEXT = (
+    "a\\b" if os.sep == "\\" else "a/b"
+)  # a path is stored as str(path): the writing OS's form
 
 
 class Colour(enum.Enum):
@@ -124,25 +126,77 @@ KINDS = [
     Kind("tuple", tuple, (1, 2), [1, 2], (3,)),
     Kind("list_of_date", list[date], [DAY], [DAY_TEXT], [date(2026, 11, 15)]),
     Kind("dict_of_date", dict[str, date], {"d": DAY}, {"d": DAY_TEXT}, {"d": date(2026, 11, 15)}),
-    Kind("deep", None, [{"d": [DAY, (AT,)], "u": {UID}}], [{"d": [DAY_TEXT, [AT_TEXT]], "u": [UID_TEXT]}], []),
-    Kind("reference_keys_and_more", dict, dict(WITH_REF_KEYS), WITH_REF_KEYS, {"_table": "t", "_id": 1, "n": 4}),
+    Kind(
+        "deep",
+        None,
+        [{"d": [DAY, (AT,)], "u": {UID}}],
+        [{"d": [DAY_TEXT, [AT_TEXT]], "u": [UID_TEXT]}],
+        [],
+    ),
+    Kind(
+        "reference_keys_and_more",
+        dict,
+        dict(WITH_REF_KEYS),
+        WITH_REF_KEYS,
+        {"_table": "t", "_id": 1, "n": 4},
+    ),
     Kind("nested_model", Inner, Inner(day=DAY), {"day": DAY_TEXT}, Inner(day=date(2026, 11, 15))),
     Kind("decimal", Decimal, Decimal("1.1"), 1.1, Decimal("2.5")),
     Kind("decimal_whole", Decimal, Decimal("5"), 5, Decimal("6")),
     Kind("decimal_trailing_zeros", Decimal, Decimal("5.00"), 5, Decimal("6")),
-    Kind("list_of_decimal", list[Decimal], [Decimal("1.1"), Decimal("2")], [1.1, 2], [Decimal("3")]),
-    Kind("dict_of_decimal", dict[str, Decimal], {"p": Decimal("1.1")}, {"p": 1.1}, {"p": Decimal("2")}),
-    Kind("set_of_decimal", set[Decimal], {Decimal("2.5"), Decimal("1.1")}, [1.1, 2.5], {Decimal("4")}),
+    Kind(
+        "list_of_decimal", list[Decimal], [Decimal("1.1"), Decimal("2")], [1.1, 2], [Decimal("3")]
+    ),
+    Kind(
+        "dict_of_decimal",
+        dict[str, Decimal],
+        {"p": Decimal("1.1")},
+        {"p": 1.1},
+        {"p": Decimal("2")},
+    ),
+    Kind(
+        "set_of_decimal", set[Decimal], {Decimal("2.5"), Decimal("1.1")}, [1.1, 2.5], {Decimal("4")}
+    ),
     Kind("tuple_of_decimal", None, (Decimal("1.1"), Decimal("2")), [1.1, 2], ()),
-    Kind("nested_model_decimal", Priced, Priced(price=Decimal("1.1")), {"price": 1.1}, Priced(price=Decimal("2"))),
+    Kind(
+        "nested_model_decimal",
+        Priced,
+        Priced(price=Decimal("1.1")),
+        {"price": 1.1},
+        Priced(price=Decimal("2")),
+    ),
     Kind("timedelta", timedelta, timedelta(minutes=90), 5400, timedelta(minutes=91)),
-    Kind("timedelta_fraction", timedelta, timedelta(minutes=90, microseconds=1), 5400.000001, timedelta(seconds=1)),
+    Kind(
+        "timedelta_fraction",
+        timedelta,
+        timedelta(minutes=90, microseconds=1),
+        5400.000001,
+        timedelta(seconds=1),
+    ),
     Kind("timedelta_negative", timedelta, -timedelta(seconds=2), -2, timedelta(seconds=2)),
     Kind("list_of_timedelta", list[timedelta], [timedelta(hours=1)], [3600], [timedelta(hours=2)]),
-    Kind("dict_of_timedelta", dict[str, timedelta], {"t": timedelta(hours=1)}, {"t": 3600}, {"t": timedelta(hours=2)}),
-    Kind("set_of_timedelta", set[timedelta], {timedelta(hours=2), timedelta(hours=1)}, [3600, 7200], {timedelta(hours=3)}),
+    Kind(
+        "dict_of_timedelta",
+        dict[str, timedelta],
+        {"t": timedelta(hours=1)},
+        {"t": 3600},
+        {"t": timedelta(hours=2)},
+    ),
+    Kind(
+        "set_of_timedelta",
+        set[timedelta],
+        {timedelta(hours=2), timedelta(hours=1)},
+        [3600, 7200],
+        {timedelta(hours=3)},
+    ),
     Kind("tuple_of_timedelta", None, (timedelta(hours=1), timedelta(seconds=1)), [3600, 1], ()),
-    Kind("nested_model_timedelta", Lasted, Lasted(took=timedelta(hours=1)), {"took": 3600}, Lasted(took=timedelta(hours=2))),
+    Kind(
+        "nested_model_timedelta",
+        Lasted,
+        Lasted(took=timedelta(hours=1)),
+        {"took": 3600},
+        Lasted(took=timedelta(hours=2)),
+    ),
     Kind(
         "nested_model_deep",
         Slot,
@@ -217,7 +271,12 @@ class Rows:
 
     async def stored(self, table: str, field: str = "v") -> list:
         """``json_extract`` of ``field`` for each row: text, a number, or JSON text."""
-        return [r[0] for r in await self.sql(f"SELECT json_extract(data, '$.{field}') FROM {table} ORDER BY _id")]
+        return [
+            r[0]
+            for r in await self.sql(
+                f"SELECT json_extract(data, '$.{field}') FROM {table} ORDER BY _id"
+            )
+        ]
 
     async def documents(self, table: str) -> list[dict]:
         return [json.loads(r[0]) for r in await self.sql(f"SELECT data FROM {table} ORDER BY _id")]
@@ -225,7 +284,9 @@ class Rows:
 
 def _text(plain):
     """What ``json_extract`` gives for the stored ``plain``: a scalar as it is, else JSON text."""
-    return plain if isinstance(plain, (str, int, float)) else json.dumps(plain, separators=(",", ":"))
+    return (
+        plain if isinstance(plain, (str, int, float)) else json.dumps(plain, separators=(",", ":"))
+    )
 
 
 def _run(steps, is_async: bool):
@@ -261,7 +322,11 @@ def test_save_stores_the_one_form_of_each_kind(base, kind):
 
 
 @pytest.mark.parametrize("base", list(BASES))
-@pytest.mark.parametrize("kind", [k for k in KINDS if k.name in {"time", "uuid", "set", "nested_model"}], ids=lambda k: k.name)
+@pytest.mark.parametrize(
+    "kind",
+    [k for k in KINDS if k.name in {"time", "uuid", "set", "nested_model"}],
+    ids=lambda k: k.name,
+)
 def test_save_many_stores_the_same_form(base, kind):
     spec = BASES[base]
 
@@ -286,7 +351,9 @@ def test_a_kind_with_no_stored_form_is_refused_naming_the_field(base, value, kin
     async def steps(rows):
         cls = spec.make(spec.cls, None)
         cls.set_db(rows.db, "t")
-        with pytest.raises(TypeError, match=rf"^Object of type {kind_name} is not JSON serializable \(at v\)$"):
+        with pytest.raises(
+            TypeError, match=rf"^Object of type {kind_name} is not JSON serializable \(at v\)$"
+        ):
             await _aw(cls(v=value).save())
         return await rows.sql("SELECT count(*) FROM t")
 
@@ -296,7 +363,9 @@ def test_a_kind_with_no_stored_form_is_refused_naming_the_field(base, value, kin
 # ---- is_dirty -------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("base, kind", [pytest.param(b, k, id=f"{b}-{k.name}") for b in DIRTY_BASES for k in KINDS])
+@pytest.mark.parametrize(
+    "base, kind", [pytest.param(b, k, id=f"{b}-{k.name}") for b in DIRTY_BASES for k in KINDS]
+)
 def test_is_dirty_compares_stored_forms(base, kind):
     spec = BASES[base]
 
@@ -305,7 +374,12 @@ def test_is_dirty_compares_stored_forms(base, kind):
         cls.set_db(rows.db, "t")
         saved = await _aw(cls(v=kind.value).save())
         loaded = await _aw(cls.from_id(saved._id))
-        clean = (saved.is_dirty(), saved.get_dirty_fields(), loaded.is_dirty(), loaded.get_dirty_fields())
+        clean = (
+            saved.is_dirty(),
+            saved.get_dirty_fields(),
+            loaded.is_dirty(),
+            loaded.get_dirty_fields(),
+        )
         loaded.v = kind.other
         return clean, (loaded.is_dirty(), loaded.get_dirty_fields())
 
@@ -326,14 +400,25 @@ def _family(parent_base, child_base, make):
             {"__annotations__": {"one": Optional[child], "items": list}, "one": None, "items": []},
         )
     elif make is _lite:
-        child = dataclass(type("SvKid", (child_base,), {"__annotations__": {"label": str}, "label": ""}))
+        child = dataclass(
+            type("SvKid", (child_base,), {"__annotations__": {"label": str}, "label": ""})
+        )
         parent = dataclass(
-            type("SvPar", (parent_base,), {"__annotations__": {"one": Any, "items": Any}, "one": None, "items": None})
+            type(
+                "SvPar",
+                (parent_base,),
+                {"__annotations__": {"one": Any, "items": Any}, "one": None, "items": None},
+            )
         )
     else:
-        child = type("SvKid", (child_base,), {"__annotations__": {"label": str}, "label": ""}, kw_only=True)
+        child = type(
+            "SvKid", (child_base,), {"__annotations__": {"label": str}, "label": ""}, kw_only=True
+        )
         parent = type(
-            "SvPar", (parent_base,), {"__annotations__": {"one": Any, "items": Any}, "one": None, "items": None}, kw_only=True
+            "SvPar",
+            (parent_base,),
+            {"__annotations__": {"one": Any, "items": Any}, "one": None, "items": None},
+            kw_only=True,
         )
     return parent, child
 
@@ -416,7 +501,9 @@ def events():
     SvEvent.set_db(db, "sv_events")
     SvEvent(name="a", when=WHEN, day=DAY, days=[DAY], slots=[{"day": DAY}]).save()
     later = DAY + timedelta(days=1)
-    SvEvent(name="b", when=WHEN + timedelta(days=1), day=later, days=[later], slots=[{"day": later}]).save()
+    SvEvent(
+        name="b", when=WHEN + timedelta(days=1), day=later, days=[later], slots=[{"day": later}]
+    ).save()
     SvEvent(name="c").save()
     yield db
     db.close()
@@ -444,8 +531,22 @@ def _names(expression) -> list[str]:
         (lambda: F("days").isin([DAY]), ["a"]),
         (lambda: F("slots").any()["day"] == DAY, ["a"]),
     ],
-    ids=["eq", "ne", "ge", "le", "gt", "lt", "between", "in_list", "isin", "date-eq", "date-between",
-         "contains", "list-isin", "any"],
+    ids=[
+        "eq",
+        "ne",
+        "ge",
+        "le",
+        "gt",
+        "lt",
+        "between",
+        "in_list",
+        "isin",
+        "date-eq",
+        "date-between",
+        "contains",
+        "list-isin",
+        "any",
+    ],
 )
 def test_a_filter_finds_what_save_stored(events, expression, names):
     assert _names(expression()) == names
@@ -453,7 +554,24 @@ def test_a_filter_finds_what_save_stored(events, expression, names):
 
 @pytest.mark.parametrize(
     "kind",
-    [k for k in KINDS if k.name in {"datetime_tz", "date", "time", "uuid", "path", "enum", "str_enum", "int_enum", "enum_of_date", "decimal", "decimal_whole"}],
+    [
+        k
+        for k in KINDS
+        if k.name
+        in {
+            "datetime_tz",
+            "date",
+            "time",
+            "uuid",
+            "path",
+            "enum",
+            "str_enum",
+            "int_enum",
+            "enum_of_date",
+            "decimal",
+            "decimal_whole",
+        }
+    ],
     ids=lambda k: k.name,
 )
 def test_a_filter_on_a_kind_finds_the_row_saved_with_it(kind):
@@ -501,7 +619,12 @@ def test_a_filter_on_none_stays_is_null(events):
 
 @pytest.mark.parametrize("value", ["text", 7, 2.5, True, False, 10**30], ids=repr)
 def test_a_filter_on_a_plain_value_binds_it_as_it_is(value):
-    for expression in (F("x") == value, F("x") >= value, F("x").contains(value), F("xs").any()["x"] == value):
+    for expression in (
+        F("x") == value,
+        F("x") >= value,
+        F("x").contains(value),
+        F("xs").any()["x"] == value,
+    ):
         assert len(expression.params) == 1
         assert expression.params[0] is value
     low_high = F("x").between(value, value).params
@@ -519,7 +642,9 @@ def test_an_async_filter_finds_what_save_stored():
     async def steps(rows):
         SvAsyncEvent.set_db(rows.db, "sv_async_events")
         await SvAsyncEvent(name="a", when=WHEN, day=DAY, extra=UID).save()
-        await SvAsyncEvent(name="b", when=WHEN + timedelta(days=1), day=DAY + timedelta(days=1)).save()
+        await SvAsyncEvent(
+            name="b", when=WHEN + timedelta(days=1), day=DAY + timedelta(days=1)
+        ).save()
         return [
             await SvAsyncEvent.query().filter(F("when") == WHEN).count(),
             await SvAsyncEvent.query().filter(F("day") == DAY).count(),
@@ -552,7 +677,12 @@ _UPDATE_VALUES = [
     ("nested_model", Inner(day=DAY), f'{{"day":"{DAY_TEXT}"}}', "object"),
     ("plain_list", [1, "a"], '[1,"a"]', "array"),
     ("plain_dict", {"k": [1]}, '{"k":[1]}', "object"),
-    ("reference_keys_and_more", dict(WITH_REF_KEYS), '{"_table":"t","_id":1,"label":"kept","n":3}', "object"),
+    (
+        "reference_keys_and_more",
+        dict(WITH_REF_KEYS),
+        '{"_table":"t","_id":1,"label":"kept","n":3}',
+        "object",
+    ),
     ("text", "plain", "plain", "text"),
     ("int", 5, 5, "integer"),
     ("decimal", Decimal("1.1"), 1.1, "real"),
@@ -564,11 +694,13 @@ _UPDATE_VALUES = [
 ]
 
 
-@pytest.mark.parametrize(*all_pairs(
-    ("name, value, text, json_type", _UPDATE_VALUES, [u[0] for u in _UPDATE_VALUES]),
-    ("call", list(_UPDATES)),
-    ("is_async", [False, True], ["sync", "async"]),
-))
+@pytest.mark.parametrize(
+    *all_pairs(
+        ("name, value, text, json_type", _UPDATE_VALUES, [u[0] for u in _UPDATE_VALUES]),
+        ("call", list(_UPDATES)),
+        ("is_async", [False, True], ["sync", "async"]),
+    )
+)
 def test_an_update_stores_the_form_save_stores(is_async, call, name, value, text, json_type):
     model = SvAsyncEvent if is_async else SvEvent
 
@@ -707,7 +839,10 @@ def test_a_raw_document_write_stores_the_form_save_stores(is_async, write):
 def test_a_raw_write_of_a_kind_with_no_stored_form_is_refused_naming_the_place(is_async):
     async def steps(rows):
         doc = {"lines": [{"d": 1}, {"d": 2}, {"d": object()}]}
-        with pytest.raises(TypeError, match=r"^Object of type object is not JSON serializable \(at lines\[2\]\.d\)$"):
+        with pytest.raises(
+            TypeError,
+            match=r"^Object of type object is not JSON serializable \(at lines\[2\]\.d\)$",
+        ):
             await _aw(rows.db.insert_document("raw", doc))
         return await rows.sql("SELECT count(*) FROM raw")
 
@@ -738,7 +873,9 @@ async def _p_versioned_new(db):
 
 
 async def _p_versioned_existing(db):
-    rid, version = await _aw(db.upsert_with_version_promoted("raw", None, {"text": "before"}, None, ["stamp"]))
+    rid, version = await _aw(
+        db.upsert_with_version_promoted("raw", None, {"text": "before"}, None, ["stamp"])
+    )
     await _aw(db.upsert_with_version_promoted("raw", rid, dict(PROMOTED_RAW), version, ["stamp"]))
 
 
@@ -855,7 +992,9 @@ def test_a_timezone_aware_datetime_has_one_form_every_way_in():
         SvEvent.query().filter(F("name") == "updated").update(when=tokyo)
         db.insert_document("sv_events", {"name": "raw", "when": tokyo})
         db.bulk_upsert("sv_events", [{"name": "bulk", "when": tokyo}])
-        rows = db.adapter.execute("SELECT json_extract(data, '$.when') FROM sv_events ORDER BY _id").fetchall()
+        rows = db.adapter.execute(
+            "SELECT json_extract(data, '$.when') FROM sv_events ORDER BY _id"
+        ).fetchall()
         assert [r[0] for r in rows] == [text] * 4
         assert _names(F("when") == tokyo) == ["bulk", "raw", "saved", "updated"]
         assert SvEvent.query().filter(F("name") == "updated").first().when == tokyo
@@ -905,11 +1044,13 @@ def test_a_decimal_in_a_document_write_is_a_number_in_the_row_text(is_async, giv
     assert data.count(text) == 2 and f'"{text}"' not in data
 
 
-@pytest.mark.parametrize(*all_pairs(
-    ("given, text", _DECIMAL_TEXT, [d[0] for d in _DECIMAL_TEXT]),
-    ("call", list(_UPDATES)),
-    ("is_async", [False, True], ["sync", "async"]),
-))
+@pytest.mark.parametrize(
+    *all_pairs(
+        ("given, text", _DECIMAL_TEXT, [d[0] for d in _DECIMAL_TEXT]),
+        ("call", list(_UPDATES)),
+        ("is_async", [False, True], ["sync", "async"]),
+    )
+)
 def test_a_decimal_in_an_update_is_a_number(is_async, call, given, text):
     model = SvAsyncEvent if is_async else SvEvent
 
@@ -917,7 +1058,9 @@ def test_a_decimal_in_an_update_is_a_number(is_async, call, given, text):
         model.set_db(rows.db, _TABLE[model])
         await _aw(model(name="a").save())
         await _aw(_UPDATES[call](model.query().filter(F("name") == "a"), extra=Decimal(given)))
-        return await rows.sql(f"SELECT json_type(data, '$.extra'), json_extract(data, '$.extra') FROM {_TABLE[model]}")
+        return await rows.sql(
+            f"SELECT json_type(data, '$.extra'), json_extract(data, '$.extra') FROM {_TABLE[model]}"
+        )
 
     [(kind, value)] = _run(steps, is_async)
     assert kind in {"integer", "real"}
@@ -928,9 +1071,15 @@ def test_a_decimal_in_an_update_is_a_number(is_async, call, given, text):
 def test_a_decimal_in_a_promoted_column_is_a_number(is_async):
     async def steps(rows):
         await _aw(rows.db.ensure_table("raw", promoted={"price": "REAL"}))
-        await _aw(rows.db.upsert_document_promoted("raw", None, {"price": Decimal("1.1"), "n": 1}, ["price"]))
+        await _aw(
+            rows.db.upsert_document_promoted(
+                "raw", None, {"price": Decimal("1.1"), "n": 1}, ["price"]
+            )
+        )
         with pytest.raises(TypeError, match="a number cannot hold it"):
-            await _aw(rows.db.upsert_document_promoted("raw", None, {"price": Decimal("NaN")}, ["price"]))
+            await _aw(
+                rows.db.upsert_document_promoted("raw", None, {"price": Decimal("NaN")}, ["price"])
+            )
         return await rows.sql("SELECT price, typeof(price) FROM raw")
 
     assert _run(steps, is_async) == [(1.1, "real")]
@@ -945,7 +1094,10 @@ def test_a_decimal_a_number_cannot_hold_is_refused_on_save(base, given):
         cls = spec.make(spec.cls, None)
         cls.set_db(rows.db, "t")
         await _aw(cls(v=1).save())
-        with pytest.raises(TypeError, match=rf"^Decimal {re.escape(str(Decimal(given)))} cannot be stored: a number cannot hold it \(at v\)$"):
+        with pytest.raises(
+            TypeError,
+            match=rf"^Decimal {re.escape(str(Decimal(given)))} cannot be stored: a number cannot hold it \(at v\)$",
+        ):
             await _aw(cls(v=Decimal(given)).save())
         return await rows.sql("SELECT count(*) FROM t")
 
@@ -954,7 +1106,9 @@ def test_a_decimal_a_number_cannot_hold_is_refused_on_save(base, given):
 
 @pytest.mark.parametrize("given", _REFUSED_DECIMALS)
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_a_decimal_a_number_cannot_hold_is_refused_in_a_document_and_names_the_place(is_async, given):
+def test_a_decimal_a_number_cannot_hold_is_refused_in_a_document_and_names_the_place(
+    is_async, given
+):
     async def steps(rows):
         doc = {"lines": [{"price": 1}, {"price": 2}, {"price": Decimal(given)}]}
         with pytest.raises(TypeError, match=r"a number cannot hold it \(at lines\[2\]\.price\)$"):
@@ -966,9 +1120,13 @@ def test_a_decimal_a_number_cannot_hold_is_refused_in_a_document_and_names_the_p
     assert _run(steps, is_async) == [(0,)]
 
 
-@pytest.mark.parametrize(*all_pairs(
-    ("is_async", [False, True], ["sync", "async"]), ("call", list(_UPDATES)), ("given", _REFUSED_DECIMALS)
-))
+@pytest.mark.parametrize(
+    *all_pairs(
+        ("is_async", [False, True], ["sync", "async"]),
+        ("call", list(_UPDATES)),
+        ("given", _REFUSED_DECIMALS),
+    )
+)
 def test_a_decimal_a_number_cannot_hold_is_refused_in_an_update(is_async, call, given):
     model = SvAsyncEvent if is_async else SvEvent
 
@@ -1024,7 +1182,10 @@ def test_a_filter_by_a_number_compares_numbers(prices, make):
         assert _priced(F("extra") > one) == ["10", "2", "9.99"]
         assert _priced(F("extra") >= one) == ["1.1", "10", "2", "9.99"]
         assert _priced(F("extra").between(Decimal("1.1"), Decimal("9.99"))) == ["1.1", "2", "9.99"]
-        assert _priced(F("extra").isin([Decimal("0.1"), Decimal("10"), Decimal("7")])) == ["0.1", "10"]
+        assert _priced(F("extra").isin([Decimal("0.1"), Decimal("10"), Decimal("7")])) == [
+            "0.1",
+            "10",
+        ]
         assert _priced(F("extra").in_list([Decimal("0.3")])) == ["0.3"]
     else:
         assert _priced(F("extra") > make(2)) == ["10", "9.99"]
@@ -1048,7 +1209,9 @@ def _typed(base_cls, **ann):
     return type("SvTyped", (base_cls,), {"__annotations__": ann, **{k: None for k in ann}}, **kw)
 
 
-@pytest.mark.parametrize("base", ["pydantic", "safe", "msgspec", "async", "async-safe", "async-msgspec"])
+@pytest.mark.parametrize(
+    "base", ["pydantic", "safe", "msgspec", "async", "async-safe", "async-msgspec"]
+)
 def test_a_decimal_field_loads_as_the_decimal_saved(base):
     spec = BASES[base]
 
@@ -1097,7 +1260,9 @@ def test_a_decimal_subclass_is_stored_as_a_number(base):
         cls = spec.make(spec.cls, None)
         cls.set_db(rows.db, "t")
         await _aw(cls(v=[SubDecimal("1.1")]).save())
-        return await rows.sql("SELECT json_extract(data, '$.v[0]'), json_type(data, '$.v[0]') FROM t")
+        return await rows.sql(
+            "SELECT json_extract(data, '$.v[0]'), json_type(data, '$.v[0]') FROM t"
+        )
 
     assert _run(steps, spec.is_async) == [(1.1, "real")]
 
@@ -1105,7 +1270,9 @@ def test_a_decimal_subclass_is_stored_as_a_number(base):
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
 def test_a_decimal_as_a_dict_key_is_refused_as_any_non_text_key_is(is_async):
     async def steps(rows):
-        with pytest.raises(TypeError, match="keys must be str, int, float, bool or None, not decimal.Decimal"):
+        with pytest.raises(
+            TypeError, match="keys must be str, int, float, bool or None, not decimal.Decimal"
+        ):
             await _aw(rows.db.insert_document("raw", {"d": {Decimal("1.1"): 1}}))
         return await rows.sql("SELECT count(*) FROM raw")
 
@@ -1122,7 +1289,9 @@ def test_a_refused_value_raises_the_sqler_error_with_its_place_and_value():
 
     err = _run(steps, False)
     assert (err.field, err.value) == ("lines[1].price", bad)
-    assert str(err) == f"Decimal {bad} cannot be stored: a number cannot hold it (at lines[1].price)"
+    assert (
+        str(err) == f"Decimal {bad} cannot be stored: a number cannot hold it (at lines[1].price)"
+    )
     assert (isinstance(err, TypeError), isinstance(err, sqler.SQLerError)) == (True, True)
     assert "UnstorableValueError" in sqler.__all__
 
@@ -1157,7 +1326,11 @@ def test_a_lite_base_loads_a_decimal_as_the_number_stored(base):
 
 def test_a_set_of_decimals_is_stored_in_one_order():
     async def steps(rows):
-        await _aw(rows.db.insert_document("raw", {"s": {Decimal("2.5"), Decimal("1.1"), Decimal("10"), Decimal("-1")}}))
+        await _aw(
+            rows.db.insert_document(
+                "raw", {"s": {Decimal("2.5"), Decimal("1.1"), Decimal("10"), Decimal("-1")}}
+            )
+        )
         return await rows.stored("raw", "s")
 
     assert [json.loads(t) for t in _run(steps, False)] == [[-1, 1.1, 2.5, 10]]
@@ -1177,7 +1350,9 @@ def test_a_decimal_beside_a_rebased_counter_is_saved_as_a_number(base):
         await _aw(one.save())
         two.count += 1
         await _aw(two.save())
-        return await rows.sql("SELECT json_extract(data, '$.count'), json_type(data, '$.price') FROM t")
+        return await rows.sql(
+            "SELECT json_extract(data, '$.count'), json_type(data, '$.price') FROM t"
+        )
 
     assert _run(steps, spec.is_async) == [(2, "real")]
 
@@ -1208,7 +1383,11 @@ def test_a_decimal_counter_field_behaves_as_a_float_one_does(base, number):
 # ---- timedelta --------------------------------------------------------------------------
 # A timedelta is stored as its number of seconds; one a number cannot hold exactly is refused.
 
-_TD_REFUSED = [timedelta.max, timedelta.min + timedelta(microseconds=1), timedelta(days=999999999, microseconds=1)]
+_TD_REFUSED = [
+    timedelta.max,
+    timedelta.min + timedelta(microseconds=1),
+    timedelta(days=999999999, microseconds=1),
+]
 
 
 class SubDelta(timedelta):
@@ -1246,7 +1425,10 @@ def test_a_timedelta_no_number_holds_is_refused_on_save(base, given):
         cls = spec.make(spec.cls, None)
         cls.set_db(rows.db, "t")
         await _aw(cls(v=1).save())
-        with pytest.raises(UnstorableValueError, match=rf"^timedelta {re.escape(str(given))} cannot be stored: a number of seconds cannot hold it \(at v\)$"):
+        with pytest.raises(
+            UnstorableValueError,
+            match=rf"^timedelta {re.escape(str(given))} cannot be stored: a number of seconds cannot hold it \(at v\)$",
+        ):
             await _aw(cls(v=given).save())
         return await rows.sql("SELECT count(*) FROM t")
 
@@ -1257,18 +1439,23 @@ def test_a_timedelta_no_number_holds_is_refused_on_save(base, given):
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
 def test_a_timedelta_no_number_holds_is_refused_in_a_document_and_names_the_place(is_async, given):
     async def steps(rows):
-        with pytest.raises(UnstorableValueError, match=r"a number of seconds cannot hold it \(at lines\[1\]\.took\)$"):
+        with pytest.raises(
+            UnstorableValueError,
+            match=r"a number of seconds cannot hold it \(at lines\[1\]\.took\)$",
+        ):
             await _aw(rows.db.insert_document("raw", {"lines": [{"took": 1}, {"took": given}]}))
         return await rows.sql("SELECT count(*) FROM raw")
 
     assert _run(steps, is_async) == [(0,)]
 
 
-@pytest.mark.parametrize(*all_pairs(
-    ("is_async", [False, True], ["sync", "async"]),
-    ("call", list(_UPDATES)),
-    ("given", _TD_REFUSED, ["max", "min_plus_one", "days_and_microsecond"]),
-))
+@pytest.mark.parametrize(
+    *all_pairs(
+        ("is_async", [False, True], ["sync", "async"]),
+        ("call", list(_UPDATES)),
+        ("given", _TD_REFUSED, ["max", "min_plus_one", "days_and_microsecond"]),
+    )
+)
 def test_a_timedelta_no_number_holds_is_refused_in_an_update(is_async, call, given):
     model = SvAsyncEvent if is_async else SvEvent
 
@@ -1299,7 +1486,11 @@ def test_a_filter_by_a_timedelta_no_number_holds_raises_the_sqler_error(events, 
 def took():
     db = SQLerDB.in_memory(shared=False)
     SvEvent.set_db(db, "sv_events")
-    for name, delta in (("three", timedelta(minutes=3)), ("ninety", timedelta(minutes=90)), ("day", timedelta(days=1))):
+    for name, delta in (
+        ("three", timedelta(minutes=3)),
+        ("ninety", timedelta(minutes=90)),
+        ("day", timedelta(days=1)),
+    ):
         SvEvent(name=name, extra=delta).save()
     yield db
     db.close()
@@ -1313,9 +1504,14 @@ def test_a_filter_by_a_timedelta_compares_the_seconds(took):
     assert _priced(F("extra") == timedelta(seconds=5400)) == ["ninety"]
     assert _priced(F("extra") != timedelta(seconds=5400)) == ["day", "three"]
     assert _priced(F("extra").between(five, timedelta(hours=2))) == ["ninety"]
-    assert _priced(F("extra").isin([timedelta(minutes=3), timedelta(days=1), timedelta(0)])) == ["day", "three"]
+    assert _priced(F("extra").isin([timedelta(minutes=3), timedelta(days=1), timedelta(0)])) == [
+        "day",
+        "three",
+    ]
     assert _priced(F("extra").in_list([timedelta(minutes=90)])) == ["ninety"]
-    assert SvEvent.query().filter(F("extra") > five).order_by("extra", desc=True).first().name == "day"
+    assert (
+        SvEvent.query().filter(F("extra") > five).order_by("extra", desc=True).first().name == "day"
+    )
 
 
 def test_a_timedelta_sum_and_average_are_numbers(took):
@@ -1341,7 +1537,12 @@ def test_an_async_filter_by_a_timedelta_finds_the_row(is_async):
 @pytest.mark.parametrize("base", ["pydantic", "safe", "msgspec", "async", "async-safe"])
 @pytest.mark.parametrize(
     "given",
-    [timedelta(minutes=90, microseconds=1), timedelta(0), -timedelta(microseconds=1), timedelta(days=999999999)],
+    [
+        timedelta(minutes=90, microseconds=1),
+        timedelta(0),
+        -timedelta(microseconds=1),
+        timedelta(days=999999999),
+    ],
     ids=["fraction", "zero", "negative_microsecond", "days_999999999"],
 )
 def test_a_timedelta_field_loads_as_the_timedelta_saved(base, given):
@@ -1395,9 +1596,15 @@ def test_a_lite_base_loads_a_timedelta_as_the_number_stored(base):
 def test_a_timedelta_in_a_promoted_column_is_a_number(is_async):
     async def steps(rows):
         await _aw(rows.db.ensure_table("raw", promoted={"took": "REAL"}))
-        await _aw(rows.db.upsert_document_promoted("raw", None, {"took": timedelta(seconds=90), "n": 1}, ["took"]))
+        await _aw(
+            rows.db.upsert_document_promoted(
+                "raw", None, {"took": timedelta(seconds=90), "n": 1}, ["took"]
+            )
+        )
         with pytest.raises(UnstorableValueError, match="a number of seconds cannot hold it"):
-            await _aw(rows.db.upsert_document_promoted("raw", None, {"took": timedelta.max}, ["took"]))
+            await _aw(
+                rows.db.upsert_document_promoted("raw", None, {"took": timedelta.max}, ["took"])
+            )
         return await rows.sql("SELECT took, typeof(took) FROM raw")
 
     assert _run(steps, is_async) == [(90.0, "real")]
@@ -1406,7 +1613,9 @@ def test_a_timedelta_in_a_promoted_column_is_a_number(is_async):
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
 def test_a_timedelta_as_a_dict_key_is_refused_as_any_non_text_key_is(is_async):
     async def steps(rows):
-        with pytest.raises(TypeError, match="keys must be str, int, float, bool or None, not datetime.timedelta"):
+        with pytest.raises(
+            TypeError, match="keys must be str, int, float, bool or None, not datetime.timedelta"
+        ):
             await _aw(rows.db.insert_document("raw", {"d": {timedelta(1): 1}}))
         return await rows.sql("SELECT count(*) FROM raw")
 
@@ -1426,7 +1635,9 @@ def test_a_timedelta_in_a_set_beside_a_decimal_is_stored_in_one_order(is_async):
 # JSON has no binary value, so a document refuses bytes; a promoted BLOB column holds them.
 
 BLOB = b"\x00\xffhi"
-_BYTES_MESSAGE = "bytes cannot be stored in a JSON document: promote the field to a BLOB column, or store text"
+_BYTES_MESSAGE = (
+    "bytes cannot be stored in a JSON document: promote the field to a BLOB column, or store text"
+)
 
 
 class SubBytes(bytes):
@@ -1470,7 +1681,9 @@ def test_bytes_in_an_update_of_a_document_field_are_refused(is_async, call):
     async def steps(rows):
         model.set_db(rows.db, _TABLE[model])
         await _aw(model(name="a").save())
-        with pytest.raises(UnstorableValueError, match="^bytes cannot be stored in a JSON document"):
+        with pytest.raises(
+            UnstorableValueError, match="^bytes cannot be stored in a JSON document"
+        ):
             await _aw(_UPDATES[call](model.query().filter(F("name") == "a"), extra=b"hi"))
         return await rows.stored(_TABLE[model], "extra")
 
@@ -1569,7 +1782,12 @@ def test_a_promoted_blob_column_takes_bytes_in_a_document_write(is_async):
 
 def _promoted(spec):
     """A model of the base with ``v`` in the document and ``col`` as a promoted column."""
-    attrs = {"__annotations__": {"v": Any, "col": Any}, "v": None, "col": None, "__promoted__": {"col": "TEXT"}}
+    attrs = {
+        "__annotations__": {"v": Any, "col": Any},
+        "v": None,
+        "col": None,
+        "__promoted__": {"col": "TEXT"},
+    }
     if spec.cls in (SQLerMsgspecModel, AsyncSQLerMsgspecModel):
         return type("SvP", (spec.cls,), attrs, kw_only=True)
     cls = type("SvP", (spec.cls,), attrs)
@@ -1611,11 +1829,15 @@ _PLACED = [
     pytest.param(lambda cls, bad: cls(v=bad), "v", id="field"),
     pytest.param(lambda cls, bad: cls(v=[{"price": 1}, {"price": bad}]), "v[1].price", id="nested"),
     pytest.param(lambda cls, bad: cls(v=[1, bad, bad]), "v[1]", id="second-after-good"),
-    pytest.param(lambda cls, bad: cls(v={"a": {"b": [bad]}, "c": bad}), "v.a.b[0]", id="first-in-order"),
+    pytest.param(
+        lambda cls, bad: cls(v={"a": {"b": [bad]}, "c": bad}), "v.a.b[0]", id="first-in-order"
+    ),
 ]
 
 
-@pytest.mark.parametrize(*all_pairs(("base", list(BASES)), ("build, place", _PLACED), ("make_bad, message", REFUSED)))
+@pytest.mark.parametrize(
+    *all_pairs(("base", list(BASES)), ("build, place", _PLACED), ("make_bad, message", REFUSED))
+)
 def test_a_refused_value_in_a_model_save_names_its_place(base, build, place, make_bad, message):
     spec = BASES[base]
     bad = make_bad()
@@ -1649,12 +1871,23 @@ def test_a_refused_value_after_a_saved_row_is_named_and_not_the_row(base):
     assert error.value is bad
 
 
-@pytest.mark.parametrize("make_bad, message, inner, attr", [
-    pytest.param(lambda: Decimal("1e30"), "Decimal 1E+30 cannot be stored: a number cannot hold it", Priced, "price", id="decimal"),
-    pytest.param(lambda: timedelta.max, REFUSED[2].values[1], Lasted, "took", id="timedelta"),
-])
+@pytest.mark.parametrize(
+    "make_bad, message, inner, attr",
+    [
+        pytest.param(
+            lambda: Decimal("1e30"),
+            "Decimal 1E+30 cannot be stored: a number cannot hold it",
+            Priced,
+            "price",
+            id="decimal",
+        ),
+        pytest.param(lambda: timedelta.max, REFUSED[2].values[1], Lasted, "took", id="timedelta"),
+    ],
+)
 @pytest.mark.parametrize("base", list(BASES))
-def test_a_refused_value_in_a_model_held_by_the_saved_model_names_the_holders_field(base, make_bad, message, inner, attr):
+def test_a_refused_value_in_a_model_held_by_the_saved_model_names_the_holders_field(
+    base, make_bad, message, inner, attr
+):
     spec = BASES[base]
     held = inner(**{attr: make_bad()})
     error, count = _refusal(spec, lambda cls: cls(v=held))
@@ -1688,7 +1921,9 @@ def test_a_refused_value_in_a_promoted_column_names_the_column(base, make_bad, m
 
 @pytest.mark.parametrize("make_bad, message", REFUSED[1:3])
 @pytest.mark.parametrize("base", [b for b in BASES if "safe" in b])
-def test_a_refused_value_in_a_promoted_column_of_a_versioned_save_names_the_column(base, make_bad, message):
+def test_a_refused_value_in_a_promoted_column_of_a_versioned_save_names_the_column(
+    base, make_bad, message
+):
     spec = BASES[base]
     bad = make_bad()
     error, count = _refusal(spec, lambda cls: cls(col=bad), promoted=True)
@@ -1716,8 +1951,12 @@ def test_bytes_in_a_list_for_a_promoted_text_column_are_refused_by_an_update(is_
     async def steps(rows):
         model.set_db(rows.db, "tagged")
         await _aw(model(name="a").save())
-        with pytest.raises(UnstorableValueError, match="^bytes cannot be stored in a JSON document") as err:
+        with pytest.raises(
+            UnstorableValueError, match="^bytes cannot be stored in a JSON document"
+        ) as err:
             await _aw(_UPDATES[call](model.query().filter(F("name") == "a"), tags=["x", b"hi"]))
-        return err.value.value, await rows.sql("SELECT json_extract(data, '$.name'), tags FROM tagged")
+        return err.value.value, await rows.sql(
+            "SELECT json_extract(data, '$.name'), tags FROM tagged"
+        )
 
     assert _run(steps, is_async) == (b"hi", [("a", None)])

@@ -117,13 +117,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import importlib
     from dataclasses import dataclass
@@ -165,7 +161,6 @@ def _(SQLerLiteModel, dataclass, db):
         name: str
         email: str
         active: bool = True
-
 
     # Create sample users
     for _i in range(10):
@@ -226,7 +221,7 @@ def _(metrics):
 
     # Per-table operations
     print("\nPer-table operations:")
-    for _table, _ops in _m['tables'].items():
+    for _table, _ops in _m["tables"].items():
         print(f"  {_table}: {_ops}")
     return
 
@@ -416,7 +411,6 @@ def _(SQLerLiteModel, cache, dataclass, db):
         name: str
         price: float
 
-
     # Cache some product data
     cache.set("all_products", "cached data", table="products")
     print(f"Cached 'all_products': {cache.has('all_products')}")
@@ -480,10 +474,7 @@ def _(mo):
 def _(MetricsCollector, User, db):
     # Create collector with custom labels
     _collector = MetricsCollector()
-    _collector.enable(
-        slow_threshold_ms=100,
-        labels={"service": "api", "environment": "production"}
-    )
+    _collector.enable(slow_threshold_ms=100, labels={"service": "api", "environment": "production"})
 
     # Run a query
     User.using(db).count()

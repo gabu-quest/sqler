@@ -61,11 +61,15 @@ def stored(value: Any, models: Any = (), field: str = "") -> Any:
     or table, so that a refused value is named by its place."""
     try:
         return _stored(value, models, "")
-    except UnstorableValueError as err:  # the place is looked for only now that the value is refused
+    except (
+        UnstorableValueError
+    ) as err:  # the place is looked for only now that the value is refused
         place = _locate(value, field, models)
         if not place:
             raise
-        raise UnstorableValueError(f"{err.message} (at {place})", field=place, value=err.value) from None
+        raise UnstorableValueError(
+            f"{err.message} (at {place})", field=place, value=err.value
+        ) from None
 
 
 def _stored(value: Any, models: Any, inside: str) -> Any:
@@ -93,11 +97,15 @@ def dumps(doc: Any) -> str:
     value it does not know, so a document already in stored form is not walked again."""
     try:
         return _ENCODER.encode(doc)
-    except UnstorableValueError as err:  # the place is looked for only now that the document is refused
+    except (
+        UnstorableValueError
+    ) as err:  # the place is looked for only now that the document is refused
         place = _locate(doc)
         if not place:
             raise
-        raise UnstorableValueError(f"{err.message} (at {place})", field=place, value=err.value) from None
+        raise UnstorableValueError(
+            f"{err.message} (at {place})", field=place, value=err.value
+        ) from None
 
 
 def json_arg(value: Any) -> tuple[str, Any]:
@@ -194,7 +202,9 @@ def _number(value: Decimal) -> int | float:
             number = float(value)
             if Decimal(repr(number)) == value:
                 return number
-    raise UnstorableValueError(f"Decimal {value} cannot be stored: a number cannot hold it", value=value)
+    raise UnstorableValueError(
+        f"Decimal {value} cannot be stored: a number cannot hold it", value=value
+    )
 
 
 def _seconds(value: timedelta) -> int | float:
@@ -207,7 +217,9 @@ def _seconds(value: timedelta) -> int | float:
             return number
     except OverflowError:
         pass
-    raise UnstorableValueError(f"timedelta {value} cannot be stored: a number of seconds cannot hold it", value=value)
+    raise UnstorableValueError(
+        f"timedelta {value} cannot be stored: a number of seconds cannot hold it", value=value
+    )
 
 
 def _locate(value: Any, path: str = "", models: Any = (), inside: bool = False) -> str | None:
@@ -436,7 +448,9 @@ def _dataclass(cls: type) -> Load:
             return value
         if plan is None:  # at the first load: a dataclass can hold itself
             plan = _init_loads(cls)
-        given = {name: value[name] if f is None else f(value[name]) for name, f in plan if name in value}
+        given = {
+            name: value[name] if f is None else f(value[name]) for name, f in plan if name in value
+        }
         try:
             return cls(**given)
         except TypeError:  # a field it needs is missing: what was saved

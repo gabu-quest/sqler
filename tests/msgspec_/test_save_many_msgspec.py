@@ -152,7 +152,11 @@ async def test_save_many_roundtrip(kit):
     await aw(item.save_many(items))
 
     loaded = [await aw(item.from_id(i._id)) for i in items]
-    assert [(m._id, m.name, m.value) for m in loaded] == [(1, "rt-0", 0), (2, "rt-1", 10), (3, "rt-2", 20)]
+    assert [(m._id, m.name, m.value) for m in loaded] == [
+        (1, "rt-0", 0),
+        (2, "rt-1", 10),
+        (3, "rt-2", 20),
+    ]
 
 
 @pytest.mark.asyncio

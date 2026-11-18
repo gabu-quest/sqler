@@ -32,14 +32,18 @@ SHAPES: dict[str, Callable[[Any], Any]] = {
     "select_fields": lambda q: q("t").select("name", "age"),
     "versioned": lambda q: q("t").filter(F("a") == 1).with_version(),
     "promoted": lambda q: q("t", promoted_fields=["status", "rank"]).filter(F("status") == "on"),
-    "promoted_versioned": lambda q: q("t", promoted_fields=["status"], include_version=True).order_by("status"),
+    "promoted_versioned": lambda q: q(
+        "t", promoted_fields=["status"], include_version=True
+    ).order_by("status"),
     "meta_columns": lambda q: q("t").filter(F("_id") > 3).order_by("_id"),
     "grouped": lambda q: q("t").group_by("city"),
     "grouped_two": lambda q: q("t").filter(F("a") == 1).group_by("city", "_version"),
     "grouped_promoted": lambda q: q("t", promoted_fields=["city", "price"]).group_by("city"),
     "grouped_having": lambda q: q("t").filter(F("a") == 1).group_by("city").having(F("_count") > 2),
     "grouped_having_sum": lambda q: q("t").group_by("city").having(F("_sum") > 100),
-    "grouped_having_all": lambda q: q("t").group_by("city").having((F("_min") < 1) | (F("_max") > 9) | (F("_avg") > 4)),
+    "grouped_having_all": lambda q: q("t")
+    .group_by("city")
+    .having((F("_min") < 1) | (F("_max") > 9) | (F("_avg") > 4)),
 }
 
 GROUPED = [name for name in SHAPES if name.startswith("grouped")]
@@ -64,7 +68,9 @@ def test_aggregates_are_the_same(name):
     sync, twin = both(name)
     for func in AGGREGATES:
         for field in AGGREGATE_FIELDS:
-            assert twin._build_aggregate_query(func, field) == sync._build_aggregate_query(func, field)
+            assert twin._build_aggregate_query(func, field) == sync._build_aggregate_query(
+                func, field
+            )
 
 
 @pytest.mark.parametrize("name", GROUPED)
@@ -72,7 +78,9 @@ def test_grouped_aggregates_are_the_same(name):
     sync, twin = both(name)
     for func in AGGREGATES:
         for field in AGGREGATE_FIELDS:
-            assert twin._build_grouped_aggregate_query(func, field) == sync._build_grouped_aggregate_query(func, field)
+            assert twin._build_grouped_aggregate_query(
+                func, field
+            ) == sync._build_grouped_aggregate_query(func, field)
 
 
 @pytest.mark.parametrize("field", ["_id", "_version", "city", "meta.score"])
@@ -94,7 +102,11 @@ def test_literal_filter_order_limit(cls):
 
 @pytest.mark.parametrize("cls", [SQLerQuery, AsyncSQLerQuery])
 def test_literal_promoted_versioned_with_id(cls):
-    q = cls("t", promoted_fields=["status"], include_version=True).filter(F("status") == "on").distinct()
+    q = (
+        cls("t", promoted_fields=["status"], include_version=True)
+        .filter(F("status") == "on")
+        .distinct()
+    )
     assert q._build_query(include_id=True) == (
         "SELECT DISTINCT _id, data, _version, status FROM t WHERE status = ?",
         ["on"],

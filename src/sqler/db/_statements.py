@@ -44,7 +44,14 @@ def _index_rows(rows: Any) -> list[dict[str, Any]]:
     indexes = []
     for row in rows:
         sql = row[2] or ""
-        indexes.append({"name": row[0], "table": row[1], "sql": sql, "unique": "UNIQUE" in sql.upper() if sql else False})
+        indexes.append(
+            {
+                "name": row[0],
+                "table": row[1],
+                "sql": sql,
+                "unique": "UNIQUE" in sql.upper() if sql else False,
+            }
+        )
     return indexes
 
 
@@ -72,7 +79,9 @@ def _index_entries(fields: Any) -> list[tuple[str, bool]]:
         if isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[1], str):
             field, direction = entry
             if direction.lower() not in _DIRECTIONS:
-                raise ValueError(f"the direction of an index field is 'asc' or 'desc', not {direction!r}")
+                raise ValueError(
+                    f"the direction of an index field is 'asc' or 'desc', not {direction!r}"
+                )
             descending = _DIRECTIONS[direction.lower()]
         elif isinstance(entry, str):
             field, descending = entry, False
@@ -93,7 +102,9 @@ def _index_name(table: str, entries: list[tuple[str, bool]]) -> str:
     by ``__``, so two lists that differ in order or in a direction name two indexes."""
     if len(entries) == 1 and not entries[0][1]:
         return f"idx_{table}_{entries[0][0].replace('.', '_')}"
-    return f"idx_{table}_" + "__".join(f.replace(".", "_") + ("_desc" if d else "") for f, d in entries)
+    return f"idx_{table}_" + "__".join(
+        f.replace(".", "_") + ("_desc" if d else "") for f, d in entries
+    )
 
 
 def _create_index_sql(
@@ -125,14 +136,17 @@ def _create_index_sql(
     idx_name = name or _index_name(table, entries)
     unique_sql = "UNIQUE" if unique else ""
     expr = ", ".join(
-        (f if f.startswith("_") or f in columns else f"json_extract(data, '$.{f}')") + (" DESC" if d else "")
+        (f if f.startswith("_") or f in columns else f"json_extract(data, '$.{f}')")
+        + (" DESC" if d else "")
         for f, d in entries
     )
     where_sql = f"WHERE {where}" if where else ""
     return f"CREATE {unique_sql} INDEX IF NOT EXISTS {idx_name} ON {table} ({expr}) {where_sql};"
 
 
-def _index_steps(table: str, fields: Any, unique: bool, name: Optional[str], where: Optional[str]) -> Any:
+def _index_steps(
+    table: str, fields: Any, unique: bool, name: Optional[str], where: Optional[str]
+) -> Any:
     """``create_index`` as a run of statements (``SQLerDB._run``), in a transaction that holds
     the write lock: read where ``table`` stores each field now, then make the index there. A
     promotion that comes later re-makes it (:func:`_follow_indexes`)."""
@@ -141,8 +155,12 @@ def _index_steps(table: str, fields: Any, unique: bool, name: Optional[str], whe
 
 
 # what SQLite keeps of a ``CREATE INDEX`` sqler sent: its head, then each indexed term
-_MADE_HEAD = re.compile(r"CREATE (UNIQUE )?INDEX ([A-Za-z_][A-Za-z0-9_]*) ON ([A-Za-z_][A-Za-z0-9_]*) \(")
-_MADE_TERM = re.compile(r"(?:json_extract\(data, '\$\.([A-Za-z0-9_.]+)'\)|([A-Za-z_][A-Za-z0-9_]*))( DESC)?(, |\) )")
+_MADE_HEAD = re.compile(
+    r"CREATE (UNIQUE )?INDEX ([A-Za-z_][A-Za-z0-9_]*) ON ([A-Za-z_][A-Za-z0-9_]*) \("
+)
+_MADE_TERM = re.compile(
+    r"(?:json_extract\(data, '\$\.([A-Za-z0-9_.]+)'\)|([A-Za-z_][A-Za-z0-9_]*))( DESC)?(, |\) )"
+)
 
 
 def _kept_text(statement: str) -> str:
@@ -178,7 +196,7 @@ def _made_by_sqler(sql: str) -> Optional[tuple[bool, str, str, list[Any], Option
     if rest and not rest.startswith("WHERE "):
         return None
     unique, name, table = bool(head.group(1)), head.group(2), head.group(3)
-    where = rest[len("WHERE "):] or None
+    where = rest[len("WHERE ") :] or None
     try:
         statement = _create_index_sql(table, fields, unique, name, where, columns, rewrite=False)
     except (SQLerError, ValueError, TypeError):
@@ -194,7 +212,10 @@ def _follow_indexes(table: str, moved: list[str], promoted: list[str]) -> Any:
 
     A run of statements the database classes send (``sqler.db._promotion._promotion``), in the
     transaction of the promotion: an index made before it would index NULL for a moved field."""
-    rows = yield "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? COLLATE NOCASE AND sql IS NOT NULL;", [table]
+    rows = yield (
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? COLLATE NOCASE AND sql IS NOT NULL;",
+        [table],
+    )
     moving = set(moved)
     for (sql,) in rows:
         made = _made_by_sqler(sql)
@@ -225,7 +246,9 @@ def _row_there_sql(table: str) -> str:
     return f"SELECT 1 FROM {table} WHERE _id = ?;"
 
 
-def _checked_promotion(table: str, promoted: dict[str, str], checks: Optional[dict[str, str]]) -> tuple[str, dict[str, str]]:
+def _checked_promotion(
+    table: str, promoted: dict[str, str], checks: Optional[dict[str, str]]
+) -> tuple[str, dict[str, str]]:
     """The arguments of an ensure with promoted columns, checked before anything is sent: the
     table name, each column name and definition, each CHECK expression. Returns the table
     name and the checks (none: empty)."""

@@ -553,10 +553,24 @@ ASYNC_BASES = {
 WHEN = datetime(2026, 3, 4, 5, 6, 7, 890000, tzinfo=timezone.utc)
 # the rows every base exports and imports: one field of each type a document holds
 TYPED_ROWS = [
-    dict(name="Kyoto", count=1400000, ratio=0.5, active=True, when=WHEN,
-         tags=["old", "temple"], meta={"rank": 2}),
-    dict(name="=Osaka", count=0, ratio=-1.25, active=False, when=WHEN + timedelta(days=1),
-         tags=[], meta={}),
+    dict(
+        name="Kyoto",
+        count=1400000,
+        ratio=0.5,
+        active=True,
+        when=WHEN,
+        tags=["old", "temple"],
+        meta={"rank": 2},
+    ),
+    dict(
+        name="=Osaka",
+        count=0,
+        ratio=-1.25,
+        active=False,
+        when=WHEN + timedelta(days=1),
+        tags=[],
+        meta={},
+    ),
 ]
 TYPED_FIELDS = {
     "name": (str, ""),
@@ -570,9 +584,14 @@ TYPED_FIELDS = {
 
 
 def _typed_model(kind, *mixins, fields=TYPED_FIELDS):
-    ns = {"__tablename__": f"typed_{kind}", "__annotations__": {n: h for n, (h, _) in fields.items()}}
+    ns = {
+        "__tablename__": f"typed_{kind}",
+        "__annotations__": {n: h for n, (h, _) in fields.items()},
+    }
     ns.update({n: d for n, (_, d) in fields.items()})
-    cls = types.new_class(f"Typed_{kind}", (*mixins, ASYNC_BASES[kind]), {}, lambda body: body.update(ns))
+    cls = types.new_class(
+        f"Typed_{kind}", (*mixins, ASYNC_BASES[kind]), {}, lambda body: body.update(ns)
+    )
     return dataclass(cls) if kind.startswith("lite") else cls
 
 
@@ -595,7 +614,10 @@ async def test_rows_exported_from_an_async_base_import_with_equal_values(kind, t
         result = await async_import_jsonl(Model, path, db=dst)
 
         assert _result_tuple(result) == (2, 2, 0, [])
-        got = [{n: getattr(r, n) for n in TYPED_FIELDS} for r in await Model.using(dst).order_by("_id").all()]
+        got = [
+            {n: getattr(r, n) for n in TYPED_FIELDS}
+            for r in await Model.using(dst).order_by("_id").all()
+        ]
         assert got == TYPED_ROWS
         assert [type(r["when"]) for r in got] == [datetime, datetime]
     finally:
@@ -605,7 +627,9 @@ async def test_rows_exported_from_an_async_base_import_with_equal_values(kind, t
 
 @pytest.mark.parametrize("update_existing", [False, True])
 @pytest.mark.parametrize("kind", list(ASYNC_BASES))
-async def test_an_async_import_keeps_the_created_at_a_mixin_gave_the_row(kind, update_existing, tmp_path):
+async def test_an_async_import_keeps_the_created_at_a_mixin_gave_the_row(
+    kind, update_existing, tmp_path
+):
     Model = _typed_model(kind, TimestampMixin, fields={"name": (str, "")})
     src, dst = await _new_adb(), await _new_adb()
     try:
@@ -646,7 +670,9 @@ async def test_a_dataclass_field_exports_and_imports_as_the_dataclass(kind, tmp_
         result = await async_import_jsonl(Model, path, db=dst)
 
         assert _result_tuple(result) == (2, 2, 0, [])
-        got = [{"name": r.name, "stops": r.stops} for r in await Model.using(dst).order_by("_id").all()]
+        got = [
+            {"name": r.name, "stops": r.stops} for r in await Model.using(dst).order_by("_id").all()
+        ]
         assert got == rows
         assert type(got[0]["stops"][1].since) is datetime
     finally:

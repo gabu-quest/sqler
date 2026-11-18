@@ -238,6 +238,7 @@ def make_db(tmp_path):
 
 # ---- item 1: every way in, every base -----------------------------------------------
 
+
 @pytest.mark.parametrize("way", WAYS)
 @pytest.mark.parametrize("base", sorted(BASES))
 def test_each_way_in_returns_what_the_base_returned(make_db, base, way):
@@ -356,7 +357,9 @@ def test_a_chain_seven_rows_long_through_all_is_followed_to_its_end(make_db, bas
     prev = None
     ids = []
     for i in range(7):
-        prev = db.insert_document(nt, {"name": f"n{i}", "one": None if prev is None else ref(nt, prev)})
+        prev = db.insert_document(
+            nt, {"name": f"n{i}", "one": None if prev is None else ref(nt, prev)}
+        )
         ids.append(prev)
     # n6 -> n5 -> n4 -> n3 -> n2 -> n1 -> n0
     node = n_cls.query().filter(F("_id") == ids[6]).all()[0]
@@ -418,375 +421,348 @@ def test_a_reference_into_a_versioned_table_the_database_never_kept_reads_as_non
 # ---- the record: what the base returned ---------------------------------------------
 
 # (base, way) -> (fields of the parent row, SELECTs run)
-EXPECTED: dict = {('lite', 'from_id'): ({'name': 'p',
-                        'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                        'many': [('Child',
-                                  1,
-                                  '-',
-                                  {'name': 'c1', 'other': None}),
-                                 ('Child',
-                                  2,
-                                  '-',
-                                  {'name': 'c2',
-                                   'other': ('ref', 'rep_lt_child', 1)})],
-                        'loose': ('ref', 'rep_lt_child', 1),
-                        'deep': ('ref', 'rep_lt_child', 2),
-                        'cyc': ('ref', 'rep_lt_child', 4),
-                        'me': ('ref', 'rep_lt_child', 6),
-                        'gone': ('ref', 'rep_lt_child', 3),
-                        'nowhere': ('ref', 'rep_nobody', 1)},
-                       2),
- ('lite', 'refresh'): ({'name': 'p',
-                        'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                        'many': [('Child',
-                                  1,
-                                  '-',
-                                  {'name': 'c1', 'other': None}),
-                                 ('Child',
-                                  2,
-                                  '-',
-                                  {'name': 'c2',
-                                   'other': ('ref', 'rep_lt_child', 1)})],
-                        'loose': ('ref', 'rep_lt_child', 1),
-                        'deep': ('ref', 'rep_lt_child', 2),
-                        'cyc': ('ref', 'rep_lt_child', 4),
-                        'me': ('ref', 'rep_lt_child', 6),
-                        'gone': ('ref', 'rep_lt_child', 3),
-                        'nowhere': ('ref', 'rep_nobody', 1)},
-                       2),
- ('lite', 'from_ids'): ({'name': 'p',
-                         'one': ('Child',
-                                 1,
-                                 '-',
-                                 {'name': 'c1', 'other': None}),
-                         'many': [('Child',
-                                   1,
-                                   '-',
-                                   {'name': 'c1', 'other': None}),
-                                  ('Child',
-                                   2,
-                                   '-',
-                                   {'name': 'c2',
-                                    'other': ('ref', 'rep_lt_child', 1)})],
-                         'loose': ('ref', 'rep_lt_child', 1),
-                         'deep': ('ref', 'rep_lt_child', 2),
-                         'cyc': ('ref', 'rep_lt_child', 4),
-                         'me': ('ref', 'rep_lt_child', 6),
-                         'gone': ('ref', 'rep_lt_child', 3),
-                         'nowhere': ('ref', 'rep_nobody', 1)},
-                        2),
- ('lite', 'all'): ({'name': 'p',
-                    'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                    'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
-                             ('Child',
-                              2,
-                              '-',
-                              {'name': 'c2',
-                               'other': ('ref', 'rep_lt_child', 1)})],
-                    'loose': ('ref', 'rep_lt_child', 1),
-                    'deep': ('ref', 'rep_lt_child', 2),
-                    'cyc': ('ref', 'rep_lt_child', 4),
-                    'me': ('ref', 'rep_lt_child', 6),
-                    'gone': ('ref', 'rep_lt_child', 3),
-                    'nowhere': ('ref', 'rep_nobody', 1)},
-                   2),
- ('lite', 'first'): ({'name': 'p',
-                      'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                      'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
-                               ('Child',
-                                2,
-                                '-',
-                                {'name': 'c2',
-                                 'other': ('ref', 'rep_lt_child', 1)})],
-                      'loose': ('ref', 'rep_lt_child', 1),
-                      'deep': ('ref', 'rep_lt_child', 2),
-                      'cyc': ('ref', 'rep_lt_child', 4),
-                      'me': ('ref', 'rep_lt_child', 6),
-                      'gone': ('ref', 'rep_lt_child', 3),
-                      'nowhere': ('ref', 'rep_nobody', 1)},
-                     2),
- ('lite-safe', 'from_id'): ({'name': 'p',
-                             'one': ('Child',
-                                     1,
-                                     0,
-                                     {'name': 'c1', 'other': None}),
-                             'many': [('Child',
-                                       1,
-                                       0,
-                                       {'name': 'c1', 'other': None}),
-                                      ('Child',
-                                       2,
-                                       0,
-                                       {'name': 'c2',
-                                        'other': ('ref', 'rep_ls_child', 1)})],
-                             'loose': ('ref', 'rep_ls_child', 1),
-                             'deep': ('ref', 'rep_ls_child', 2),
-                             'cyc': ('ref', 'rep_ls_child', 4),
-                             'me': ('ref', 'rep_ls_child', 6),
-                             'gone': ('ref', 'rep_ls_child', 3),
-                             'nowhere': ('ref', 'rep_nobody', 1)},
-                            2),
- ('lite-safe', 'refresh'): ({'name': 'p',
-                             'one': ('Child',
-                                     1,
-                                     0,
-                                     {'name': 'c1', 'other': None}),
-                             'many': [('Child',
-                                       1,
-                                       0,
-                                       {'name': 'c1', 'other': None}),
-                                      ('Child',
-                                       2,
-                                       0,
-                                       {'name': 'c2',
-                                        'other': ('ref', 'rep_ls_child', 1)})],
-                             'loose': ('ref', 'rep_ls_child', 1),
-                             'deep': ('ref', 'rep_ls_child', 2),
-                             'cyc': ('ref', 'rep_ls_child', 4),
-                             'me': ('ref', 'rep_ls_child', 6),
-                             'gone': ('ref', 'rep_ls_child', 3),
-                             'nowhere': ('ref', 'rep_nobody', 1)},
-                            2),
- ('lite-safe', 'from_ids'): ({'name': 'p',
-                              'one': ('Child',
-                                      1,
-                                      0,
-                                      {'name': 'c1', 'other': None}),
-                              'many': [('Child',
-                                        1,
-                                        0,
-                                        {'name': 'c1', 'other': None}),
-                                       ('Child',
-                                        2,
-                                        0,
-                                        {'name': 'c2',
-                                         'other': ('ref', 'rep_ls_child', 1)})],
-                              'loose': ('ref', 'rep_ls_child', 1),
-                              'deep': ('ref', 'rep_ls_child', 2),
-                              'cyc': ('ref', 'rep_ls_child', 4),
-                              'me': ('ref', 'rep_ls_child', 6),
-                              'gone': ('ref', 'rep_ls_child', 3),
-                              'nowhere': ('ref', 'rep_nobody', 1)},
-                             2),
- ('lite-safe', 'all'): ({'name': 'p',
-                         'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                         'many': [('Child',
-                                   1,
-                                   0,
-                                   {'name': 'c1', 'other': None}),
-                                  ('Child',
-                                   2,
-                                   0,
-                                   {'name': 'c2',
-                                    'other': ('ref', 'rep_ls_child', 1)})],
-                         'loose': ('ref', 'rep_ls_child', 1),
-                         'deep': ('ref', 'rep_ls_child', 2),
-                         'cyc': ('ref', 'rep_ls_child', 4),
-                         'me': ('ref', 'rep_ls_child', 6),
-                         'gone': ('ref', 'rep_ls_child', 3),
-                         'nowhere': ('ref', 'rep_nobody', 1)},
-                        2),
- ('lite-safe', 'first'): ({'name': 'p',
-                           'one': ('Child',
-                                   1,
-                                   0,
-                                   {'name': 'c1', 'other': None}),
-                           'many': [('Child',
-                                     1,
-                                     0,
-                                     {'name': 'c1', 'other': None}),
-                                    ('Child',
-                                     2,
-                                     0,
-                                     {'name': 'c2',
-                                      'other': ('ref', 'rep_ls_child', 1)})],
-                           'loose': ('ref', 'rep_ls_child', 1),
-                           'deep': ('ref', 'rep_ls_child', 2),
-                           'cyc': ('ref', 'rep_ls_child', 4),
-                           'me': ('ref', 'rep_ls_child', 6),
-                           'gone': ('ref', 'rep_ls_child', 3),
-                           'nowhere': ('ref', 'rep_nobody', 1)},
-                          2),
- ('pydantic', 'from_id'): ({'name': 'p',
-                            'one': ('Child',
-                                    1,
-                                    '-',
-                                    {'name': 'c1', 'other': None}),
-                            'many': [('Child',
-                                      1,
-                                      '-',
-                                      {'name': 'c1', 'other': None}),
-                                     ('Child',
-                                      2,
-                                      '-',
-                                      {'name': 'c2',
-                                       'other': ('ref', 'rep_pd_child', 1)})],
-                            'loose': ('ref', 'rep_pd_child', 1),
-                            'deep': ('ref', 'rep_pd_child', 2),
-                            'cyc': ('ref', 'rep_pd_child', 4),
-                            'me': ('ref', 'rep_pd_child', 6),
-                            'gone': ('ref', 'rep_pd_child', 3),
-                            'nowhere': ('ref', 'rep_nobody', 1)},
-                           2),
- ('pydantic', 'refresh'): ({'name': 'p',
-                            'one': ('Child',
-                                    1,
-                                    '-',
-                                    {'name': 'c1', 'other': None}),
-                            'many': [('Child',
-                                      1,
-                                      '-',
-                                      {'name': 'c1', 'other': None}),
-                                     ('Child',
-                                      2,
-                                      '-',
-                                      {'name': 'c2',
-                                       'other': ('ref', 'rep_pd_child', 1)})],
-                            'loose': ('ref', 'rep_pd_child', 1),
-                            'deep': ('ref', 'rep_pd_child', 2),
-                            'cyc': ('ref', 'rep_pd_child', 4),
-                            'me': ('ref', 'rep_pd_child', 6),
-                            'gone': ('ref', 'rep_pd_child', 3),
-                            'nowhere': ('ref', 'rep_nobody', 1)},
-                           2),
- ('pydantic', 'from_ids'): ({'name': 'p',
-                             'one': ('Child',
-                                     1,
-                                     '-',
-                                     {'name': 'c1', 'other': None}),
-                             'many': [('Child',
-                                       1,
-                                       '-',
-                                       {'name': 'c1', 'other': None}),
-                                      ('Child',
-                                       2,
-                                       '-',
-                                       {'name': 'c2',
-                                        'other': ('ref', 'rep_pd_child', 1)})],
-                             'loose': ('ref', 'rep_pd_child', 1),
-                             'deep': ('ref', 'rep_pd_child', 2),
-                             'cyc': ('ref', 'rep_pd_child', 4),
-                             'me': ('ref', 'rep_pd_child', 6),
-                             'gone': ('ref', 'rep_pd_child', 3),
-                             'nowhere': ('ref', 'rep_nobody', 1)},
-                            2),
- ('pydantic', 'all'): ({'name': 'p',
-                        'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                        'many': [('Child',
-                                  1,
-                                  '-',
-                                  {'name': 'c1', 'other': None}),
-                                 ('Child',
-                                  2,
-                                  '-',
-                                  {'name': 'c2',
-                                   'other': ('ref', 'rep_pd_child', 1)})],
-                        'loose': ('ref', 'rep_pd_child', 1),
-                        'deep': ('ref', 'rep_pd_child', 2),
-                        'cyc': ('ref', 'rep_pd_child', 4),
-                        'me': ('ref', 'rep_pd_child', 6),
-                        'gone': ('ref', 'rep_pd_child', 3),
-                        'nowhere': ('ref', 'rep_nobody', 1)},
-                       2),
- ('pydantic', 'first'): ({'name': 'p',
-                          'one': ('Child',
-                                  1,
-                                  '-',
-                                  {'name': 'c1', 'other': None}),
-                          'many': [('Child',
-                                    1,
-                                    '-',
-                                    {'name': 'c1', 'other': None}),
-                                   ('Child',
-                                    2,
-                                    '-',
-                                    {'name': 'c2',
-                                     'other': ('ref', 'rep_pd_child', 1)})],
-                          'loose': ('ref', 'rep_pd_child', 1),
-                          'deep': ('ref', 'rep_pd_child', 2),
-                          'cyc': ('ref', 'rep_pd_child', 4),
-                          'me': ('ref', 'rep_pd_child', 6),
-                          'gone': ('ref', 'rep_pd_child', 3),
-                          'nowhere': ('ref', 'rep_nobody', 1)},
-                         2),
- ('safe', 'from_id'): ({'name': 'p',
-                        'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                        'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
-                                 ('Child',
-                                  2,
-                                  0,
-                                  {'name': 'c2',
-                                   'other': ('ref', 'rep_sf_child', 1)})],
-                        'loose': ('ref', 'rep_sf_child', 1),
-                        'deep': ('ref', 'rep_sf_child', 2),
-                        'cyc': ('ref', 'rep_sf_child', 4),
-                        'me': ('ref', 'rep_sf_child', 6),
-                        'gone': ('ref', 'rep_sf_child', 3),
-                        'nowhere': ('ref', 'rep_nobody', 1)},
-                       2),
- ('safe', 'refresh'): ({'name': 'p',
-                        'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                        'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
-                                 ('Child',
-                                  2,
-                                  0,
-                                  {'name': 'c2',
-                                   'other': ('ref', 'rep_sf_child', 1)})],
-                        'loose': ('ref', 'rep_sf_child', 1),
-                        'deep': ('ref', 'rep_sf_child', 2),
-                        'cyc': ('ref', 'rep_sf_child', 4),
-                        'me': ('ref', 'rep_sf_child', 6),
-                        'gone': ('ref', 'rep_sf_child', 3),
-                        'nowhere': ('ref', 'rep_nobody', 1)},
-                       2),
- ('safe', 'from_ids'): ({'name': 'p',
-                         'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                         'many': [('Child',
-                                   1,
-                                   0,
-                                   {'name': 'c1', 'other': None}),
-                                  ('Child',
-                                   2,
-                                   0,
-                                   {'name': 'c2',
-                                    'other': ('ref', 'rep_sf_child', 1)})],
-                         'loose': ('ref', 'rep_sf_child', 1),
-                         'deep': ('ref', 'rep_sf_child', 2),
-                         'cyc': ('ref', 'rep_sf_child', 4),
-                         'me': ('ref', 'rep_sf_child', 6),
-                         'gone': ('ref', 'rep_sf_child', 3),
-                         'nowhere': ('ref', 'rep_nobody', 1)},
-                        2),
- ('safe', 'all'): ({'name': 'p',
-                    'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                    'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
-                             ('Child',
-                              2,
-                              0,
-                              {'name': 'c2',
-                               'other': ('ref', 'rep_sf_child', 1)})],
-                    'loose': ('ref', 'rep_sf_child', 1),
-                    'deep': ('ref', 'rep_sf_child', 2),
-                    'cyc': ('ref', 'rep_sf_child', 4),
-                    'me': ('ref', 'rep_sf_child', 6),
-                    'gone': ('ref', 'rep_sf_child', 3),
-                    'nowhere': ('ref', 'rep_nobody', 1)},
-                   2),
- ('safe', 'first'): ({'name': 'p',
-                      'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                      'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
-                               ('Child',
-                                2,
-                                0,
-                                {'name': 'c2',
-                                 'other': ('ref', 'rep_sf_child', 1)})],
-                      'loose': ('ref', 'rep_sf_child', 1),
-                      'deep': ('ref', 'rep_sf_child', 2),
-                      'cyc': ('ref', 'rep_sf_child', 4),
-                      'me': ('ref', 'rep_sf_child', 6),
-                      'gone': ('ref', 'rep_sf_child', 3),
-                      'nowhere': ('ref', 'rep_nobody', 1)},
-                     2)}
+EXPECTED: dict = {
+    ("lite", "from_id"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_lt_child", 1)}),
+            ],
+            "loose": ("ref", "rep_lt_child", 1),
+            "deep": ("ref", "rep_lt_child", 2),
+            "cyc": ("ref", "rep_lt_child", 4),
+            "me": ("ref", "rep_lt_child", 6),
+            "gone": ("ref", "rep_lt_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("lite", "refresh"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_lt_child", 1)}),
+            ],
+            "loose": ("ref", "rep_lt_child", 1),
+            "deep": ("ref", "rep_lt_child", 2),
+            "cyc": ("ref", "rep_lt_child", 4),
+            "me": ("ref", "rep_lt_child", 6),
+            "gone": ("ref", "rep_lt_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("lite", "from_ids"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_lt_child", 1)}),
+            ],
+            "loose": ("ref", "rep_lt_child", 1),
+            "deep": ("ref", "rep_lt_child", 2),
+            "cyc": ("ref", "rep_lt_child", 4),
+            "me": ("ref", "rep_lt_child", 6),
+            "gone": ("ref", "rep_lt_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("lite", "all"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_lt_child", 1)}),
+            ],
+            "loose": ("ref", "rep_lt_child", 1),
+            "deep": ("ref", "rep_lt_child", 2),
+            "cyc": ("ref", "rep_lt_child", 4),
+            "me": ("ref", "rep_lt_child", 6),
+            "gone": ("ref", "rep_lt_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("lite", "first"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_lt_child", 1)}),
+            ],
+            "loose": ("ref", "rep_lt_child", 1),
+            "deep": ("ref", "rep_lt_child", 2),
+            "cyc": ("ref", "rep_lt_child", 4),
+            "me": ("ref", "rep_lt_child", 6),
+            "gone": ("ref", "rep_lt_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("lite-safe", "from_id"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_ls_child", 1)}),
+            ],
+            "loose": ("ref", "rep_ls_child", 1),
+            "deep": ("ref", "rep_ls_child", 2),
+            "cyc": ("ref", "rep_ls_child", 4),
+            "me": ("ref", "rep_ls_child", 6),
+            "gone": ("ref", "rep_ls_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("lite-safe", "refresh"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_ls_child", 1)}),
+            ],
+            "loose": ("ref", "rep_ls_child", 1),
+            "deep": ("ref", "rep_ls_child", 2),
+            "cyc": ("ref", "rep_ls_child", 4),
+            "me": ("ref", "rep_ls_child", 6),
+            "gone": ("ref", "rep_ls_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("lite-safe", "from_ids"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_ls_child", 1)}),
+            ],
+            "loose": ("ref", "rep_ls_child", 1),
+            "deep": ("ref", "rep_ls_child", 2),
+            "cyc": ("ref", "rep_ls_child", 4),
+            "me": ("ref", "rep_ls_child", 6),
+            "gone": ("ref", "rep_ls_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("lite-safe", "all"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_ls_child", 1)}),
+            ],
+            "loose": ("ref", "rep_ls_child", 1),
+            "deep": ("ref", "rep_ls_child", 2),
+            "cyc": ("ref", "rep_ls_child", 4),
+            "me": ("ref", "rep_ls_child", 6),
+            "gone": ("ref", "rep_ls_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("lite-safe", "first"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_ls_child", 1)}),
+            ],
+            "loose": ("ref", "rep_ls_child", 1),
+            "deep": ("ref", "rep_ls_child", 2),
+            "cyc": ("ref", "rep_ls_child", 4),
+            "me": ("ref", "rep_ls_child", 6),
+            "gone": ("ref", "rep_ls_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("pydantic", "from_id"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_pd_child", 1)}),
+            ],
+            "loose": ("ref", "rep_pd_child", 1),
+            "deep": ("ref", "rep_pd_child", 2),
+            "cyc": ("ref", "rep_pd_child", 4),
+            "me": ("ref", "rep_pd_child", 6),
+            "gone": ("ref", "rep_pd_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("pydantic", "refresh"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_pd_child", 1)}),
+            ],
+            "loose": ("ref", "rep_pd_child", 1),
+            "deep": ("ref", "rep_pd_child", 2),
+            "cyc": ("ref", "rep_pd_child", 4),
+            "me": ("ref", "rep_pd_child", 6),
+            "gone": ("ref", "rep_pd_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("pydantic", "from_ids"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_pd_child", 1)}),
+            ],
+            "loose": ("ref", "rep_pd_child", 1),
+            "deep": ("ref", "rep_pd_child", 2),
+            "cyc": ("ref", "rep_pd_child", 4),
+            "me": ("ref", "rep_pd_child", 6),
+            "gone": ("ref", "rep_pd_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("pydantic", "all"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_pd_child", 1)}),
+            ],
+            "loose": ("ref", "rep_pd_child", 1),
+            "deep": ("ref", "rep_pd_child", 2),
+            "cyc": ("ref", "rep_pd_child", 4),
+            "me": ("ref", "rep_pd_child", 6),
+            "gone": ("ref", "rep_pd_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("pydantic", "first"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, "-", {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, "-", {"name": "c1", "other": None}),
+                ("Child", 2, "-", {"name": "c2", "other": ("ref", "rep_pd_child", 1)}),
+            ],
+            "loose": ("ref", "rep_pd_child", 1),
+            "deep": ("ref", "rep_pd_child", 2),
+            "cyc": ("ref", "rep_pd_child", 4),
+            "me": ("ref", "rep_pd_child", 6),
+            "gone": ("ref", "rep_pd_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("safe", "from_id"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_sf_child", 1)}),
+            ],
+            "loose": ("ref", "rep_sf_child", 1),
+            "deep": ("ref", "rep_sf_child", 2),
+            "cyc": ("ref", "rep_sf_child", 4),
+            "me": ("ref", "rep_sf_child", 6),
+            "gone": ("ref", "rep_sf_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("safe", "refresh"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_sf_child", 1)}),
+            ],
+            "loose": ("ref", "rep_sf_child", 1),
+            "deep": ("ref", "rep_sf_child", 2),
+            "cyc": ("ref", "rep_sf_child", 4),
+            "me": ("ref", "rep_sf_child", 6),
+            "gone": ("ref", "rep_sf_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("safe", "from_ids"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_sf_child", 1)}),
+            ],
+            "loose": ("ref", "rep_sf_child", 1),
+            "deep": ("ref", "rep_sf_child", 2),
+            "cyc": ("ref", "rep_sf_child", 4),
+            "me": ("ref", "rep_sf_child", 6),
+            "gone": ("ref", "rep_sf_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("safe", "all"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_sf_child", 1)}),
+            ],
+            "loose": ("ref", "rep_sf_child", 1),
+            "deep": ("ref", "rep_sf_child", 2),
+            "cyc": ("ref", "rep_sf_child", 4),
+            "me": ("ref", "rep_sf_child", 6),
+            "gone": ("ref", "rep_sf_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+    ("safe", "first"): (
+        {
+            "name": "p",
+            "one": ("Child", 1, 0, {"name": "c1", "other": None}),
+            "many": [
+                ("Child", 1, 0, {"name": "c1", "other": None}),
+                ("Child", 2, 0, {"name": "c2", "other": ("ref", "rep_sf_child", 1)}),
+            ],
+            "loose": ("ref", "rep_sf_child", 1),
+            "deep": ("ref", "rep_sf_child", 2),
+            "cyc": ("ref", "rep_sf_child", 4),
+            "me": ("ref", "rep_sf_child", 6),
+            "gone": ("ref", "rep_sf_child", 3),
+            "nowhere": ("ref", "rep_nobody", 1),
+        },
+        2,
+    ),
+}
 
 
 # ---- hostile inputs at a typed position ---------------------------------------------
@@ -1040,7 +1016,9 @@ def test_a_typed_reference_holds_its_row_and_the_parent_saves_unchanged(typed, b
     got.save()  # must NOT raise "Related model must be saved before saving parent"
     assert rows_of(db, pt)[0][1]["one"] == {"_table": ct, "_id": 1}
     assert rows_of(db, pt)[0][1]["many"] == [
-        {"_table": ct, "_id": 1}, {"_table": ct, "_id": 2}, {"_table": ct, "_id": 1}
+        {"_table": ct, "_id": 1},
+        {"_table": ct, "_id": 2},
+        {"_table": ct, "_id": 1},
     ]
     assert rows_of(db, pt)[0][1]["bag"] == {"a": {"_table": ct, "_id": 2}}
     assert [r[1] for r in rows_of(db, pt)] == [stored[0][1]]  # no document holds the version
@@ -1075,7 +1053,9 @@ def test_a_list_holding_one_child_twice_reads_the_child_table_once(typed, base, 
     with query_logger.capture() as sent:
         got = load(p_cls, pid, way)
     assert [(type(m).__name__, m._id) for m in got.many] == [
-        (c_cls.__name__, 1), (c_cls.__name__, 2), (c_cls.__name__, 1)
+        (c_cls.__name__, 1),
+        (c_cls.__name__, 2),
+        (c_cls.__name__, 1),
     ]
     assert sent_to(sent, c_cls.__tablename__) == 1
     # one object per row per load, by every way (the batch ways built one each before)
@@ -1131,7 +1111,9 @@ def test_a_cycle_through_typed_fields_closes_and_saves(typed, base, way):
     after = rows_of(db, nt)
     assert [r[1]["one"] for r in after] == [r[1]["one"] for r in before]
     assert [r[1]["one"] for r in after] == [
-        {"_table": nt, "_id": 2}, {"_table": nt, "_id": 1}, {"_table": nt, "_id": 3}
+        {"_table": nt, "_id": 2},
+        {"_table": nt, "_id": 1},
+        {"_table": nt, "_id": 3},
     ]
 
 
@@ -1166,11 +1148,13 @@ def test_a_typed_field_whose_row_is_gone(typed, base, way):
     assert _observe(db, p_cls, p2._id, way, pt) == gone_expected(base)
 
 
-@pytest.mark.parametrize(*all_pairs(
-    ("shape", ["id-str", "other-table"]),
-    ("base", sorted(TYPED)),
-    ("way", TYPED_WAYS),
-))
+@pytest.mark.parametrize(
+    *all_pairs(
+        ("shape", ["id-str", "other-table"]),
+        ("base", sorted(TYPED)),
+        ("way", TYPED_WAYS),
+    )
+)
 def test_a_typed_field_holding_a_reference_that_cannot_be_followed(typed, base, way, shape):
     db, (g_cls, c_cls, p_cls, _), _ = typed(base)
     pt = p_cls.__tablename__
@@ -1269,11 +1253,13 @@ VALIDATED = {"pydantic": (VdC, VdP), "safe": (VdsC, VdsP)}
 RESHAPED = {"drop": [2, 3], "reverse": [3, 2, 1], "new": [None, None, None]}
 
 
-@pytest.mark.parametrize(*all_pairs(
-    ("base", sorted(VALIDATED)),
-    ("way", TYPED_WAYS),
-    ("mode", sorted(RESHAPED)),
-))
+@pytest.mark.parametrize(
+    *all_pairs(
+        ("base", sorted(VALIDATED)),
+        ("way", TYPED_WAYS),
+        ("mode", sorted(RESHAPED)),
+    )
+)
 def test_a_validator_that_reshapes_the_children_keeps_each_child_its_row(make_db, base, way, mode):
     """Item 4: each child the validator leaves is the row it says it is; nothing is
     paired by position, so ``save()`` overwrites no other row."""
@@ -1418,7 +1404,9 @@ def test_a_child_class_bound_elsewhere_or_never_bound(make_db, base, way):
     what ``from_id`` gives (the batch ways read the parent's database before)."""
     o_cls, _, p_cls = ELSEWHERE[base]
     db, other_db, rid = _elsewhere(make_db, base)
-    assert _observe(db, p_cls, rid, way, p_cls.__tablename__) == ELSEWHERE_EXPECTED[(base, "from_id")]
+    assert (
+        _observe(db, p_cls, rid, way, p_cls.__tablename__) == ELSEWHERE_EXPECTED[(base, "from_id")]
+    )
 
 
 @pytest.mark.parametrize("way", TYPED_WAYS)
@@ -1508,14 +1496,20 @@ def test_typed_fields_of_a_class_defined_before_the_class_it_refers_to(make_db):
     db = make_db()
     for c_cls, p_cls in ((FwdC, FwdP), (LFwdC, LFwdP)):
         cid = db.insert_document(c_cls.__tablename__, {"name": "c"})
-        db.insert_document(p_cls.__tablename__, {"title": "p", "one": {"_table": c_cls.__tablename__, "_id": cid}})
+        db.insert_document(
+            p_cls.__tablename__, {"title": "p", "one": {"_table": c_cls.__tablename__, "_id": cid}}
+        )
         got = p_cls.using(db).first()
         assert (type(got.one).__name__, got.one._id, got.one.name) == (c_cls.__name__, cid, "c")
 
 
 def test_typed_fields_names_every_model_class_a_field_admits():
     assert _refs.typed_fields(TyP) == {"one": _at(TyC), "many": _in_list(TyC), "bag": _in_dict(TyC)}
-    assert _refs.typed_fields(LtyP) == {"one": _at(LtyC), "many": _in_list(LtyC), "bag": _in_dict(LtyC)}
+    assert _refs.typed_fields(LtyP) == {
+        "one": _at(LtyC),
+        "many": _in_list(LtyC),
+        "bag": _in_dict(LtyC),
+    }
     assert _refs.typed_fields(Pd_Parent) == {"one": _at(Pd_Child), "many": _in_list(Pd_Child)}
     assert _refs.typed_fields(TyG) == {}
 
@@ -1690,7 +1684,8 @@ def test_a_msgspec_typed_field_is_the_model_of_its_row(make_db, way):
     }[way]()
     name = "c"
     assert [(type(c).__name__, c._id, c.name) for c in (got.one, *got.many)] == [
-        ("MsC", cid, name), ("MsC", cid, name)
+        ("MsC", cid, name),
+        ("MsC", cid, name),
     ]
     got.save()
     assert rows_of(db, MsP.__tablename__) == stored
@@ -1705,7 +1700,12 @@ def gone_expected(base: str) -> Any:
     child = (c_cls.__name__, 1, v, {"g": (g_cls.__name__, 1, v, {"name": "g2"}), "name": "c1b"})
     return (
         {"bag": {}, "many": [child], "one": None, "title": "p2"},
-        {"bag": {}, "many": [{"_id": 1, "_table": c_cls.__tablename__}], "one": None, "title": "p2"},
+        {
+            "bag": {},
+            "many": [{"_id": 1, "_table": c_cls.__tablename__}],
+            "one": None,
+            "title": "p2",
+        },
     )
 
 
@@ -1735,84 +1735,166 @@ def unfollowed_expected(base: str, shape: str, c_cls: type) -> Any:
         {"bag": {}, "many": [], "one": blank, "title": "h"},
         ("ValueError", "Related model must be saved before saving parent"),
     )
-ELSEWHERE_EXPECTED: dict = {('lite', 'all'): ({'never': ('LtyuC', 1, '-', {'name': 'never-bound'}),
-                    'other': ('LtyoC', 1, '-', {'name': 'in-parent-db'}),
-                    'title': 'e'},
-                   {'never': {'_id': 1, '_table': 'rep_ltyu_c'},
-                    'other': {'_id': 1, '_table': 'rep_ltyo_c'},
-                    'title': 'e'}),
- ('lite', 'first'): ({'never': ('LtyuC', 1, '-', {'name': 'never-bound'}),
-                      'other': ('LtyoC', 1, '-', {'name': 'in-parent-db'}),
-                      'title': 'e'},
-                     {'never': {'_id': 1, '_table': 'rep_ltyu_c'},
-                      'other': {'_id': 1, '_table': 'rep_ltyo_c'},
-                      'title': 'e'}),
- ('lite', 'from_id'): ({'never': ('LtyuC', 1, '-', {'name': 'never-bound'}),
-                        'other': ('LtyoC', 1, '-', {'name': 'in-child-db'}),
-                        'title': 'e'},
-                       {'never': {'_id': 1, '_table': 'rep_ltyu_c'},
-                        'other': {'_id': 1, '_table': 'rep_ltyo_c'},
-                        'title': 'e'}),
- ('lite', 'from_ids'): ({'never': ('LtyuC', 1, '-', {'name': 'never-bound'}),
-                         'other': ('LtyoC', 1, '-', {'name': 'in-parent-db'}),
-                         'title': 'e'},
-                        {'never': {'_id': 1, '_table': 'rep_ltyu_c'},
-                         'other': {'_id': 1, '_table': 'rep_ltyo_c'},
-                         'title': 'e'}),
- ('lite', 'refresh'): ({'never': ('LtyuC', 1, '-', {'name': 'never-bound'}),
-                        'other': ('LtyoC', 1, '-', {'name': 'in-child-db'}),
-                        'title': 'e'},
-                       {'never': {'_id': 1, '_table': 'rep_ltyu_c'},
-                        'other': {'_id': 1, '_table': 'rep_ltyo_c'},
-                        'title': 'e'}),
- ('pydantic', 'all'): ({'never': ('TyuC', 1, '-', {'name': 'never-bound'}),
-                        'other': ('TyoC', None, '-', {'name': 'in-parent-db'}),
-                        'title': 'e'},
-                       ('ValueError', 'Related model must be saved before saving parent')),
- ('pydantic', 'first'): ({'never': ('TyuC', 1, '-', {'name': 'never-bound'}),
-                          'other': ('TyoC', None, '-', {'name': 'in-parent-db'}),
-                          'title': 'e'},
-                         ('ValueError', 'Related model must be saved before saving parent')),
- ('pydantic', 'from_id'): ({'never': ('TyuC', 1, '-', {'name': 'never-bound'}),
-                            'other': ('TyoC', 1, '-', {'name': 'in-child-db'}),
-                            'title': 'e'},
-                           {'never': {'_id': 1, '_table': 'rep_tyu_c'},
-                            'other': {'_id': 1, '_table': 'rep_tyo_c'},
-                            'title': 'e'}),
- ('pydantic', 'from_ids'): ({'never': ('TyuC', 1, '-', {'name': 'never-bound'}),
-                             'other': ('TyoC', None, '-', {'name': 'in-parent-db'}),
-                             'title': 'e'},
-                            ('ValueError', 'Related model must be saved before saving parent')),
- ('pydantic', 'refresh'): ({'never': ('TyuC', 1, '-', {'name': 'never-bound'}),
-                            'other': ('TyoC', 1, '-', {'name': 'in-child-db'}),
-                            'title': 'e'},
-                           {'never': {'_id': 1, '_table': 'rep_tyu_c'},
-                            'other': {'_id': 1, '_table': 'rep_tyo_c'},
-                            'title': 'e'}),
- ('safe', 'all'): ({'never': ('TysuC', 1, 0, {'name': 'never-bound'}),
-                    'other': ('TysoC', None, 0, {'name': 'in-parent-db'}),
-                    'title': 'e'},
-                   ('ValueError', 'Related model must be saved before saving parent')),
- ('safe', 'first'): ({'never': ('TysuC', 1, 0, {'name': 'never-bound'}),
-                      'other': ('TysoC', None, 0, {'name': 'in-parent-db'}),
-                      'title': 'e'},
-                     ('ValueError', 'Related model must be saved before saving parent')),
- ('safe', 'from_id'): ({'never': ('TysuC', 1, 0, {'name': 'never-bound'}),
-                        'other': ('TysoC', 1, 0, {'name': 'in-child-db'}),
-                        'title': 'e'},
-                       {'never': {'_id': 1, '_table': 'rep_tysu_c'},
-                        'other': {'_id': 1, '_table': 'rep_tyso_c'},
-                        'title': 'e'}),
- ('safe', 'from_ids'): ({'never': ('TysuC', 1, 0, {'name': 'never-bound'}),
-                         'other': ('TysoC', None, 0, {'name': 'in-parent-db'}),
-                         'title': 'e'},
-                        ('ValueError', 'Related model must be saved before saving parent')),
- ('safe', 'refresh'): ({'never': ('TysuC', 1, 0, {'name': 'never-bound'}),
-                        'other': ('TysoC', 1, 0, {'name': 'in-child-db'}),
-                        'title': 'e'},
-                       {'never': {'_id': 1, '_table': 'rep_tysu_c'},
-                        'other': {'_id': 1, '_table': 'rep_tyso_c'},
-                        'title': 'e'})}
+
+
+ELSEWHERE_EXPECTED: dict = {
+    ("lite", "all"): (
+        {
+            "never": ("LtyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("LtyoC", 1, "-", {"name": "in-parent-db"}),
+            "title": "e",
+        },
+        {
+            "never": {"_id": 1, "_table": "rep_ltyu_c"},
+            "other": {"_id": 1, "_table": "rep_ltyo_c"},
+            "title": "e",
+        },
+    ),
+    ("lite", "first"): (
+        {
+            "never": ("LtyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("LtyoC", 1, "-", {"name": "in-parent-db"}),
+            "title": "e",
+        },
+        {
+            "never": {"_id": 1, "_table": "rep_ltyu_c"},
+            "other": {"_id": 1, "_table": "rep_ltyo_c"},
+            "title": "e",
+        },
+    ),
+    ("lite", "from_id"): (
+        {
+            "never": ("LtyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("LtyoC", 1, "-", {"name": "in-child-db"}),
+            "title": "e",
+        },
+        {
+            "never": {"_id": 1, "_table": "rep_ltyu_c"},
+            "other": {"_id": 1, "_table": "rep_ltyo_c"},
+            "title": "e",
+        },
+    ),
+    ("lite", "from_ids"): (
+        {
+            "never": ("LtyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("LtyoC", 1, "-", {"name": "in-parent-db"}),
+            "title": "e",
+        },
+        {
+            "never": {"_id": 1, "_table": "rep_ltyu_c"},
+            "other": {"_id": 1, "_table": "rep_ltyo_c"},
+            "title": "e",
+        },
+    ),
+    ("lite", "refresh"): (
+        {
+            "never": ("LtyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("LtyoC", 1, "-", {"name": "in-child-db"}),
+            "title": "e",
+        },
+        {
+            "never": {"_id": 1, "_table": "rep_ltyu_c"},
+            "other": {"_id": 1, "_table": "rep_ltyo_c"},
+            "title": "e",
+        },
+    ),
+    ("pydantic", "all"): (
+        {
+            "never": ("TyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("TyoC", None, "-", {"name": "in-parent-db"}),
+            "title": "e",
+        },
+        ("ValueError", "Related model must be saved before saving parent"),
+    ),
+    ("pydantic", "first"): (
+        {
+            "never": ("TyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("TyoC", None, "-", {"name": "in-parent-db"}),
+            "title": "e",
+        },
+        ("ValueError", "Related model must be saved before saving parent"),
+    ),
+    ("pydantic", "from_id"): (
+        {
+            "never": ("TyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("TyoC", 1, "-", {"name": "in-child-db"}),
+            "title": "e",
+        },
+        {
+            "never": {"_id": 1, "_table": "rep_tyu_c"},
+            "other": {"_id": 1, "_table": "rep_tyo_c"},
+            "title": "e",
+        },
+    ),
+    ("pydantic", "from_ids"): (
+        {
+            "never": ("TyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("TyoC", None, "-", {"name": "in-parent-db"}),
+            "title": "e",
+        },
+        ("ValueError", "Related model must be saved before saving parent"),
+    ),
+    ("pydantic", "refresh"): (
+        {
+            "never": ("TyuC", 1, "-", {"name": "never-bound"}),
+            "other": ("TyoC", 1, "-", {"name": "in-child-db"}),
+            "title": "e",
+        },
+        {
+            "never": {"_id": 1, "_table": "rep_tyu_c"},
+            "other": {"_id": 1, "_table": "rep_tyo_c"},
+            "title": "e",
+        },
+    ),
+    ("safe", "all"): (
+        {
+            "never": ("TysuC", 1, 0, {"name": "never-bound"}),
+            "other": ("TysoC", None, 0, {"name": "in-parent-db"}),
+            "title": "e",
+        },
+        ("ValueError", "Related model must be saved before saving parent"),
+    ),
+    ("safe", "first"): (
+        {
+            "never": ("TysuC", 1, 0, {"name": "never-bound"}),
+            "other": ("TysoC", None, 0, {"name": "in-parent-db"}),
+            "title": "e",
+        },
+        ("ValueError", "Related model must be saved before saving parent"),
+    ),
+    ("safe", "from_id"): (
+        {
+            "never": ("TysuC", 1, 0, {"name": "never-bound"}),
+            "other": ("TysoC", 1, 0, {"name": "in-child-db"}),
+            "title": "e",
+        },
+        {
+            "never": {"_id": 1, "_table": "rep_tysu_c"},
+            "other": {"_id": 1, "_table": "rep_tyso_c"},
+            "title": "e",
+        },
+    ),
+    ("safe", "from_ids"): (
+        {
+            "never": ("TysuC", 1, 0, {"name": "never-bound"}),
+            "other": ("TysoC", None, 0, {"name": "in-parent-db"}),
+            "title": "e",
+        },
+        ("ValueError", "Related model must be saved before saving parent"),
+    ),
+    ("safe", "refresh"): (
+        {
+            "never": ("TysuC", 1, 0, {"name": "never-bound"}),
+            "other": ("TysoC", 1, 0, {"name": "in-child-db"}),
+            "title": "e",
+        },
+        {
+            "never": {"_id": 1, "_table": "rep_tysu_c"},
+            "other": {"_id": 1, "_table": "rep_tyso_c"},
+            "title": "e",
+        },
+    ),
+}
 
 
 # ---- a batch read changes no schema -------------------------------------------------
@@ -1858,7 +1940,11 @@ def test_a_batch_read_adds_no_version_column_and_the_child_saves(make_db, way):
     before = _columns(db, NcC.__tablename__)
     got = BATCH[way](db)
     assert _columns(db, NcC.__tablename__) == before == ["_id", "data"]
-    assert (got.one._id, got.one._version, got.loose) == (1, 0, {"_table": NcC.__tablename__, "_id": 1})
+    assert (got.one._id, got.one._version, got.loose) == (
+        1,
+        0,
+        {"_table": NcC.__tablename__, "_id": 1},
+    )
     got.one.name = "c2"
     got.one.save(db=db)
     assert version_of(db, NcC.__tablename__, 1) == 1
@@ -1926,7 +2012,9 @@ def test_a_second_read_of_a_version_less_table_asks_the_table_once(make_db):
 def test_a_second_read_of_a_versioned_table_sends_no_pragma(make_db):
     db = make_db()
     NcC(name="c").save(db=db)
-    db.insert_document(NcP.__tablename__, {"name": "p", "one": {"_table": NcC.__tablename__, "_id": 1}})
+    db.insert_document(
+        NcP.__tablename__, {"name": "p", "one": {"_table": NcC.__tablename__, "_id": 1}}
+    )
     NcP.from_ids([1], db=db)
     with query_logger.capture() as sent:
         got = NcP.from_ids([1], db=db)[0]
@@ -1941,7 +2029,9 @@ def test_a_read_in_a_rolled_back_transaction_remembers_nothing(make_db):
     _plain_child_table(db)
     with pytest.raises(RuntimeError, match="undo"):
         with db.transaction():
-            db.adapter.execute(f'ALTER TABLE {NcC.__tablename__} ADD COLUMN _version INTEGER NOT NULL DEFAULT 3')
+            db.adapter.execute(
+                f"ALTER TABLE {NcC.__tablename__} ADD COLUMN _version INTEGER NOT NULL DEFAULT 3"
+            )
             assert NcP.from_ids([1], db=db)[0].one._version == 3
             raise RuntimeError("undo")
     db.adapter.execute(f"DROP TABLE {NcC.__tablename__}")
@@ -2315,8 +2405,16 @@ def test_a_long_chain_saves_model_by_model_and_the_rows_stay(graph, base, way):
         x = x.next
     after = raw_rows(db, node.__tablename__)
     if base in VERSIONED:  # a safe save writes the next version into the JSON as well
-        after = [(i, json.dumps({k: v for k, v in json.loads(d).items() if k != "_version"},
-                                separators=(",", ":"))) for i, d in after]
+        after = [
+            (
+                i,
+                json.dumps(
+                    {k: v for k, v in json.loads(d).items() if k != "_version"},
+                    separators=(",", ":"),
+                ),
+            )
+            for i, d in after
+        ]
         before = [(i, json.dumps(json.loads(d), separators=(",", ":"))) for i, d in before]
     assert after == before
     assert len(after) == 50
@@ -2435,8 +2533,10 @@ def test_a_cycle_saved_model_by_model_writes_the_rows_back_unchanged(graph, base
     k = load(node, first["list"], way)
     k.save()
     k.kids[0].save()
-    after = [(i, {kk: v for kk, v in json.loads(d).items() if kk != "_version"})
-             for i, d in raw_rows(db, t)]
+    after = [
+        (i, {kk: v for kk, v in json.loads(d).items() if kk != "_version"})
+        for i, d in raw_rows(db, t)
+    ]
     assert after == [(i, {kk: v for kk, v in d.items() if kk != "_version"}) for i, d in before]
     assert len(after) == 8
 
@@ -2476,11 +2576,13 @@ def test_a_before_validator_in_a_cycle_receives_the_row_objects(make_db, way):
     assert GV_SEEN[-2:] == ["GvNode", "GvNode"]
 
 
-@pytest.mark.parametrize(*all_pairs(
-    ("kind", ["required", "defaults"]),
-    ("way", ["resolve-false", "iter"]),
-    ("base", sorted(GRAPH)),
-))
+@pytest.mark.parametrize(
+    *all_pairs(
+        ("kind", ["required", "defaults"]),
+        ("way", ["resolve-false", "iter"]),
+        ("base", sorted(GRAPH)),
+    )
+)
 def test_a_reference_not_followed_is_the_stored_reference_and_saves_back(graph, base, way, kind):
     db, (node, req, *_) = graph(base)
     cls = req if kind == "required" else node
@@ -2502,8 +2604,16 @@ def test_a_reference_not_followed_is_the_stored_reference_and_saves_back(graph, 
     got.save()
     after = raw_rows(db, t)
     if base in VERSIONED:
-        after = [(i, json.dumps({k: v for k, v in json.loads(d).items() if k != "_version"},
-                                separators=(",", ":"))) for i, d in after]
+        after = [
+            (
+                i,
+                json.dumps(
+                    {k: v for k, v in json.loads(d).items() if k != "_version"},
+                    separators=(",", ":"),
+                ),
+            )
+            for i, d in after
+        ]
         before = [(i, json.dumps(json.loads(d), separators=(",", ":"))) for i, d in before]
     assert after == before
 
@@ -2516,11 +2626,13 @@ def _refused_by_its_own_from_id(bad: type, rid: int) -> type:
     raise AssertionError("the row loads by its own from_id")
 
 
-@pytest.mark.parametrize(*all_pairs(
-    ("where", ["field-depth-1", "list-depth-1", "field-depth-3", "list-depth-3"]),
-    ("base", sorted(GRAPH)),
-    ("way", TYPED_WAYS),
-))
+@pytest.mark.parametrize(
+    *all_pairs(
+        ("where", ["field-depth-1", "list-depth-1", "field-depth-3", "list-depth-3"]),
+        ("base", sorted(GRAPH)),
+        ("way", TYPED_WAYS),
+    )
+)
 def test_a_referenced_row_its_class_refuses_raises_with_a_note(graph, base, way, where):
     db, (node, _, _, _, bad) = graph(base)
     t, bt = node.__tablename__, bad.__tablename__
@@ -2713,10 +2825,7 @@ STATE_CLASSES = {
 # pydantic model and a frozen msgspec struct refuse before any reference is loaded.
 STATE_LEFT_OUT = {("pydantic-frozen", "refresh"), ("msgspec-frozen", "refresh")}
 STATE_WAYS = [
-    (kind, way)
-    for kind in STATE_CLASSES
-    for way in TYPED_WAYS
-    if (kind, way) not in STATE_LEFT_OUT
+    (kind, way) for kind in STATE_CLASSES for way in TYPED_WAYS if (kind, way) not in STATE_LEFT_OUT
 ]
 
 
@@ -2935,7 +3044,9 @@ def test_a_msgspec_object_that_holds_no_row_is_of_its_class_and_no_hook_ran_on_i
     known = list(MS_SUBCLASSED)
     one, two = _refs._blank(cls), _refs._blank(cls)
     assert (type(one), type(two), one is two) == (cls, cls, False)
-    assert [getattr(one, name) for name in cls.__struct_fields__] == [None] * len(cls.__struct_fields__)
+    assert [getattr(one, name) for name in cls.__struct_fields__] == [None] * len(
+        cls.__struct_fields__
+    )
     assert MS_READ == []
     assert MS_SUBCLASSED == known  # no ``__init_subclass__`` of the user's saw a class
     if cls is BkPlain:
@@ -3082,7 +3193,9 @@ OWN_WAY = {
 
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("kind", sorted(OWN_WAY))
-def test_a_class_that_builds_its_model_its_own_way_builds_a_row_in_a_cycle_that_way(make_db, kind, way):
+def test_a_class_that_builds_its_model_its_own_way_builds_a_row_in_a_cycle_that_way(
+    make_db, kind, way
+):
     """Rows stored with ``title`` load only through the class's own ``model_validate`` (or
     its validator): outside a cycle and inside one."""
     cls = OWN_WAY[kind]

@@ -86,7 +86,12 @@ class AsyncSQLerQuery(_Statements):
         """Async twin of :meth:`sqler.query.query.SQLerQuery._laid_out`."""
         db, table = self._db, self._table
         promoted, names, version = await db._shape_of(table)
-        if not version and self._include_version and self._use == "update" and await db._has_version_column(table) is False:
+        if (
+            not version
+            and self._include_version
+            and self._use == "update"
+            and await db._has_version_column(table) is False
+        ):
             await db._ensure_versioned_table(table)
             promoted, names, version = await db._shape_of(table)
         key: Any = (names, promoted, version)
@@ -96,7 +101,11 @@ class AsyncSQLerQuery(_Statements):
         laid = self._laid
         if laid is None or laid[0] != key:
             made = self._clone(
-                promoted_fields=promoted, include_version=version, db=None, guard=db._guard_of(table, names), names=names
+                promoted_fields=promoted,
+                include_version=version,
+                db=None,
+                guard=db._guard_of(table, names),
+                names=names,
             )
             if others:
                 made._expression, made._others = await self._related_laid_out()
@@ -114,7 +123,10 @@ class AsyncSQLerQuery(_Statements):
             used._db = db
             used = await used._laid_out()
             if part.table not in names:  # a table not remembered may be missing: it is read once
-                names[part.table] = (used._names, used._names is None and not (await db._names(part.table))[0])
+                names[part.table] = (
+                    used._names,
+                    used._names is None and not (await db._names(part.table))[0],
+                )
             laid[part] = (used._where()[0], names[part.table][1])
         return with_related(expression, laid), tuple((table, n) for table, (n, _) in names.items())
 
@@ -132,7 +144,9 @@ class AsyncSQLerQuery(_Statements):
                 cursor = await self._db._sent(self._table, make)
                 return used, cursor
             sql, params = build(self)
-            assert self._adapter is not None  # with no database behind the query its caller refused a query with no adapter
+            assert (
+                self._adapter is not None
+            )  # with no database behind the query its caller refused a query with no adapter
             try:
                 return self, await self._adapter._execute_judged(sql, params)
             except Exception as exc:
@@ -586,7 +600,9 @@ class AsyncSQLerQuery(_Statements):
                 rowcount = cur.rowcount
                 await cur.close()
                 return rowcount
-        _, cur = await (await self._updating())._execute(lambda q: q._update_sql(fields, *q._touched(), returning=False))
+        _, cur = await (await self._updating())._execute(
+            lambda q: q._update_sql(fields, *q._touched(), returning=False)
+        )
         if cur is None:
             return 0
         rowcount = cur.rowcount
@@ -634,13 +650,17 @@ class AsyncSQLerQuery(_Statements):
                 ids = await self._picked_ids(n)
                 if not ids:
                     return []
-                query, cur = await (await self._updating())._execute(lambda q: q._update_ids_sql(fields, ids))
+                query, cur = await (await self._updating())._execute(
+                    lambda q: q._update_ids_sql(fields, ids)
+                )
                 if cur is None:
                     return []
                 rows = await cur.fetchall()
                 await cur.close()
                 return [query._returned(row) for row in rows]
-        query, cur = await (await self._updating())._execute(lambda q: q._update_picked_sql(fields, n, op))
+        query, cur = await (await self._updating())._execute(
+            lambda q: q._update_picked_sql(fields, n, op)
+        )
         if cur is None:
             return []
         rows = await cur.fetchall()
@@ -655,7 +675,9 @@ class AsyncSQLerQuery(_Statements):
         if self._windowed():  # the caller's transaction holds the write lock
             query, rows = await (await self._updating())._picked_rows(n)
         else:
-            query, cur = await (await self._updating())._execute(lambda q: q._picked(n, q._returning()))
+            query, cur = await (await self._updating())._execute(
+                lambda q: q._picked(n, q._returning())
+            )
             rows = None
             if cur is not None:
                 rows = await cur.fetchall()

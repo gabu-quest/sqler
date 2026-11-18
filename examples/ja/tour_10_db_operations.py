@@ -91,7 +91,6 @@ def _(SQLerModel, db):
         name: str
         email: str
 
-
     # データを作成
     for _i in range(10):
         User(name=f"User{_i}", email=f"user{_i}@example.com").save(db=db)
@@ -247,7 +246,6 @@ def _(SQLerModel, db):
         _table = "products"
         name: str
         price: float
-
 
     # 多数の商品を作成
     for _i in range(25):
