@@ -395,7 +395,7 @@ class TestCreateIndexWhereRejectsInjection:
             db.create_index("items", "name", where=evil_where)
 
     def test_accepts_legit_partial_where(self, db):
-        # The documented use case from README.ja.md / docs/API.md must keep working
+        # The documented use case from docs/API.md must keep working
         db.create_index(
             "items",
             "name",
