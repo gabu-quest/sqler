@@ -1,8 +1,11 @@
 """Adversarial tests for SQL injection prevention (async adapter/query/db)."""
 
+from enum import IntEnum
+
 import pytest
 import pytest_asyncio
 
+from sqler import AsyncSQLerModel, AsyncSQLerQuery
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import (
     InvalidColumnDefError,
@@ -112,6 +115,106 @@ class TestAsyncUpdateRejectsInjection:
     async def test_update_one_rejects(self, aquery, evil):
         with pytest.raises(InvalidFieldNameError, match="Invalid field name"):
             await aquery.update_one(**{evil: "val"})
+
+
+UNION = "1 UNION SELECT 1, sqlite_version()"
+
+# (value, error, message): the twin of the sync file's list; async takes what sync takes.
+BAD_COUNTS = [
+    (UNION, TypeError, "takes a whole number, not str"),
+    ("5", TypeError, "takes a whole number, not str"),
+    ("1; DROP TABLE x", TypeError, "takes a whole number, not str"),
+    (5.0, TypeError, "takes a whole number, not float"),
+    (2.5, TypeError, "takes a whole number, not float"),
+    (True, TypeError, "takes a whole number, not bool"),
+    (None, TypeError, "takes a whole number, not NoneType"),
+    (-1, ValueError, "must be >= 0"),
+]
+BAD_IDS = ["union", "digit-str", "drop", "float-whole", "float", "bool", "none", "negative"]
+
+
+class Three(IntEnum):
+    THREE = 3
+
+
+@pytest_asyncio.fixture
+async def scored():
+    """Five items, ids 1 to 5, ``score`` 1 to 5."""
+    db = AsyncSQLerDB.in_memory(shared=False)
+    await db.connect()
+    for s in range(1, 6):
+        await db.insert_document("items", {"score": s})
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
+async def _scores(q) -> list[int]:
+    return [d["score"] for d in await q.all_dicts()]
+
+
+class _AItem(AsyncSQLerModel):
+    score: int = 0
+    __tablename__ = "items"
+
+
+class TestAsyncLimitAndOffsetTakeOnlyWholeNumbers:
+    @pytest.mark.parametrize("method", ["limit", "offset"])
+    @pytest.mark.parametrize("value,error,message", BAD_COUNTS, ids=BAD_IDS)
+    @pytest.mark.asyncio
+    async def test_a_query_refuses_at_the_call(self, aquery, method, value, error, message):
+        with pytest.raises(error, match=rf"^{method}(\(\) | ){message}$"):
+            getattr(aquery, method)(value)
+
+    @pytest.mark.parametrize("method", ["limit", "offset"])
+    @pytest.mark.parametrize("value,error,message", BAD_COUNTS, ids=BAD_IDS)
+    @pytest.mark.asyncio
+    async def test_a_model_queryset_refuses_at_the_call(self, scored, method, value, error, message):
+        with pytest.raises(error, match=rf"^{method}(\(\) | ){message}$"):
+            getattr(_AItem.using(scored), method)(value)
+
+    @pytest.mark.parametrize("arg", ["limit", "offset"])
+    @pytest.mark.asyncio
+    async def test_a_query_made_with_a_limit_or_an_offset_refuses_a_string(self, adb, arg):
+        with pytest.raises(TypeError, match=rf"^{arg}\(\) takes a whole number, not str$"):
+            AsyncSQLerQuery("items", adapter=adb.adapter, **{arg: UNION})
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda q: q.limit("1; DROP TABLE x").delete(),
+            lambda q: q.limit("1; DROP TABLE x").update(score=0),
+            lambda q: q.offset("1; DROP TABLE x").delete(),
+            lambda q: q.limit(2.5).delete(),
+            lambda q: q.limit(-1).update_n(2, score=0),
+        ],
+        ids=["limit-str-delete", "limit-str-update", "offset-str-delete", "limit-float-delete", "limit-negative-update-n"],
+    )
+    @pytest.mark.asyncio
+    async def test_a_write_is_refused_before_any_row_is_written(self, scored, write):
+        with pytest.raises((TypeError, ValueError), match=r"^(limit|offset)(\(\) takes a whole number| must be >= 0)"):
+            await write(_AItem.using(scored))
+        assert await _scores((await scored.query("items")).order_by("_id")) == [1, 2, 3, 4, 5]
+
+    @pytest.mark.asyncio
+    async def test_limit_zero_returns_no_row(self, scored):
+        assert await _scores((await scored.query("items")).limit(0)) == []
+
+    @pytest.mark.asyncio
+    async def test_offset_zero_skips_no_row(self, scored):
+        assert await _scores((await scored.query("items")).offset(0)) == [1, 2, 3, 4, 5]
+
+    @pytest.mark.asyncio
+    async def test_an_int_like_is_taken_as_its_int(self, scored):
+        items = await scored.query("items")
+        q = items.limit(Three.THREE).offset(Three.THREE)
+        assert (type(q._limit), type(q._offset), await _scores(items.limit(Three.THREE))) == (int, int, [1, 2, 3])
+        assert q.debug() == items.limit(3).offset(3).debug()
+
+    @pytest.mark.asyncio
+    async def test_the_sql_of_a_valid_limit_and_offset(self, aquery):
+        assert aquery.limit(5).offset(2).debug() == ("SELECT data FROM items LIMIT 5 OFFSET 2", [])
 
 
 class TestAsyncExecuteSqlRestriction:

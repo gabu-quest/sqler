@@ -1478,9 +1478,9 @@ async def test_delete_all_in_a_transaction_the_caller_rolls_back_leaves_both_tab
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
-async def test_delete_all_with_an_order_and_a_limit_deletes_and_looks_at_every_match(base):
-    """A ``DELETE`` takes the filter only, as it did: the limit and the order are not used,
-    and the look covers every row deleted."""
+async def test_delete_all_with_an_order_and_a_limit_deletes_and_looks_at_the_rows_all_returns(base):
+    """A ``DELETE`` of a query with an order and a limit takes the rows ``all()`` returns, and
+    the look at the rows that refer to them covers those rows and no other."""
     db = await open_db(base)
     try:
         Target, Referrer = pair(base)
@@ -1488,13 +1488,15 @@ async def test_delete_all_with_an_order_and_a_limit_deletes_and_looks_at_every_m
             await settle(Target(name=name).save(db=db))
         await settle(Referrer().save(db=db))
         await put(db, Referrer.__tablename__, 1, "$.target", ref(Target.__tablename__, 3))
-        q = Target.using(db).order_by("name").limit(1)
+        first = Target.using(db).order_by("name").limit(1)
+        last = Target.using(db).order_by("name", desc=True).limit(1)
 
-        with pytest.raises(ReferentialIntegrityError, match=r"^Cannot delete 3 rows of "):
-            await settle(q.delete_all())
-        assert await settle(q.delete_all(on_delete="set_null")) == 3
+        assert await settle(first.delete_all()) == 1  # a: nothing refers to it
+        with pytest.raises(ReferentialIntegrityError, match=rf"^Cannot delete {Target.__tablename__}:3; "):
+            await settle(last.delete_all())
+        assert await settle(last.delete_all(on_delete="set_null")) == 1
 
-        assert await holds(db, Target.__tablename__, "$.name") == []
+        assert await holds(db, Target.__tablename__, "$.name") == [(2, "b")]
         assert await holds(db, Referrer.__tablename__) == [(1, None)]
     finally:
         await settle(db.close())

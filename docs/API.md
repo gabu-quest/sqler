@@ -664,6 +664,14 @@ gives back model instances. The query it wraps is a `SQLerQuery`, or on the asyn
 `AsyncSQLerDB`): the same chain of `filter()`, `order_by()`, `limit()` and so on, but `all()` and
 `first()` return the stored JSON text of each row, and `all_dicts()` the parsed documents.
 
+`limit(n)` and `offset(n)`, on every query and queryset, sync and async, take a whole number,
+`0` or more: an `int`, or anything `operator.index()` takes (a numpy integer, an `IntEnum`),
+kept as a plain `int`. Anything else is refused at the call, before any SQL exists: a `bool`,
+a `str` (`"5"` too), a `float`, `None` or any other type raises `TypeError`
+(`limit() takes a whole number, not str`), a negative number `ValueError`
+(`limit must be >= 0`). Convert a request parameter with `int()` first. `limit(0)` returns no
+row, `offset(0)` skips none.
+
 ```python
 from sqler import SQLerDB, SQLerModel, SQLerExpression, SQLerQuerySet
 from sqler.query import SQLerField as F
@@ -696,8 +704,8 @@ print([u.name for u in qs.all()])  # ['Ada']
 `queryset.copy_to(table)` copies the rows `all()` would return into `table` as they are
 stored (the same `_id`, document, `_version` and promoted columns) in one
 `INSERT ... SELECT` inside the database, and returns how many it copied; the rows it read
-are unchanged. `queryset.delete(on_delete="restrict")` deletes every matching row and
-returns the count: it is `delete_all()` under this name, with the same policy ([C09]) and
+are unchanged. `queryset.delete(on_delete="restrict")` deletes the rows `all()` would return
+and returns the count: it is `delete_all()` under this name, with the same policy ([C09]) and
 unit. Together they move rows to an archive; inside `with db.transaction():` (`async with`
 on an `AsyncSQLerDB`) the copy and the delete both happen or, after an exception or a
 rollback, neither. Outside one, each is its own unit. The async querysets have both, awaited.
@@ -715,10 +723,18 @@ The target table:
   `UniqueConstraintError`, and nothing is copied; so does a row a unique index on the target
   refuses. A copy of a table that does not exist copies 0 rows and makes nothing.
 
-`copy_to()` and `delete()` refuse a query with a limit or an offset (`ValueError`, before any
-statement): both take every row the filter matches, so a copy and a delete of one query take
-the same rows. An `order_by()` changes nothing. `copy_to()` also refuses `select()` and
-`group_by()`: it copies whole rows. A cached query of the target's table drops its entries,
+`copy_to()`, `delete()`, `delete_all()`, `update()`, `update_n()` and `update_one()` take
+the rows `all()` on the same query returns, so a copy and a delete of one query take the same
+rows: every row the filter matches, or, with a limit or an offset, the rows `all()` returns
+for that query (`order_by("n").limit(3).delete()` deletes three rows; `update_n(n)` takes the
+first `n` of them). Such a write first sends the read's own statement, in one transaction with
+the write that takes the write lock before it, then writes those rows by id
+(`... WHERE _id IN (SELECT value FROM json_each(?))`), so no other connection changes them in
+between, and an update of the ordered field still changes the rows the old order picked.
+Without an `order_by()`, which rows those are is SQLite's choice, and so is the order of rows
+that tie on the order: give the query an order to pick specific rows. A query with no limit
+and no offset sends its own `WHERE`, as before; an order alone changes nothing. `copy_to()` refuses
+`select()` and `group_by()`: it copies whole rows. A cached query of the target's table drops its entries,
 and a search index on the target finds the copied rows (its triggers write them);
 `copy_to()` writes no audit row, sets no timestamp and calls no hook.
 
@@ -770,10 +786,9 @@ print([(j._id, j.title) for j in archive.order_by("title").all()])  # [(1, 'pain
 print([j.title for j in archive.filter(Job.ref("crew").field("name") == "Ada").all()])  # ['paint']
 print([j.title for j in Job.using(db).all()])  # ['sand']
 
-try:
-    Job.using(db).order_by("title").limit(1).delete()
-except ValueError as exc:
-    print(str(exc).split(":")[0])  # delete
+Job(title="tile").save(db=db)
+print(Job.using(db).order_by("title").limit(1).delete())  # 1: 'sand', the first by title
+print([j.title for j in Job.using(db).all()])  # ['tile']
 ```
 
 ---
@@ -1828,9 +1843,11 @@ A class with no rule sends the one statement it sent before. `delete_all(on_dele
 meets the delete policy as `delete()` does ([C09]): the default `restrict` refuses while a
 row outside the set refers to a row in it, and nothing is deleted. A class with no rule that
 no class can refer to sends its one `DELETE`; otherwise the `DELETE` returns the rows it
-deleted, and the look, the policy and the audit rows join it in one unit. A queryset's
-order and limit do not narrow the `DELETE` of `delete_all()`: it deletes every row the filter
-matches. `delete()` and `copy_to()` refuse a query with a limit or an offset.
+deleted, and the look, the policy and the audit rows join it in one unit. A queryset with a
+limit or an offset writes the rows `all()` on it returns, and only those: `update()`,
+`update_one()`, `update_n()` (the first `n` of them), `delete_all()`, `delete()` and
+`copy_to()`, and with them the policy's look and changes, the audit rows, the version moves
+and the search index.
 
 A write made with `db.*` directly (`db.bulk_upsert`, `db.insert_document`, `db.execute`) is
 below the model and meets no rule of any class.

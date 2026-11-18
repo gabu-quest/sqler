@@ -1,8 +1,10 @@
 """Adversarial tests for SQL injection prevention via field/identifier validation."""
 
+from enum import IntEnum
 
 import pytest
 
+from sqler import SQLerModel, SQLerQuery
 from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import (
     InvalidColumnDefError,
@@ -286,6 +288,98 @@ class TestUpdateRejectsFieldInjection:
     def test_update_one_rejects(self, query, evil):
         with pytest.raises(InvalidFieldNameError, match="Invalid field name"):
             query.update_one(**{evil: "val"})
+
+
+# ---------------------------------------------------------------------------
+# limit() and offset(): a whole number, 0 or more, checked at the call
+# ---------------------------------------------------------------------------
+
+UNION = "1 UNION SELECT 1, sqlite_version()"
+
+# (value, error, message): every value limit() and offset() refuse, and how.
+BAD_COUNTS = [
+    (UNION, TypeError, "takes a whole number, not str"),
+    ("5", TypeError, "takes a whole number, not str"),
+    ("1; DROP TABLE x", TypeError, "takes a whole number, not str"),
+    (5.0, TypeError, "takes a whole number, not float"),
+    (2.5, TypeError, "takes a whole number, not float"),
+    (True, TypeError, "takes a whole number, not bool"),
+    (None, TypeError, "takes a whole number, not NoneType"),
+    (-1, ValueError, "must be >= 0"),
+]
+BAD_IDS = ["union", "digit-str", "drop", "float-whole", "float", "bool", "none", "negative"]
+
+
+class Three(IntEnum):
+    THREE = 3
+
+
+@pytest.fixture
+def scored():
+    """Five items, ids 1 to 5, ``score`` 1 to 5."""
+    d = SQLerDB.in_memory(shared=False)
+    for s in range(1, 6):
+        d.insert_document("items", {"score": s})
+    yield d
+    d.close()
+
+
+def _scores(db, q) -> list[int]:
+    return [d["score"] for d in q.all_dicts()]
+
+
+class _Item(SQLerModel):
+    score: int = 0
+    __tablename__ = "items"
+
+
+class TestLimitAndOffsetTakeOnlyWholeNumbers:
+    @pytest.mark.parametrize("method", ["limit", "offset"])
+    @pytest.mark.parametrize("value,error,message", BAD_COUNTS, ids=BAD_IDS)
+    def test_a_query_refuses_at_the_call(self, query, method, value, error, message):
+        with pytest.raises(error, match=rf"^{method}(\(\) | ){message}$"):
+            getattr(query, method)(value)
+
+    @pytest.mark.parametrize("method", ["limit", "offset"])
+    @pytest.mark.parametrize("value,error,message", BAD_COUNTS, ids=BAD_IDS)
+    def test_a_model_queryset_refuses_at_the_call(self, scored, method, value, error, message):
+        with pytest.raises(error, match=rf"^{method}(\(\) | ){message}$"):
+            getattr(_Item.using(scored), method)(value)
+
+    @pytest.mark.parametrize("arg", ["limit", "offset"])
+    def test_a_query_made_with_a_limit_or_an_offset_refuses_a_string(self, db, arg):
+        with pytest.raises(TypeError, match=rf"^{arg}\(\) takes a whole number, not str$"):
+            SQLerQuery("items", adapter=db.adapter, **{arg: UNION})
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda q: q.limit("1; DROP TABLE x").delete(),
+            lambda q: q.limit("1; DROP TABLE x").update(score=0),
+            lambda q: q.offset("1; DROP TABLE x").delete(),
+            lambda q: q.limit(2.5).delete(),
+            lambda q: q.limit(-1).update_n(2, score=0),
+        ],
+        ids=["limit-str-delete", "limit-str-update", "offset-str-delete", "limit-float-delete", "limit-negative-update-n"],
+    )
+    def test_a_write_is_refused_before_any_row_is_written(self, scored, write):
+        with pytest.raises((TypeError, ValueError), match=r"^(limit|offset)(\(\) takes a whole number| must be >= 0)"):
+            write(_Item.using(scored))
+        assert _scores(scored, scored.query("items").order_by("_id")) == [1, 2, 3, 4, 5]
+
+    def test_limit_zero_returns_no_row(self, scored):
+        assert _scores(scored, scored.query("items").limit(0)) == []
+
+    def test_offset_zero_skips_no_row(self, scored):
+        assert _scores(scored, scored.query("items").offset(0)) == [1, 2, 3, 4, 5]
+
+    def test_an_int_like_is_taken_as_its_int(self, scored):
+        q = scored.query("items").limit(Three.THREE).offset(Three.THREE)
+        assert (type(q._limit), type(q._offset), _scores(scored, scored.query("items").limit(Three.THREE))) == (int, int, [1, 2, 3])
+        assert q.debug() == scored.query("items").limit(3).offset(3).debug()
+
+    def test_the_sql_of_a_valid_limit_and_offset(self, query):
+        assert query.limit(5).offset(2).debug() == ("SELECT data FROM items LIMIT 5 OFFSET 2", [])
 
 
 # ---------------------------------------------------------------------------

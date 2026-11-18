@@ -184,7 +184,9 @@ class SQLerQuerySet(Generic[T]):
         return self._checked("rows").paginate(page, per_page)
 
     def update(self, **fields) -> int:
-        """Update matching rows with the given field values.
+        """Update the rows :meth:`all` would return with the given field values: every match,
+        or, on a query with a limit or an offset, the rows that window picks in the query's
+        order, picked once before any is written.
 
         A set-based write meets the rules of the class as ``save()`` does, but for its
         hooks: on a versioned class each row's version moves; a class that stamps sets
@@ -238,7 +240,8 @@ class SQLerQuerySet(Generic[T]):
         return self._models(docs)
 
     def delete_all(self, on_delete: str = "restrict") -> int:
-        """Delete all matching rows (bulk delete).
+        """Delete the rows :meth:`all` would return (bulk delete): every match, or, on a query
+        with a limit or an offset, the rows that window picks in the query's order.
 
         Note: This is named delete_all to avoid confusion with model.delete().
         ``on_delete`` is what a row's ``delete_with_policy()`` takes, with the same default:
@@ -258,18 +261,12 @@ class SQLerQuerySet(Generic[T]):
         return len(self._written("rows", lambda q: [(doc, None) for doc in q._deleted()], on_delete))
 
     def delete(self, on_delete: str = "restrict") -> int:
-        """Delete every matching row: :meth:`delete_all`, with the same ``on_delete``, unit and
-        result, under the name a query's ``delete()`` has.
-
-        A query with a limit or an offset is refused with ``ValueError`` before any statement:
-        :meth:`copy_to` and ``delete()`` of one query take the same rows, every row the
-        filter matches (an order changes nothing). ``delete_all()`` still deletes every
-        match whatever the limit.
+        """Delete the rows :meth:`all` would return: :meth:`delete_all`, with the same
+        ``on_delete``, rows, unit and result, under the name a query's ``delete()`` has.
 
         Returns:
             int: Number of rows deleted.
         """
-        self._query._whole_rows("delete")
         return self.delete_all(on_delete)
 
     def copy_to(self, table: str) -> int:
@@ -281,8 +278,8 @@ class SQLerQuerySet(Generic[T]):
         columns, the class's ``__checks__``, ``_version`` where it has it); an existing one
         gets the promoted columns it lacks. Refused with ``ValueError`` before anything is
         written: the queryset's own table, a ``table`` with a promoted column this one has
-        not, or with ``_version`` where this one has not (or the reverse), a query with a
-        limit or an offset (see :meth:`delete`), ``select()`` or ``group_by()``, and a class
+        not, or with ``_version`` where this one has not (or the reverse), a query with
+        ``select()`` or ``group_by()``, and a class
         with a field that can refer to rows of this queryset's table (its own kind, through an
         ``Optional``, a list or a dict value): the copies would still refer to those rows,
         and a delete of them would count the copies as referrers. A row whose
