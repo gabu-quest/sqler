@@ -217,6 +217,18 @@ def _no_cursor() -> None:
     return None
 
 
+def _open_after_failure(db: sqlite3.Connection) -> Optional[bool]:
+    """In the connection's thread, after a call on ``db`` raised: whether SQLite counts a
+    transaction open there; None when ``db`` is closed. A call queued behind the close of its
+    connection runs on the closed handle (aiosqlite's thread runs every call queued before its
+    stop) and fails for that; the failure is what its sender sees, and nothing ran, so nothing
+    is counted, as a call that is never reached counts nothing."""
+    try:
+        return db.in_transaction
+    except sqlite3.ProgrammingError:  # "Cannot operate on a closed database."
+        return None
+
+
 class _InThread:
     """What the adapter queues on a connection's thread (``_in_thread``), named as the call it makes there."""
 
@@ -241,10 +253,12 @@ class _InThread:
                 raw = db.execute(sql, params)
             except sqlite3.OperationalError as exc:
                 raw = _through_lock(exc, adapter.timeout_ms, db.execute, sql, params, closed=adapter._closed_under(db))
-        finally:
+        except BaseException:
             if held is not None:
-                held._open = db.in_transaction
+                held._open = _open_after_failure(db)
+            raise
         if held is not None:
+            held._open = db.in_transaction
             held._raw = raw
         return raw
 
@@ -256,12 +270,15 @@ class _InThread:
         (the first row's statement meets it, before any row is written), an iterator raises at once."""
         try:
             try:
-                return db.executemany(sql, param_list)
+                raw = db.executemany(sql, param_list)
             except sqlite3.OperationalError as exc:
                 wait = adapter.timeout_ms if isinstance(param_list, (list, tuple)) else 0
-                return _through_lock(exc, wait, db.executemany, sql, param_list, closed=adapter._closed_under(db))
-        finally:
-            sent._open = db.in_transaction
+                raw = _through_lock(exc, wait, db.executemany, sql, param_list, closed=adapter._closed_under(db))
+        except BaseException:
+            sent._open = _open_after_failure(db)
+            raise
+        sent._open = db.in_transaction
+        return raw
 
     @staticmethod
     def set_up(db: sqlite3.Connection, pragma: str, adapter: "AsyncSQLiteAdapter") -> Optional[tuple]:
@@ -285,10 +302,14 @@ class _InThread:
     def fetch(db: sqlite3.Connection, cursor: "weakref.ref[_Cursor]", fetch, *args) -> Any:
         """Read a cursor's rows lazily (``fetch``: a method of its sqlite3 cursor), held weakly as in ``execute``."""
         try:
-            return fetch(*args)
-        finally:
+            rows = fetch(*args)
+        except BaseException:
             if (held := cursor()) is not None:
-                held._open = db.in_transaction
+                held._open = _open_after_failure(db)
+            raise
+        if (held := cursor()) is not None:
+            held._open = db.in_transaction
+        return rows
 
     @staticmethod
     def after(db: sqlite3.Connection) -> None:

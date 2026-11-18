@@ -2934,13 +2934,73 @@ async def test_a_statement_cancelled_after_its_connection_closed_leaves_no_wait_
     t = await make_db()
     await t.adapter.begin_transaction()
     conn = t.adapter._pinned()
-    sibling = asyncio.create_task(t.adapter.execute(INSERT, ["b"]))  # runs before the close is done
-    await conn.close()
-    sibling.cancel()  # in the step the close came back in: before the sibling sees its error
+    loop = asyncio.get_running_loop()
+    closed = asyncio.Event()
+    # each queues its call on the connection's thread in its first step, in this order, all in
+    # one turn of the loop: the close, a call that wakes this test, the sibling's statement
+    closing = asyncio.ensure_future(conn.close())
+    marking = asyncio.ensure_future(conn._execute(lambda: loop.call_soon_threadsafe(closed.set)))
+    sibling = asyncio.create_task(t.adapter.execute(INSERT, ["b"]))
+    # The thread hands its answers to the loop in order, so the task of the close runs its next
+    # step (the connection is gone) before this test wakes, and the sibling after: it has not run
+    # since it queued its statement. (Not in the step ``close()`` comes back in: aiosqlite 0.22
+    # waits there for every call queued before its stop, and the sibling has its error by then.)
+    await asyncio.wait_for(closed.wait(), BOUND_S)
+    sibling.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(sibling, BOUND_S)
+    assert t.adapter._task_lease.get().settling is None  # its wait ended in its first step
     with pytest.raises(ValueError, match="^no active connection$"):
         await asyncio.wait_for(t.adapter.execute(INSERT, ["c"]), BOUND_S)
+    await asyncio.wait_for(asyncio.gather(closing, marking), BOUND_S)
+
+
+async def _queued_behind_close(t: Traced, call) -> BaseException:
+    """``call()``'s coroutine started in a task that queues it behind the close of the transaction's
+    connection, closed directly on aiosqlite; the error it ends with."""
+    conn = t.adapter._pinned()
+    behind = asyncio.create_task(call())  # its first step runs while the close waits for its thread
+    await conn.close()
+    with pytest.raises(BaseException) as caught:
+        await asyncio.wait_for(behind, BOUND_S)
+    return caught.value
+
+
+@pytest.mark.asyncio
+async def test_a_statement_queued_behind_its_connections_close_ends_with_its_own_error(make_db):
+    """A sibling's statement queued behind the close of the transaction's connection runs on
+    the closed handle and ends with SQLite's error for that, raised by the statement itself:
+    none raised over it by the adapter's count of the transaction in the connection's thread."""
+    t = await make_db()
+    await t.adapter.begin_transaction()
+    error = await _queued_behind_close(t, lambda: t.adapter.execute(INSERT, ["b"]))
+    assert (type(error), str(error), error.__context__) == (
+        sqlite3.ProgrammingError, "Cannot operate on a closed database.", None
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_executemany_queued_behind_its_connections_close_ends_with_its_own_error(make_db):
+    """As for one statement: ``executemany`` queued behind the close ends with its own error."""
+    t = await make_db()
+    await t.adapter.begin_transaction()
+    error = await _queued_behind_close(t, lambda: t.adapter.executemany(INSERT, [["b"], ["c"]]))
+    assert (type(error), str(error), error.__context__) == (
+        sqlite3.ProgrammingError, "Cannot operate on a closed database.", None
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_read_queued_behind_its_connections_close_ends_with_its_own_error(make_db):
+    """A lazy read of a cursor's rows queued behind the close ends with its own error too."""
+    t = await make_db()
+    await t.adapter.begin_transaction()
+    await t.adapter.execute(INSERT, ["a"])
+    cursor = await t.adapter.execute("SELECT v FROM t")  # its rows are read lazily
+    error = await _queued_behind_close(t, cursor.fetchall)
+    assert (type(error), str(error), error.__context__) == (
+        sqlite3.ProgrammingError, "Cannot operate on a closed database.", None
+    )
 
 
 @pytest.mark.asyncio
