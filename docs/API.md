@@ -696,8 +696,8 @@ print([u.name for u in qs.all()])  # ['Ada']
 `queryset.copy_to(table)` copies the rows `all()` would return into `table` as they are
 stored (the same `_id`, document, `_version` and promoted columns) in one
 `INSERT ... SELECT` inside the database, and returns how many it copied; the rows it read
-are unchanged. `queryset.delete(on_delete="restrict")` deletes every matching row and
-returns the count: it is `delete_all()` under this name, with the same policy ([C09]) and
+are unchanged. `queryset.delete(on_delete="restrict")` deletes the rows `all()` would return
+and returns the count: it is `delete_all()` under this name, with the same policy ([C09]) and
 unit. Together they move rows to an archive; inside `with db.transaction():` (`async with`
 on an `AsyncSQLerDB`) the copy and the delete both happen or, after an exception or a
 rollback, neither. Outside one, each is its own unit. The async querysets have both, awaited.
@@ -715,10 +715,17 @@ The target table:
   `UniqueConstraintError`, and nothing is copied; so does a row a unique index on the target
   refuses. A copy of a table that does not exist copies 0 rows and makes nothing.
 
-`copy_to()` and `delete()` refuse a query with a limit or an offset (`ValueError`, before any
-statement): both take every row the filter matches, so a copy and a delete of one query take
-the same rows. An `order_by()` changes nothing. `copy_to()` also refuses `select()` and
-`group_by()`: it copies whole rows. A cached query of the target's table drops its entries,
+`copy_to()`, `delete()`, `delete_all()` and `update()` take exactly the rows `all()` on the
+same query returns, so a copy and a delete of one query take the same rows: every row the
+filter matches, or, with a limit or an offset, the rows that window picks in the query's
+order (`order_by("n").limit(3).delete()` deletes three rows). Such a query names its rows by
+id, `... WHERE _id IN (SELECT _id ... ORDER BY ... LIMIT n OFFSET k)`, the shape `update_n()`
+uses; SQLite picks them once, before any row is written, so an update of the ordered field
+still changes the rows the old order picked. A query with no limit and no offset sends its
+own `WHERE`, as before; an order alone changes nothing. Give the query an order that names
+one row at each place (ties broken by a unique field): rows that tie on the order may come in
+any order, so `all()` run alone and the write may pick different ones. `copy_to()` refuses
+`select()` and `group_by()`: it copies whole rows. A cached query of the target's table drops its entries,
 and a search index on the target finds the copied rows (its triggers write them);
 `copy_to()` writes no audit row, sets no timestamp and calls no hook.
 
@@ -770,10 +777,9 @@ print([(j._id, j.title) for j in archive.order_by("title").all()])  # [(1, 'pain
 print([j.title for j in archive.filter(Job.ref("crew").field("name") == "Ada").all()])  # ['paint']
 print([j.title for j in Job.using(db).all()])  # ['sand']
 
-try:
-    Job.using(db).order_by("title").limit(1).delete()
-except ValueError as exc:
-    print(str(exc).split(":")[0])  # delete
+Job(title="tile").save(db=db)
+print(Job.using(db).order_by("title").limit(1).delete())  # 1: 'sand', the first by title
+print([j.title for j in Job.using(db).all()])  # ['tile']
 ```
 
 ---
@@ -1828,9 +1834,11 @@ A class with no rule sends the one statement it sent before. `delete_all(on_dele
 meets the delete policy as `delete()` does ([C09]): the default `restrict` refuses while a
 row outside the set refers to a row in it, and nothing is deleted. A class with no rule that
 no class can refer to sends its one `DELETE`; otherwise the `DELETE` returns the rows it
-deleted, and the look, the policy and the audit rows join it in one unit. A queryset's
-order and limit do not narrow the `DELETE` of `delete_all()`: it deletes every row the filter
-matches. `delete()` and `copy_to()` refuse a query with a limit or an offset.
+deleted, and the look, the policy and the audit rows join it in one unit. A queryset with a
+limit or an offset writes the rows `all()` on it returns, and only those: `update()`,
+`update_one()`, `update_n()` (the first `n` of them), `delete_all()`, `delete()` and
+`copy_to()`, and with them the policy's look and changes, the audit rows, the version moves
+and the search index.
 
 A write made with `db.*` directly (`db.bulk_upsert`, `db.insert_document`, `db.execute`) is
 below the model and meets no rule of any class.

@@ -441,12 +441,33 @@ class _Statements:
             return self._on_columns(order)
         return ""
 
+    def _windowed(self) -> bool:
+        """Whether the query has a limit or an offset: then its rows are not every row its
+        filter matches (an order alone changes which come first, not which come)."""
+        return self._limit is not None or self._offset is not None
+
     def _picked(self, n: Optional[int], columns: str = "_id") -> tuple[str, list[Any]]:
-        """The SELECT of the rows an update changes: the first ``n`` in the query's order, or,
-        with no ``n``, every row the query matches."""
+        """The SELECT of the rows a write touches: the rows :meth:`all` returns (the filter,
+        and the order, limit and offset where the query has a limit or an offset), and with
+        ``n`` the first ``n`` of them."""
         where, params = self._where()
-        tail = "" if n is None else f"{self._order_clause()} LIMIT {int(n)}"
+        limit = self._limit if n is None else int(n) if self._limit is None else min(int(n), int(self._limit))
+        tail = ""
+        if limit is not None or self._offset is not None:
+            tail = f"{self._order_clause()} LIMIT {-1 if limit is None else int(limit)}"
+            if self._offset is not None:
+                tail += f" OFFSET {int(self._offset)}"
         return self._squeezed(f"SELECT {columns} FROM {self._table} {where} {tail}"), params
+
+    def _touched(self) -> tuple[str, list[Any]]:
+        """The WHERE of an ``UPDATE``, a ``DELETE`` or a copy: the rows :meth:`all` returns.
+        A query with a limit or an offset names them by id, ``WHERE _id IN (SELECT _id ...
+        ORDER BY ... LIMIT n OFFSET k)`` (:meth:`_picked`, which SQLite runs once, before any
+        row is written); any other query keeps its own WHERE, the statement it always sent."""
+        if not self._windowed():
+            return self._where()
+        picked, params = self._picked(None)
+        return f"WHERE _id IN ({picked})", params
 
     def _returning(self) -> str:
         """The columns a written row is read back with."""
@@ -490,41 +511,30 @@ class _Statements:
         )
 
     def _delete_sql(self, returning: bool = False) -> tuple[str, list[Any]]:
-        where, params = self._where()
+        """``DELETE`` of the rows :meth:`all` returns (:meth:`_touched`)."""
+        where, params = self._touched()
         sql = f"DELETE FROM {self._table} {where}"
         if returning:
             sql += f" RETURNING {self._returning()}"
         return self._squeezed(sql), params
 
-    def _whole_rows(self, call: str) -> None:
-        """Refuse, for ``call`` (``copy_to``, ``delete``), a query with a limit or an offset,
-        before any statement: a copy and a delete of one query must touch the same rows, and
-        a delete takes every row the filter matches (an order changes neither)."""
-        if self._limit is not None or self._offset is not None:
-            raise ValueError(
-                f"{call}: a query with a limit or an offset is refused: copy_to() and delete() "
-                "take every row the filter matches, so that a copy and a delete of one query "
-                "touch the same rows; narrow the rows with filter()"
-            )
-
     def _copy_target(self, table: str) -> str:
         """The checked target of :meth:`_copy_sql`, refused before any statement: a name
         sqler does not take for a table, the query's own table, and a query whose rows are not
-        whole rows or not every row its filter matches (:meth:`_whole_rows`)."""
+        whole rows."""
         target = validate_table_name(table)
         if target.lower() == self._table.lower():
             raise ValueError(f"copy_to: {target} is the table the query reads; copy to another table")
-        self._whole_rows("copy_to")
         for name, used in (("select()", self._select_fields), ("group_by()", self._group_by_fields or self._having)):
             if used:
                 raise ValueError(f"copy_to: a query with {name} is refused: it copies whole rows")
         return target
 
     def _copy_sql(self, target: str) -> tuple[str, list[Any]]:
-        """The one ``INSERT ... SELECT`` that copies the rows the query matches into the
-        checked ``target`` as they are stored: ``_id``, ``data``, ``_version`` where the
-        table has it, and every promoted column (:meth:`_returning`)."""
-        where, params = self._where()
+        """The one ``INSERT ... SELECT`` that copies the rows :meth:`all` returns
+        (:meth:`_touched`) into the checked ``target`` as they are stored: ``_id``, ``data``,
+        ``_version`` where the table has it, and every promoted column (:meth:`_returning`)."""
+        where, params = self._touched()
         columns = self._returning()
         return self._squeezed(f"INSERT INTO {target} ({columns}) SELECT {columns} FROM {self._table} {where}"), params
 
@@ -1188,7 +1198,10 @@ class SQLerQuery(_Statements):
             cur.close()
 
     def update(self, **fields) -> int:
-        """Update matching rows with the given field values.
+        """Update the rows :meth:`all` returns with the given field values: every match,
+        or, on a query with a limit or an offset, the rows that window picks in the query's
+        order (``UPDATE ... WHERE _id IN (SELECT _id ... LIMIT n OFFSET k)``, picked once
+        before any row is written).
 
         Supports F-expressions for atomic operations::
 
@@ -1208,7 +1221,7 @@ class SQLerQuery(_Statements):
             int: Number of rows updated.
         """
         self._write_checks(fields)
-        _, cur = self._updating()._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
+        _, cur = self._updating()._execute(lambda q: q._update_sql(fields, *q._touched(), returning=False))
         if cur is None:
             return 0
         assert self._adapter is not None  # _write_checks refused a query with no adapter
@@ -1235,7 +1248,7 @@ class SQLerQuery(_Statements):
         return rows[0] if rows else None
 
     def update_n(self, n: int, **fields) -> list[dict[str, Any]]:
-        """Atomically update up to *n* matching rows and return them.
+        """Atomically update the first *n* of the rows :meth:`all` returns and return them.
 
         Uses ``UPDATE ... WHERE _id IN (SELECT _id ... LIMIT n) RETURNING ...``
         for race-free batch claiming.
@@ -1279,7 +1292,9 @@ class SQLerQuery(_Statements):
         return [(doc, after[_id]) for _id, doc in before.items()]
 
     def delete(self) -> int:
-        """Delete all matching rows.
+        """Delete the rows :meth:`all` returns: every match, or, on a query with a limit or
+        an offset, the rows that window picks in the query's order (``DELETE ... WHERE _id
+        IN (SELECT _id ... LIMIT n OFFSET k)``).
 
         Raises:
             NoAdapterError: If the query has no adapter.

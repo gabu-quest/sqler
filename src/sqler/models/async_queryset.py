@@ -159,7 +159,8 @@ class AsyncSQLerQuerySet(Generic[T]):
         return await self._checked().distinct_values(field)
 
     async def update(self, **fields) -> int:
-        """Update matching rows with the given field values; the class's rules apply as in
+        """Update the rows :meth:`all` would return, as :meth:`SQLerQuerySet.update` takes
+        them, with the given field values; the class's rules apply as in
         :meth:`SQLerQuerySet.update` (version, stamps, audit rows; no hook is called).
 
         Args:
@@ -203,7 +204,8 @@ class AsyncSQLerQuerySet(Generic[T]):
         return self._models(docs)
 
     async def delete_all(self, on_delete: str = "restrict") -> int:
-        """Delete all matching rows (bulk delete).
+        """Delete the rows :meth:`all` would return (bulk delete), as
+        :meth:`SQLerQuerySet.delete_all` takes them.
 
         Note: This is named delete_all to avoid confusion with model.delete().
         ``on_delete`` and the unit are as :meth:`SQLerQuerySet.delete_all` has them. A
@@ -219,8 +221,7 @@ class AsyncSQLerQuerySet(Generic[T]):
 
     async def delete(self, on_delete: str = "restrict") -> int:
         """Async twin of :meth:`SQLerQuerySet.delete`: :meth:`delete_all` under the name a
-        query's ``delete()`` has; a limit or an offset is refused."""
-        self._query._whole_rows("delete")
+        query's ``delete()`` has."""
         return await self.delete_all(on_delete)
 
     async def copy_to(self, table: str) -> int:

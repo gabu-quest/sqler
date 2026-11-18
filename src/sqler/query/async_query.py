@@ -511,7 +511,10 @@ class AsyncSQLerQuery(_Statements):
         return res[0] if res else None
 
     async def update(self, **fields) -> int:
-        """Update matching rows with the given field values.
+        """Update the rows :meth:`all` returns with the given field values: every match,
+        or, on a query with a limit or an offset, the rows that window picks in the query's
+        order (``UPDATE ... WHERE _id IN (SELECT _id ... LIMIT n OFFSET k)``, picked once
+        before any row is written).
 
         Supports F-expressions for atomic operations::
 
@@ -527,7 +530,7 @@ class AsyncSQLerQuery(_Statements):
             int: Number of rows updated.
         """
         self._write_checks(fields)
-        _, cur = await (await self._updating())._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
+        _, cur = await (await self._updating())._execute(lambda q: q._update_sql(fields, *q._touched(), returning=False))
         if cur is None:
             return 0
         rowcount = cur.rowcount
@@ -552,7 +555,7 @@ class AsyncSQLerQuery(_Statements):
         return rows[0] if rows else None
 
     async def update_n(self, n: int, **fields) -> list[dict[str, Any]]:
-        """Atomically update up to *n* matching rows and return them.
+        """Atomically update the first *n* of the rows :meth:`all` returns and return them.
 
         Uses ``UPDATE ... WHERE _id IN (SELECT _id ... LIMIT n) RETURNING ...``
         for race-free batch claiming.
@@ -596,7 +599,9 @@ class AsyncSQLerQuery(_Statements):
         return [(doc, after[_id]) for _id, doc in before.items()]
 
     async def delete(self) -> int:
-        """Delete all matching rows.
+        """Delete the rows :meth:`all` returns: every match, or, on a query with a limit or
+        an offset, the rows that window picks in the query's order (``DELETE ... WHERE _id
+        IN (SELECT _id ... LIMIT n OFFSET k)``).
 
         Returns:
             int: Number of rows deleted.
