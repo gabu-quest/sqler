@@ -49,6 +49,10 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check .
 
+      - name: Type check (mypy)
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run mypy
+
       - name: Run unit tests (perf excluded)
         env:
           PYTHONUTF8: "1"
