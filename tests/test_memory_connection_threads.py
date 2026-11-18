@@ -1582,4 +1582,4 @@ def test_an_exception_at_any_line_of_an_outermost_rollback_leaves_no_transaction
         if not fired:
             break
         landed.extend(fired)
-    assert (len(landed), line) == ({"memory": 13, "file": 12}[place], len(landed))
+    assert (len(landed), line) == ({"memory": 15, "file": 14}[place], len(landed))
