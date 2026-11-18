@@ -664,6 +664,14 @@ gives back model instances. The query it wraps is a `SQLerQuery`, or on the asyn
 `AsyncSQLerDB`): the same chain of `filter()`, `order_by()`, `limit()` and so on, but `all()` and
 `first()` return the stored JSON text of each row, and `all_dicts()` the parsed documents.
 
+`limit(n)` and `offset(n)`, on every query and queryset, sync and async, take a whole number,
+`0` or more: an `int`, or anything `operator.index()` takes (a numpy integer, an `IntEnum`),
+kept as a plain `int`. Anything else is refused at the call, before any SQL exists: a `bool`,
+a `str` (`"5"` too), a `float`, `None` or any other type raises `TypeError`
+(`limit() takes a whole number, not str`), a negative number `ValueError`
+(`limit must be >= 0`). Convert a request parameter with `int()` first. `limit(0)` returns no
+row, `offset(0)` skips none.
+
 ```python
 from sqler import SQLerDB, SQLerModel, SQLerExpression, SQLerQuerySet
 from sqler.query import SQLerField as F
@@ -715,16 +723,17 @@ The target table:
   `UniqueConstraintError`, and nothing is copied; so does a row a unique index on the target
   refuses. A copy of a table that does not exist copies 0 rows and makes nothing.
 
-`copy_to()`, `delete()`, `delete_all()` and `update()` take exactly the rows `all()` on the
-same query returns, so a copy and a delete of one query take the same rows: every row the
-filter matches, or, with a limit or an offset, the rows that window picks in the query's
-order (`order_by("n").limit(3).delete()` deletes three rows). Such a query names its rows by
-id, `... WHERE _id IN (SELECT _id ... ORDER BY ... LIMIT n OFFSET k)`, the shape `update_n()`
-uses; SQLite picks them once, before any row is written, so an update of the ordered field
-still changes the rows the old order picked. A query with no limit and no offset sends its
-own `WHERE`, as before; an order alone changes nothing. Give the query an order that names
-one row at each place (ties broken by a unique field): rows that tie on the order may come in
-any order, so `all()` run alone and the write may pick different ones. `copy_to()` refuses
+`copy_to()`, `delete()`, `delete_all()`, `update()`, `update_n()` and `update_one()` take
+the rows `all()` on the same query returns, so a copy and a delete of one query take the same
+rows: every row the filter matches, or, with a limit or an offset, the rows `all()` returns
+for that query (`order_by("n").limit(3).delete()` deletes three rows; `update_n(n)` takes the
+first `n` of them). Such a write first sends the read's own statement, in one transaction with
+the write that takes the write lock before it, then writes those rows by id
+(`... WHERE _id IN (SELECT value FROM json_each(?))`), so no other connection changes them in
+between, and an update of the ordered field still changes the rows the old order picked.
+Without an `order_by()`, which rows those are is SQLite's choice, and so is the order of rows
+that tie on the order: give the query an order to pick specific rows. A query with no limit
+and no offset sends its own `WHERE`, as before; an order alone changes nothing. `copy_to()` refuses
 `select()` and `group_by()`: it copies whole rows. A cached query of the target's table drops its entries,
 and a search index on the target finds the copied rows (its triggers write them);
 `copy_to()` writes no audit row, sets no timestamp and calls no hook.

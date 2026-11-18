@@ -1,5 +1,7 @@
+import contextlib
 import functools
 import json
+import operator
 import re
 import sqlite3
 from typing import TYPE_CHECKING, Any, Iterator, NoReturn, Optional, Self
@@ -126,6 +128,24 @@ async def aend_failed(adapter: Any, exc: Exception, table: str, sql: str) -> NoR
     if not is_missing_read(exc, table, sql):
         await adapter._end_failed_statement(exc)
     raise exc
+
+
+def whole_number(n: Any, method: str) -> int:
+    """``n`` as a plain ``int``, the one check of what :meth:`SQLerQuery.limit`,
+    :meth:`SQLerQuery.offset` and their async twins take: a whole number
+    (``operator.index(n)`` works: an ``int``, a numpy int, an ``IntEnum``), not negative.
+    Anything else is refused before any SQL exists, since the value is written into the
+    statement's text: ``TypeError`` for a ``bool``, a ``str`` (``"5"`` too), a ``float``,
+    ``None`` or any other type, ``ValueError`` for a negative number."""
+    if isinstance(n, bool):
+        raise TypeError(f"{method}() takes a whole number, not bool")
+    try:
+        value = operator.index(n)
+    except TypeError:
+        raise TypeError(f"{method}() takes a whole number, not {type(n).__name__}") from None
+    if value < 0:
+        raise ValueError(f"{method} must be >= 0")
+    return value
 
 
 class QueryError(Exception):
@@ -378,17 +398,22 @@ class _Statements:
         """Return (sql, params) for debugging."""
         return self._build_query()
 
-    def _write_checks(self, fields: dict, n: Optional[int] = None) -> None:
-        """The refusals of an update, before any statement is sent."""
+    def _write_checks(self, fields: dict, n: Optional[int] = None) -> Optional[int]:
+        """The refusals of an update, before any statement is sent; ``n`` (``update_n()``'s,
+        written into the statement's text) as the plain ``int`` the statement takes
+        (:func:`whole_number`: ``TypeError`` for a ``str``, a ``float``, a ``bool``)."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
         if not fields:
             raise ValueError("No fields to update")
-        if n is not None and n < 1:
-            raise ValueError("n must be >= 1")
+        if n is not None:
+            n = whole_number(n, "update_n")
+            if n < 1:
+                raise ValueError("n must be >= 1")
         for key in fields:
             validate_field_name(key)
         self._refuse_version(fields)  # a query that is versioned whatever its table has: before the table is touched
+        return n
 
     def _refuse_version(self, fields: dict) -> None:
         """An update of a versioned row moves its version and takes no value for it."""
@@ -447,27 +472,33 @@ class _Statements:
         return self._limit is not None or self._offset is not None
 
     def _picked(self, n: Optional[int], columns: str = "_id") -> tuple[str, list[Any]]:
-        """The SELECT of the rows a write touches: the rows :meth:`all` returns (the filter,
-        and the order, limit and offset where the query has a limit or an offset), and with
-        ``n`` the first ``n`` of them."""
+        """The SELECT of the rows of a query with no limit and no offset (every match), with
+        ``n`` the first ``n`` of them in the query's order (``update_n()``, ``update_one()``).
+        A query with a limit or an offset has its rows picked by its read's own statement
+        instead (``_picked_rows`` of each query class)."""
+        self._unwindowed()
         where, params = self._where()
-        limit = self._limit if n is None else int(n) if self._limit is None else min(int(n), int(self._limit))
-        tail = ""
-        if limit is not None or self._offset is not None:
-            tail = f"{self._order_clause()} LIMIT {-1 if limit is None else int(limit)}"
-            if self._offset is not None:
-                tail += f" OFFSET {int(self._offset)}"
+        tail = "" if n is None else f"{self._order_clause()} LIMIT {n}"
         return self._squeezed(f"SELECT {columns} FROM {self._table} {where} {tail}"), params
 
-    def _touched(self) -> tuple[str, list[Any]]:
+    def _unwindowed(self) -> None:
+        """Refuse a statement that names the rows by the filter alone on a query with a limit
+        or an offset: it would write every row the filter matches, not the rows :meth:`all`
+        returns."""
+        if self._windowed():
+            raise AssertionError("a query with a limit or an offset writes the ids its read picked")
+
+    def _touched(self, ids: Optional[list] = None) -> tuple[str, list[Any]]:
         """The WHERE of an ``UPDATE``, a ``DELETE`` or a copy: the rows :meth:`all` returns.
-        A query with a limit or an offset names them by id, ``WHERE _id IN (SELECT _id ...
-        ORDER BY ... LIMIT n OFFSET k)`` (:meth:`_picked`, which SQLite runs once, before any
-        row is written); any other query keeps its own WHERE, the statement it always sent."""
-        if not self._windowed():
+        A query with a limit or an offset names them by id: ``ids``, the ids its read's own
+        statement returned in the same transaction (``_picked_rows`` of each query class),
+        bound as one JSON array (no limit on the number of SQL variables is met). Any other
+        query keeps its own WHERE, the statement it always sent."""
+        if ids is None:
+            self._unwindowed()
             return self._where()
-        picked, params = self._picked(None)
-        return f"WHERE _id IN ({picked})", params
+        guard = f" AND {self._guard}" if self._guard else ""
+        return f"WHERE _id IN (SELECT value FROM json_each(?)){guard}", [json.dumps(ids)]
 
     def _returning(self) -> str:
         """The columns a written row is read back with."""
@@ -505,14 +536,11 @@ class _Statements:
 
     def _update_ids_sql(self, fields: dict, ids: list) -> tuple[str, list[Any]]:
         """``UPDATE`` of exactly the rows ``ids``, returning them."""
-        guard = f" AND {self._guard}" if self._guard else ""
-        return self._update_sql(
-            fields, f"WHERE _id IN (SELECT value FROM json_each(?)){guard}", [json.dumps(ids)], True
-        )
+        return self._update_sql(fields, *self._touched(ids), returning=True)
 
-    def _delete_sql(self, returning: bool = False) -> tuple[str, list[Any]]:
-        """``DELETE`` of the rows :meth:`all` returns (:meth:`_touched`)."""
-        where, params = self._touched()
+    def _delete_sql(self, returning: bool = False, ids: Optional[list] = None) -> tuple[str, list[Any]]:
+        """``DELETE`` of the rows :meth:`all` returns (:meth:`_touched`, ``ids`` as it takes them)."""
+        where, params = self._touched(ids)
         sql = f"DELETE FROM {self._table} {where}"
         if returning:
             sql += f" RETURNING {self._returning()}"
@@ -530,11 +558,12 @@ class _Statements:
                 raise ValueError(f"copy_to: a query with {name} is refused: it copies whole rows")
         return target
 
-    def _copy_sql(self, target: str) -> tuple[str, list[Any]]:
+    def _copy_sql(self, target: str, ids: Optional[list] = None) -> tuple[str, list[Any]]:
         """The one ``INSERT ... SELECT`` that copies the rows :meth:`all` returns
-        (:meth:`_touched`) into the checked ``target`` as they are stored: ``_id``, ``data``,
-        ``_version`` where the table has it, and every promoted column (:meth:`_returning`)."""
-        where, params = self._touched()
+        (:meth:`_touched`, ``ids`` as it takes them) into the checked ``target`` as they are
+        stored: ``_id``, ``data``, ``_version`` where the table has it, and every promoted
+        column (:meth:`_returning`)."""
+        where, params = self._touched(ids)
         columns = self._returning()
         return self._squeezed(f"INSERT INTO {target} ({columns}) SELECT {columns} FROM {self._table} {where}"), params
 
@@ -571,8 +600,9 @@ class SQLerQuery(_Statements):
         self._expression = expression
         self._order = order
         self._desc = desc
-        self._limit = limit
-        self._offset = offset
+        # written into the SQL text: checked as limit() and offset() check them (whole_number)
+        self._limit = None if limit is None else whole_number(limit, "limit")
+        self._offset = None if offset is None else whole_number(offset, "offset")
         self._include_version = include_version
         self._select_fields = select_fields
         self._distinct = distinct
@@ -696,6 +726,47 @@ class SQLerQuery(_Statements):
         names = tuple(row[0] for row in self._adapter.execute(_NAMES_SQL, [self._table]).fetchall())
         return self._clone(include_version=True) if _has_version(names) else self
 
+    @contextlib.contextmanager
+    def _held(self) -> Iterator[None]:
+        """One unit that holds the write lock from its start, for a write that picks its rows
+        with one statement and writes them with another: the database's own
+        ``transaction()`` where one is behind the query, else the adapter's
+        (``begin_transaction``). Each begins with ``BEGIN IMMEDIATE``, which waits for the
+        lock (busy_timeout); inside a transaction already open it is a savepoint, and the lock
+        is held since that transaction's ``BEGIN``. So no other connection writes a row
+        between the pick and the write."""
+        if self._db is not None:
+            with self._db.transaction():
+                yield
+            return
+        from sqler.db.sqler_db import _end_transaction
+
+        adapter = self._adapter
+        assert adapter is not None  # each caller refused a query with no adapter
+        adapter.begin_transaction()
+        try:
+            yield
+        except BaseException as exc:
+            _end_transaction(adapter, False, exc)
+            raise
+        adapter.end_transaction(commit=True)
+
+    def _picked_rows(self, n: Optional[int] = None) -> tuple[Self, Optional[list[tuple]]]:
+        """The rows :meth:`all` returns (the first ``n`` with ``n``), read by sending the read's
+        own statement, ``_build_query(include_id=True)`` (the one ``all_dicts()``, iteration and
+        a queryset's ``all()`` send): the same text, parameters and data, so the same plan and
+        the same rows, ties under an ``order_by`` too, with no tie-breaker added; with the
+        query they were read by (its columns are :meth:`_returning`'s). ``None`` when the
+        table is missing. Run it inside :meth:`_held` or the caller's transaction, so the
+        write lock is held before the pick."""
+        query, cur = self._execute(lambda q: q._build_query(include_id=True))
+        if cur is None:
+            return query, None
+        try:
+            return query, cur.fetchall() if n is None else cur.fetchmany(n)
+        finally:
+            cur.close()
+
     def _rows(self, *, include_id: bool = False) -> list[tuple]:
         """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
         if self._adapter is None:
@@ -801,23 +872,31 @@ class SQLerQuery(_Statements):
         """Return a new query with a LIMIT clause.
 
         Args:
-            n: Maximum number of rows to return.
+            n: Maximum number of rows to return: a whole number, ``0`` or more.
 
         Returns:
             SQLerQuery: New query instance.
+
+        Raises:
+            TypeError: ``n`` is not a whole number (a ``bool``, ``str``, ``float``, ``None``).
+            ValueError: ``n`` is negative.
         """
-        return self._clone(limit=n)
+        return self._clone(limit=whole_number(n, "limit"))
 
     def offset(self, n: int) -> Self:
         """Return a new query with an OFFSET clause.
 
         Args:
-            n: Number of rows to skip.
+            n: Number of rows to skip: a whole number, ``0`` or more.
 
         Returns:
             SQLerQuery: New query instance.
+
+        Raises:
+            TypeError: ``n`` is not a whole number (a ``bool``, ``str``, ``float``, ``None``).
+            ValueError: ``n`` is negative.
         """
-        return self._clone(offset=n)
+        return self._clone(offset=whole_number(n, "offset"))
 
     def select(self, *fields: str) -> Self:
         """Return a new query that only retrieves specified fields.
@@ -1199,9 +1278,9 @@ class SQLerQuery(_Statements):
 
     def update(self, **fields) -> int:
         """Update the rows :meth:`all` returns with the given field values: every match,
-        or, on a query with a limit or an offset, the rows that window picks in the query's
-        order (``UPDATE ... WHERE _id IN (SELECT _id ... LIMIT n OFFSET k)``, picked once
-        before any row is written).
+        or, on a query with a limit or an offset, the rows the read's own statement returns,
+        read in one transaction with the write after the write lock is taken, then written
+        by id (``UPDATE ... WHERE _id IN (SELECT value FROM json_each(?))``).
 
         Supports F-expressions for atomic operations::
 
@@ -1221,6 +1300,13 @@ class SQLerQuery(_Statements):
             int: Number of rows updated.
         """
         self._write_checks(fields)
+        if self._windowed():
+            with self._held():
+                ids = self._picked_ids()
+                if not ids:
+                    return 0
+                _, cur = self._updating()._execute(lambda q: q._update_sql(fields, *q._touched(ids), returning=False))
+                return 0 if cur is None else cur.rowcount
         _, cur = self._updating()._execute(lambda q: q._update_sql(fields, *q._touched(), returning=False))
         if cur is None:
             return 0
@@ -1263,7 +1349,16 @@ class SQLerQuery(_Statements):
         return self._update_picked(fields, n, "IN")
 
     def _update_picked(self, fields: dict, n: int, op: str) -> list[dict[str, Any]]:
-        self._write_checks(fields, n)
+        checked = self._write_checks(fields, n)
+        assert checked is not None  # n was given
+        n = checked
+        if self._windowed():
+            with self._held():
+                ids = self._picked_ids(n)
+                if not ids:
+                    return []
+                query, cur = self._updating()._execute(lambda q: q._update_ids_sql(fields, ids))
+                return [] if cur is None else [query._returned(row) for row in cur.fetchall()]
         query, cur = self._updating()._execute(lambda q: q._update_picked_sql(fields, n, op))
         if cur is None:
             return []
@@ -1279,11 +1374,15 @@ class SQLerQuery(_Statements):
         The rows are read, then exactly those are written: run it inside a transaction, so
         that no other connection writes a row between its read and its write.
         """
-        self._write_checks(fields, n)
-        query, cur = self._updating()._execute(lambda q: q._picked(n, q._returning()))
-        if cur is None:
+        n = self._write_checks(fields, n)
+        if self._windowed():  # the caller's transaction holds the write lock
+            query, rows = self._updating()._picked_rows(n)
+        else:
+            query, cur = self._updating()._execute(lambda q: q._picked(n, q._returning()))
+            rows = None if cur is None else cur.fetchall()
+        if rows is None:
             return []
-        before = {doc["_id"]: doc for doc in map(query._returned, cur.fetchall())}
+        before = {doc["_id"]: doc for doc in map(query._returned, rows)}
         if not before:
             return []
         assert self._adapter is not None  # _write_checks refused a query with no adapter
@@ -1293,8 +1392,9 @@ class SQLerQuery(_Statements):
 
     def delete(self) -> int:
         """Delete the rows :meth:`all` returns: every match, or, on a query with a limit or
-        an offset, the rows that window picks in the query's order (``DELETE ... WHERE _id
-        IN (SELECT _id ... LIMIT n OFFSET k)``).
+        an offset, the rows the read's own statement returns, read in one transaction with
+        the delete after the write lock is taken, then deleted by id (``DELETE ... WHERE _id
+        IN (SELECT value FROM json_each(?))``).
 
         Raises:
             NoAdapterError: If the query has no adapter.
@@ -1304,6 +1404,13 @@ class SQLerQuery(_Statements):
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._windowed():
+            with self._held():
+                ids = self._picked_ids()
+                if not ids:
+                    return 0
+                _, cur = self._execute(lambda q: q._delete_sql(ids=ids))
+                return 0 if cur is None else cur.rowcount
         _, cur = self._execute(lambda q: q._delete_sql())
         if cur is None:
             return 0
@@ -1315,7 +1422,10 @@ class SQLerQuery(_Statements):
         transaction)."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        query, cur = self._execute(lambda q: q._delete_sql(returning=True))
+        ids = self._picked_ids()
+        if ids == []:
+            return []
+        query, cur = self._execute(lambda q: q._delete_sql(returning=True, ids=ids))
         return [] if cur is None else [query._returned(row) for row in cur.fetchall()]
 
     def _copied(self, target: str) -> int:
@@ -1324,8 +1434,21 @@ class SQLerQuery(_Statements):
         transaction."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        _, cur = self._execute(lambda q: q._copy_sql(target))
+        ids = self._picked_ids()
+        if ids == []:
+            return 0
+        _, cur = self._execute(lambda q: q._copy_sql(target, ids))
         return 0 if cur is None else cur.rowcount
+
+    def _picked_ids(self, n: Optional[int] = None) -> Optional[list]:
+        """For a write inside the caller's transaction (which holds the write lock): the ids
+        of the rows :meth:`all` returns (the first ``n``) on a query with a limit or an offset
+        (:meth:`_picked_rows`), ``[]`` for none or a missing table; ``None`` for any other
+        query, whose write names its rows by its own WHERE."""
+        if not self._windowed():
+            return None
+        _, rows = self._picked_rows(n)
+        return [row[0] for row in rows or []]
 
 
 class PaginatedResult:

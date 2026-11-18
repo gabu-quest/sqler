@@ -16,6 +16,7 @@ The fixture rows (``_seed``): five jobs ``n`` 0 to 4, ``tag`` ``t<n>``, ``done``
 import asyncio
 import inspect
 import itertools
+import sqlite3
 import types
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -974,5 +975,202 @@ async def test_update_n_and_update_one_pick_among_the_rows_all_returns(kind):
         many = await _v(_window(cls.using(db)).update_n(5, tag="x"))
         one = await _v(_window(cls.using(db)).update_one(tag="y"))
         assert (sorted(m._id for m in many), one._id) == ([3, 4], 4)
+    finally:
+        await _close(db)
+
+
+# ----- a limited write touches the rows all() returns: it picks them with the read's statement
+#
+# ``_aged`` rows, ids 1 to 5: ``age`` 50, 10, 40, 20, 30 (promoted, with an index), ``grp``
+# 1, 0, 1, 0, 1 (a JSON field). With no ``order_by`` a bare ``SELECT _id ... LIMIT 2`` reads
+# the covering index on ``age`` and picks ids 2 and 4, while ``all()`` reads the table and
+# returns ids 1 and 2: a write with a limit or an offset runs the read's own statement and
+# writes the ids it returned. No tie-breaker is added: the order of ties (``ties-asc``,
+# ``ties-desc``) is SQLite's, the same for the read and the write.
+
+AGES = [50, 10, 40, 20, 30]
+
+
+async def _aged(kind: str, db) -> type:
+    cls = _model(
+        kind,
+        {"age": (int, 0), "grp": (int, 0), "tag": (str, "")},
+        table="ct_aged",
+        extra={"__promoted__": {"age": "INTEGER NOT NULL DEFAULT 0"}},
+    )
+    for i, age in enumerate(AGES):
+        await _v(cls(age=age, grp=1 - i % 2, tag=f"t{i}").save(db=db))
+    await _v(cls.ensure_index("age", db=db))
+    return cls
+
+
+async def _aged_state(cls, db) -> dict[int, tuple]:
+    return {m._id: (m.age, m.grp, m.tag) for m in await _v(cls.using(db).all())}
+
+
+_LIMITED = [
+    (lambda q: q.limit(2), [1, 2]),
+    (lambda q: q.offset(3), [4, 5]),
+    (lambda q: q.limit(2).offset(1), [2, 3]),
+    (lambda q: q.order_by("grp").limit(3), [2, 4, 1]),
+    (lambda q: q.order_by("grp", desc=True).limit(2), [1, 3]),
+    (lambda q: q.order_by("grp", "-age").limit(3), [4, 2, 1]),
+]
+_LIMITED_IDS = ["limit", "offset-no-limit", "limit-offset", "ties-asc", "ties-desc", "two-terms"]
+
+
+@pytest.mark.parametrize("call", ["all", "delete", "update", "copy_to", "update_n"])
+@pytest.mark.parametrize("shape,expected", _LIMITED, ids=_LIMITED_IDS)
+@pytest.mark.parametrize("kind", PYDANTIC)
+@pytest.mark.asyncio
+async def test_a_limited_query_reads_and_writes_the_same_rows(kind, shape, expected, call):
+    db = await _db(kind)
+    try:
+        cls = await _aged(kind, db)
+        q = shape(cls.using(db))
+        before = await _aged_state(cls, db)
+        if call == "all":
+            got = [m._id for m in await _v(q.all())]
+        elif call == "copy_to":
+            await _v(q.copy_to("ct_aged_copy"))
+            got = sorted(m._id for m in await _v(cls.using(db, "ct_aged_copy").all()))
+        elif call == "update_n":
+            got = sorted(m._id for m in await _v(q.update_n(5, tag="x")))
+            assert _touched(before, await _aged_state(cls, db)) == got
+        else:
+            await _v(q.update(tag="x") if call == "update" else q.delete())
+            got = _touched(before, await _aged_state(cls, db))
+        assert got == (expected if call == "all" else sorted(expected))
+    finally:
+        await _close(db)
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("shape,expected", _LIMITED, ids=_LIMITED_IDS)
+@pytest.mark.asyncio
+async def test_a_plain_query_with_a_limit_reads_and_deletes_the_same_rows(is_async, shape, expected):
+    kind = "async-pydantic" if is_async else "pydantic"
+    db = await _db(kind)
+    try:
+        cls = await _aged(kind, db)
+        q = shape((AsyncSQLerQuery if is_async else SQLerQuery)("ct_aged", adapter=db.adapter, promoted_fields=["age"]))
+        read = [d["_id"] for d in await _v(q.all_dicts())]
+        before = await _aged_state(cls, db)
+        await _v(q.delete())
+        assert (read, _touched(before, await _aged_state(cls, db))) == (expected, sorted(expected))
+    finally:
+        await _close(db)
+
+
+@pytest.mark.parametrize(
+    "shape,order",
+    [
+        (lambda q: q, ""),
+        (lambda q: q.limit(2), " LIMIT 2"),
+        (lambda q: q.offset(3), " LIMIT -1 OFFSET 3"),
+        (lambda q: q.order_by("age").limit(2), " ORDER BY age LIMIT 2"),
+        (lambda q: q.order_by("grp", "-age").limit(5).offset(2), " ORDER BY json_extract(data, '$.grp'), age DESC LIMIT 5 OFFSET 2"),
+        (lambda q: q.order_by("age"), " ORDER BY age"),
+    ],
+    ids=["none", "limit", "offset", "one-term", "two-terms", "order-no-limit"],
+)
+def test_the_select_of_a_limited_query_is_the_one_it_always_sent(shape, order):
+    """The read pays nothing for the write's pick: no ``_id`` is added to its order (the SQL
+    of ``60cbb0a``)."""
+    q = shape(SQLerQuery("ct_aged", promoted_fields=["age"]))
+    assert q.debug() == (f"SELECT data FROM ct_aged{order}", [])
+
+
+# ----- the pick and the write are one unit that holds the write lock from its start --------
+#
+# While a limited write sends the read's statement that picks its rows, a second connection
+# (timeout 0, so it does not wait) tries to delete row 1, one of the two the write picks. The
+# write lock is held already, so SQLite refuses it, and the write touches exactly the rows
+# all() returned. Were the pick sent before the lock, the second writer would delete row 1
+# and the write would pick rows 2 and 3.
+
+
+_RACED = [(False, "delete"), (False, "update"), (False, "update_n"), (False, "copy_to"), (True, "delete"), (True, "update"), (True, "update_n")]
+
+
+@pytest.mark.parametrize("plain,call", _RACED, ids=[("plain-" if p else "queryset-") + c for p, c in _RACED])
+@pytest.mark.parametrize("kind", PYDANTIC)
+@pytest.mark.asyncio
+async def test_a_second_writer_cannot_change_the_rows_a_limited_write_picked(kind, plain, call, tmp_path):
+    path = str(tmp_path / "race.db")
+    db = await _db(kind, path)
+    other = sqlite3.connect(path, timeout=0, isolation_level=None)
+    adapter = db.adapter
+    judged = adapter._execute_judged
+    seen: list[str] = []
+
+    def second_writer(sql: str) -> None:
+        if sql.startswith("SELECT _id, data") and " FROM ct_aged " in f"{sql} " and not seen:
+            try:
+                other.execute("DELETE FROM ct_aged WHERE _id = 1")
+                seen.append("deleted row 1")
+            except sqlite3.OperationalError as exc:
+                seen.append(str(exc))
+
+    if _is_async(kind):
+
+        async def hooked(sql, params=None):
+            second_writer(sql)
+            return await judged(sql, params)
+    else:
+
+        def hooked(sql, params=None):
+            second_writer(sql)
+            return judged(sql, params)
+
+    try:
+        cls = await _aged(kind, db)
+        if plain:
+            q = (AsyncSQLerQuery if _is_async(kind) else SQLerQuery)("ct_aged", adapter=adapter, promoted_fields=["age"])
+        else:
+            q = cls.using(db)
+        q = q.limit(2)
+        before = await _aged_state(cls, db)
+        adapter._execute_judged = hooked
+        try:
+            if call == "copy_to":
+                await _v(q.copy_to("ct_aged_copy"))
+            elif call == "update_n":
+                await _v(q.update_n(5, tag="x"))
+            else:
+                await _v(q.update(tag="x") if call == "update" else q.delete())
+        finally:
+            del adapter._execute_judged
+        after = await _aged_state(cls, db)
+        if call == "copy_to":
+            touched = sorted(m._id for m in await _v(cls.using(db, "ct_aged_copy").all()))
+        else:
+            touched = _touched(before, after)
+        assert (seen, touched, sorted(after)) == (
+            ["database is locked"],
+            [1, 2],
+            [1, 2, 3, 4, 5] if call != "delete" else [3, 4, 5],
+        )
+    finally:
+        other.close()
+        await _close(db)
+
+
+@pytest.mark.parametrize("n", ["1; DROP TABLE x", 2.5, True], ids=["str", "float", "bool"])
+@pytest.mark.parametrize("plain", [False, True], ids=["queryset", "plain"])
+@pytest.mark.parametrize("kind", PYDANTIC)
+@pytest.mark.asyncio
+async def test_update_n_takes_only_a_whole_number(kind, plain, n):
+    db = await _db(kind)
+    try:
+        cls = await _aged(kind, db)
+        if plain:
+            q = (AsyncSQLerQuery if _is_async(kind) else SQLerQuery)("ct_aged", adapter=db.adapter, promoted_fields=["age"])
+        else:
+            q = cls.using(db)
+        before = await _aged_state(cls, db)
+        with pytest.raises(TypeError, match=r"update_n\(\) takes a whole number, not (str|float|bool)"):
+            await _v(q.update_n(n, tag="x"))
+        assert (await _aged_state(cls, db), await _raw(db, "SELECT COUNT(*) FROM ct_aged")) == (before, [(5,)])
     finally:
         await _close(db)

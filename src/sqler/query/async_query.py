@@ -1,6 +1,7 @@
+import contextlib
 import json
 import sqlite3
-from typing import Any, AsyncGenerator, Optional, Self
+from typing import Any, AsyncGenerator, AsyncIterator, Optional, Self
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
@@ -13,6 +14,7 @@ from sqler.query.query import (
     aend_failed,
     is_missing_table,
     related_tables,
+    whole_number,
     with_related,
 )
 from sqler.utils import validate_field_name
@@ -45,8 +47,9 @@ class AsyncSQLerQuery(_Statements):
         self._expression = expression
         self._order = order
         self._desc = desc
-        self._limit = limit
-        self._offset = offset
+        # written into the SQL text: checked as limit() and offset() check them (whole_number)
+        self._limit = None if limit is None else whole_number(limit, "limit")
+        self._offset = None if offset is None else whole_number(offset, "offset")
         self._include_version = include_version
         self._select_fields = select_fields
         self._distinct = distinct
@@ -151,6 +154,46 @@ class AsyncSQLerQuery(_Statements):
             await cur.close()
         return self._clone(include_version=True) if _has_version(names) else self
 
+    @contextlib.asynccontextmanager
+    async def _held(self) -> AsyncIterator[None]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._held`: the pick and the write on
+        one pinned connection, in one unit that holds the write lock from its start."""
+        if self._db is not None:
+            async with self._db.transaction():
+                yield
+            return
+        from sqler.db.sqler_db import _ended_while_leaving
+
+        adapter = self._adapter
+        assert adapter is not None  # each caller refused a query with no adapter
+        await adapter.begin_transaction()
+        try:
+            yield
+        except BaseException as exc:
+            try:
+                await adapter.end_transaction(commit=False)
+            except Exception as ended:
+                _ended_while_leaving(ended, exc)
+            raise
+        await adapter.end_transaction(commit=True)
+
+    async def _picked_rows(self, n: Optional[int] = None) -> tuple[Self, Optional[list]]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._picked_rows`."""
+        query, cur = await self._execute(lambda q: q._build_query(include_id=True))
+        if cur is None:
+            return query, None
+        try:
+            return query, await (cur.fetchall() if n is None else cur.fetchmany(n))
+        finally:
+            await cur.close()
+
+    async def _picked_ids(self, n: Optional[int] = None) -> Optional[list]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._picked_ids`."""
+        if not self._windowed():
+            return None
+        _, rows = await self._picked_rows(n)
+        return [row[0] for row in rows or []]
+
     async def _rows(self, *, include_id: bool = False) -> list[tuple]:
         """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
         if self._adapter is None:
@@ -205,7 +248,7 @@ class AsyncSQLerQuery(_Statements):
         return self._clone(order=None, desc=False, order_fields=parsed)
 
     def limit(self, n: int) -> Self:
-        return self._clone(limit=n)
+        return self._clone(limit=whole_number(n, "limit"))
 
     def offset(self, n: int) -> Self:
         """Return a new query with an OFFSET clause.
@@ -216,7 +259,7 @@ class AsyncSQLerQuery(_Statements):
         Returns:
             AsyncSQLerQuery: New query instance.
         """
-        return self._clone(offset=n)
+        return self._clone(offset=whole_number(n, "offset"))
 
     def select(self, *fields: str) -> Self:
         """Return a new query that only retrieves specified fields.
@@ -512,9 +555,9 @@ class AsyncSQLerQuery(_Statements):
 
     async def update(self, **fields) -> int:
         """Update the rows :meth:`all` returns with the given field values: every match,
-        or, on a query with a limit or an offset, the rows that window picks in the query's
-        order (``UPDATE ... WHERE _id IN (SELECT _id ... LIMIT n OFFSET k)``, picked once
-        before any row is written).
+        or, on a query with a limit or an offset, the rows the read's own statement returns,
+        read in one transaction with the write after the write lock is taken, then written
+        by id (``UPDATE ... WHERE _id IN (SELECT value FROM json_each(?))``).
 
         Supports F-expressions for atomic operations::
 
@@ -530,6 +573,19 @@ class AsyncSQLerQuery(_Statements):
             int: Number of rows updated.
         """
         self._write_checks(fields)
+        if self._windowed():
+            async with self._held():
+                ids = await self._picked_ids()
+                if not ids:
+                    return 0
+                _, cur = await (await self._updating())._execute(
+                    lambda q: q._update_sql(fields, *q._touched(ids), returning=False)
+                )
+                if cur is None:
+                    return 0
+                rowcount = cur.rowcount
+                await cur.close()
+                return rowcount
         _, cur = await (await self._updating())._execute(lambda q: q._update_sql(fields, *q._touched(), returning=False))
         if cur is None:
             return 0
@@ -570,7 +626,20 @@ class AsyncSQLerQuery(_Statements):
         return await self._update_picked(fields, n, "IN")
 
     async def _update_picked(self, fields: dict, n: int, op: str) -> list[dict[str, Any]]:
-        self._write_checks(fields, n)
+        checked = self._write_checks(fields, n)
+        assert checked is not None  # n was given
+        n = checked
+        if self._windowed():
+            async with self._held():
+                ids = await self._picked_ids(n)
+                if not ids:
+                    return []
+                query, cur = await (await self._updating())._execute(lambda q: q._update_ids_sql(fields, ids))
+                if cur is None:
+                    return []
+                rows = await cur.fetchall()
+                await cur.close()
+                return [query._returned(row) for row in rows]
         query, cur = await (await self._updating())._execute(lambda q: q._update_picked_sql(fields, n, op))
         if cur is None:
             return []
@@ -582,12 +651,17 @@ class AsyncSQLerQuery(_Statements):
 
     async def _changed(self, fields: dict, n: Optional[int] = None) -> list[tuple[dict, dict]]:
         """Async twin of :meth:`SQLerQuery._changed` (run it inside a transaction)."""
-        self._write_checks(fields, n)
-        query, cur = await (await self._updating())._execute(lambda q: q._picked(n, q._returning()))
-        if cur is None:
+        n = self._write_checks(fields, n)
+        if self._windowed():  # the caller's transaction holds the write lock
+            query, rows = await (await self._updating())._picked_rows(n)
+        else:
+            query, cur = await (await self._updating())._execute(lambda q: q._picked(n, q._returning()))
+            rows = None
+            if cur is not None:
+                rows = await cur.fetchall()
+                await cur.close()
+        if rows is None:
             return []
-        rows = await cur.fetchall()
-        await cur.close()
         before = {doc["_id"]: doc for doc in map(query._returned, rows)}
         if not before:
             return []
@@ -600,14 +674,26 @@ class AsyncSQLerQuery(_Statements):
 
     async def delete(self) -> int:
         """Delete the rows :meth:`all` returns: every match, or, on a query with a limit or
-        an offset, the rows that window picks in the query's order (``DELETE ... WHERE _id
-        IN (SELECT _id ... LIMIT n OFFSET k)``).
+        an offset, the rows the read's own statement returns, read in one transaction with
+        the delete after the write lock is taken, then deleted by id (``DELETE ... WHERE _id
+        IN (SELECT value FROM json_each(?))``).
 
         Returns:
             int: Number of rows deleted.
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._windowed():
+            async with self._held():
+                ids = await self._picked_ids()
+                if not ids:
+                    return 0
+                _, cur = await self._execute(lambda q: q._delete_sql(ids=ids))
+                if cur is None:
+                    return 0
+                rowcount = cur.rowcount
+                await cur.close()
+                return rowcount
         _, cur = await self._execute(lambda q: q._delete_sql())
         if cur is None:
             return 0
@@ -620,7 +706,10 @@ class AsyncSQLerQuery(_Statements):
         """Async twin of :meth:`SQLerQuery._deleted` (run it inside a transaction)."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        query, cur = await self._execute(lambda q: q._delete_sql(returning=True))
+        ids = await self._picked_ids()
+        if ids == []:
+            return []
+        query, cur = await self._execute(lambda q: q._delete_sql(returning=True, ids=ids))
         if cur is None:
             return []
         rows = await cur.fetchall()
@@ -631,7 +720,10 @@ class AsyncSQLerQuery(_Statements):
         """Async twin of :meth:`SQLerQuery._copied`."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        _, cur = await self._execute(lambda q: q._copy_sql(target))
+        ids = await self._picked_ids()
+        if ids == []:
+            return 0
+        _, cur = await self._execute(lambda q: q._copy_sql(target, ids))
         if cur is None:
             return 0
         rowcount = cur.rowcount
