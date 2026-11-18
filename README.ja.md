@@ -267,6 +267,7 @@ Pydantic 版をローカルで動かすには、`uv sync --dev` の後に `uv ru
 ```bash
 uv sync --dev
 uv run ruff check .
+uv run ruff format --check .
 uv run pytest -m "not perf"                                        # スイート全体。20 分以上かかる
 uv run python -m benchmarks run --scale medium --storage both      # ベンチマーク（SQLite のベースライン付き）
 ```

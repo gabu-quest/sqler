@@ -267,6 +267,7 @@ To run the Pydantic versions locally: `uv sync --dev`, then `uv run marimo edit 
 ```bash
 uv sync --dev
 uv run ruff check .
+uv run ruff format --check .
 uv run pytest -m "not perf"                                        # the whole suite; over twenty minutes
 uv run python -m benchmarks run --scale medium --storage both      # benchmarks, with SQLite baselines
 ```

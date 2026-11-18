@@ -67,7 +67,9 @@ A safe model checks and bumps a row version on every save. `SQLerLiteModelBase` 
 - On a slow disk most of a run is commits to the file databases the tests make in the temp
   folder; `TMPDIR=/dev/shm uv run pytest -q` (Linux) keeps them in memory and more than halves it.
 - One file: `uv run pytest tests/<file>`; one test: `uv run pytest tests/<file>::<test>`.
-- Lint: `uv run ruff check .` (CI runs it before the tests).
+- Lint: `uv run ruff check .` (CI runs it before the tests). Format: `uv run ruff format .`; the
+  tree is kept formatted (`uv run ruff format --check .`), and `.git-blame-ignore-revs` lists
+  the reformat commit.
 - Type check: `uv run mypy` (its settings are `[tool.mypy]` in `pyproject.toml`).
 - Performance tests (marker `perf`, opt-in): `uv run pytest -m perf`.
 
