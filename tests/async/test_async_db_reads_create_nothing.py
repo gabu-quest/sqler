@@ -149,10 +149,15 @@ async def _apage(awaitable):
     return _page(await awaitable)
 
 
+async def _streamed(iterator):
+    return [row async for row in iterator]
+
+
 QUERY_CALLS = {
     "all": (lambda q: q.all(), []),
     "first": (lambda q: q.first(), None),
     "all_dicts": (lambda q: q.all_dicts(), []),
+    "iter_dicts": (lambda q: _streamed(q.iter_dicts()), []),
     "first_dict": (lambda q: q.first_dict(), None),
     "count": (lambda q: q.count(), 0),
     "sum": (lambda q: q.sum("n"), None),
@@ -183,6 +188,14 @@ async def _by_hand(d, t):
 
 
 QUERY_ROUTES = {"db_query": _db_query, "by_hand": _by_hand}
+# what a read of a missing table sends: a query from the database looks at the table first, as a
+# model's query set does; one built by hand on the adapter sends its own statement only, and
+# before an update the read of its table's columns (whether the update moves a version)
+SENT = {"db_query": 2, "by_hand": 1}
+
+
+def _sent(route, name):
+    return SENT[route] + (route == "by_hand" and name.startswith("update"))
 
 
 async def _model_query(d, table):
@@ -203,6 +216,7 @@ QS_CALLS = {
     "all": (lambda q: q.all(), []),
     "first": (lambda q: q.first(), None),
     "as_dicts": (lambda q: q.as_dicts(), []),
+    "iter": (lambda q: _streamed(q.iter()), []),
     "count": (lambda q: q.count(), 0),
     "sum": (lambda q: q.sum("n"), None),
     "avg": (lambda q: q.avg("n"), None),
@@ -238,18 +252,20 @@ async def _answers(d, path, route, call):
 @pytest.mark.parametrize("name", list(QUERY_CALLS))
 async def test_the_query_of_a_missing_table_answers_as_an_empty_one(db, path, route, name):
     call, empty = QUERY_CALLS[name]
-    assert await _answers(db, path, QUERY_ROUTES[route], call) == (empty, empty, 1, False, 0)
+    assert await _answers(db, path, QUERY_ROUTES[route], call) == (empty, empty, _sent(route, name), False, 0)
 
 
 @pytest.mark.parametrize("route", list(QS_ROUTES))
 @pytest.mark.parametrize("name", list(QS_CALLS))
 async def test_the_queryset_of_a_missing_table_answers_as_an_empty_one(db, path, route, name):
     call, empty = QS_CALLS[name]
-    assert await _answers(db, path, QS_ROUTES[route], call) == (empty, empty, 1, False, 0)
+    # two statements: the look at the table its database remembers nothing of, then its own
+    assert await _answers(db, path, QS_ROUTES[route], call) == (empty, empty, 2, False, 0)
 
 
-async def test_db_query_is_bound_to_the_adapter_itself(db):
-    assert (await db.query("absent"))._adapter is db.adapter
+async def test_db_query_reads_through_its_database_on_the_adapters_own_connection(db):
+    q = await db.query("absent")
+    assert (q._adapter is db.adapter, q._db is db) == (True, True)
 
 
 # --- hostile inputs ----------------------------------------------------------------------

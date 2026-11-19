@@ -29,7 +29,7 @@ def seed_database():
             if os.path.exists(wal_path):
                 os.remove(wal_path)
 
-    init_db(db_path)
+    db = init_db(db_path)
 
     print("Seeding countries...")
     countries = {}
@@ -42,7 +42,7 @@ def seed_database():
     ]
     for name, code in country_data:
         c = Country(name=name, code=code)
-        c.save()
+        c.save(db=db)
         countries[code] = c
         print(f"  + {name} ({code})")
 
@@ -68,7 +68,7 @@ def seed_database():
     for name, country_code in city_data:
         c = City(name=name)
         c.set_country(countries[country_code])
-        c.save()
+        c.save(db=db)
         cities[name] = c
         print(f"  + {name}, {countries[country_code].name}")
 
@@ -87,7 +87,7 @@ def seed_database():
     for name, city_name, bio in writer_data:
         w = Writer(name=name, bio=bio)
         w.set_city(cities[city_name])
-        w.save()
+        w.save(db=db)
         writers[name] = w
         print(f"  + {name} ({city_name})")
 
@@ -284,7 +284,7 @@ def seed_database():
     for title, writer_name, content, tags in articles_data:
         a = Article(title=title, content=content.strip(), tags=tags)
         a.set_writer(writers[writer_name])
-        a.save()
+        a.save(db=db)
         print(f"  + {title[:50]}... by {writer_name}")
 
     close_db()

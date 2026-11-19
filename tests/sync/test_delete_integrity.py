@@ -64,3 +64,27 @@ def test_delete_with_policy_invalid_mode_raises():
 
     with pytest.raises(ValueError, match="on_delete must be"):
         a.delete_with_policy(on_delete="CASCADE")  # case-sensitive
+
+
+def test_find_ref_paths_reads_any_position_and_only_a_reference_counts():
+    """``find_ref_paths`` takes no class: it finds a reference at any position. A reference is
+    exactly a str ``_table`` and an int ``_id``; any other dict (a text or bool ``_id``, a key
+    more) is data, walked into and never counted."""
+    from sqler.models.integrity import find_ref_paths
+
+    def ref(rid):
+        return {"_table": "users", "_id": rid}
+
+    doc = {
+        "author": ref(1),
+        "comments": [{"user": ref(1)}, ref(2)],
+        "as_text": ref("1"),
+        "as_bool": ref(True),
+        "no_number": ref("x"),
+        "other_table": {"_table": "posts", "_id": 1},
+        "outer": {**ref(1), "inner": ref(1)},
+        "with_more_keys": {**ref(1), "label": "data"},
+    }
+
+    assert find_ref_paths(doc, {"users"}, 1) == ["author", "comments[0].user", "outer.inner"]
+    assert find_ref_paths(ref(1), {"users"}, 1) == ["$"]

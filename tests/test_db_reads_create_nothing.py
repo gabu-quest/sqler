@@ -204,6 +204,14 @@ QUERY_ROUTES = {
     "db_query": lambda d, t: d.query(t),
     "by_hand": lambda d, t: SQLerQuery(table=t, adapter=d.adapter),
 }
+# what a read of a missing table sends: a query from the database looks at the table first, as a
+# model's query set does; one built by hand on the adapter sends its own statement only, and
+# before an update the read of its table's columns (whether the update moves a version)
+SENT = {"db_query": 2, "by_hand": 1}
+
+
+def _sent(route, name):
+    return SENT[route] + (route == "by_hand" and name.startswith("update"))
 
 
 def _bound(d, table):
@@ -269,18 +277,20 @@ def _answers(d, path, route, call):
 @pytest.mark.parametrize("name", list(QUERY_CALLS))
 def test_the_query_of_a_missing_table_answers_as_an_empty_one(db, path, route, name):
     call, empty = QUERY_CALLS[name]
-    assert _answers(db, path, QUERY_ROUTES[route], call) == (empty, empty, 1, False)
+    assert _answers(db, path, QUERY_ROUTES[route], call) == (empty, empty, _sent(route, name), False)
 
 
 @pytest.mark.parametrize("route", list(QS_ROUTES))
 @pytest.mark.parametrize("name", list(QS_CALLS))
 def test_the_queryset_of_a_missing_table_answers_as_an_empty_one(db, path, route, name):
     call, empty = QS_CALLS[name]
-    assert _answers(db, path, QS_ROUTES[route], call) == (empty, empty, 1, False)
+    # two statements: the look at the table its database remembers nothing of, then its own
+    assert _answers(db, path, QS_ROUTES[route], call) == (empty, empty, 2, False)
 
 
-def test_db_query_is_bound_to_the_adapter_itself(db):
-    assert db.query("absent")._adapter is db.adapter
+def test_db_query_reads_through_its_database_on_the_adapters_own_connection(db):
+    q = db.query("absent")
+    assert (q._adapter is db.adapter, q._db is db) == (True, True)
 
 
 # --- hostile inputs ----------------------------------------------------------------------
@@ -292,7 +302,7 @@ def test_iter_dicts_of_a_missing_table_runs_at_the_first_next_and_yields_nothing
         rows = QUERY_ROUTES[route](db, "absent").iter_dicts()
         before = len(sent)
         first = next(rows, "end")
-    assert (before, first, len(sent), "absent" in _tables(path)) == (0, "end", 1, False)
+    assert (before, first, len(sent), "absent" in _tables(path)) == (0, "end", SENT[route], False)
 
 
 def test_iter_dicts_abandoned_halfway_on_an_existing_table(db, path):

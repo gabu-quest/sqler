@@ -22,8 +22,8 @@ from typing import (
 
 from sqler import registry
 from sqler._stored import stored
-from sqler.exceptions import NotBoundError, UniqueConstraintError
-from sqler.models import _dirty, _refs
+from sqler.exceptions import UniqueConstraintError
+from sqler.models import _dirty, _refs, _table_names, _write_rules
 from sqler.models._table_names import (  # noqa: F401
     _default_table_name,
     _instance_binding,
@@ -109,7 +109,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            cls._db._ensure_table_with_promoted(cls._table, promoted, checks)
+            cls._db._ensure_table_with_promoted(cls._table, promoted, checks, model=cls)
         else:
             cls._db._ensure_table(cls._table)
         registry.register(cls._table, cls)
@@ -136,17 +136,26 @@ class SQLerLiteModel(SQLerLiteModelBase):
         Args:
             db: Database to read.
             table: Optional table to read instead of the class's own. The class
-                binding is not changed. A row read from it remembers the table:
-                ``save()``, ``delete()`` and ``refresh()`` use that table.
+                binding is not changed. A row read through the queryset has ``db``
+                and the table as its home: ``save()``, ``delete()`` and ``refresh()``
+                use them.
 
         A read creates no table: on a table nobody created, ``all()`` is empty,
         ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
         """
+        table = validate_table_name(table) if table is not None else _model_table_name(cls)
+        return cls._queryset(db, table)
+
+    @classmethod
+    def _queryset(cls: Type[T], db: "SQLerDB", table: str) -> "SQLerQuerySet[T]":
+        """The queryset on ``table`` of ``db`` that ``query()`` and ``using()`` give: rows
+        read with their version where the class's rows are versioned."""
         from sqler.models.queryset import SQLerQuerySet
         from sqler.query import SQLerQuery
 
-        table = validate_table_name(table) if table is not None else _model_table_name(cls)
         q = SQLerQuery(table=table, adapter=db.adapter)
+        if cls._versioned_rows:
+            q = q.with_version()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
             q = q._clone(promoted_fields=list(promoted.keys()))
@@ -158,43 +167,25 @@ class SQLerLiteModel(SQLerLiteModelBase):
         db, _ = cls._require_binding()
         return db
 
-    @classmethod
-    def _require_binding(cls) -> tuple["SQLerDB", str]:
-        """Return the bound DB and table or raise if unbound.
-
-        Raises:
-            NotBoundError: If :meth:`set_db` has not been called.
-        """
-        if cls._db is None or cls._table is None:
-            raise NotBoundError(
-                f"Model {cls.__name__} is not bound. "
-                "Use .using(db) for queries or .save(db=db) for writes.",
-                details={"model": cls.__name__},
-            )
-        return cls._db, cls._table
+    _require_binding = classmethod(_table_names._require_binding)
+    _resolve_binding = classmethod(_table_names._resolve_binding)
 
     @classmethod
-    def _resolve_binding(cls, db=None) -> tuple["SQLerDB", str]:
-        """Return (db, table) using the provided db or the class-level binding."""
-        if db is not None:
-            return db, _model_table_name(cls)
-        return cls._require_binding()
-
-    @classmethod
-    def from_id(cls: Type[T], id_: int) -> Optional[T]:
+    def from_id(cls: Type[T], id_: int, *, db=None) -> Optional[T]:
         """Hydrate an instance by ``_id``.
 
         Args:
             id_: Row id to load.
+            db: Optional database (overrides class-level binding).
 
         Returns:
             Model instance when found, else ``None``.
         """
-        db, table = cls._require_binding()
-        doc = _read_document(db, table, id_)
+        db, table = cls._resolve_binding(db)
+        doc = _read_document(db, table, id_, cls._versioned_rows)
         if doc is None:
             return None
-        return _refs.from_row(cls, cls._resolve_relations(doc, db=db), doc)
+        return _refs.models(cls, [doc], db, table)[0]
 
     @classmethod
     def from_ids(cls: Type[T], ids: list[int], *, db=None) -> list[T]:
@@ -210,18 +201,9 @@ class SQLerLiteModel(SQLerLiteModelBase):
         """
         if not ids:
             return []
-        given = db
         db, table = cls._resolve_binding(db)
         read = _refs.read_versioned if cls._versioned_rows else _read_documents
-        docs = read(db, table, ids)
-        if not docs:
-            return []
-        # Use queryset's batch resolution
-        qs = cls.using(given) if given is not None else cls.query()
-        return [
-            _refs.from_row(cls, doc, row)
-            for row, doc in zip(docs, qs._batch_resolve(docs), strict=True)
-        ]
+        return _refs.models(cls, read(db, table, ids), db, table)
 
     @classmethod
     def count(cls: Type[T]) -> int:
@@ -231,14 +213,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
     @classmethod
     def query(cls: Type[T]) -> "SQLerQuerySet[T]":
         """Return a queryset for chaining and execution."""
-        db, table = cls._require_binding()
-        q = db.query(table)
-        promoted = getattr(cls, "__promoted__", None)
-        if promoted:
-            q = q._clone(promoted_fields=list(promoted.keys()))
-        from sqler.models.queryset import SQLerQuerySet
-
-        return SQLerQuerySet[T](cls, q, db)
+        return cls._queryset(*cls._require_binding())
 
     @classmethod
     def filter(cls: Type[T], expression: Any) -> "SQLerQuerySet[T]":
@@ -330,6 +305,9 @@ class SQLerLiteModel(SQLerLiteModelBase):
 
         Uses multi-row INSERT for significantly better throughput than
         calling ``save()`` in a loop. Only supports new (unsaved) instances.
+        Each instance meets the rules of its class as ``save()`` does: hooks,
+        timestamps and audit rows (see the mixins); with an audit log the batch
+        and its audit rows are one transaction.
 
         Args:
             instances: List of model instances with ``_id is None``.
@@ -341,18 +319,16 @@ class SQLerLiteModel(SQLerLiteModelBase):
         Raises:
             ValueError: If any instance already has an ``_id``.
         """
-        if not instances:
-            return instances
-        for inst in instances:
-            if inst._id is not None:
-                raise ValueError("save_many() only accepts new instances (_id must be None)")
+        return _write_rules.save_many(cls, instances, db, cls._insert_rows)
 
-        db, table = cls._resolve_binding(db)
+    @classmethod
+    def _insert_rows(cls, db, table: str, instances: list) -> None:
+        """Write new instances in one batch; each takes its ``_id`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
 
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            db._ensure_promoted(table, promoted, checks)
+            db._ensure_promoted(table, promoted, checks, model=cls)
 
         payloads = [inst._dump_with_relations() for inst in instances]
 
@@ -365,23 +341,36 @@ class SQLerLiteModel(SQLerLiteModelBase):
         for inst, id_, payload in zip(instances, ids, payloads):
             object.__setattr__(inst, "_id", id_)
             object.__setattr__(inst, "_snapshot", _dirty.snapshot(payload))
-        return instances
 
-    def save(self: T, *, db=None) -> T:
+    def save(self: T, *, db=None, _partial: bool = False) -> T:
         """Insert or update this instance and update ``_id``.
 
         Args:
             db: Optional database to write to (overrides class-level binding).
+            _partial: Write only the fields that differ from the row as this model last
+                loaded or saved it, and leave the row's other fields as they are
+                (``save_partial()``). The row must exist.
 
         Returns:
             self: The same instance (for chaining).
         """
-        cls = self.__class__
         db, table = _instance_binding(self, db)
+        return _write_rules.save(
+            self, db, table, _partial, lambda: self._write(db, table, _partial)
+        )
+
+    def _write(self: T, db, table: str, _partial: bool) -> T:
+        """Write this instance's row (``save()`` without the rules of its class)."""
+        cls = self.__class__
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
-            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
+            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
+        if _partial:
+            new_id = self._id
+            changed = _dirty.changed_fields(self._snapshot or {}, payload)
+            db._update_fields(table, new_id, payload, changed, promoted or ())
+        elif promoted:
             promoted_fields = list(promoted.keys())
             new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
         else:
@@ -401,41 +390,23 @@ class SQLerLiteModel(SQLerLiteModelBase):
     def delete_with_policy(self, *, db=None, on_delete: str = "restrict") -> None:
         """Delete this instance with a specified integrity policy.
 
+        The delete and what the policy does to referring rows are one transaction
+        (the caller's, if one is open), and the instance meets the rules of its class
+        as ``delete()`` does: hooks and the audit row.
+
         Args:
             db: Optional database to delete from (overrides class-level binding).
             on_delete: One of "restrict", "set_null", or "cascade".
         """
         db, table = _instance_binding(self, db)
-        if self._id is None:
-            raise ValueError("Cannot delete unsaved model (missing _id)")
-        target = (table, int(self._id))
-        if on_delete not in {"restrict", "set_null", "cascade"}:
-            raise ValueError("on_delete must be 'restrict','set_null', or 'cascade'")
+        _write_rules.delete(self, db, table, on_delete)
 
-        # Find referrers
-        from sqler.models import ReferentialIntegrityError
-        from sqler.models.integrity import (
-            cascade_delete,
-            find_referrers,
-            set_null_referrers,
-        )
-
-        referrers = find_referrers(db, table, int(self._id))
-        if on_delete == "restrict" and referrers:
-            raise ReferentialIntegrityError(
-                f"Cannot delete {table}:{self._id}; referenced by {len(referrers)} row(s)"
-            )
-        if on_delete == "set_null":
-            set_null_referrers(db, table, int(self._id), referrers)
-        elif on_delete == "cascade":
-            visited: set[tuple[str, int]] = {target}
-            cascade_delete(db, referrers, visited)
-
-        db.delete_document(table, self._id)
-        object.__setattr__(self, "_id", None)
-
-    def refresh(self: T) -> T:
+    def refresh(self: T, *, db=None) -> T:
         """Reload this instance's fields from the database.
+
+        Args:
+            db: Optional database to read from (overrides the instance's home); the
+                instance's home moves there.
 
         Raises:
             ValueError: If the instance has not been saved.
@@ -445,59 +416,35 @@ class SQLerLiteModel(SQLerLiteModelBase):
             self: The same instance (for chaining).
         """
         cls = self.__class__
-        db, table = _instance_binding(self)
+        db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = _read_document(db, table, self._id)
+        doc = _read_document(db, table, self._id, cls._versioned_rows)
         if doc is None:
             raise LookupError(f"Row {self._id} not found for refresh")
-        row, doc = doc, cls._resolve_relations(doc, db=db)
-        # Update fields in-place
+        own = {(table, self._id): self}
+        return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]
+
+    def _refreshed(self: T, doc: dict, row: dict) -> T:
+        """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
         for f in fields(self):
-            if f.name.startswith("_"):
-                continue
-            if f.name in doc:
+            if not f.name.startswith("_") and f.name in doc:
                 object.__setattr__(self, f.name, doc[f.name])
         object.__setattr__(self, "_snapshot", _dirty.snapshot(row))
         return self
 
     # ----- relationship encoding/decoding -----
     @classmethod
-    def _is_ref_dict(cls, value: object) -> bool:
-        """Check if value is a reference dict."""
-        return isinstance(value, dict) and "_table" in value and "_id" in value
-
-    @classmethod
-    def _resolve_relations(cls, data: dict, db=None, _seen: frozenset = frozenset()) -> dict:
-        """Replace the references in ``data`` by the rows they point to (see ``_refs.resolve``)."""
-        return _refs.resolve(data, db, _seen)
-
-    @classmethod
-    def _load_refs(cls, ids: list, seen: frozenset) -> dict:
-        """Load the rows ``ids`` of this class's table with one statement.
-
-        Returns ``{id: instance}``; a row that is gone is missing, one that cannot be
-        hydrated maps to ``_refs.KEEP``.
-        """
-        db, table = cls._require_binding()
-        out: dict = {}
-        read = _refs.read_versioned if cls._versioned_rows else _read_documents
-        for raw in read(db, table, ids):
-            rid = raw["_id"]
-            try:
-                doc = cls._resolve_relations(raw, db=db, _seen=seen | {(table, rid)})
-                inst = _refs.from_row(cls, doc, raw)
-            except (LookupError, RuntimeError, ValueError):
-                out[rid] = _refs.KEEP
-                continue
-            out[rid] = inst
-        return out
+    def _resolve_relations(cls, data: dict, db=None) -> dict:
+        """``data`` with the model of its row in place of each typed reference, loaded from
+        ``db`` or the class's database (see ``_refs.resolve``)."""
+        return _refs.resolve(data, db if db is not None else cls.db(), {}, cls)
 
     def _dump_with_relations(self) -> dict:
         """The document ``save()`` writes: each field in stored form, a related model as the
         reference to its row."""
         return {
-            f.name: stored(getattr(self, f.name), SQLerLiteModel)
+            f.name: stored(getattr(self, f.name), SQLerLiteModel, f.name)
             for f in fields(self)
             if not f.name.startswith("_")
         }

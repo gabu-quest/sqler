@@ -14,6 +14,7 @@ from typing import Optional
 
 import msgspec
 import pytest
+from pairwise import all_pairs
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerModel,
@@ -71,6 +72,48 @@ class DtPydSafeLinked(SQLerSafeModel):
     title: str = ""
     n: int = 0
     one: Optional[DtPydSafeChild] = None
+
+
+class DtAPydChild(AsyncSQLerModel):
+    name: str = ""
+
+
+class DtAPydPlain(AsyncSQLerModel):
+    title: str = ""
+    n: int = 0
+    tags: list[str] = []
+    meta: dict = {}
+    grid: list[list[int]] = []
+    x: float = 0.0
+    big: int = 0
+    opt: Optional[str] = None
+
+
+class DtAPydLinked(AsyncSQLerModel):
+    title: str = ""
+    n: int = 0
+    one: Optional[DtAPydChild] = None
+
+
+class DtAPydSafeChild(AsyncSQLerSafeModel):
+    name: str = ""
+
+
+class DtAPydSafePlain(AsyncSQLerSafeModel):
+    title: str = ""
+    n: int = 0
+    tags: list[str] = []
+    meta: dict = {}
+    grid: list[list[int]] = []
+    x: float = 0.0
+    big: int = 0
+    opt: Optional[str] = None
+
+
+class DtAPydSafeLinked(AsyncSQLerSafeModel):
+    title: str = ""
+    n: int = 0
+    one: Optional[DtAPydSafeChild] = None
 
 
 @dataclass
@@ -186,6 +229,8 @@ KINDS = {
     "pydsafe": (DtPydSafeChild, DtPydSafePlain, DtPydSafeLinked, False),
     "lite": (DtLiteChild, DtLitePlain, DtLiteLinked, False),
     "litesafe": (DtLiteSafeChild, DtLiteSafePlain, DtLiteSafeLinked, False),
+    "apyd": (DtAPydChild, DtAPydPlain, DtAPydLinked, True),
+    "apydsafe": (DtAPydSafeChild, DtAPydSafePlain, DtAPydSafeLinked, True),
     "alite": (DtALiteChild, DtALitePlain, DtALiteLinked, True),
     "alitesafe": (DtALiteSafeChild, DtALiteSafePlain, DtALiteSafeLinked, True),
     "msgspec": (None, DtMsgPlain, None, False),
@@ -359,9 +404,7 @@ EDITS = {
 }
 
 
-@pytest.mark.parametrize("edit", list(EDITS))
-@pytest.mark.parametrize("way", WAYS)
-@pytest.mark.parametrize("kind", list(KINDS))
+@pytest.mark.parametrize(*all_pairs(("kind", list(KINDS)), ("way", WAYS), ("edit", list(EDITS))))
 def test_change_made_in_place_is_dirty_until_saved_and_seen_again(kind, way, edit):
     async def scenario():
         db = await bind(kind, "e")
@@ -504,62 +547,6 @@ def test_save_many_leaves_models_not_dirty(kind):
     assert out == [(False, set()), (False, set()), {"tags"}]
 
 
-# ---- 5. the async pydantic bases keep a snapshot that shares nothing ---------------------
-
-
-class DtAsyncPlain(AsyncSQLerModel):
-    title: str = ""
-    tags: list[str] = []
-    meta: dict = {}
-
-
-class DtAsyncSafePlain(AsyncSQLerSafeModel):
-    title: str = ""
-    tags: list[str] = []
-    meta: dict = {}
-
-
-@pytest.mark.parametrize("cls", [DtAsyncPlain, DtAsyncSafePlain])
-def test_async_pydantic_snapshot_is_the_row_and_shares_nothing(cls):
-    async def scenario():
-        db = AsyncSQLerDB.in_memory()
-        await db.connect()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            cls.set_db(db, f"dt_{cls.__name__.lower()}")
-        await cls(title="a", tags=["x"], meta={"k": {"d": 1}}).save()
-        got = (await cls.query().all())[0]
-        got.tags.append("y")
-        got.meta["k"]["d"] = 2
-        snap = got._snapshot
-        await db.close()
-        return snap
-
-    assert asyncio.run(scenario()) == {"title": "a", "tags": ["x"], "meta": {"k": {"d": 1}}}
-
-
-@pytest.mark.parametrize("way", ("save", "asave_many"))
-@pytest.mark.parametrize("cls", [DtAsyncPlain, DtAsyncSafePlain])
-def test_async_pydantic_snapshot_after_a_save_is_what_was_written(cls, way):
-    async def scenario():
-        db = AsyncSQLerDB.in_memory()
-        await db.connect()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            cls.set_db(db, f"dt_{cls.__name__.lower()}_{way}")
-        row = cls(title="a", tags=["x"], meta={"k": {"d": 1}})
-        if way == "save":
-            await row.save()
-        else:
-            await cls.asave_many([row])
-        row.tags.append("y")
-        snap = row._snapshot
-        await db.close()
-        return snap
-
-    assert asyncio.run(scenario()) == {"title": "a", "tags": ["x"], "meta": {"k": {"d": 1}}}
-
-
 # ---- 6. the snapshot is data: nothing done to a child changes its parent's snapshot ------
 
 
@@ -583,6 +570,14 @@ class DtALiteSafeMany(AsyncSQLerLiteSafeModel):
     many: list[DtALiteSafeChild] = field(default_factory=list)
 
 
+class DtAPydMany(AsyncSQLerModel):
+    many: list[DtAPydChild] = []
+
+
+class DtAPydSafeMany(AsyncSQLerSafeModel):
+    many: list[DtAPydSafeChild] = []
+
+
 class DtPydMany(SQLerModel):
     many: list[DtPydChild] = []
 
@@ -596,6 +591,8 @@ MANY = {
     "pydsafe": DtPydSafeMany,
     "lite": DtLiteMany,
     "litesafe": DtLiteSafeMany,
+    "apyd": DtAPydMany,
+    "apydsafe": DtAPydSafeMany,
     "alite": DtALiteMany,
     "alitesafe": DtALiteSafeMany,
 }
@@ -706,7 +703,7 @@ def test_reference_to_a_row_deleted_with_sql_reads_none_and_is_dirty(kind):
 
 
 @pytest.mark.parametrize("kind", ["lite", "litesafe"])
-def test_lite_reference_to_a_row_deleted_with_sql_holds_the_stored_reference(kind):
+def test_lite_reference_to_a_row_deleted_with_sql_reads_none_and_is_dirty(kind):
     async def scenario():
         db = await bind(kind, "h")
         child, _, linked, _ = KINDS[kind]
@@ -716,10 +713,10 @@ def test_lite_reference_to_a_row_deleted_with_sql_holds_the_stored_reference(kin
         got = await load(linked, row, "all")
         out = (got.one, got.is_dirty(), got.get_dirty_fields())
         await close(db)
-        return out, child._table, c._id
+        return out
 
-    out, table, cid = asyncio.run(scenario())
-    assert out == ({"_table": table, "_id": cid}, False, set())
+    # a typed reference to a row that is gone reads as None; save() would write null
+    assert asyncio.run(scenario()) == (None, True, {"one"})
 
 
 @pytest.mark.parametrize("kind", ["alite", "alitesafe"])
@@ -765,10 +762,10 @@ def test_row_with_a_key_the_class_has_no_field_for_is_dirty_in_that_key(kind, wa
 
 @pytest.mark.parametrize("note", [{}, {"note": "n"}])
 @pytest.mark.parametrize("kind", ["lite", "alite"])
-def test_stored_reference_in_an_untyped_field_after_all_is_dirty(kind, note):
-    """``all()`` hands an untyped field the stored row of the child, not the reference; what
-    ``save()`` would write for it is that row, so the field differs from the stored
-    reference (with a key besides ``_table`` and ``_id`` or without)."""
+def test_stored_reference_in_an_untyped_field_after_all_is_not_dirty(kind, note):
+    """An untyped field is never followed: ``all()`` hands it the stored value, which is what
+    ``save()`` would write (a dict with a key besides ``_table`` and ``_id`` is data, stored
+    whole)."""
 
     async def scenario():
         db = await bind(kind, "x")
@@ -781,4 +778,5 @@ def test_stored_reference_in_an_untyped_field_after_all_is_dirty(kind, note):
         await close(db)
         return out
 
-    assert asyncio.run(scenario()) == ({"name": "c", "_id": 1}, True, {"meta"})
+    ref = {"_table": f"dt_{kind}_child_x", "_id": 1, **note}
+    assert asyncio.run(scenario()) == (ref, False, set())

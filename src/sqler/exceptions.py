@@ -85,6 +85,16 @@ class QueryTimeoutError(QueryError):
     pass
 
 
+class SearchQueryError(QueryError):
+    """Raised when SQLite refuses a full-text search string as an FTS5 query.
+
+    The message names the query and SQLite's reason; the ``sqlite3`` error is the
+    ``__cause__``. ``search(text, plain=True)`` reads text as words and never raises it.
+    """
+
+    pass
+
+
 class InvariantViolationError(QueryError):
     """Raised when data violates expected invariants (e.g., NULL JSON)."""
 
@@ -120,6 +130,16 @@ class ValidationError(ModelError):
         super().__init__(message, details=details)
         self.field = field
         self.value = value
+
+
+class UnstorableValueError(ValidationError, TypeError):
+    """Raised when a value has no stored form: a kind sqler does not store, or a ``Decimal``
+    that no JSON number holds exactly.
+
+    ``value`` is the refused value. ``field`` is its place in the document being written
+    (``price``, ``lines[2].price``) where the write knows it, else ``None``. It is also a
+    ``TypeError``, the class raised for such a value before this one existed.
+    """
 
 
 class NotFoundError(ModelError):
@@ -171,6 +191,30 @@ class DeadlockError(ConcurrencyError):
 
 class LockTimeoutError(ConcurrencyError):
     """Raised when unable to acquire a lock within the timeout period."""
+
+    pass
+
+
+class TransactionStateError(ConcurrencyError):
+    """Raised when a transaction can no longer be trusted to commit what it was told to.
+
+    The cases, sync and async alike where they apply:
+
+    - the end of a nested transaction failed in SQLite: that end, every later statement in
+      the transaction and the transaction's own end raise this error (``__cause__`` is
+      SQLite's error), and the transaction is rolled back;
+    - a statement ended the transaction behind the adapter (a raw ``COMMIT``, ``END`` or
+      ``ROLLBACK``, or a failure SQLite answers by rolling the whole transaction back, which
+      is then the ``__cause__``): that statement, every later one in the transaction and the
+      transaction's own end raise this error, and nothing more is sent for it; what was
+      written before the statement stays as the statement left it;
+    - a transaction is begun on a connection where SQLite holds a transaction the adapter
+      did not open (a raw ``BEGIN``, or a raw write not committed yet): nothing is sent, and
+      that work stays pending for ``adapter.commit()`` or a raw ``ROLLBACK``;
+    - async only: a transaction ended while another task's nested transaction in it was
+      open; the task that ended it and the task whose nested transaction was open both
+      get this error.
+    """
 
     pass
 
@@ -398,79 +442,6 @@ class AfterDeleteError(HookError):
     """Raised when an after_delete hook fails."""
 
     pass
-
-
-# Relationship Resolution Errors
-
-
-class ResolutionError(SQLerError):
-    """Base class for relationship resolution errors."""
-
-    pass
-
-
-class CircularReferenceError(ResolutionError):
-    """Raised when a circular reference is detected during relationship resolution.
-
-    This error occurs when resolving relationships creates an infinite loop,
-    such as A -> B -> A.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        path: Optional[list[tuple[str, int]]] = None,
-        details: Optional[dict[str, Any]] = None,
-    ):
-        super().__init__(message, details=details)
-        self.path = path or []
-
-    def __str__(self) -> str:
-        if self.path:
-            path_str = " -> ".join(f"{table}:{id_}" for table, id_ in self.path)
-            return f"{self.message}: {path_str}"
-        return self.message
-
-
-class MaxDepthExceededError(ResolutionError):
-    """Raised when relationship resolution exceeds the maximum allowed depth."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        max_depth: Optional[int] = None,
-        current_depth: Optional[int] = None,
-        details: Optional[dict[str, Any]] = None,
-    ):
-        super().__init__(message, details=details)
-        self.max_depth = max_depth
-        self.current_depth = current_depth
-
-
-class MissingReferenceError(ResolutionError):
-    """Warning-level error for missing references during batch resolution.
-
-    This is used when a referenced row doesn't exist but we want to continue
-    resolving other references rather than failing completely.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        table: Optional[str] = None,
-        id_: Optional[int] = None,
-        details: Optional[dict[str, Any]] = None,
-    ):
-        super().__init__(message, details=details)
-        self.table = table
-        self.id_ = id_
-
-
-# Backwards compatibility alias
-MissingReferenceWarning = MissingReferenceError
 
 
 # Batch Operation Errors

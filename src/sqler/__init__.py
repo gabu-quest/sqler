@@ -1,4 +1,5 @@
 from .adapter import AsyncSQLiteAdapter, SQLiteAdapter
+from .adapter.asynchronous import PoolStats
 from .cache import (
     CacheAwareModel,
     CacheEntry,
@@ -13,14 +14,10 @@ from .db import SQLerDB
 from .db.async_db import AsyncSQLerDB
 from .exceptions import (
     BatchOperationError,
-    CircularReferenceError,
     ConcurrencyError,
     ConnectionPoolExhaustedError,
     IntegrityError,
     LockTimeoutError,
-    MaxDepthExceededError,
-    MissingReferenceError,
-    MissingReferenceWarning,
     ModelError,
     NoAdapterError,
     NotBoundError,
@@ -28,11 +25,13 @@ from .exceptions import (
     NotFoundError,
     QueryError,
     QueryTimeoutError,
-    ResolutionError,
     SchemaError,
+    SearchQueryError,
     SQLerError,
     StaleVersionError,
+    TransactionStateError,
     UniqueConstraintError,
+    UnstorableValueError,
     ValidationError,
 )
 from .export import (
@@ -159,11 +158,13 @@ from .ops import (
     restore,
     vacuum,
 )
-from .pool import ConnectionPool, PooledSQLerDB, PooledSQLiteAdapter, PoolStats
 from .query import F, SQLerExpression, SQLerField, SQLerQuery
+from .query.async_query import AsyncSQLerQuery
 from .query.query import PaginatedResult
 from .registry import register, resolve, tables
 from .tracking import (
+    AsyncPartialUpdateMixin,
+    AsyncTrackedModel,
     ChangeTracker,
     DiffMixin,
     FieldChange,
@@ -224,6 +225,7 @@ __all__ = [
     "NO_REBASE_CONFIG",
     # Query
     "SQLerQuery",
+    "AsyncSQLerQuery",
     "SQLerExpression",
     "SQLerField",
     "F",  # Alias for SQLerField (Django-like syntax)
@@ -265,9 +267,6 @@ __all__ = [
     "BackupResult",
     "DatabaseStats",
     # Connection Pool
-    "ConnectionPool",
-    "PooledSQLiteAdapter",
-    "PooledSQLerDB",
     "PoolStats",
     # Errors - Base
     "SQLerError",
@@ -278,26 +277,23 @@ __all__ = [
     # Errors - Query
     "QueryError",
     "QueryTimeoutError",
+    "SearchQueryError",
     # Errors - Model
     "ModelError",
     "NotFoundError",
     "NotBoundError",
     "ValidationError",
+    "UnstorableValueError",
     # Errors - Concurrency
     "ConcurrencyError",
     "StaleVersionError",
     "LockTimeoutError",
+    "TransactionStateError",
     # Errors - Integrity
     "IntegrityError",
     "UniqueConstraintError",
     # Errors - Schema
     "SchemaError",
-    # Errors - Resolution
-    "ResolutionError",
-    "CircularReferenceError",
-    "MaxDepthExceededError",
-    "MissingReferenceError",
-    "MissingReferenceWarning",
     # Errors - Batch
     "BatchOperationError",
     # Errors - Pool
@@ -332,8 +328,10 @@ __all__ = [
     "SearchableMixin",
     # Change Tracking
     "TrackedModel",
+    "AsyncTrackedModel",
     "ChangeTracker",
     "FieldChange",
     "PartialUpdateMixin",
+    "AsyncPartialUpdateMixin",
     "DiffMixin",
 ]

@@ -14,10 +14,9 @@ import time
 
 import pytest
 import pytest_asyncio
-from sqler.adapter.asynchronous import AsyncSQLiteAdapter
+from sqler.adapter.asynchronous import AsyncSQLiteAdapter, PoolStats
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import ConnectionPoolExhaustedError, NotConnectedError
-from sqler.pool import PoolStats
 
 BOUND_S = 1.0
 PRAGMAS = [

@@ -272,8 +272,11 @@ class TestAsyncCreateIndexWhereRejectsInjection:
 # names stored in documents / used as JSON keys never change the statement
 # ---------------------------------------------------------------------------
 
+from typing import Union  # noqa: E402
+
 from pydantic import Field as _PydField  # noqa: E402
 from sqler import AsyncSQLerModel  # noqa: E402
+from sqler.logging import query_logger  # noqa: E402
 from sqler.query import SQLerField as F  # noqa: E402
 
 HOSTILE_TABLES = [
@@ -293,17 +296,25 @@ BAD_IDS = ["1 OR 1=1", None, 1.5, [1], True, {"a": 1}, "1", 2**63, -(2**63) - 1,
 EDGE_IDS = [2**63 - 1, -(2**63)]
 
 
+class AHolderUser(AsyncSQLerModel):
+    __tablename__ = "hr_users"
+    name: str = ""
+
+
+# a typed position, so that what is refused here is refused by the walk, not by the rule
+# that an untyped field is never followed
 class AHolder(AsyncSQLerModel):
-    payload: dict = _PydField(default_factory=dict)
+    payload: dict[str, Union[dict, AHolderUser]] = _PydField(default_factory=dict)
 
 
 @pytest_asyncio.fixture
 async def rdb():
     db = AsyncSQLerDB.in_memory(shared=False)
     await db.connect()
+    AHolderUser.set_db(db)
     AHolder.set_db(db)
     await db.insert_document("secrets", {"secret": "s3"})
-    await db.insert_document("users", {"name": "u1"})
+    await db.insert_document("hr_users", {"name": "u1"})
     try:
         yield db
     finally:
@@ -311,49 +322,55 @@ async def rdb():
         await db.close()
 
 
-class TestAsyncBatchResolveRejectsHostileRefs:
+class TestAsyncLoaderRejectsHostileRefs:
+    # a reference the loader refuses leads to no row of the field's class: it is left out of
+    # the dict, and no statement is sent for it: every statement names the holder's table
+
+    @staticmethod
+    async def _load(rdb, payload):
+        rid = await rdb.insert_document(AHolder.__tablename__, {"payload": payload})
+        with query_logger.capture() as sent:
+            got = await AHolder.from_id(rid)
+        return got.payload, sum(AHolder.__tablename__ not in q.sql for q in sent)
+
     @pytest.mark.parametrize("table", HOSTILE_TABLES)
     @pytest.mark.asyncio
-    async def test_hostile_table_left_unchanged(self, rdb, table):
-        ref = {"_table": table, "_id": 1}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+    async def test_hostile_table_left_out(self, rdb, table):
+        assert await self._load(rdb, {"k": {"_table": table, "_id": 1}}) == ({}, 0)
 
     @pytest.mark.parametrize("bad", BAD_IDS, ids=repr)
     @pytest.mark.asyncio
-    async def test_bad_id_left_unchanged(self, rdb, bad):
-        ref = {"_table": "users", "_id": bad}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+    async def test_bad_id_left_out(self, rdb, bad):
+        # an ``_id`` that is no int (a bool neither) makes the dict data, kept as it is; an
+        # int no row can have makes a reference to no row, left out
+        held = {"_table": "hr_users", "_id": bad}
+        kept = {} if type(bad) is int else {"k": held}
+        assert await self._load(rdb, {"k": held}) == (kept, 0)
 
     @pytest.mark.parametrize("edge", EDGE_IDS, ids=repr)
     @pytest.mark.asyncio
-    async def test_edge_id_without_row_left_unchanged(self, rdb, edge):
-        ref = {"_table": "users", "_id": edge}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+    async def test_edge_id_without_row_left_out(self, rdb, edge):
+        assert (await self._load(rdb, {"k": {"_table": "hr_users", "_id": edge}}))[0] == {}
 
-    @pytest.mark.parametrize("table", ["users\n", "users\r\n", "\nusers"], ids=repr)
+    @pytest.mark.parametrize("table", ["hr_users\n", "hr_users\r\n", "\nhr_users"], ids=repr)
     @pytest.mark.asyncio
-    async def test_newline_table_left_unchanged(self, rdb, table):
-        ref = {"_table": table, "_id": 1}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+    async def test_newline_table_left_out(self, rdb, table):
+        assert await self._load(rdb, {"k": {"_table": table, "_id": 1}}) == ({}, 0)
 
     @pytest.mark.asyncio
     async def test_bad_ref_does_not_stop_good_ref(self, rdb):
-        bad = {"_table": "users; x", "_id": 1}
-        good = {"_table": "users", "_id": 1}
-        out = await AHolder.query()._abatch_resolve([{"payload": {"a": bad, "b": good}}])
-        assert out[0]["payload"]["a"] == bad
-        assert out[0]["payload"]["b"]["name"] == "u1"
+        bad = {"_table": "hr_users; x", "_id": 1}
+        good = {"_table": "hr_users", "_id": 1}
+        payload, _ = await self._load(rdb, {"a": bad, "b": good})
+        assert list(payload) == ["b"]
+        assert payload["b"].name == "u1"
 
     @pytest.mark.asyncio
     async def test_end_to_end_all(self, rdb):
         ref = {"_table": "secrets WHERE 1 UNION SELECT _id, data FROM secrets", "_id": 1}
         await AHolder(payload={"k": ref}).save()
         got = await AHolder.query().all()
-        assert got[0].payload == {"k": ref}
+        assert got[0].payload == {}
 
 
 LITERAL_NAMES = [
@@ -586,7 +603,7 @@ class TestAsyncPromotedWriteNames:
         before = await self._state(pdb)
         with pytest.raises(_InvalidTableNameError):
             await _ASYNC_PROMOTED_WRITES[method](pdb, "jobs\n", ["s"])
-        assert await self._state(pdb) == before == [[(1, "first", 0)], [("jobs",), ("sqlite_sequence",)]]
+        assert await self._state(pdb) == before == [[(1, "first", 0)], [("_sqler_promoted",), ("jobs",), ("sqlite_sequence",)]]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("method", list(_ASYNC_PROMOTED_WRITES))

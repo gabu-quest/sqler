@@ -17,7 +17,6 @@ from sqler import (
     DEFAULT_REBASE_CONFIG,
     NO_REBASE_CONFIG,
     PERMISSIVE_REBASE_CONFIG,
-    CircularReferenceError,
     F,
     RebaseConfig,
     SoftDeleteMixin,
@@ -33,8 +32,6 @@ from sqler.models.utils import (
     compute_numeric_scalar_deltas,
 )
 from sqler.utils import (
-    ReferenceTracker,
-    collect_references,
     is_ref_dict,
     validate_table_name,
 )
@@ -313,62 +310,24 @@ class TestReferenceUtilities:
         assert not is_ref_dict([])
         assert not is_ref_dict("string")
 
-    def test_collect_references(self):
-        """Test reference collection from documents."""
-        doc = {
-            "name": "Order",
-            "user": {"_table": "users", "_id": 1},
-            "items": [
-                {"_table": "products", "_id": 10},
-                {"_table": "products", "_id": 11},
-            ],
-            "nested": {"supplier": {"_table": "suppliers", "_id": 5}},
-        }
-
-        refs = collect_references(doc)
-
-        assert refs == {
-            "users": {1},
-            "products": {10, 11},
-            "suppliers": {5},
-        }
-
-    def test_reference_tracker_basic(self):
-        """Test basic reference tracking."""
-        tracker = ReferenceTracker(max_depth=3)
-
-        with tracker.visit("users", 1) as can_proceed:
-            assert can_proceed
-
-            with tracker.visit("posts", 10) as can_proceed2:
-                assert can_proceed2
-
-                # Circular reference detected
-                with tracker.visit("users", 1) as can_proceed3:
-                    assert not can_proceed3
-
-    def test_reference_tracker_max_depth(self):
-        """Test max depth enforcement."""
-        tracker = ReferenceTracker(max_depth=2)
-
-        with tracker.visit("a", 1):
-            with tracker.visit("b", 2):
-                # Should fail - max depth reached
-                with tracker.visit("c", 3) as can_proceed:
-                    assert not can_proceed
+    @pytest.mark.parametrize(
+        "value, is_ref",
+        [
+            ({"_table": "t", "_id": 1}, True),
+            ({"_table": "t", "_id": True}, False),
+            ({"_table": "t", "_id": "1"}, False),
+            ({"_table": 1, "_id": 1}, False),
+            ({"_table": "t", "_id": 1, "label": "kept"}, False),
+            ({"_id": 1}, False),
+        ],
+        ids=repr,
+    )
+    def test_a_reference_is_exactly_a_str_table_and_an_int_id(self, value, is_ref):
+        assert is_ref_dict(value) is is_ref
 
 
 class TestExceptionHierarchy:
     """Tests for the exception hierarchy."""
-
-    def test_circular_reference_error(self):
-        """Test CircularReferenceError with path information."""
-        path = [("users", 1), ("posts", 10), ("users", 1)]
-        error = CircularReferenceError("Cycle detected", path=path)
-
-        assert "Cycle detected" in str(error)
-        assert "users:1" in str(error)
-        assert error.path == path
 
     def test_sqler_error_base(self):
         """Test SQLerError base class."""

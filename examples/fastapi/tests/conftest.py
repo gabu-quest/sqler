@@ -1,39 +1,39 @@
 """Test fixtures for FastAPI example tests."""
 
 import os
-import tempfile
 from typing import Generator
 
 import pytest
 
+from examples.fastapi.app import app
+from examples.fastapi.db import MODELS, close_db, get_db, init_db
 from fastapi.testclient import TestClient
-
-# Create single temp database for test session
-_test_db_fd, _test_db_path = tempfile.mkstemp(suffix=".db")
-os.environ["SQLER_DB_PATH"] = _test_db_path
-
-# Import after setting env var
-from examples.fastapi.app import app  # noqa: E402
-from examples.fastapi.db import close_db, init_db  # noqa: E402
 
 
 @pytest.fixture(scope="session")
-def client() -> Generator[TestClient, None, None]:
-    """Create test client once for entire test session."""
-    init_db(_test_db_path)
-    with TestClient(app) as c:
-        yield c
+def client(tmp_path_factory) -> Generator[TestClient, None, None]:
+    """Create test client once for the session, on a database of its own."""
+    db_path = str(tmp_path_factory.mktemp("fastapi-example") / "test.db")
+    saved = os.environ.get("SQLER_DB_PATH")
+    os.environ["SQLER_DB_PATH"] = db_path
     close_db()
-    os.close(_test_db_fd)
+    init_db(db_path)
     try:
-        os.unlink(_test_db_path)
-    except Exception:
-        pass
-    for suffix in ["-wal", "-shm"]:
-        try:
-            os.unlink(_test_db_path + suffix)
-        except Exception:
-            pass
+        with TestClient(app) as c:
+            yield c
+    finally:
+        close_db()
+        if saved is None:
+            os.environ.pop("SQLER_DB_PATH", None)
+        else:
+            os.environ["SQLER_DB_PATH"] = saved
+
+
+@pytest.fixture(autouse=True)
+def empty_tables(client: TestClient) -> None:
+    """Start every test on empty tables, whatever the app seeded or another test left."""
+    for model in MODELS:
+        model.using(get_db()).delete_all()
 
 
 @pytest.fixture

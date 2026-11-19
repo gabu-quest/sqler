@@ -1,0 +1,178 @@
+"""A test that fails while it holds an async database must not keep the pytest process alive,
+and a program that ends with one open ends.
+
+Each case runs a small pytest, or a small program, of its own: the thing under test is how
+that process ends."""
+
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+TESTS = Path(__file__).parent
+HEADER = "import asyncio\nfrom sqler.db.async_db import AsyncSQLerDB\n"
+
+
+def _run_inner(tmp_path, source, timeout=60):
+    """Run ``source`` as a test file under this suite's conftest; the child inherits the
+    parent's environment (Windows needs SYSTEMROOT to start) with this folder in front on PYTHONPATH."""
+    (tmp_path / "test_inner.py").write_text(HEADER + textwrap.dedent(source))
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(filter(None, [str(TESTS), os.environ.get("PYTHONPATH")])),
+    }
+    for name in ("PYTEST_ADDOPTS", "PY_COLORS", "FORCE_COLOR"):  # the summary is read as plain text
+        env.pop(name, None)
+    env["NO_COLOR"] = "1"
+    argv = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-p",
+        "conftest",
+        "-p",
+        "no:cacheprovider",
+        "-q",
+        "--rootdir",
+        str(tmp_path),
+        str(tmp_path),
+    ]
+    try:
+        done = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, cwd=tmp_path, env=env
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            f"the inner run did not end within {timeout} s:\n{exc.stdout}\n{exc.stderr}"
+        ) from exc
+    return done, f"inner run, exit {done.returncode}:\n{done.stdout}\n{done.stderr}"
+
+
+OPEN_ONE = """
+    async def open_one():
+        db = AsyncSQLerDB.in_memory(shared=False)
+        await db.connect()
+        return db
+"""
+
+
+def test_a_failed_test_leaves_nothing_open_and_a_passing_one_is_not_touched(tmp_path):
+    done, shown = _run_inner(
+        tmp_path,
+        OPEN_ONE
+        + """
+    import pytest
+
+    @pytest.fixture(scope="module")
+    def wider():
+        db = asyncio.run(open_one())
+        yield db
+        asyncio.run(db.close())
+
+    def test_wider_one(wider):
+        asyncio.run(wider.execute_sql("SELECT 1"))
+
+    def test_wider_two(wider):
+        asyncio.run(wider.execute_sql("SELECT 1"))
+
+    def test_fails_with_two_open():
+        dbs = [asyncio.run(open_one()), asyncio.run(open_one())]
+        assert dbs is None, "left it open"
+
+    def test_fails_after_closing_its_own():
+        db = asyncio.run(open_one())
+        asyncio.run(db.close())
+        assert db is None, "left it open"
+    """,
+    )
+    failures = re.findall(r"^E +AssertionError: left it open$", done.stdout, re.M)
+    assert (
+        done.returncode,
+        len(failures),
+        re.search(r"^2 failed, 2 passed in ", done.stdout, re.M) is not None,
+    ) == (1, 2, True), shown
+
+
+def test_a_close_that_fails_does_not_hide_the_next_one(tmp_path):
+    done, shown = _run_inner(
+        tmp_path,
+        OPEN_ONE
+        + """
+    def test_leaves_two_and_the_first_cannot_close():
+        first, second = asyncio.run(open_one()), asyncio.run(open_one())
+        first.adapter._all_conns[0]._running = False  # its close() now raises "Connection closed"
+    """,
+    )
+    assert (
+        done.returncode,
+        re.search(r"^1 passed, 1 error in ", done.stdout, re.M) is not None,
+    ) == (1, True), shown
+    # The report is counted where the teardown printed it, at the start of a line: the short
+    # summary repeats it after the test's name, cut to the terminal's width or, on CI, in full.
+    reports = re.findall(r"^the test left async connections open: .*$", done.stdout, re.M)
+    assert len(reports) == 1, shown
+    assert "left open and its close raised ValueError('Connection closed')" in reports[0], shown
+
+
+def test_a_connection_in_a_statement_that_never_ends_fails_its_test_and_the_run_ends(tmp_path):
+    done, shown = _run_inner(
+        tmp_path,
+        OPEN_ONE
+        + """
+    FOREVER = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c"
+
+    def test_leaves_a_statement_running():
+        async def start():
+            db = await open_one()
+            asyncio.ensure_future(db.adapter._all_conns[0].execute(FOREVER))
+            await asyncio.sleep(0.2)
+        asyncio.run(start())
+    """,
+    )
+    assert (
+        done.returncode,
+        re.search(r"^1 passed, 1 error in ", done.stdout, re.M) is not None,
+    ) == (1, True), shown
+    assert "was left in a statement that did not end" in done.stdout, shown
+
+
+# ---- a program that ends with the database open -------------------------------------
+
+PROGRAM = """
+    import asyncio, sys
+    from sqler import AsyncSQLerDB
+
+    async def main():
+        db = AsyncSQLerDB.on_disk(sys.argv[1])
+        await db.connect()
+        await db.insert_document("notes", {"text": "kept"})
+        ENDING
+
+    asyncio.run(main())
+"""
+ENDINGS = {
+    "raises": ('raise RuntimeError("the program failed")', 1, "RuntimeError: the program failed"),
+    "returns": ("return", 0, ""),
+    "exits": ("sys.exit(3)", 3, ""),
+}
+
+
+@pytest.mark.parametrize("ending", list(ENDINGS))
+def test_a_program_that_ends_with_an_async_database_open_ends_and_keeps_what_it_wrote(tmp_path, ending):
+    line, code, last = ENDINGS[ending]
+    path = tmp_path / "notes.db"
+    argv = [sys.executable, "-c", textwrap.dedent(PROGRAM).replace("ENDING", line), str(path)]
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=20, cwd=tmp_path)
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(f"the program did not end within 20 s:\n{exc.stdout}\n{exc.stderr}") from exc
+    assert (done.returncode, (done.stderr.strip().splitlines() or [""])[-1]) == (code, last)
+    with sqlite3.connect(path) as conn:
+        rows = conn.execute("SELECT _id, data FROM notes").fetchall()
+    assert [(i, json.loads(d)) for i, d in rows] == [(1, {"text": "kept"})]

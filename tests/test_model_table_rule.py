@@ -10,7 +10,7 @@ import gc
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import msgspec  # noqa: F401  (the msgspec base needs it installed)
 import pytest
@@ -260,7 +260,7 @@ def test_later_definition_keeps_the_bound_pydantic_class(db):
 
     class RdPyPost(SQLerModel):
         title: str = ""
-        author: Any = None
+        author: Optional[RdPyAuthor] = None
 
     _bind(RdPyAuthor, db)
     _bind(RdPyPost, db)
@@ -277,8 +277,9 @@ def test_later_definition_keeps_the_bound_pydantic_class(db):
     post.refresh()
     assert type(post.author) is bound
     assert post.author.name == "ann"
-    # an untyped field read by a query holds the bound row's data
-    assert RdPyPost.query().first().author == {"name": "ann", "_id": author._id}
+    queried = RdPyPost.query().first()
+    assert type(queried.author) is bound
+    assert queried.author.name == "ann"
     assert later is not bound
 
 
@@ -319,7 +320,7 @@ async def test_later_definition_keeps_the_bound_async_pydantic_class(adb):
 
     class RdAsPost(AsyncSQLerModel):
         title: str = ""
-        author: Any = None
+        author: Optional[RdAsAuthor] = None
 
     _bind(RdAsAuthor, adb)
     _bind(RdAsPost, adb)
@@ -335,7 +336,9 @@ async def test_later_definition_keeps_the_bound_async_pydantic_class(adb):
     assert got.author.name == "ann"
     await post.refresh()
     assert type(post.author) is bound
-    assert (await RdAsPost.query().first()).author == {"name": "ann", "_id": author._id}
+    queried = await RdAsPost.query().first()
+    assert type(queried.author) is bound
+    assert queried.author.name == "ann"
     assert later is not bound
 
 

@@ -659,8 +659,11 @@ class TestReservedWordProtection:
 # names stored in documents / used as JSON keys never change the statement
 # ---------------------------------------------------------------------------
 
+from typing import Union  # noqa: E402
+
 from pydantic import Field as _PydField  # noqa: E402
 from sqler import SQLerDB as _SQLerDB  # noqa: E402
+from sqler.logging import query_logger  # noqa: E402
 from sqler.models import SQLerModel  # noqa: E402
 from sqler.query import SQLerField as F  # noqa: E402
 
@@ -682,57 +685,71 @@ EDGE_IDS = [2**63 - 1, -(2**63)]
 TRAILING_NEWLINE_NAMES = ["users\n", "users\r\n", "\nusers", "a\n", "_\n"]
 
 
+class HolderUser(SQLerModel):
+    __tablename__ = "hr_users"
+    name: str = ""
+
+
+# a typed position, so that what is refused here is refused by the walk, not by the rule
+# that an untyped field is never followed
 class Holder(SQLerModel):
-    payload: dict = _PydField(default_factory=dict)
+    payload: dict[str, Union[dict, HolderUser]] = _PydField(default_factory=dict)
 
 
 @pytest.fixture
 def rdb():
     d = _SQLerDB.in_memory(shared=False)
+    HolderUser.set_db(d)
     Holder.set_db(d)
     d.insert_document("secrets", {"secret": "s3"})
-    d.insert_document("users", {"name": "u1"})
+    d.insert_document("hr_users", {"name": "u1"})
     yield d
     d.close()
 
 
-class TestBatchResolveRejectsHostileRefs:
+class TestLoaderRejectsHostileRefs:
+    # a reference the loader refuses leads to no row of the field's class: it is left out of
+    # the dict, and no statement is sent for it: every statement names the holder's table
+
+    @staticmethod
+    def _load(rdb, payload):
+        rid = rdb.insert_document(Holder.__tablename__, {"payload": payload})
+        with query_logger.capture() as sent:
+            got = Holder.from_id(rid)
+        return got.payload, sum(Holder.__tablename__ not in q.sql for q in sent)
+
     @pytest.mark.parametrize("table", HOSTILE_TABLES)
-    def test_hostile_table_left_unchanged(self, rdb, table):
-        ref = {"_table": table, "_id": 1}
-        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+    def test_hostile_table_left_out(self, rdb, table):
+        assert self._load(rdb, {"k": {"_table": table, "_id": 1}}) == ({}, 0)
 
     @pytest.mark.parametrize("bad", BAD_IDS, ids=repr)
-    def test_bad_id_left_unchanged(self, rdb, bad):
-        ref = {"_table": "users", "_id": bad}
-        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+    def test_bad_id_left_out(self, rdb, bad):
+        # an ``_id`` that is no int (a bool neither) makes the dict data, kept as it is; an
+        # int no row can have makes a reference to no row, left out
+        held = {"_table": "hr_users", "_id": bad}
+        kept = {} if type(bad) is int else {"k": held}
+        assert self._load(rdb, {"k": held}) == (kept, 0)
 
     @pytest.mark.parametrize("edge", EDGE_IDS, ids=repr)
-    def test_edge_id_without_row_left_unchanged(self, rdb, edge):
-        ref = {"_table": "users", "_id": edge}
-        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+    def test_edge_id_without_row_left_out(self, rdb, edge):
+        assert self._load(rdb, {"k": {"_table": "hr_users", "_id": edge}})[0] == {}
 
-    @pytest.mark.parametrize("table", ["users\n", "users\r\n", "\nusers"], ids=repr)
-    def test_newline_table_left_unchanged(self, rdb, table):
-        ref = {"_table": table, "_id": 1}
-        out = Holder.query()._batch_resolve([{"payload": {"k": ref}, "_id": 1}])
-        assert out == [{"payload": {"k": ref}, "_id": 1}]
+    @pytest.mark.parametrize("table", ["hr_users\n", "hr_users\r\n", "\nhr_users"], ids=repr)
+    def test_newline_table_left_out(self, rdb, table):
+        assert self._load(rdb, {"k": {"_table": table, "_id": 1}}) == ({}, 0)
 
     def test_bad_ref_does_not_stop_good_ref(self, rdb):
-        bad = {"_table": "users; x", "_id": 1}
-        good = {"_table": "users", "_id": 1}
-        out = Holder.query()._batch_resolve([{"payload": {"a": bad, "b": good}}])
-        assert out[0]["payload"]["a"] == bad
-        assert out[0]["payload"]["b"]["name"] == "u1"
+        bad = {"_table": "hr_users; x", "_id": 1}
+        good = {"_table": "hr_users", "_id": 1}
+        payload, _ = self._load(rdb, {"a": bad, "b": good})
+        assert list(payload) == ["b"]
+        assert payload["b"].name == "u1"
 
     def test_end_to_end_all(self, rdb):
         ref = {"_table": "secrets WHERE 1 UNION SELECT _id, data FROM secrets", "_id": 1}
         Holder(payload={"k": ref}).save()
         got = Holder.query().all()
-        assert got[0].payload == {"k": ref}
+        assert got[0].payload == {}
 
 
 # --- JSON path literals -----------------------------------------------------
@@ -1178,7 +1195,7 @@ class TestPromotedWriteNames:
         before = self._untouched(pdb)
         with pytest.raises(InvalidTableNameError):
             _PROMOTED_WRITES[method](pdb, "jobs\n", ["s"])
-        assert self._untouched(pdb) == before == ([(1, "first", 0)], ["jobs", "sqlite_sequence"])
+        assert self._untouched(pdb) == before == ([(1, "first", 0)], ["_sqler_promoted", "jobs", "sqlite_sequence"])
 
     @pytest.mark.parametrize("method", list(_PROMOTED_WRITES))
     def test_hostile_promoted_field_is_refused(self, pdb, method):

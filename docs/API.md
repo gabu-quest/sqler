@@ -142,6 +142,7 @@ The recommended way to bind models is `using()` (class-level) and `save(db=)` / 
 # Class-level: using() returns a queryset on db (no global mutation)
 users = User.using(db).filter(F("age") > 30).all()
 users = User.from_ids([1, 2], db=db)
+user = User.from_id(1, db=db)
 
 # One query on another table; the class binding is not changed
 archived = User.using(db, "users_archive").all()
@@ -157,6 +158,29 @@ user.delete(db=db2)     # deletes from db2
 
 Both patterns avoid global `set_db()` state and are safe for multi-DB scenarios.
 
+**An instance belongs to the database it was read from or written to.** Every way of
+loading a row (`from_id()`, `from_ids()`, a queryset's `all()`, `first()`, `iter()`,
+`update_one()`, `update_n()`, `refresh()`, a referenced row loaded with its parent, a
+search) gives the instance its home: the database and table of the row. Each successful
+`save()`, `save_partial()` and `save_many()` makes the database and table written to its
+home; a write that fails leaves the home as it was. A `save()` of an instance with an
+`_id` whose row is not in the database written to (deleted since it was read, or never
+there, as with `save(db=other)`) writes no row and raises `NotFoundError` naming the
+table and the id (a safe model raises `StaleVersionError`); the instance keeps its `_id`,
+its changes and its home. To put a copy of a row into another database, save a new
+instance without the `_id` there (`Model(**fields).save(db=other)`). `save()`, `refresh()`, `delete()`
+and `get_audit_log()` use, in this order: the `db=` given, else the instance's home,
+else the class's `set_db()` database, else they raise `NotBoundError`. So a class bound
+to one database never writes a row read from another into its own, and a class bound to
+none needs `db=` only on the call that first reads or saves an instance. `refresh(db=)`
+reads from that database and moves the home there. A deleted instance has no `_id` and
+keeps its home: a later `save()` inserts it there again. A new instance (`Model(...)`)
+has no home. The home is not a field: it is in no `==`, `hash`, `repr`, dump or stored
+document; `copy.copy()`, `copy.deepcopy()` and `model_copy()` keep the same database
+object; a pickled instance has none. `dataclasses.replace()` (lite) gives a new instance
+with no `_id`; `msgspec.structs.replace()` keeps the `_id` but not the home, so read the
+row again instead of saving such a copy.
+
 **Which table a class uses.** Every route (`save(db=)`, `using(db)`, references,
 `FTSIndex`, the registry) uses one rule: the table bound with `set_db()`, else
 `__tablename__`, else the plural of the class name (`User` → `users`; a name that
@@ -164,16 +188,12 @@ already ends in `s` is kept). A class bound with `set_db(db, "a")` reads `a` fro
 database given to `using()`.
 
 **`using(db, table=None)`.** With `table`, that one query reads the named table; the
-name is checked before any SQL (`InvalidTableNameError`). A row read this way
-remembers its table: `save()`, `delete()` and `refresh()` use it, so a row is never
-written to a different table than it was read from; `row.save(db=other_db)` updates
-the row with the same `_id` in that table of `other_db`. `as_ref(row)`, and the
-reference a model holding it stores, name that table. On the msgspec base the table
-is kept outside the struct fields: it is in neither `msgspec.json.encode(row)` nor `==`.
-A copy made with `model_copy()` (pydantic) keeps the table. A copy made with
-`dataclasses.replace()` (lite) or `msgspec.structs.replace()` does not: it keeps the
-`_id` and is a row of the class's own table, so read the row again instead of saving
-such a copy.
+name is checked before any SQL (`InvalidTableNameError`). The table is part of the
+home of a row read this way, so a row is never written to a different table than it was
+read from; `row.save(db=other_db)` updates the row with the same `_id` in that table of
+`other_db`. `as_ref(row)`, and the reference a model holding it stores, name that table.
+On a versioned (safe) class, `using()` reads each row's version as `query()` does, so a
+set-based update through either moves the version and a stale `save()` is refused.
 
 **A read creates no table.** `using(db)`, `using(db, table)` and `query()` on an async
 bound class run no `CREATE TABLE`: on a table nobody created, `all()` is `[]`,
@@ -526,6 +546,75 @@ q = User.query().filter(User.ref("address").field("city") == "Kyoto")
 assert [row.name for row in q.all()] == ["Alice"]
 ```
 
+### [C47] How references are loaded
+
+A stored reference is a dict of exactly two keys, `{"_table": <str>, "_id": <int>}` (an
+`_id` that is a `bool`, a float or a string makes it no reference); any other dict, one
+with these keys and more too, is data: stored and read whole, never followed, never a
+referrer (`sqler.utils.is_ref_dict`). In a field whose type hint
+names a model class (`Address | None`, `list[Address]`, `dict[str, Address]`), a reference
+into a table of that class is loaded as the model of its row. Every way of loading
+(`from_id`, `refresh`, `from_ids`, `query().all()`, `query().first()`, sync and async, on
+every model base) loads the same way:
+
+- **Followed to the end.** A chain of rows loads whole, however long: one `SELECT` per table
+  per level, never one per row of a level.
+- **One object per row per load.** A row reached twice is the same object: a diamond shares
+  its child, a cycle closes (`a.next.next is a`), and a row of the result that another row
+  references is that result. `refresh()` counts its own instance as the object of its row.
+- **A row that is gone** reads as `None` in a field and is left out of a list.
+- **A row its class refuses** raises what loading that row by its own `from_id` raises, with
+  a note naming the row, its table and the field that referenced it.
+- **Without loading** (`.resolve(False)`, `iter()`) the field holds the stored reference,
+  whatever its type hint says; saving the model writes it back unchanged.
+- A referenced row of a class bound to a database is read from that database, where its
+  `save()` writes it back; a row of a class bound to none from the database of the row that
+  references it.
+
+In a cycle the model that closes it is the object its row becomes once its own fields are
+validated: a `mode="before"` validator of the referring field receives that object before
+its fields are set (a pydantic one holds each field's default, a lite one no field, a
+msgspec one `None` in every field), a
+`mode="after"` one sees it validated. A required reference field closes the same way. The
+row is then built on that object, so it holds every field of its row whatever way its class
+keeps its state (`slots=True`, frozen, private attributes), and a `model_post_init`,
+`__post_init__` or after-validator that keeps `self` keeps the object the graph holds.
+pydantic runs a class's after-validators on every instance of it that it validates as a
+field value, so such a validator also sees the closing object before it is built. A
+msgspec model can only be made new by its class, so its closing object is made without
+`__post_init__` running on it, the row is then built as msgspec builds it, and its state is
+moved onto the closing object: `__post_init__` runs once for the row, on the row's values,
+and a hook that keeps `self` there keeps the object msgspec built, not the one the graph
+holds. A class that defines its own `model_validate`, and a pydantic validator that returns
+another object than the one it was given, are treated the same way: the model is built the
+class's way and its state is moved.
+`repr()` prints a model met again inside itself as `...`; `model_dump()` of a cycle raises
+`ValueError` (pydantic's), on the lite bases too. Two limits: on a msgspec model in a cycle
+`repr()` and `model_dump()` recurse until `RecursionError`, and `refresh()` fails on a
+frozen pydantic or frozen msgspec model (every other way of loading a frozen class works).
+
+```python
+from typing import Optional
+
+from sqler import SQLerDB, SQLerModel
+
+class Node(SQLerModel):
+    name: str = ""
+    next: Optional["Node"] = None
+
+Node.model_rebuild()
+db = SQLerDB.in_memory()
+Node.set_db(db)
+a = Node(name="a").save()
+b = Node(name="b", next=a).save()
+a.next = b
+a.save()
+
+got = Node.from_id(a._id)
+assert got.next.name == "b" and got.next.next is got
+assert Node.query().resolve(False).first().next == {"_table": Node.__tablename__, "_id": b._id}
+```
+
 ---
 
 ## Safe Models & Concurrency
@@ -547,10 +636,7 @@ acc.balance = 120
 acc.save()
 
 table = getattr(Account, "__tablename__", "accounts")
-db.adapter.execute(
-    f"UPDATE {table} SET data = json_set(data,'$._version', json_extract(data,'$._version') + 1) WHERE _id = ?;",
-    [acc._id],
-)
+db.adapter.execute(f"UPDATE {table} SET _version = _version + 1 WHERE _id = ?;", [acc._id])
 db.adapter.commit()
 
 acc.balance = 130
@@ -561,6 +647,30 @@ except StaleVersionError:
 else:
     raise AssertionError("stale writes must raise")
 ```
+
+The version of a row is its table's `_version` column, and every write sqler makes of a row
+of a table that has it moves it by one, whatever writes it: a safe or a plain class's
+`save()` and queryset `update()`, `update_one()`, `update_n()`, `db.query(table).update()`,
+the same three of a query built from the adapter alone (`SQLerQuery(table, db.adapter)`,
+which reads the table's columns before each update), `upsert_document()`, `bulk_upsert()`,
+`upsert_with_version()`, a delete policy's `set_null`. An insert (`save_many()`,
+`insert_document()`) writes 0. So a later `save()` of an instance loaded before any of them
+raises `StaleVersionError`; an instance loaded after them, or returned by `update_one()` /
+`update_n()`, holds the new version and saves. A `_version` key in a document written to
+such a table is not stored and sets nothing, and `update(_version=...)` on it is refused.
+Every read of such a table through a database object or a model (`find_document`, the
+dicts of `db.query(table)` or of a model's query set, a model) gives `_version` from the
+column. A statement sent by hand with `db.adapter.execute()` moves it only if it
+says so, as above.
+
+A table made before versioning (by a plain model, by SQL, or copied without its `_version`
+column) is read as it is, through every door (`from_id`, `from_ids`, `refresh`, a
+reference, `query()`, `using(db)`): each row at version 0, and no read changes the schema,
+so it works on a database that cannot be written. The first versioned write adds the
+column: a `save()` (a holder who read at version 0 then saves) or a set-based update. Only
+the sync safe bases' `set_db()` adds it when the class is bound. A database object asks
+once whether a table has the column, with the table's other columns (see "Promoted columns"
+in `docs/STORAGE.md`), and learns again when SQLite refuses a statement built for them.
 
 ### [C13] Safe model collision handling
 
@@ -749,11 +859,208 @@ TxItem(name="D").save()
 assert TxItem.query().count() == 2
 ```
 
+### `commit()`, `auto_commit()` and the adapter block
+
+Only the end of a transaction opened by `begin_transaction` (the `db.transaction()` block,
+or `adapter.end_transaction()`) ends it; the same rule holds on the sync and the async
+adapter. Outside such a transaction, `adapter.commit()` commits what the thread (async:
+the task) wrote on its connection, and the adapter block (`with db.adapter:` /
+`async with db.adapter:`) commits its writes when it ends, or rolls them back when an
+exception leaves it. Inside one (a transaction of this thread; async: of this task or
+one it was started inside):
+
+- `adapter.commit()` raises `TransactionStateError` and commits nothing; the transaction
+  goes on and can still be used. A transaction whose nested end failed raises that
+  failure's error instead.
+- `adapter.auto_commit()` does nothing: it is the call for "commit unless a transaction
+  is open".
+- The adapter block neither commits nor rolls back when it ends; an exception leaves
+  through it to the transaction's block, and what the block wrote is the transaction's
+  (it is kept if the transaction commits).
+
+### Raw statements and transactions
+
+A raw statement sent through `adapter.execute()` or `adapter.executemany()` may do anything
+SQLite allows except end or open a transaction behind the adapter; the same holds on the sync
+and the async adapter, and SQLite's own state after the statement decides, not its text.
+
+- Inside a transaction: a statement that ends it (a raw `COMMIT`, `END` or `ROLLBACK`, or a
+  failure SQLite answers by rolling the whole transaction back, such as `ON CONFLICT
+  ROLLBACK`) raises `TransactionStateError` at that statement. What was written before it
+  was committed or rolled back by it and cannot be put back; every later statement in the
+  transaction and the block's end raise the same error and send nothing. End a transaction
+  by leaving its `db.transaction()` block, and raise in the block to roll it back. Raw
+  `SAVEPOINT` work that leaves the transaction open is not refused.
+- Outside a transaction: raw work that SQLite holds in a transaction (a raw `BEGIN`, or a
+  raw write not committed yet) stays pending on the connection (async: on the task's pinned
+  connection, which no other task gets). `db.transaction()` and `begin_transaction()` then
+  raise `TransactionStateError` and send nothing: keep the work with `db.adapter.commit()`
+  or drop it with `db.adapter.execute("ROLLBACK")`, then begin again. A write that opens no
+  transaction of its own (a plain `save()`) commits the pending work with its own, as
+  `sqlite3` does. Outside a transaction, what was sent since the last commit is one unit: a
+  statement that fails rolls all of it back (the raw work with it) and raises its error.
+
+### Nested transactions whose end fails
+
+A `db.transaction()` inside another one is a savepoint: its block ends with `RELEASE`, or
+with `ROLLBACK TO` then `RELEASE` when it raised. If SQLite refuses one of them (for
+example because a raw `RELEASE` statement already ended the savepoint), the transaction can
+no longer be trusted, on the sync adapter as on the async one. After a failed `ROLLBACK TO`
+no `RELEASE` is sent, since that would keep the rows the rollback was to undo. The nested
+block raises `TransactionStateError` with the SQLite error as `__cause__` (a block that is
+already raising keeps its own exception, with the same sentence added as a note, once
+however many blocks it leaves; any other error raised by the end of a transaction while an
+exception leaves is named on that exception as a note, "ending the transaction failed:
+<type>: <message>"). From then
+on every statement of that thread in the transaction (`execute`, `executemany`,
+`executescript`, `commit`, a new nested transaction, `with adapter:`) raises the same error
+and sends nothing; the transaction ends with `ROLLBACK` whatever its block asks for, and the
+block that ends it raises the error too. An interrupt (`KeyboardInterrupt`) during a nested
+end leaves as it is, and the transaction ends rolled back the same way. The same holds for
+`adapter.begin_transaction()` and `adapter.end_transaction()` called directly.
+
+### A rollback that fails
+
+When the `ROLLBACK` that ends a transaction fails in SQLite (a progress handler or
+`interrupt()` stops it, say), at the end of a block, after a failed commit or after a failed
+statement, the sync adapter tries it once more at once. If that fails too, no later
+statement is ever sent into that transaction. A thread's own connection (a file, a named
+shared-cache memory database) is closed, which rolls back and frees the write lock, and a
+warning is logged; the thread opens a new connection at its next statement, and the block's
+own exception leaves as it is. (A cursor of the closed connection that still has rows to
+read keeps SQLite from letting go of it: until that cursor is closed or dropped, writers
+get `database is locked`; the block's rows are not committed either way.) An interrupt
+(`KeyboardInterrupt`) that arrives between the two tries is raised on after the same has
+been done. The one connection of a plain `":memory:"` database cannot be
+closed without losing the database: it keeps the transaction, and its thread stays the
+holder. The end raises `TransactionStateError` with SQLite's error as `__cause__` (a block
+that is already raising keeps its own exception, with the sentence as a note); every later
+statement of any thread tries the rollback again first: until one succeeds, the holder's
+statements raise the same error and the other threads wait as for any open transaction. A
+thread that ends as the holder is treated the same way. The async adapter closes such a
+connection and puts a fresh one in its place in the pool.
+
+### How long a statement waits for a lock
+
+`timeout_ms` (default 5000) is how long a statement waits for another connection's lock
+before it raises `sqlite3.OperationalError: database is locked`. Pass it to
+`SQLiteAdapter(...)`, `AsyncSQLiteAdapter(...)`, their `on_disk()` and `in_memory()`, or
+`SQLerDB`/`AsyncSQLerDB` `.on_disk()` and `.in_memory()`; it is SQLite's `busy_timeout` on
+every connection the adapter opens (every connection of an async pool), and on a plain
+sync `":memory:"` database also the wait for another thread's transaction. The async
+adapter has a second wait, `acquire_timeout` (seconds): the wait for a connection of its
+own pool and for a turn in a transaction tasks share; `timeout_ms` is the wait for a lock
+another connection or process holds. A `PRAGMA busy_timeout = N` in `pragmas` says the same thing:
+without `timeout_ms` it sets the number, and beside a `timeout_ms` that differs `connect()`
+raises `ValueError`. `connect()` on the async adapter opens its pool once: on a connected
+adapter, or beside another `connect()` or a statement's own connect, it opens nothing more;
+a `connect()` that fails closes every connection it opened and raises the error that made it
+fail. A shared-cache in-memory database does not wait: SQLite calls no busy
+handler for its table locks, so such a statement raises "database table is locked" at once.
+
+### Async transactions shared by tasks
+
+Tasks started inside `async with db.transaction():` share its connection. Each task's
+place in the transaction is its innermost nested transaction that is still open, else the
+transaction itself. A task sends a statement only while no other task's nested transaction
+is open above its place: otherwise the statement waits its turn, in the order asked, for at
+most `acquire_timeout` seconds, then raises `LockTimeoutError` (the other nested transaction
+is still running, or it waits for this task and can never end). A statement that has been
+given its turn is sent before any other task's nested transaction opens on top of it. With
+`acquire_timeout=None` there is no bound: a task inside a nested transaction that awaits a
+statement of a sibling on the same connection waits for ever, because the sibling waits for
+that nested transaction to end.
+
+The transaction ends for every task when its `COMMIT` or `ROLLBACK` is sent. A task that
+outlives it is in no transaction: its statements run on a pooled connection and are
+committed, and its `db.transaction()` starts a new one. Await the tasks inside the block
+(or use a `TaskGroup`) to make their work part of it. If the block ends while a nested
+transaction of another task is still open, the transaction is rolled back; the block raises
+`TransactionStateError` (when it raised an exception of its own, that one goes on), and the
+other task gets `TransactionStateError` at its next statement or at the end of its nested
+block (an exception of its own goes on with a note that nothing in it was committed). A task
+that ends with its own nested transaction open has it rolled back.
+
+If the end of a nested transaction fails in SQLite (for example because a raw `RELEASE`
+statement already ended its savepoint), the transaction can no longer be trusted. After a
+failed `ROLLBACK TO` no `RELEASE` is sent, since that would keep the rows the rollback was to
+undo. The nested block raises `TransactionStateError` with the SQLite error as `__cause__`,
+the transaction ends rolled back whatever its block asks for, and the block that ends it
+raises `TransactionStateError` too. A block that is already raising keeps its own exception,
+and the same sentence is added to it as a note. From the failed end on, every statement sent
+in that transaction by any task (`execute`, `executemany`, a new nested transaction, also one
+that was waiting its turn) raises the same `TransactionStateError` and sends nothing, and a
+nested block that ends in it raises it too.
+
+### Async cursors
+
+The cursor `await adapter.execute(...)` returns reads only what its statement saw. SQLite
+reads a statement's rows as they are fetched; so before any statement is sent on that
+connection (by the cursor's own task, a task that took it from the pool, a child task that
+shares the pin, a sibling in a shared transaction) or a rollback ends its transaction, the
+rows the cursor has not returned yet are read, in the connection's thread ahead of that
+statement, and the cursor serves them from memory. Rows its own transaction wrote and then
+rolled back are served: they are what the statement saw, and a row its own task inserts
+before the first fetch is not. While nothing else is sent on the connection it reads
+lazily, as SQLite does, and a cursor nobody holds any more, or one that is closed or has
+returned its last row, is never read ahead. A statement whose rows raise part-way (a
+`json()` of a malformed value, say) raises at the same read either way. A cursor serving
+rows from memory answers `fetchone`, `fetchmany` (`arraysize` honoured), `fetchall`,
+`async for`, `async with`, `close`, `description`, `rowcount` and `lastrowid` as before;
+`connection` and `row_factory` stay the wrapped cursor's (the connection the statement ran
+on, the factory the rows were built with: setting it after the rows were read changes none
+of them). Of two statements that two tasks sharing one connection send at the same moment,
+the one handed to the connection first is answered whole, as if the other had not been
+sent. A statement cancelled while the read of another cursor's rows that it set off is
+running leaves that cursor all its rows. If the adapter is closed, or the connection
+breaks so that the read itself fails (the connection is then replaced), before a cursor's
+rows could be read, a later read raises `NotConnectedError` and touches no connection. A
+statement sent on `adapter.connection` (the raw `aiosqlite` connection) is outside this
+rule: the adapter does not see it, and a lazy cursor on that connection may read its work.
+
 ---
 
 ## Data Integrity
 
 ### [C09] Delete policies: `restrict`
+
+`delete()`, `delete_with_policy()` and a queryset's `delete_all()` (each with the default
+`on_delete="restrict"`) raise `ReferentialIntegrityError` and delete nothing while a row that
+stays refers to a row that goes, on every base, sync and async (`await a.delete()` too).
+`set_null` writes `None` in place of each such reference; `cascade` deletes the referring
+rows too, and theirs.
+
+- A row refers to another when it holds the reference at a position its class declares as a
+  model: `author: U | None`, `items: list[U]`, `by_key: dict[str, U]`, nested, or a base
+  class of `U`. These are the positions a load follows. Only a field declared as a model
+  counts: a reference in a plain `dict`, `list` or `Any` field is data, and it neither
+  refuses a delete nor is nulled or cascaded; a dict with a key more than a reference is
+  data at every position. `validate_references()` still reports a reference in any field
+  whose row is gone, and never a dict that is not a reference.
+- The fields that count for a table are those of every class whose rows live in it: the
+  class registered for it, a subclass that inherits its table, another class bound to it
+  (`__tablename__`, `set_db(db, table)`) and a class whose rows were read or written there
+  through `using(db, table)`. A class defined later, or bound later, counts from then on;
+  a class bound elsewhere still counts for the table it wrote to. Only classes this
+  process has defined are known: import the modules of the classes that refer to a table
+  before deleting from it.
+- Rows deleted together are no referrers of each other: a row that refers only to itself,
+  or a parent and its children in one `delete_all()`, go through under `restrict`.
+- The rows go, the look for referring rows runs and the policy acts in one transaction (a
+  savepoint inside yours); a refusal or a failure leaves every row as it was, and no other
+  connection writes a referrer in between.
+- The look reads only the tables whose classes can hold a reference to the table, once each
+  for any number of rows. A delete of a row of a class no class can refer to reads no other
+  table. A class whose annotations do not resolve yet is read whole.
+- A field that is the reference itself is looked up with
+  `json_extract(data, '$.<field>._id')`: on a large referring table, an index on it
+  (`db.create_index("posts", "author._id")`) lets the look skip the scan of the table. A
+  list or a dict of references is read row by row.
+- A row written by hand is read as a load reads it. One that SQLite's JSON functions
+  cannot read (`NaN`, `Infinity`, text that is no JSON) is not passed over: the look then
+  reads the table's rows in Python, which is slower. The one exception is a document that
+  repeats a key, which sqler never writes: the look, like every query and index, reads the
+  first, and a load reads the last.
 
 ```python
 from sqler import SQLerDB, SQLerModel, ReferentialIntegrityError
@@ -763,14 +1070,14 @@ class U(SQLerModel):
 
 class Post(SQLerModel):
     title: str
-    author: dict | None = None
+    author: U | None = None
 
 db = SQLerDB.in_memory()
 U.set_db(db)
 Post.set_db(db)
 
 u = U(name="Writer").save()
-Post(title="Post A", author={"_table":"u","_id":u._id}).save()
+Post(title="Post A", author=u).save()
 
 try:
     u.delete_with_policy(on_delete="restrict")
@@ -798,6 +1105,10 @@ db.create_index("xs", "name", where="json_extract(data,'$.name') IS NOT NULL")
 
 ### [C16] Delete policies in action
 
+The delete and what its policy does to referring rows are one unit (a savepoint inside your
+transaction, if one is open): if the delete of the row is refused, the referring rows are as
+they were, also when you catch the error inside your transaction and commit.
+
 ```python
 from sqler import SQLerDB, SQLerModel, ReferentialIntegrityError
 
@@ -806,14 +1117,14 @@ class DIUser(SQLerModel):
 
 class Post(SQLerModel):
     title: str
-    author: dict | None = None
+    author: DIUser | None = None
 
 # restrict: raises while references exist
 restrict_db = SQLerDB.in_memory()
 DIUser.set_db(restrict_db)
 Post.set_db(restrict_db)
 writer = DIUser(name="Writer").save()
-Post(title="Post A", author={"_table": "diusers", "_id": writer._id}).save()
+Post(title="Post A", author=writer).save()
 try:
     writer.delete_with_policy(on_delete="restrict")
 except ReferentialIntegrityError:
@@ -824,7 +1135,7 @@ set_null_db = SQLerDB.in_memory()
 DIUser.set_db(set_null_db)
 Post.set_db(set_null_db)
 nullable = DIUser(name="Nullable").save()
-post = Post(title="Post B", author={"_table": "diusers", "_id": nullable._id}).save()
+post = Post(title="Post B", author=nullable).save()
 nullable.delete_with_policy(on_delete="set_null")
 assert Post.from_id(post._id).author is None
 
@@ -833,7 +1144,7 @@ cascade_db = SQLerDB.in_memory()
 DIUser.set_db(cascade_db)
 Post.set_db(cascade_db)
 cascade = DIUser(name="Cascade").save()
-Post(title="Post C", author={"_table": "diusers", "_id": cascade._id}).save()
+Post(title="Post C", author=cascade).save()
 cascade.delete_with_policy(on_delete="cascade")
 assert Post.query().count() == 0
 ```
@@ -958,6 +1269,93 @@ without it. Table names, column names, definitions and checks are checked before
 any SQL runs; the write methods with promoted columns check the table and the
 promoted field names the same way.
 
+**The document writers on a table with columns.** `insert_document`, `upsert_document`,
+`insert_many`, `insert_many_with_version`, `bulk_upsert` and `upsert_with_version` put each
+key the document holds that names a column beside `data` (promoted by a class, by
+`ensure_table`, or added with plain SQL) into that column, the rest into `data`, so a read
+gives back what was written. A column whose key the document does not hold is not written:
+an update leaves its value, an insert gives it the column's `DEFAULT` (or NULL); a key held
+as `None` writes NULL. A model class without `__promoted__` saves through these methods, so
+its saves leave a column it has no field for as it is. `upsert_document` with an `_id`
+updates that row only: when the table has no row with that `_id` it writes no row and
+raises `NotFoundError`. In one call, rows that hold different
+keys each get their own (consecutive rows with the same keys share one statement). A value
+a column refuses (`NOT NULL`, `CHECK`) raises SQLite's `IntegrityError` and writes nothing of
+the call; `bulk_upsert` of an existing row whose document lacks the key of a `NOT NULL`
+column without a `DEFAULT` raises it too, because SQLite checks the column before it finds
+the row. A key in another case than the column (`Status`, column `status`) stays in `data`.
+A database object learns a table's columns at its first ensure, read or write of it; a
+column added later by other means is seen by a new database object (see
+[STORAGE.md](STORAGE.md)).
+
+**Promoting a field on a table that has rows.** A column added to an existing table
+(by `ensure_table`, by `set_db()` or the first save of a model class whose
+`__promoted__` names it) takes each row's value out of the row's document and puts it
+in the column, in one transaction with the `ALTER TABLE` (one pass over the table, once;
+inside an open `transaction()` it is part of it). The column then holds what a `save()`
+would have written there. A row whose document has no key for the field gets the default
+of the model's field, as it read before; without a model, or without a default, it gets
+the column's `DEFAULT` or NULL. A JSON `null` gives NULL, never the `DEFAULT`.
+
+Where that cannot keep what a row reads, the promotion raises `SchemaError` and changes
+nothing (no column, no document touched); `details` names the `table`, the `column`, how
+many `rows` and the `first_id`: a list, a dict or a reference under the key; an integer
+past 64 bits; `null`, or no key and a default the column cannot hold, in a `NOT NULL`
+column. SQLite cannot add a `NOT NULL` column without a `DEFAULT` to an existing table:
+that raises `SchemaError` too.
+
+**A table an earlier version promoted.** Earlier versions added the column and left the
+values in the documents, and a later write may have changed either. sqler records in a
+table of its own, `_sqler_promoted`, which columns hold their values (see
+[STORAGE.md](STORAGE.md)). A database object checks a table whose columns beside `data`
+are not all recorded there once, at whichever comes first: an ensure (`ensure_table`,
+`set_db()`, the first save of a model class), a read (`find_document`,
+`find_documents`, `from_id`, `from_ids`, and a model query's `all()`, `first()`,
+`iter()`, `count()` and every other call that runs it, `update()` and `delete_all()`
+included) or a document write (above). The check reads the table once for documents that
+still hold a column's key: none, and the object remembers the table as settled; some, and the call raises
+`SchemaError` (`details["columns"]` holds the rows and the first `_id` per column) and
+changes nothing, because a read sets the column over the document and would hide the
+document's value. That holds for a column added by other means too. Settle each column
+with `move_promoted(table, column, keep=...)`: `keep="document"` puts each document's
+value into the column, `keep="column"` keeps the column's values; both take the key out of
+the documents (under the refusals above) and record the column.
+
+A read writes no record. An ensure records what it found settled; when the database
+takes no write then (opened read-only, or another connection holds the write lock past
+the busy timeout) the table is used all the same and the next ensure writes the record. A
+column that has to be added, or values that have to move, still need the write lock.
+`execute_sql()` runs your own SQL and is not checked. A search index made with
+`content_sync` on the table gets its triggers made again, inside the promotion, so that it
+reads a moved field from its column and still finds the rows.
+
+```python
+import json
+import sqlite3
+import tempfile
+from pathlib import Path
+
+from sqler import SchemaError, SQLerDB
+
+path = str(Path(tempfile.mkdtemp()) / "old.db")
+conn = sqlite3.connect(path)  # a table as an earlier version left it
+conn.execute("CREATE TABLE tickets (_id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL)")
+conn.execute("INSERT INTO tickets (data) VALUES (?)", [json.dumps({"name": "a", "status": "open"})])
+conn.execute("ALTER TABLE tickets ADD COLUMN status TEXT")
+conn.commit()
+conn.close()
+
+db = SQLerDB.on_disk(path)
+try:
+    db.ensure_table("tickets", promoted={"status": "TEXT"})
+except SchemaError as err:
+    assert err.details == {"table": "tickets", "columns": {"status": {"rows": 1, "first_id": 1}}}
+db.move_promoted("tickets", "status", keep="document")
+db.ensure_table("tickets", promoted={"status": "TEXT"})
+assert db.find_document("tickets", 1) == {"name": "a", "_id": 1, "status": "open"}
+db.close()
+```
+
 ### [D02] A unique index that refuses a row raises `UniqueConstraintError`
 
 ```python
@@ -1012,6 +1410,65 @@ then raises `NotImplementedError`.
 ---
 
 ## Mixins
+
+### Which writes meet the mixins
+
+Every way of writing an instance meets the rules of its class, sync and async, on every
+base: `save()`, `save_partial()`, `save_many()`, `delete()`, `delete_with_policy()`,
+`soft_delete()`, `restore()` and `first_or_create()` (when it creates).
+
+| Mixin | What each of those writes does |
+|-------|--------------------------------|
+| `TimestampMixin` | sets `created_at` (first write) and `updated_at` on each instance written |
+| `AuditMixin` | the same times, and `created_by` / `updated_by` from the current user |
+| `AuditLogMixin` | one audit row per row written (`create`, `update` where the stored document changed, `delete`), in one unit with the row: both are there or neither is. Inside your transaction the unit is a savepoint: both follow your commit or rollback, and a write that fails leaves neither, also when you catch the error and commit |
+| `HooksMixin` | `before_save` / `after_save` around each instance saved, `before_delete` / `after_delete` around each delete |
+
+`updated_at` is a time of day, not the order of writes. A `save()` gives its instance a
+stamp later than the one that instance held, also when the clock has not moved. A save by
+another instance of the same row, and a set-based update, store the clock's reading, so two
+writes of a row inside one tick of the clock (about 15 ms on Windows before Python 3.13, far
+less elsewhere) can leave equal stamps. What orders the writes of a row is its `_version`:
+on a table with that column every write moves it by one.
+
+Order: `before_save()` runs first, then the timestamps are set, then the row is written; a
+`before_save()` that returns False leaves the instance as it was. `after_save()` and
+`after_delete()` run once the write is committed (or, inside your transaction, once it is
+written). `save_many()` calls `before_save()` on every instance, in order, before anything is
+stamped or written (one that returns False raises `RuntimeError` naming its index, and
+nothing is written), then `after_save()` on each once the batch is written.
+`delete_with_policy()` is the delete: `delete()` is the same call with
+`on_delete="restrict"`, and the delete with what its policy does to referring rows is one
+unit. An unsaved instance or an unknown policy raises `ValueError` before any hook.
+
+A write that fails leaves the instance as it was before the call (`_id`, the stored snapshot
+and, on a safe model, `_version`), so it can be made again once the cause is gone.
+
+A delete's audit row holds the row as it was stored: an instance edited and not saved before
+its `delete()` logs the stored values, not its edits.
+
+### The set-based ways and the rows a delete's policy changes
+
+A queryset's `update()`, `update_one()`, `update_n()` and `delete_all()`, and the rows that
+`delete_with_policy(on_delete="set_null")` nulls or `on_delete="cascade"` deletes (each by
+the rules of its own table's registered class), meet the same rules but the hooks:
+
+| Rule | Set-based ways and a policy's rows |
+|------|------------------------------------|
+| version (a table with the `_version` column) | every update moves `_version` by one, in the same statement, and so does the update that nulls a reference (a holder who loaded the row before cannot save the reference back); `_version` cannot be named in an update (`ValueError`) |
+| `TimestampMixin` / `AuditMixin` | each updated (or nulled) row gets `updated_at` (and `updated_by`) in the same statement, stored as `save()` stores it; one time for all rows of the statement (the strictly-later promise of `save()` is per instance). A field you name in the update is yours: `update(updated_at=x)` writes `x` |
+| `AuditLogMixin` | one `update` row per row changed (`changes` holds the old and new of each key that differs; the new value is what the row holds afterwards, F-expressions included) and one `delete` row per row deleted, in one unit with the write; each row is read and written inside that unit, so no other connection writes it in between |
+| `HooksMixin` | calls no hook; use a loop of `save()` where a hook must run |
+
+A class with no rule sends the one statement it sent before. `delete_all(on_delete=...)`
+meets the delete policy as `delete()` does ([C09]): the default `restrict` refuses while a
+row outside the set refers to a row in it, and nothing is deleted. A class with no rule that
+no class can refer to sends its one `DELETE`; otherwise the `DELETE` returns the rows it
+deleted, and the look, the policy and the audit rows join it in one unit. A queryset's
+order and limit do not narrow the `DELETE`: it deletes every row the filter matches.
+
+A write made with `db.*` directly (`db.bulk_upsert`, `db.insert_document`, `db.execute`) is
+below the model and meets no rule of any class.
 
 ### [C26] Timestamps
 
@@ -1272,10 +1729,36 @@ cache.invalidate_pattern("users:*")
 cache.invalidate_table("users")
 
 # Use the decorator for automatic caching
-@cached_query(ttl_seconds=60)
+@cached_query(ttl_seconds=60, table=User)
 def get_active_users():
     return User.query().filter(F("active") == True).all()
 ```
+
+`table=` names what a cached function reads: a table name, or a model class, which stands
+for its table (the name its rows are written to; a name that differs only by case is the
+same table, as in SQLite). With `CacheAwareModel` on the class, a cached result of its table
+is never kept from rows older than the last write of the table:
+
+1. Every way of writing the class's rows drops the entries of its table in every
+   `QueryCache` (and those tagged with `Meta.cache_table`, where the class sets one):
+   `save()`, `save_partial()`, `save_many()`, `delete()`, `delete_with_policy()` and the rows
+   a delete's policy nulls or deletes (their own class's table), and a queryset's `update()`,
+   `update_one()`, `update_n()` and `delete_all()`, sync and async. An async write tells the
+   cache when it has run, not when its coroutine is made. It sends no statement.
+2. While a transaction of this process that wrote the table is open (`db.transaction()`,
+   `with db:`), no entry of the table
+   is served or stored (`get`, `has` and `set` too): the writer reads its own uncommitted
+   rows through, and other threads and tasks read the committed rows through. Caching of
+   the table resumes when the transaction ends, committed or rolled back.
+3. A result is stored only if the table was not written while its function ran.
+
+An entry with no table is never dropped by a write, only by its lifetime. A write made with
+`db.*` directly (`insert_many`, `bulk_upsert`, the document methods, raw SQL) is below the
+model and drops nothing: call `invalidate_table()` after one. A transaction opened on the
+adapter directly (`adapter.begin_transaction()`) is not seen either: a write inside it drops
+the entries at the write, not again at its end. The cache lives in this
+process: a write by another process is not seen, and an entry's lifetime is the bound on how
+long it can serve rows that write replaced.
 
 ### [C39] Data export (CSV, JSON)
 
@@ -1333,6 +1816,42 @@ for record_json in stream_jsonl(User):
     process(record_json)
 ```
 
+`stream_jsonl()`, `iter_dicts()` and `iter()` read their rows as they give them. Writing
+inside the loop (a `save()` of each model, say) is safe: the first statement the thread
+sends on its connection, a read as much as a write, reads the rows not given yet first, so each row comes once with the
+values its statement saw, and the rest of the result is held in memory from then on. A
+statement another thread sends on its own connection reads nothing of this one. A rollback
+reads nothing either: a cursor or iterator left part-read when its transaction (or nested
+transaction) is rolled back raises `sqlite3.OperationalError` at its next read. On a plain
+`":memory:"` database (`SQLerDB.in_memory(shared=False)`), whose one connection every thread
+shares, a statement's rows are read whole before another thread may use the connection, so
+the three hold the whole result there.
+
+The async query and query set stream with `async for`:
+
+```python
+async for doc in (await db.query("users")).iter_dicts():
+    process(doc)
+
+async for user in User.query().filter(F("age") > 30).iter():
+    process(user)
+```
+
+They give what `all_dicts()` and `all()` give, a chunk of rows read at a time; `iter()`
+follows no reference (as `.resolve(False)`). Outside a transaction a suspended iteration
+holds one pooled connection, from its first step until it ends: its rows run out, it is
+closed (`await it.aclose()`, or `contextlib.aclosing`), or the event loop closes it once it
+was dropped or left by an exception or a cancellation. Then the connection goes back to the
+pool, whichever task ends it. It stays with its task when that task sent another statement
+on it after the iteration's and has not committed it: the task's `auto_commit()` (or its
+end) gives it back. Stopping early reads none of the rows left. Inside
+`async with db.transaction()` the iteration sees the transaction's writes and the
+transaction's end gives the connection back; an iterator left unfinished when it ends goes
+on giving what its statement saw. Writing inside the loop (a `save()` of each model, say) is
+safe: the first statement sent on the iteration's connection reads the rows not given yet
+first, so each row comes once with the values its statement saw, and the rest of the result
+is held in memory from then on.
+
 ```python
 from sqler import async_export_jsonl, async_import_jsonl
 
@@ -1355,8 +1874,7 @@ Article.set_db(db)
 
 # Create FTS index on specific fields
 fts = FTSIndex(Article, fields=["title", "content"])
-fts.create(db)
-fts.rebuild()  # Index existing records
+fts.create(db)  # also indexes the rows already in the table
 
 # Search
 results = fts.search("Python")
@@ -1371,10 +1889,71 @@ for result in ranked:
 # Count matches
 count = fts.count("Python")
 
-# Index a new document
+# Text from a user: words to find, not a query
+results = fts.search("C++ it's foo-bar", plain=True)
+
+# A new row is indexed by the triggers create() added
 new_article = Article(title="New", content="content").save()
-fts.index(new_article)
+assert fts.count("New") == 1
 ```
+
+**The search string** given to `search()`, `search_ranked()`, `search_with_highlights()`,
+`snippet()` and `count()` (and to the mixin's `search()`, `search_ranked()` and
+`search_count()`) is an [FTS5 query](https://sqlite.org/fts5.html#full_text_query_syntax):
+`python tutorial` (both words), `python OR rust`, `python NOT java`, `"exact phrase"`,
+`pyth*`, `title:python`. A string SQLite refuses as a query (`C++`, `it's`, `foo-bar`, an
+empty string) raises `SearchQueryError`, a `QueryError` whose message names the query and
+SQLite's reason; the `sqlite3` error is its `__cause__`.
+
+**`plain=True`** reads the text as words to find: a row matches when it has every word,
+where a word is what the index's tokenizer makes of the text between spaces. No character
+is syntax, so `C++`, `it's`, `foo-bar`, `AT&T` and `100%` work, `OR` and `NOT` are words,
+and the pieces of `foo-bar` must stand next to each other. Text with no word in it (empty,
+spaces, `*`) finds nothing. It never raises `SearchQueryError`.
+
+**`content_sync=True`** (the default): `create()` creates the model's table if it is
+missing and adds three triggers (`<index>_ai`, `<index>_au`, `<index>_ad`) that update the
+index on every insert, update and delete of the table, whoever writes: `save()`,
+`update()`, `bulk_upsert()`, the document methods, raw SQL, another connection. The index
+change commits or rolls back with the write. `index()` and `remove()` change nothing then:
+an entry leaves only with its row. **`content_sync=False`** adds no trigger: the index
+changes only through `index()`, `remove()`, `rebuild()` and the mixin's `save()` and
+`delete()`. The mixin keeps the entry in the database the row is written to or deleted from
+(inside that database's transaction), and only for a row of the index's table: a database
+that has no table of this index is left alone.
+
+**What a trigger costs:** each insert and delete of a row writes its index row as well;
+an update writes it only when the row id or the stored value of an indexed field changed,
+so an update of other fields costs one comparison of the indexed values per row.
+
+**`create()`** makes the index what its definition (fields, their order, tokenizer,
+`content_sync`) says, or refuses, in one transaction:
+
+- No index table: it is created; with `content_sync=True` the triggers are added and the
+  index is filled from the rows already in the table.
+- An index table with the same fields in the same order and the same tokenizer is kept,
+  however its statement is spelled (an index made by an older sqler is the same index).
+- An index table with other fields, another order or another tokenizer: `create()` raises
+  `SchemaError`, naming the index, what it has and what was asked, and changes nothing.
+  To change an index, call `drop()` then `create()`.
+- With `content_sync=True`, a trigger that is missing or is not the one the definition
+  writes now (a field promoted to a column since, an older sqler) is replaced, and the
+  index is filled again from the table. So an index made by an older sqler, without
+  triggers, gets them and its missing rows on the first `create()` after the upgrade.
+- With `content_sync=False`, triggers of the index are dropped.
+
+A `create()` that fails leaves the index and its triggers as they were; one that finds
+everything as defined writes nothing (it does not wait for another writer's lock).
+`drop()` removes the triggers with the index. A raw `DROP TABLE` of the index leaves its
+triggers, and every later write to the table then fails; `drop()` removes both, and
+`create()` repairs them.
+
+Every way in indexes a field as it is stored: a promoted column from its column, any other
+field from `data` (a list or dict as its JSON text, a number as the number, `None` as
+nothing). `index(model)` reads the saved row, not the instance's unsaved values.
+
+A search index works on a `SQLerDB`: given an `AsyncSQLerDB` (through `db=` or the
+model's binding), every method raises `TypeError` before it sends anything.
 
 ```python
 from sqler import SearchableMixin
@@ -1391,39 +1970,19 @@ Post.set_db(db)
 # Create index once
 Post.create_search_index(db)
 
-# Add posts
+# Add posts: the index follows
 Post(title="Python Tips", body="Learn Python").save()
-Post.rebuild_search_index()
 
 # Search
 results = Post.search("Python")
 count = Post.search_count("Python")
+results = Post.search("C++", plain=True)
 ```
 
 ### [C42] Connection pooling
 
-```python
-from sqler import PooledSQLerDB, PoolStats
-
-# Create pooled database with 10 connections
-db = PooledSQLerDB.on_disk("mydb.db", pool_size=10)
-
-class User(SQLerModel):
-    name: str
-
-User.set_db(db)
-
-# Use normally - connections are managed automatically
-User(name="Alice").save()
-users = User.query().all()
-
-# Check pool stats
-stats: PoolStats = db.pool_stats()
-print(f"Active: {stats.active_connections}/{stats.pool_size}")
-print(f"Waiting: {stats.waiting_requests}")
-
-db.close()
-```
+`SQLerDB` gives each thread its own connection and returns it when the thread ends, so threads share one `SQLerDB`.
+`AsyncSQLerDB` pools its connections; `db.pool_stats()` returns a `PoolStats` with the pool's size, free and in-use connections, checkouts, timeouts and wait times.
 
 ### [C43] Schema migrations
 
@@ -1619,6 +2178,62 @@ user.revert_changes()
 print(user.name)  # 'Alice'
 ```
 
+On a tracked model `is_dirty` is a property (the tracker's answer), where the model bases
+have an `is_dirty()` method: write `user.is_dirty`, and `SQLerModel.is_dirty(user)` for the
+base's answer.
+
+`TrackedModel` works with the sync pydantic and lite bases (`SQLerModel`, `SQLerSafeModel`,
+`SQLerLiteModel`, `SQLerLiteSafeModel`). An async model uses `AsyncTrackedModel` (with
+`AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite twins); `TrackedModel` on an async
+model raises `TypeError` when the class is defined. A msgspec model cannot take either:
+msgspec refuses the mixin when the class is defined.
+
+```python
+from sqler import PartialUpdateMixin, TrackedModel
+
+class Config(PartialUpdateMixin, TrackedModel, SQLerModel):
+    key: str
+    value: str
+    description: str = ""
+
+config = Config(key="theme", value="dark").save(db=db)
+config.value = "light"
+config.save_partial(db=db)  # writes only `value`; `key` and `description` stay as the row has them
+```
+
+`save_partial(db=None)` writes the fields that differ from the row as the model last loaded
+or saved it, and leaves the row's other fields as they are, so two instances of one row that
+change different fields both land. It goes through `save()`:
+
+- the row is the one `save()` writes: the database given or bound, and the table the row was
+  read from (`using(db, table)`);
+- each changed value is stored as `save()` stores it (a `datetime`, `Decimal`, `timedelta`, a
+  reference, a nested model, a promoted column, ...); a value with no stored form raises
+  `UnstorableValueError` naming its field. The changed fields go in one `UPDATE`;
+- on a safe model the version is checked and bumped as `save()` does: a stale partial save
+  raises `StaleVersionError` (or is rebased where `_rebase_config` allows it);
+- the mixins around `save()` run as for `save()`: `TimestampMixin` moves `updated_at`, the
+  audit log records the changed fields in the same transaction, `CacheAwareModel`
+  invalidates its table, `SearchableMixin` re-indexes, hooks run;
+- a row that is gone raises `NotFoundError` (a write of some fields cannot recreate it);
+  a model never saved is saved in full; with no changed field nothing is sent;
+- a key in the row that the model has no field for (a row written by another version of
+  the program) is left as it is; a full `save()` writes the model's own document and drops
+  it. A field the row did not hold yet is added at the end of the document, so the stored
+  text can order its keys differently from a full save's; the values are the same;
+- a field whose name holds a double quote or a backslash (possible only through
+  `pydantic.create_model`) raises `InvalidFieldNameError` before anything is sent: save
+  such a row with `save()`.
+
+Your own `save()` override on such a model must take and pass on keyword arguments
+(`def save(self, **kwargs): ... return super().save(**kwargs)`): the partial save reaches
+the base through it, and an override that takes none raises `TypeError` on
+`save_partial()`.
+
+After it the model is clean (`is_dirty` is False); a partial save that raised leaves it dirty.
+The async twin is `AsyncPartialUpdateMixin` with `AsyncTrackedModel`:
+`await config.save_partial(db=db)`.
+
 ```python
 from sqler import DiffMixin
 
@@ -1667,6 +2282,7 @@ SQLer provides a unified exception hierarchy under `sqler.exceptions`:
   - `NotBoundError` — model not bound to database
   - `NotFoundError` — model instance not found
   - `ValidationError` — model validation failed
+  - `UnstorableValueError` — a value has no stored form (a kind sqler does not store; a `Decimal` or `timedelta` no number holds exactly, a `timedelta` being stored as its number of seconds; or `bytes` in a JSON document: promote the field to a `BLOB` column, or store text); `value` is the value and `field` its place in the document, where known; also a `TypeError`
 - **Hook errors**
   - `BeforeSaveError`, `AfterSaveError` — save hook failures
   - `BeforeDeleteError`, `AfterDeleteError` — delete hook failures
@@ -1722,7 +2338,8 @@ def safe_delete(model):
 SQLite allows only one writer at a time. If you see this error:
 - Reduce concurrent write operations
 - Use transactions to batch writes: `with db.transaction(): ...`
-- Increase `busy_timeout` pragma (default is 5000ms)
+- Increase `timeout_ms` (default 5000), e.g. `SQLerDB.on_disk("app.db", timeout_ms=15000)` or
+  `AsyncSQLerDB.on_disk("app.db", timeout_ms=15000)` (`acquire_timeout` is a different wait)
 - For high write loads, consider a write queue or single-writer pattern
 
 **"Model X is not bound"**

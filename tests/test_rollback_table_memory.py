@@ -10,7 +10,7 @@ driver's trace callback.
 import threading
 import warnings
 from dataclasses import dataclass
-from typing import Any
+from typing import Optional
 
 import pytest
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel, SQLiteAdapter
@@ -38,7 +38,7 @@ class MemRefChild(SQLerLiteSafeModel):
 class MemRefParent(SQLerLiteModel):
     __tablename__ = "mem_ref_parents"
     name: str = ""
-    child: Any = None
+    child: Optional[MemRefChild] = None
 
 
 @pytest.fixture
@@ -129,7 +129,8 @@ def test_a_thousand_saves_in_one_transaction_create_the_new_table_once(db):
         with db.transaction():
             for i in range(1000):
                 MemPromo(name=str(i)).save(db=db)
-    assert len(_kind(sent, "CREATE TABLE")) == 1
+    assert len(_kind(sent, "CREATE TABLE IF NOT EXISTS MEM_PROMOS")) == 1
+    assert len(_kind(sent, "CREATE TABLE IF NOT EXISTS _SQLER_PROMOTED")) == 1  # the record table
     assert MemPromo.using(db).count() == 1000
 
 
@@ -263,10 +264,13 @@ def test_lite_safe_model_first_saved_in_a_rolled_back_transaction_saves_again_af
 
 
 def test_save_many_of_a_promoted_class_looks_the_table_up_once_for_two_calls(db):
-    with query_logger.capture() as sent:
+    with query_logger.capture() as first:
         MemPromo.save_many([MemPromo(name="a")], db=db)
+    with query_logger.capture() as second:
         MemPromo.save_many([MemPromo(name="b")], db=db)
-    assert len([q for q in sent if "sqlite_master" in q.sql]) == 1
+    # the first reads the table's columns, then again under the write lock that creates it
+    assert [q.sql for q in first if "table_xinfo" in q.sql] == ['PRAGMA table_xinfo("mem_promos");'] * 2
+    assert [q.sql for q in second if "table_xinfo" in q.sql or "sqlite_master" in q.sql] == []
     assert MemPromo.using(db).count() == 2
 
 

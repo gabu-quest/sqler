@@ -5,7 +5,6 @@ and lifecycle hooks.
 """
 
 import json
-from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Optional, Self
@@ -13,6 +12,7 @@ from typing import Any, ClassVar, Optional, Self
 from sqler import _stored
 from sqler.models import _dirty
 from sqler.models._table_names import _instance_binding
+from sqler.models._write_rules import WriteRules, deletable, new_only
 from sqler.utils import validate_table_name
 
 # Context variables for thread/async-safe user tracking
@@ -46,7 +46,7 @@ def _stamp_times(created_at: Optional[datetime], updated_at: Optional[datetime])
     return created_at, max(now, floor + _ONE_MICROSECOND)
 
 
-class TimestampMixin:
+class TimestampMixin(WriteRules):
     """Mixin that automatically manages created_at and updated_at fields.
 
     Usage::
@@ -66,10 +66,13 @@ class TimestampMixin:
         """Set timestamp fields before save."""
         self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
 
-    def save(self, *, db=None) -> Self:
-        """Save with automatic timestamp updates."""
+    def _stamp(self) -> None:
         self._set_timestamps()
-        return super().save(db=db)  # type: ignore[misc, return-value]
+        super()._stamp()
+
+    @classmethod
+    def _update_stamps(cls) -> dict[str, Any]:
+        return {**super()._update_stamps(), "updated_at": datetime.now(timezone.utc)}
 
 
 class SoftDeleteMixin:
@@ -363,7 +366,7 @@ class HooksMixin:
         """
         pass
 
-    def save(self, *, db=None) -> Self:
+    def save(self, *, db=None, _partial: bool = False) -> Self:
         """Save with before/after hooks.
 
         Calls before_save() first. If it returns False, the save is aborted.
@@ -379,13 +382,36 @@ class HooksMixin:
             raise RuntimeError(
                 f"before_save() returned False, save aborted for {self.__class__.__name__}"
             )
-        result = super().save(db=db)  # type: ignore[misc]
+        result = super().save(db=db, _partial=_partial)  # type: ignore[misc]
         if self._hooks_enabled:
             self.after_save()
         return result  # type: ignore[return-value]
 
-    def delete(self, *, db=None) -> None:
-        """Delete with before/after hooks.
+    @classmethod
+    def save_many(cls, instances: list, *, db=None) -> list:
+        """Insert new instances in one batch, with each one's hooks.
+
+        ``before_save()`` runs on each instance, in order, before anything is stamped or
+        written; one that returns False raises ``RuntimeError`` naming its index, and
+        nothing is written. ``after_save()`` runs on each, in order, once the batch is
+        written.
+        """
+        if not cls._hooks_enabled:
+            return super().save_many(instances, db=db)  # type: ignore[misc]
+        new_only(instances)
+        for index, inst in enumerate(instances):
+            if not inst.before_save():
+                raise RuntimeError(
+                    f"before_save() returned False for instance {index}, "
+                    f"save_many aborted for {cls.__name__}"
+                )
+        result = super().save_many(instances, db=db)  # type: ignore[misc]
+        for inst in instances:
+            inst.after_save()
+        return result
+
+    def delete_with_policy(self, *, db=None, on_delete: str = "restrict") -> None:
+        """Delete with before/after hooks (``delete()`` comes through here).
 
         Calls before_delete() first. If it returns False, the delete is aborted.
         After a successful delete, after_delete() is called.
@@ -393,11 +419,13 @@ class HooksMixin:
         Raises:
             RuntimeError: If before_delete() returns False.
         """
-        if self._hooks_enabled and not self.before_delete():
-            raise RuntimeError(
-                f"before_delete() returned False, delete aborted for {self.__class__.__name__}"
-            )
-        super().delete(db=db)  # type: ignore[misc]
+        if self._hooks_enabled:
+            deletable(self, on_delete)
+            if not self.before_delete():
+                raise RuntimeError(
+                    f"before_delete() returned False, delete aborted for {self.__class__.__name__}"
+                )
+        super().delete_with_policy(db=db, on_delete=on_delete)  # type: ignore[misc]
         if self._hooks_enabled:
             self.after_delete()
 
@@ -448,7 +476,7 @@ class AsyncHooksMixin:
         """Called after the model is deleted (async)."""
         pass
 
-    async def save(self, *, db=None) -> Self:
+    async def save(self, *, db=None, _partial: bool = False) -> Self:
         """Save with before/after hooks (async).
 
         Calls before_save() first. If it returns False, the save is aborted.
@@ -464,13 +492,31 @@ class AsyncHooksMixin:
             raise RuntimeError(
                 f"before_save() returned False, save aborted for {self.__class__.__name__}"
             )
-        result = await super().save(db=db)  # type: ignore[misc]
+        result = await super().save(db=db, _partial=_partial)  # type: ignore[misc]
         if self._hooks_enabled:
             await self.after_save()
         return result  # type: ignore[return-value]
 
-    async def delete(self, *, db=None) -> None:
-        """Delete with before/after hooks (async).
+    @classmethod
+    async def save_many(cls, instances: list, *, db=None) -> list:
+        """Insert new instances in one batch, with each one's hooks (async); see
+        :meth:`HooksMixin.save_many`."""
+        if not cls._hooks_enabled:
+            return await super().save_many(instances, db=db)  # type: ignore[misc]
+        new_only(instances)
+        for index, inst in enumerate(instances):
+            if not await inst.before_save():
+                raise RuntimeError(
+                    f"before_save() returned False for instance {index}, "
+                    f"save_many aborted for {cls.__name__}"
+                )
+        result = await super().save_many(instances, db=db)  # type: ignore[misc]
+        for inst in instances:
+            await inst.after_save()
+        return result
+
+    async def delete_with_policy(self, *, db=None, on_delete: str = "restrict") -> None:
+        """Delete with before/after hooks (async; ``delete()`` comes through here).
 
         Calls before_delete() first. If it returns False, the delete is aborted.
         After a successful delete, after_delete() is called.
@@ -478,11 +524,13 @@ class AsyncHooksMixin:
         Raises:
             RuntimeError: If before_delete() returns False.
         """
-        if self._hooks_enabled and not await self.before_delete():
-            raise RuntimeError(
-                f"before_delete() returned False, delete aborted for {self.__class__.__name__}"
-            )
-        await super().delete(db=db)  # type: ignore[misc]
+        if self._hooks_enabled:
+            deletable(self, on_delete)
+            if not await self.before_delete():
+                raise RuntimeError(
+                    f"before_delete() returned False, delete aborted for {self.__class__.__name__}"
+                )
+        await super().delete_with_policy(db=db, on_delete=on_delete)  # type: ignore[misc]
         if self._hooks_enabled:
             await self.after_delete()
 
@@ -511,7 +559,7 @@ class AsyncFullMixin(TimestampMixin, AsyncSoftDeleteMixin, AsyncHooksMixin):
     pass
 
 
-class AuditMixin:
+class AuditMixin(WriteRules):
     """Mixin that provides audit logging for model changes.
 
     Tracks who created/updated records and when. Requires a way to get
@@ -600,13 +648,20 @@ class AuditMixin:
         self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
         self.updated_by = user  # type: ignore[attr-defined]
 
-    def save(self, *, db=None) -> Self:
-        """Save with automatic audit field updates."""
+    def _stamp(self) -> None:
         self._set_audit_fields()
-        return super().save(db=db)  # type: ignore[misc, return-value]
+        super()._stamp()
+
+    @classmethod
+    def _update_stamps(cls) -> dict[str, Any]:
+        return {
+            **super()._update_stamps(),
+            "updated_at": datetime.now(timezone.utc),
+            "updated_by": cls.get_current_user(),
+        }
 
 
-class AsyncAuditMixin:
+class AsyncAuditMixin(WriteRules):
     """Async version of AuditMixin for async models.
 
     Usage::
@@ -655,27 +710,17 @@ class AsyncAuditMixin:
         self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
         self.updated_by = user  # type: ignore[attr-defined]
 
-    async def save(self, *, db=None) -> Self:
-        """Save with automatic audit field updates."""
+    def _stamp(self) -> None:
         self._set_audit_fields()
-        return await super().save(db=db)  # type: ignore[misc, return-value]
+        super()._stamp()
 
-
-_NO_VALUE = object()
-
-
-def _remember_identity(obj) -> dict:
-    """What a failed save must put back: ``_id`` and, where the model has one, ``_version``."""
-    kept = {"_id": getattr(obj, "_id", None)}
-    version = getattr(obj, "_version", _NO_VALUE)
-    if version is not _NO_VALUE:
-        kept["_version"] = version
-    return kept
-
-
-def _restore_identity(obj, kept: dict) -> None:
-    for name, value in kept.items():
-        setattr(obj, name, value)
+    @classmethod
+    def _update_stamps(cls) -> dict[str, Any]:
+        return {
+            **super()._update_stamps(),
+            "updated_at": datetime.now(timezone.utc),
+            "updated_by": cls.get_current_user(),
+        }
 
 
 def _audit_table_ddl(audit_table: str) -> str:
@@ -723,6 +768,22 @@ def _audit_changes(old_row: Optional[dict], written: dict) -> dict[str, dict[str
     }
 
 
+def _audit_statements(audit_table: str, user, rows) -> list[tuple[str, list]]:
+    """The audit rows for rows a write changed (see ``_write_rules``): a create and a
+    delete each one, an update one where its stored document changed. A delete's snapshot
+    is the row as it was stored."""
+    statements = []
+    for action, record_id, before, after in rows:
+        if action == "create":
+            statements.append(_audit_insert(audit_table, record_id, action, user, None, after))
+        elif action == "delete":
+            snapshot = _dirty.snapshot(before)
+            statements.append(_audit_insert(audit_table, record_id, action, user, None, snapshot))
+        elif changes := _audit_changes(before, after):
+            statements.append(_audit_insert(audit_table, record_id, action, user, changes, after))
+    return statements
+
+
 def _audit_entries(rows) -> list[dict[str, Any]]:
     return [
         {
@@ -736,27 +797,7 @@ def _audit_entries(rows) -> list[dict[str, Any]]:
     ]
 
 
-@asynccontextmanager
-async def _aatomic(db):
-    """Async twin of ``_atomic``."""
-    if db.adapter.in_transaction:
-        yield
-    else:
-        async with db.transaction():
-            yield
-
-
-@contextmanager
-def _atomic(db):
-    """One transaction around several statements, unless the caller already has one."""
-    if db.adapter.in_transaction:
-        yield
-    else:
-        with db.transaction():
-            yield
-
-
-class AuditLogMixin:
+class AuditLogMixin(WriteRules):
     """Mixin that logs all changes to a separate audit log table.
 
     This creates a full audit trail of all changes to a model, storing
@@ -781,20 +822,18 @@ class AuditLogMixin:
     The audit log is stored in a table named `{model_table}_audit`.
     """
 
-    def _log_audit(
-        self, action: str, changes: Optional[dict], snapshot: dict, *, db
-    ) -> None:
-        """Write one audit row: ``changes`` (updates) and ``snapshot`` are stored documents."""
-        db, table = _instance_binding(self, db)
+    _row_rules: ClassVar[bool] = True
+
+    @classmethod
+    def _rows_written(cls, db, table: str, rows) -> None:
+        """Write the audit rows of ``rows`` (inside the write's transaction)."""
         audit_table = validate_table_name(f"{table}_audit")
-        db.adapter.execute(_audit_table_ddl(audit_table))
-        db.adapter.auto_commit()
-        user = AuditMixin.get_current_user() if hasattr(AuditMixin, "get_current_user") else None
-        sql, params = _audit_insert(
-            audit_table, getattr(self, "_id", None), action, user, changes, snapshot
-        )
-        db.adapter.execute(sql, params)
-        db.adapter.auto_commit()
+        statements = _audit_statements(audit_table, AuditMixin.get_current_user(), rows)
+        if statements:
+            db.adapter.execute(_audit_table_ddl(audit_table))
+            for sql, params in statements:
+                db.adapter.execute(sql, params)
+        super()._rows_written(db, table, rows)
 
     def get_audit_log(self, *, db=None) -> list[dict[str, Any]]:
         """Get the audit log for this record.
@@ -821,44 +860,8 @@ class AuditLogMixin:
 
         return _audit_entries(rows)
 
-    def save(self, *, db=None) -> Self:
-        """Save with automatic audit logging.
 
-        Outside a transaction the save and its audit row share one transaction: both
-        are there or neither is. Inside the caller's transaction both follow its
-        commit or rollback.
-        """
-        db, _ = _instance_binding(self, db)
-        kept = _remember_identity(self)
-        try:
-            with _atomic(db):
-                return self._save_and_log(db)
-        except BaseException:
-            # the save was rolled back (or the caller's transaction will be): the
-            # instance goes back to what it was, so a second save() starts from there
-            _restore_identity(self, kept)
-            raise
-
-    def _save_and_log(self, db) -> Self:
-        is_new = getattr(self, "_id", None) is None
-        old_row = None if is_new else db.find_document(_instance_binding(self, db)[1], self._id)
-        result = super().save(db=db)  # type: ignore[misc]
-        written = self._snapshot  # type: ignore[attr-defined]
-        if is_new:
-            self._log_audit("create", None, written, db=db)
-        elif changes := _audit_changes(old_row, written):
-            self._log_audit("update", changes, written, db=db)
-        return result  # type: ignore[return-value]
-
-    def delete(self, *, db=None) -> None:
-        """Delete with audit logging (the row and its audit entry go together)."""
-        db, _ = _instance_binding(self, db)
-        with _atomic(db):
-            self._log_audit("delete", None, self._dump_with_relations(), db=db)  # type: ignore[attr-defined]
-            super().delete(db=db)  # type: ignore[misc]
-
-
-class AsyncAuditLogMixin:
+class AsyncAuditLogMixin(WriteRules):
     """Async version of AuditLogMixin.
 
     Usage::
@@ -870,26 +873,20 @@ class AsyncAuditLogMixin:
         logs = await user.get_audit_log()
     """
 
-    async def _log_audit(
-        self, action: str, changes: Optional[dict], snapshot: dict, *, db
-    ) -> None:
-        """Write one audit row (async); ``changes`` and ``snapshot`` are stored documents."""
-        db, table = _instance_binding(self, db)
+    _row_rules: ClassVar[bool] = True
+
+    @classmethod
+    async def _arows_written(cls, db, table: str, rows) -> None:
+        """Write the audit rows of ``rows`` (inside the write's transaction)."""
         audit_table = validate_table_name(f"{table}_audit")
-        cursor = await db.adapter.execute(_audit_table_ddl(audit_table))
-        await cursor.close()
-        await db.adapter.auto_commit()
-        user = (
-            AsyncAuditMixin.get_current_user()
-            if hasattr(AsyncAuditMixin, "get_current_user")
-            else None
-        )
-        sql, params = _audit_insert(
-            audit_table, getattr(self, "_id", None), action, user, changes, snapshot
-        )
-        cursor = await db.adapter.execute(sql, params)
-        await cursor.close()
-        await db.adapter.auto_commit()
+        statements = _audit_statements(audit_table, AsyncAuditMixin.get_current_user(), rows)
+        if statements:
+            cursor = await db.adapter.execute(_audit_table_ddl(audit_table))
+            await cursor.close()
+            for sql, params in statements:
+                cursor = await db.adapter.execute(sql, params)
+                await cursor.close()
+        await super()._arows_written(db, table, rows)
 
     async def get_audit_log(self, *, db=None) -> list[dict[str, Any]]:
         """Get the audit log for this record (async)."""
@@ -912,39 +909,3 @@ class AsyncAuditLogMixin:
             return []
 
         return _audit_entries(rows)
-
-    async def save(self, *, db=None) -> Self:
-        """Save with automatic audit logging (async).
-
-        Outside a transaction the save and its audit row share one transaction: both
-        are there or neither is. Inside the caller's transaction both follow its
-        commit or rollback. A failed save leaves ``_id`` as it was.
-        """
-        db, _ = _instance_binding(self, db)
-        kept = _remember_identity(self)
-        try:
-            async with _aatomic(db):
-                return await self._save_and_log(db)
-        except BaseException:
-            _restore_identity(self, kept)
-            raise
-
-    async def _save_and_log(self, db) -> Self:
-        is_new = getattr(self, "_id", None) is None
-        old_row = (
-            None if is_new else await db.find_document(_instance_binding(self, db)[1], self._id)
-        )
-        result = await super().save(db=db)  # type: ignore[misc]
-        written = self._snapshot  # type: ignore[attr-defined]
-        if is_new:
-            await self._log_audit("create", None, written, db=db)
-        elif changes := _audit_changes(old_row, written):
-            await self._log_audit("update", changes, written, db=db)
-        return result  # type: ignore[return-value]
-
-    async def delete(self, *, db=None) -> None:
-        """Delete with audit logging (the row and its audit entry go together)."""
-        db, _ = _instance_binding(self, db)
-        async with _aatomic(db):
-            await self._log_audit("delete", None, await self._adump_with_relations(), db=db)  # type: ignore[attr-defined]
-            await super().delete(db=db)  # type: ignore[misc]

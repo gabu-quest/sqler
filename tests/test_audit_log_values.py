@@ -20,6 +20,7 @@ from typing import Any, NamedTuple, Optional
 import pydantic
 import pytest
 from sqler import AsyncSQLerDB, AsyncSQLerSafeModel, SQLerDB, SQLerModel, SQLerSafeModel
+from sqler.exceptions import NotFoundError
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.mixins import AsyncAuditLogMixin, AuditLogMixin, TimestampMixin
@@ -117,9 +118,9 @@ def _bind(rows, table, *classes):
         cls.set_db(rows.db, tbl)
 
 
-# ---- p29: the four models of the planner's probe --------------------------------------------
+# ---- an update of one field reports that field, whatever the other fields hold --------------
 
-P29 = [
+OTHER_FIELDS = [
     pytest.param("plain", {"n": (int, 1)}, {"n": 1}, id="plain"),
     pytest.param("dated", {"when": (Optional[datetime], WHEN)}, {"when": WHEN_TEXT}, id="datetime"),
     pytest.param("dayed", {"day": (Optional[date], DAY)}, {"day": DAY_TEXT}, id="date"),
@@ -127,12 +128,12 @@ P29 = [
 
 
 @pytest.mark.parametrize("base", BASE_IDS)
-@pytest.mark.parametrize("label, fields, stored", P29)
+@pytest.mark.parametrize("label, fields, stored", OTHER_FIELDS)
 def test_update_of_name_reports_only_name(base, label, fields, stored):
     spec = BASES[base]
 
     async def steps(rows):
-        cls = make(spec, "P29" + label, **fields)
+        cls = make(spec, "Other" + label, **fields)
         _bind(rows, "items", cls)
         item = await _aw(cls(name="a", **{k: v[1] for k, v in fields.items()}).save())
         item.name = "b"
@@ -274,15 +275,33 @@ def test_an_update_that_changes_nothing_writes_no_audit_row(base):
 
 
 @pytest.mark.parametrize("base", BASE_IDS)
-def test_a_decimal_field_raises_and_leaves_nothing(base):
+def test_a_decimal_field_is_saved_and_audited_as_a_number(base):
+    spec = BASES[base]
+
+    async def steps(rows):
+        cls = make(spec, "Priced", price=(Optional[Decimal], None))
+        _bind(rows, "priced", cls)
+        item = await _aw(cls(name="a", price=Decimal("1.5")).save())
+        item.price = Decimal("2.25")
+        await _aw(item.save())
+        return await rows.audit("priced")
+
+    assert _run(steps, spec.is_async) == [
+        ("create", None, {"name": "a", "price": 1.5}),
+        ("update", {"price": {"old": 1.5, "new": 2.25}}, {"name": "a", "price": 2.25}),
+    ]
+
+
+@pytest.mark.parametrize("base", BASE_IDS)
+def test_a_decimal_a_number_cannot_hold_raises_and_leaves_nothing(base):
     spec = BASES[base]
 
     async def steps(rows):
         cls = make(spec, "Priced", price=(Optional[Decimal], None))
         _bind(rows, "priced", cls)
         await _aw(cls(name="seed").save())
-        item = cls(name="a", price=Decimal("1.5"))
-        with pytest.raises(TypeError, match="Decimal"):
+        item = cls(name="a", price=Decimal("0.1234567890123456789"))
+        with pytest.raises(TypeError, match="a number cannot hold it"):
             await _aw(item.save())
         return (
             item._id,
@@ -379,7 +398,8 @@ def test_a_row_deleted_behind_the_model_writes_no_update_row(base):
         item = await _aw(cls(name="a").save())
         await rows.sql("DELETE FROM vanished")
         item.name = "b"
-        await _aw(item.save())
+        with pytest.raises(NotFoundError, match="Row 1 of vanished is not there"):
+            await _aw(item.save())
         return [a for a, _, _ in await rows.audit("vanished")]
 
     assert _run(steps, spec.is_async) == ["create"]

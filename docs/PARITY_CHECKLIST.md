@@ -34,7 +34,7 @@ This document enumerates every feature in the sync implementation and tracks par
 | `in_transaction` property | ✅ | ✅ | ✅ | |
 | `begin_transaction()` | ✅ | ✅ | ✅ | Uses BEGIN IMMEDIATE |
 | `end_transaction(commit=True)` | ✅ | ✅ | ✅ | |
-| `_txn_depth` tracking | ✅ | ✅ | ✅ | Nested transaction support |
+| Nested transaction tracking | ✅ | ✅ | 🔧 | Sync: a depth counter (`_txn_depth`). Async: the connection's stack of savepoints, and in each task the savepoints it is inside; depth and savepoint name are read from them |
 | **Context Managers** |
 | `__enter__/__exit__` | ✅ | ✅ | ✅ | |
 | `__aenter__/__aexit__` | N/A | ✅ | ✅ | |
@@ -178,7 +178,8 @@ This document enumerates every feature in the sync implementation and tracks par
 | `explain_query_plan(adapter)` | ✅ | ✅ | 🔧 | Async takes no arg |
 | **Batch Resolution** |
 | `_batch_resolve(docs)` | ✅ | ✅ | ✅ | |
-| `_attach_metadata(inst, doc, row, other_table)` | ✅ | ✅ | ✅ | |
+| `_models(docs)` | ✅ | ✅ | ✅ | each model has its home: the queryset's database and table |
+| `_checked(use)` | ✅ | ✅ | ✅ | a versioned query asks `db._has_version_column(table)` for rows it reads or returns |
 
 ---
 
@@ -214,7 +215,6 @@ This document enumerates every feature in the sync implementation and tracks par
 | `delete_with_policy(on_delete, db=None)` | ✅ | ✅ | ✅ | restrict, set_null, cascade all work |
 | `refresh()` | ✅ | ✅ | ✅ | |
 | **Relationship Helpers** |
-| `_is_ref_dict(value)` | ✅ | N/A | 🔧 | Handled inline in async |
 | `_resolve_relations(data)` | ✅ | ✅ | 🔧 | Async uses `_aresolve_relations` |
 | `_dump_with_relations()` | ✅ | ✅ | 🔧 | Async uses `_adump_with_relations` |
 | **Integrity Helpers** |
@@ -226,7 +226,6 @@ This document enumerates every feature in the sync implementation and tracks par
 
 ### Model Notes:
 1. **`set_db()` doesn't call `_ensure_table` in async** — By design (async requires await)
-2. **`_is_ref_dict()` handled inline in async** — Not needed as separate helper
 
 ---
 
@@ -349,7 +348,6 @@ This document enumerates every feature in the sync implementation and tracks par
 |------------|----------|-------|
 | `timeout_ms` parameter | Adapter | Not applicable to aiosqlite |
 | Memory singleton mode | Adapter | Different concurrency model |
-| `_is_ref_dict()` helper | Model | Handled inline in async |
 | `set_db()` lazy in async | Model/SafeModel | Async can't call sync `_ensure_table` |
 | Row count detection | Query | Sync: `cursor.rowcount`, async: `SELECT changes()` |
 

@@ -192,7 +192,7 @@ Run `uv run python -m benchmarks run --scale medium --storage both` to generate 
 - `SQLerSafeModel` with optimistic locking (`_version` + `StaleVersionError`)
 - Referential integrity: `cascade`, `restrict`, `set_null` delete policies
 - Transaction-aware saves — `model.save()` inside `with db.transaction():` rolls back properly
-- `save_many()` / `asave_many()` for fast bulk creation (multi-row INSERT with auto-chunking)
+- `save_many()` for fast bulk creation, sync and async (multi-row INSERT with auto-chunking)
 - `bulk_upsert` for efficient batch writes
 
 **Developer Experience**

@@ -8,7 +8,7 @@ index given the database finds the row.
 import sqlite3
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional, Union
 
 import pytest
 import pytest_asyncio
@@ -176,16 +176,29 @@ def test_search_index_given_the_database_finds_an_unbound_models_row(db):
     assert fts.count("ownership") == 1
 
 
-def test_search_on_a_class_whose_table_does_not_exist_yet(db):
+def test_a_synced_index_on_a_class_whose_table_does_not_exist_yet_creates_it(db):
     class UrNeverSaved(SQLerModel):
         title: str = ""
 
     fts = FTSIndex(UrNeverSaved, ["title"], db=db)
     assert fts.table == "urneversaveds"
     fts.create()
+    assert _exists(db, "urneversaveds") is True
     assert fts.rebuild() == 0
     assert fts.search("anything") == []
     assert fts.count("anything") == 0
+
+
+def test_a_manual_index_on_a_class_whose_table_does_not_exist_leaves_it_missing(db):
+    class UrNeverSavedManual(SQLerModel):
+        title: str = ""
+
+    fts = FTSIndex(UrNeverSavedManual, ["title"], db=db, content_sync=False)
+    fts.create()
+    assert fts.rebuild() == 0
+    assert fts.search("anything") == []
+    assert fts.count("anything") == 0
+    assert _exists(db, "urneversavedmanuals") is False
 
 
 def test_from_ids_with_a_database_on_an_unbound_class(db):
@@ -235,7 +248,7 @@ class UmPyPart(SQLerModel):
 
 class UmPyBox(SQLerModel):
     name: str = ""
-    part: Any = None
+    part: Union[dict, UmPyPart, None] = None  # a typed position that also takes a stored reference
 
 
 @dataclass
@@ -246,7 +259,7 @@ class UmLitePart(SQLerLiteModel):
 @dataclass
 class UmLiteBox(SQLerLiteModel):
     name: str = ""
-    part: Any = None
+    part: Union[dict, UmLitePart, None] = None  # a typed position that also takes a stored reference
 
 
 class UmAsPart(AsyncSQLerModel):
@@ -255,7 +268,7 @@ class UmAsPart(AsyncSQLerModel):
 
 class UmAsBox(AsyncSQLerModel):
     name: str = ""
-    part: Any = None
+    part: Union[dict, UmAsPart, None] = None  # a typed position that also takes a stored reference
 
 
 @dataclass
@@ -266,7 +279,7 @@ class UmALitePart(AsyncSQLerLiteModel):
 @dataclass
 class UmALiteBox(AsyncSQLerLiteModel):
     name: str = ""
-    part: Any = None
+    part: Union[dict, UmALitePart, None] = None  # a typed position that also takes a stored reference
 
 
 def _exists(db, table):
@@ -277,17 +290,16 @@ def _exists(db, table):
 @pytest.mark.parametrize(
     "box_cls,part_cls", [(UmPyBox, UmPyPart), (UmLiteBox, UmLitePart)], ids=["pydantic", "lite"]
 )
-def test_reference_to_a_missing_table_stays_a_reference(db, box_cls, part_cls):
+def test_reference_to_a_missing_table_reads_as_none(db, box_cls, part_cls):
     _bind(box_cls, db)
     part = part_cls(label="p").save(db=db)
     part_table = part_cls._resolve_binding(db)[1]
     box = box_cls(name="b", part=part).save()
     db.adapter.execute(f"DROP TABLE {part_table}")
 
-    ref = {"_table": part_table, "_id": part._id}
-    assert box_cls.from_id(box._id).part == ref
+    assert box_cls.from_id(box._id).part is None
     box.refresh()
-    assert box.part == ref
+    assert box.part is None
     assert _exists(db, part_table) is False
 
 
@@ -314,7 +326,7 @@ def test_reference_whose_row_does_not_fit_its_class_raises(db, box_cls, part_cls
 @pytest.mark.parametrize(
     "box_cls,part_cls", [(UmAsBox, UmAsPart), (UmALiteBox, UmALitePart)], ids=["async-pydantic", "async-lite"]
 )
-async def test_async_reference_to_a_missing_table_stays_a_reference(adb, box_cls, part_cls):
+async def test_async_reference_to_a_missing_table_reads_as_none(adb, box_cls, part_cls):
     _bind(box_cls, adb)
     part = await part_cls(label="p").save(db=adb)
     part_table = part_cls._resolve_binding(adb)[1]
@@ -322,10 +334,9 @@ async def test_async_reference_to_a_missing_table_stays_a_reference(adb, box_cls
     await adb.adapter.execute(f"DROP TABLE {part_table}")
     await adb.adapter.auto_commit()
 
-    ref = {"_table": part_table, "_id": part._id}
-    assert (await box_cls.from_id(box._id)).part == ref
+    assert (await box_cls.from_id(box._id)).part is None
     await box.refresh()
-    assert box.part == ref
+    assert box.part is None
     cur = await adb.adapter.execute("SELECT 1 FROM sqlite_master WHERE name=?", [part_table])
     assert await cur.fetchone() is None
     await cur.close()
@@ -377,7 +388,8 @@ def test_every_search_on_a_missing_source_table_is_empty(db, method):
     class UsNever(SQLerModel):
         title: str = ""
 
-    fts = FTSIndex(UsNever, ["title"], db=db)
+    # an index without triggers: one with them creates the table it follows
+    fts = FTSIndex(UsNever, ["title"], db=db, content_sync=False)
     fts.create()
     # an index row whose source row (and table) does not exist
     db.adapter.execute(f"INSERT INTO {fts.index_table}(rowid, title) VALUES (1, 'python')")

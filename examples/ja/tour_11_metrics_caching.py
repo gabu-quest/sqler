@@ -30,7 +30,7 @@ def _(mo):
         1. メトリクス収集（Prometheus/StatsD 互換）
         2. TTL 付きクエリ結果キャッシング
         3. キャッシュ対応モデル
-        4. コネクションプーリングの概念
+        4. スレッドとタスクのコネクション
 
         探求しましょう！
         """
@@ -53,20 +53,16 @@ def _():
     from sqler import SQLerDB, SQLerModel
     from sqler.cache import CacheAwareModel, CacheStats, QueryCache, cached_query
     from sqler.metrics import MetricsCollector, QueryMetrics, metrics
-    from sqler.pool import ConnectionPool, PooledSQLerDB, PoolStats
     from sqler.query import SQLerField as F
 
     db = SQLerDB.in_memory()
     print("データベースに接続しました！")
-    print("インポート完了: metrics, cache, pool モジュール")
+    print("インポート完了: metrics, cache モジュール")
     return (
         CacheAwareModel,
         CacheStats,
-        ConnectionPool,
         F,
         MetricsCollector,
-        PoolStats,
-        PooledSQLerDB,
         QueryCache,
         QueryMetrics,
         SQLerDB,
@@ -340,9 +336,11 @@ def _(mo):
         r"""
         ## 8. コネクションプーリング
 
-        並行アクセスがある本番環境ではコネクションプールを使用。
+        `SQLerDB` はスレッドごとに専用のコネクションを持ち、スレッドが終わると
+        それを返します。そのため、複数のスレッドが 1 つの `SQLerDB` を共有できます。
+        `AsyncSQLerDB` はコネクションをプールし、`pool_stats()` でその状態を示します。
 
-        **注意：** プールにはディスクベースのデータベースが必要なため、
+        **注意：** スレッドにはディスクベースのデータベースが必要なため、
         API を示します：
         """
     )
@@ -351,17 +349,17 @@ def _(mo):
 
 @app.cell
 def _():
-    print("コネクションプール機能：")
+    print("スレッドごと・タスクごとのコネクション：")
     print("")
-    print("  # プール付きデータベースを作成")
-    print("  db = PooledSQLerDB.on_disk('app.db', max_connections=10)")
-    print("")
-    print("  # SQLerDB と同様に使用")
+    print("  # すべてのスレッドで 1 つの SQLerDB")
+    print("  db = SQLerDB.on_disk('app.db')")
     print("  User.set_db(db)")
-    print("  users = User.query().all()")
+    print("  threads = [threading.Thread(target=lambda: User.query().all()) for _ in range(10)]")
     print("")
-    print("  # プール統計を確認")
-    print("  stats = db.pool_stats()")
+    print("  # 非同期：コネクションプールとその統計")
+    print("  adb = AsyncSQLerDB.on_disk('app.db')")
+    print("  await adb.connect()")
+    print("  stats = adb.pool_stats()")
     print("  print(f'使用中: {stats.in_use_connections}')")
     print("  print(f'利用可能: {stats.available_connections}')")
     print("")
@@ -423,14 +421,13 @@ def _(mo):
         | `@cached_query` | 自動キャッシングデコレータ |
         | `.invalidate_pattern()` | ワイルドカードキャッシュ無効化 |
         | `CacheAwareModel` | モデル変更時に自動無効化 |
-        | `ConnectionPool` | スレッドセーフなコネクションプーリング |
-        | `PooledSQLerDB` | 組み込みプーリング付き SQLerDB |
+        | `AsyncSQLerDB.pool_stats()` | 非同期コネクションプールの統計 |
 
         **ベストプラクティス：**
         - 本番監視にメトリクスを有効化
         - 適切な TTL でコストの高いクエリをキャッシュ
         - バルク更新後に `invalidate_table()` を使用
-        - 並行アクセスにコネクションプーリングを使用
+        - スレッド間では 1 つの `SQLerDB` を共有する。`AsyncSQLerDB` はタスク用にコネクションをプールする
         - 遅いクエリ追跡に `slow_threshold_ms` を設定
 
         **これで SQLer ツアーは終了です！**

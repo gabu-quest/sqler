@@ -7,8 +7,8 @@ between its statement and that release (``wait_for`` timing out, an outer
 write transaction open: every other writer then waited out the busy timeout and
 failed with "database is locked".
 
-Statements are made to hang by patching ``aiosqlite.Cursor.fetchone``, so no
-test depends on timing luck. Every wait has an upper bound well inside the
+Statements are made to hang by holding a cursor's read of its rows before aiosqlite
+queues it, so no test depends on timing luck. Every wait has an upper bound well inside the
 5 s busy timeout of ``on_disk``.
 """
 
@@ -21,23 +21,24 @@ import tempfile
 import aiosqlite
 import pytest
 import pytest_asyncio
-from sqler.adapter.asynchronous import AsyncSQLiteAdapter
+from sqler.adapter.asynchronous import AsyncSQLiteAdapter, _InThread
 
 BOUND_S = 2.5  # a write that waits on a leaked lock takes the full 5 s busy timeout
 
 
 @pytest.fixture
 def hang_fetchone(monkeypatch):
-    """While ``state["on"]`` is true, ``Cursor.fetchone`` sleeps (to be cancelled)."""
-    real = aiosqlite.Cursor.fetchone
+    """While ``state["on"]`` is true, a cursor's read of its rows sleeps (to be cancelled)
+    before aiosqlite queues it on the connection's thread."""
+    real = aiosqlite.Connection._execute
     state = {"on": False}
 
-    async def fetchone(self):
-        if state["on"]:
+    async def execute(self, fn, *args, **kwargs):
+        if state["on"] and fn is _InThread.fetch:
             await asyncio.sleep(60)
-        return await real(self)
+        return await real(self, fn, *args, **kwargs)
 
-    monkeypatch.setattr(aiosqlite.Cursor, "fetchone", fetchone)
+    monkeypatch.setattr(aiosqlite.Connection, "_execute", execute)
     return state
 
 

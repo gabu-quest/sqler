@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fastapi import APIRouter, HTTPException, status
 
+from ..db import get_db
 from ..models import City, Country, Writer
 from ..utils import db_call, hydrate_ref
 
@@ -62,7 +63,7 @@ async def list_countries():
     """
 
     def _list():
-        return Country.query().all()
+        return Country.using(get_db()).all()
 
     countries = await db_call(_list)
     return [_country_to_out(c) for c in countries]
@@ -77,7 +78,7 @@ async def create_country(payload: CountryCreate):
 
     def _create():
         country = Country(**payload.model_dump())
-        country.save()
+        country.save(db=get_db())
         return country
 
     country = await db_call(_create)
@@ -90,7 +91,7 @@ async def get_country(country_id: int):
 
     日本語: IDで国を取得。
     """
-    country = await db_call(lambda: Country.from_id(country_id))
+    country = await db_call(lambda: Country.from_id(country_id, db=get_db()))
     if not country:
         raise HTTPException(status_code=404, detail="Country not found")
     return _country_to_out(country)
@@ -106,12 +107,12 @@ async def delete_country(country_id: int):
     from sqler.query import SQLerField as F
 
     def _delete():
-        country = Country.from_id(country_id)
+        country = Country.from_id(country_id, db=get_db())
         if not country:
             raise HTTPException(status_code=404, detail="Country not found")
 
         # Check for dependent cities
-        dependent_cities = City.query().filter(F("country._id") == country_id).count()
+        dependent_cities = City.using(get_db()).filter(F(["country", "_id"]) == country_id).count()
         if dependent_cities > 0:
             raise HTTPException(
                 status_code=409,
@@ -119,7 +120,7 @@ async def delete_country(country_id: int):
             )
 
         try:
-            country.delete()
+            country.delete(db=get_db())
         except ReferentialIntegrityError as e:
             raise HTTPException(status_code=409, detail=str(e))
 
@@ -136,10 +137,10 @@ async def list_cities_by_country(country_id: int):
     from sqler.query import SQLerField as F
 
     def _list():
-        country = Country.from_id(country_id)
+        country = Country.from_id(country_id, db=get_db())
         if not country:
             raise HTTPException(status_code=404, detail="Country not found")
-        return City.query().filter(F("country._id") == country_id).all()
+        return City.using(get_db()).filter(F(["country", "_id"]) == country_id).all()
 
     cities = await db_call(_list)
     return [_city_to_out(c) for c in cities]
@@ -158,7 +159,7 @@ async def list_cities():
     """
 
     def _list():
-        return City.query().all()
+        return City.using(get_db()).all()
 
     cities = await db_call(_list)
     return [_city_to_out(c) for c in cities]
@@ -172,15 +173,15 @@ async def create_city(payload: CityCreate):
     """
 
     def _create():
-        country = Country.from_id(payload.country_id)
+        country = Country.from_id(payload.country_id, db=get_db())
         if not country:
             raise HTTPException(status_code=404, detail="Country not found")
 
         city = City(name=payload.name)
         city.set_country(country)
-        city.save()
+        city.save(db=get_db())
         # Re-fetch to hydrate RefFields
-        return City.from_id(city._id)
+        return City.from_id(city._id, db=get_db())
 
     city = await db_call(_create)
     return _city_to_out(city)
@@ -192,7 +193,7 @@ async def get_city(city_id: int):
 
     日本語: IDで都市を取得。
     """
-    city = await db_call(lambda: City.from_id(city_id))
+    city = await db_call(lambda: City.from_id(city_id, db=get_db()))
     if not city:
         raise HTTPException(status_code=404, detail="City not found")
     return _city_to_out(city)
@@ -208,12 +209,12 @@ async def delete_city(city_id: int):
     from sqler.query import SQLerField as F
 
     def _delete():
-        city = City.from_id(city_id)
+        city = City.from_id(city_id, db=get_db())
         if not city:
             raise HTTPException(status_code=404, detail="City not found")
 
         # Check for dependent writers
-        dependent_writers = Writer.query().filter(F("city._id") == city_id).count()
+        dependent_writers = Writer.using(get_db()).filter(F(["city", "_id"]) == city_id).count()
         if dependent_writers > 0:
             raise HTTPException(
                 status_code=409,
@@ -221,7 +222,7 @@ async def delete_city(city_id: int):
             )
 
         try:
-            city.delete()
+            city.delete(db=get_db())
         except ReferentialIntegrityError as e:
             raise HTTPException(status_code=409, detail=str(e))
 

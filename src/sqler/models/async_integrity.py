@@ -1,201 +1,111 @@
 """Async referential integrity utilities for SQLer models.
 
-This module provides async helper functions for managing referential integrity
-across JSON documents stored in SQLite. It handles finding references,
-enforcing deletion policies, and validating reference consistency.
+The rule of which rows refer to a row is :mod:`sqler.models.integrity`'s; these read and
+write through the async adapter.
 """
 
 import json
 from typing import TYPE_CHECKING
 
 from sqler import registry
-from sqler.utils import validate_table_name
+from sqler.models import _write_rules, integrity
+
+# find_ref_paths stays importable from here, as it was
+from sqler.models.integrity import (  # noqa: F401
+    Read,
+    Referrer,
+    Rows,
+    _by_table,
+    _look,
+    _nulled,
+    find_ref_paths,
+)
+from sqler.utils import is_ref_dict, validate_table_name
 
 if TYPE_CHECKING:
     from sqler.db.async_db import AsyncSQLerDB
 
+_is_valid_table_name = integrity._is_valid_table_name
 
-def _is_valid_table_name(table: str) -> bool:
-    """Check if a table name is valid (safe for SQL use).
 
-    Args:
-        table: Table name to validate.
-
-    Returns:
-        bool: True if the table name is valid.
-    """
-    from sqler.exceptions import InvalidTableNameError
-
+async def _aread(db: "AsyncSQLerDB", read: Read) -> Rows:
+    table, sql, params = read
     try:
-        validate_table_name(table)
-    except InvalidTableNameError:
-        return False
-    return True
+        cur = await db.adapter._execute_judged(sql, params)
+        try:
+            return await cur.fetchall()  # SQLite reads the rows as they are fetched
+        finally:
+            await cur.close()
+    except Exception as exc:
+        if not integrity.answers(exc, table):
+            await db.adapter._end_failed_statement(exc)
+        return integrity.failed_read(exc, table)
 
 
-async def async_find_referrers(
-    db: "AsyncSQLerDB", target_table: str, target_id: int
-) -> list[tuple[str, int, dict]]:
-    """Find all rows across all tables that reference the target row.
-
-    Scans all registered tables for JSON documents containing references
-    (``{"_table": ..., "_id": ...}``) pointing to the specified target.
+async def async_find_referrers(db: "AsyncSQLerDB", target_table: str, target_id) -> list[Referrer]:
+    """Async twin of :func:`sqler.models.integrity.find_referrers`: the same look, read
+    through the async adapter.
 
     Args:
         db: The async database instance to search.
-        target_table: Table name of the target row.
-        target_id: Row ``_id`` of the target.
+        target_table: Table name of the target rows.
+        target_id: Row ``_id`` of the target, or a collection of them.
 
     Returns:
         List of tuples: ``(referring_table, referring_row_id, metadata)``.
         Metadata is a dict with ``"paths"`` listing JSON paths containing
         the reference.
     """
-    candidates: list[tuple[str, int, dict]] = []
-    # Use cached table name resolution for better performance
-    allowed_tables = registry.get_allowed_tables(target_table)
-    like_id = f'%"_id":{target_id}%'
-
-    for table in registry.tables().keys():
-        # skip tables not present in this DB
-        cur = await db.adapter.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?;", [table]
-        )
-        exists = await cur.fetchone()
-        await cur.close()
-        if not exists:
-            continue
-
-        cur = await db.adapter.execute(
-            f"SELECT _id, data FROM {table} WHERE data LIKE ?;",
-            [like_id],
-        )
-        rows = await cur.fetchall()
-        await cur.close()
-
-        for _id, data_json in rows:
-            try:
-                data = json.loads(data_json)
-            except (json.JSONDecodeError, TypeError):
-                # Skip rows with invalid JSON
-                continue
-            paths = find_ref_paths(data, allowed_tables, target_id)
-            if paths:
-                candidates.append((table, int(_id), {"paths": paths}))
-
-    return candidates
-
-
-def find_ref_paths(data: dict, allowed_tables: set[str], target_id: int) -> list[str]:
-    """Recursively find JSON paths containing references to a target row.
-
-    Walks through a document searching for reference dictionaries (with
-    ``_table`` and ``_id`` keys) that point to the specified target.
-
-    Args:
-        data: The document to search.
-        allowed_tables: Set of table names that are valid reference targets.
-        target_id: The row ``_id`` we're looking for.
-
-    Returns:
-        List of JSON paths (e.g., ``['$.author', '$.comments[0].user']``)
-        where references to the target were found.
-    """
-    paths: list[str] = []
-
-    def walk(value, path: str):
-        if isinstance(value, dict):
-            if value.get("_table") in allowed_tables and int(value.get("_id", -1)) == target_id:
-                paths.append(path or "$")
-            for k, v in value.items():
-                walk(v, f"{path}.{k}" if path else k)
-        elif isinstance(value, list):
-            for i, v in enumerate(value):
-                walk(v, f"{path}[{i}]")
-
-    walk(data, "")
-    return paths
+    look = _look(target_table, target_id)
+    try:
+        read = next(look)
+        while True:
+            read = look.send(await _aread(db, read))
+    except StopIteration as done:
+        return done.value
 
 
 async def async_set_null_referrers(
-    db: "AsyncSQLerDB",
-    target_table: str,
-    target_id: int,
-    referrers: list[tuple[str, int, dict]],
+    db: "AsyncSQLerDB", target_table: str, target_id, referrers: list[Referrer]
 ) -> None:
-    """Nullify all references to the target row in referring documents.
-
-    For each referring row, replaces reference dictionaries pointing to
-    the target with ``None`` before the target is deleted.
+    """Async twin of :func:`sqler.models.integrity.set_null_referrers`.
 
     Args:
         db: The async database instance.
-        target_table: Table name of the target being deleted.
-        target_id: Row ``_id`` of the target being deleted.
-        referrers: List of ``(table, row_id, metadata)`` from
-            :func:`async_find_referrers`.
+        target_table: Table name of the targets being deleted.
+        target_id: Row ``_id`` of the target being deleted, or a collection of them.
+        referrers: List of ``(table, row_id, metadata)`` from :func:`async_find_referrers`.
     """
-    # Use cached table name resolution for better performance
     for table, _row_id, _meta in referrers:
         validate_table_name(table)
-    allowed_tables = registry.get_allowed_tables(target_table)
-
-    for table, row_id, meta in referrers:
+    null = _nulled(target_table, target_id)
+    for table, row_id, _meta in referrers:
         cur = await db.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [row_id])
         row = await cur.fetchone()
         await cur.close()
-        if not row:
-            continue
-        obj = json.loads(row[1])
-
-        def replace(value):
-            if (
-                isinstance(value, dict)
-                and value.get("_table") in allowed_tables
-                and int(value.get("_id", -1)) == target_id
-            ):
-                return None
-            if isinstance(value, dict):
-                return {k: replace(v) for k, v in value.items()}
-            if isinstance(value, list):
-                return [replace(v) for v in value]
-            return value
-
-        new_obj = replace(obj)
-        payload = json.dumps(new_obj)
-        await db.adapter.execute(
-            f"UPDATE {table} SET data = json(?) WHERE _id = ?;", [payload, row_id]
-        )
-        await db.adapter.auto_commit()
+        if row:
+            await _write_rules.anull_referrer(db, table, row_id, null(table, json.loads(row[1])))
 
 
 async def async_cascade_delete(
-    db: "AsyncSQLerDB",
-    referrers: list[tuple[str, int, dict]],
-    visited: set[tuple[str, int]],
+    db: "AsyncSQLerDB", referrers: list[Referrer], visited: set[tuple[str, int]]
 ) -> None:
-    """Recursively delete referring rows and their dependents.
-
-    Implements cascade deletion by recursively finding and deleting all
-    rows that reference deleted rows, preventing orphaned references.
+    """Async twin of :func:`sqler.models.integrity.cascade_delete`.
 
     Args:
         db: The async database instance.
         referrers: List of ``(table, row_id, metadata)`` to delete.
-        visited: Set of ``(table, row_id)`` tuples already processed to
-            prevent infinite loops.
+        visited: Set of ``(table, row_id)`` already deleted or being deleted; it grows.
     """
     for table, _row_id, _ in referrers:
         validate_table_name(table)
-    for table, row_id, _ in referrers:
-        key = (table, row_id)
-        if key in visited:
-            continue
-        visited.add(key)
-        # recurse
-        kid_refs = await async_find_referrers(db, table, row_id)
-        await async_cascade_delete(db, kid_refs, visited)
-        await db.delete_document(table, row_id)
+    level = referrers
+    while level:
+        rows = _by_table(level, visited)
+        for table, ids in rows.items():
+            for row_id in ids:
+                await _write_rules.adelete_referrer(db, table, row_id)
+        level = [ref for table, ids in rows.items() for ref in await async_find_referrers(db, table, ids)]
 
 
 async def async_validate_references(db: "AsyncSQLerDB"):
@@ -235,18 +145,17 @@ async def async_validate_references(db: "AsyncSQLerDB"):
                 continue
 
             async def check_refs(value, path: str):
-                if isinstance(value, dict) and "_table" in value and "_id" in value:
-                    t = value.get("_table")
-                    i = int(value.get("_id", -1))
+                if is_ref_dict(value):
+                    t, i = value["_table"], value["_id"]
                     # Validate table name to prevent SQL injection
-                    if not isinstance(t, str) or not _is_valid_table_name(t):
+                    if not _is_valid_table_name(t):
                         # Invalid table name in reference - treat as broken
                         broken.append(
                             BrokenRef(
                                 table=table,
                                 row_id=int(_id),
                                 path=path or "$",
-                                target_table=str(t),
+                                target_table=t,
                                 target_id=i,
                             )
                         )

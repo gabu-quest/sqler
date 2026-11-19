@@ -13,17 +13,19 @@ import json
 import typing
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Optional
+from typing import Any, Optional
 
 import pytest
 import pytest_asyncio
+from pairwise import all_pairs
 from pydantic import Field as PydField
-from pydantic import field_validator
+from pydantic import PrivateAttr, field_validator, model_validator
 from sqler import AsyncSQLerDB, F
 from sqler.adapter import AsyncSQLiteAdapter
 from sqler.exceptions import StaleVersionError
 from sqler.logging import query_logger
 from sqler.models import AsyncSQLerModel, AsyncSQLerQuerySet, AsyncSQLerSafeModel, _refs
+from sqler.models._table_names import _ref_table
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 from sqler.query.async_query import AsyncSQLerQuery
@@ -108,33 +110,6 @@ class ALs_Parent(AsyncSQLerLiteSafeModel):
     gone: Any = None
     nowhere: Any = None
 
-
-class ACount_Pd(AsyncSQLerModel):
-    __tablename__ = "arep_count_pd"
-    name: str = ""
-    loose: Any = None
-    per_row_calls: ClassVar[int] = 0
-
-    @classmethod
-    async def _aresolve_relations(cls, data, db=None, _seen=frozenset()):
-        cls.per_row_calls += 1
-        return await super()._aresolve_relations(data, db=db, _seen=_seen)
-
-
-@dataclass
-class ACount_Lt(AsyncSQLerLiteModel):
-    __tablename__ = "arep_count_lt"
-    name: str = ""
-    loose: Any = None
-    per_row_calls: ClassVar[int] = 0
-
-    @classmethod
-    async def _aresolve_relations(cls, data, db=None, _seen=frozenset()):
-        cls.per_row_calls += 1
-        return await super()._aresolve_relations(data, db=db, _seen=_seen)
-
-
-COUNTING = {"pydantic": (APd_Child, ACount_Pd), "lite": (ALt_Child, ACount_Lt)}
 
 BASES = {
     "pydantic": (APd_Child, APd_Parent),
@@ -308,9 +283,7 @@ BAD_REFS = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("way", WAYS)
-@pytest.mark.parametrize("bad", BAD_REFS)
-@pytest.mark.parametrize("base", sorted(BASES))
+@pytest.mark.parametrize(*all_pairs(("base", sorted(BASES)), ("bad", BAD_REFS), ("way", WAYS)))
 async def test_unusable_reference_is_left_as_it_is_and_never_sent_to_sql(make_db, base, bad, way):
     db, child, parent, ct = await _bound(make_db, base)
     await db.insert_document(ct, {"name": "c1"})
@@ -333,14 +306,13 @@ async def test_the_same_reference_twice_in_one_row_is_read_once(make_db, base, w
     db, child, parent, ct = await _bound(make_db, base)
     c1 = await db.insert_document(ct, {"name": "c1"})
     pid = await db.insert_document(
-        parent.__tablename__, {"name": "p", "loose": ref(ct, c1), "deep": [ref(ct, c1)]}
+        parent.__tablename__, {"name": "p", "one": ref(ct, c1), "many": [ref(ct, c1)]}
     )
     got, sel = await run_way(db, parent, pid, way)
     reads = [s for s in sel if f"FROM {ct} " in s and " IN (" in s]
-    expected = 0 if (base == "safe" and way in ("from_id", "refresh")) else 1
-    assert len(reads) == expected
-    for s in reads:
-        assert _ids_in(s) == [str(c1)]
+    assert len(reads) == 1
+    assert _ids_in(reads[0]) == [str(c1)]
+    assert (got.one.name, [c.name for c in got.many]) == ("c1", ["c1"])
 
 
 @pytest.mark.asyncio
@@ -349,12 +321,12 @@ async def test_the_same_reference_in_two_rows_of_one_all_is_read_once(make_db, b
     db, child, parent, ct = await _bound(make_db, base)
     c1 = await db.insert_document(ct, {"name": "c1"})
     for n in ("p1", "p2"):
-        await db.insert_document(parent.__tablename__, {"name": n, "loose": ref(ct, c1)})
+        await db.insert_document(parent.__tablename__, {"name": n, "one": ref(ct, c1)})
     got, sel = await selects_of(db, lambda: parent.query().all())
     reads = [s for s in sel if f"FROM {ct} " in s]
     assert len(reads) == 1
     assert _ids_in(reads[0]) == [str(c1)]
-    assert [g.loose["name"] for g in got] == ["c1", "c1"]
+    assert [g.one.name for g in got] == ["c1", "c1"]
 
 
 @pytest.mark.asyncio
@@ -364,51 +336,36 @@ async def test_a_thousand_references_into_one_table_are_one_statement(make_db, b
     db, child, parent, ct = await _bound(make_db, base)
     ids = await db.insert_many(ct, [{"name": f"c{i}"} for i in range(1000)])
     pid = await db.insert_document(
-        parent.__tablename__, {"name": "p", "loose": [ref(ct, i) for i in ids]}
+        parent.__tablename__, {"name": "p", "many": [ref(ct, i) for i in ids]}
     )
     got, sel = await run_way(db, parent, pid, way)
     reads = [s for s in sel if f"FROM {ct} " in s]
-    if base == "safe" and way in ("from_id", "refresh"):
-        assert reads == []
-        assert got.loose[999] == ref(ct, ids[999])
-        return
     assert len(reads) == 1
-    assert len(got.loose) == 1000
-    last = got.loose[999]
-    name = last["name"] if isinstance(last, dict) else last.name
-    assert name == "c999"
+    assert len(got.many) == 1000
+    assert (got.many[999].name, got.many[999]._id) == ("c999", ids[999])
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("base", sorted(BASES))
-async def test_a_chain_six_levels_deep_through_all_is_finished_by_the_per_row_pass(
-    make_db, base
-):
-    db, child, parent, ct = await _bound(make_db, base)
+async def test_a_chain_seven_rows_long_through_all_is_followed_to_its_end(make_db, base):
+    n_cls = TYPED[base][3]
+    db = await make_db()
+    await bind(db, n_cls, n_cls)
+    nt = n_cls.__tablename__
     prev = None
     ids = []
     for i in range(7):
         prev = await db.insert_document(
-            ct, {"name": f"c{i}", "other": None if prev is None else ref(ct, prev)}
+            nt, {"name": f"n{i}", "one": None if prev is None else ref(nt, prev)}
         )
         ids.append(prev)
-    # parent -> c6 -> c5 -> c4 -> c3 -> c2 -> c1 -> c0
-    await db.insert_document(parent.__tablename__, {"name": "p", "loose": ref(ct, ids[6])})
-    got = (await parent.query().all())[0]
-    node = got.loose
+    # n6 -> n5 -> n4 -> n3 -> n2 -> n1 -> n0
+    node = (await n_cls.query().filter(F("_id") == ids[6]).all())[0]
     names = []
-    for _ in range(5):
-        names.append(node["name"])
-        node = node["other"]
-    assert names == ["c6", "c5", "c4", "c3", "c2"]
-    # the batch stops at five levels; the per-row pass loads the sixth as a model, and
-    # through it the seventh, except on the pydantic safe base, whose loader stops there
-    version = 0 if "safe" in base else "-"
-    assert describe(node, depth=0) == ("Child", ids[1], version, "...")
-    if base == "safe":
-        assert node.other == ref(ct, ids[0])
-    else:
-        assert describe(node.other, depth=1) == ("Child", ids[0], version, {"name": "c0", "other": None})
+    while node is not None:
+        names.append((node._id, node.name))
+        node = node.one
+    assert names == [(ids[i], f"n{i}") for i in range(6, -1, -1)]
 
 
 async def _tables(db: AsyncSQLerDB) -> set[str]:
@@ -428,15 +385,11 @@ async def test_a_reference_into_a_dropped_table_of_a_bound_class_reads_as_none(
 ):
     db, child, parent, ct = await _bound(make_db, base)
     c1 = await db.insert_document(ct, {"name": "c1"})
-    pid = await db.insert_document(parent.__tablename__, {"name": "p", "loose": ref(ct, c1)})
+    pid = await db.insert_document(parent.__tablename__, {"name": "p", "one": ref(ct, c1)})
     await db.adapter.execute(f"DROP TABLE {ct};")
     await db.adapter.commit()
     got, _ = await run_way(db, parent, pid, way)
-    if base == "safe" and way in ("from_id", "refresh"):
-        # the pydantic safe base's from_id and refresh resolve no untyped reference
-        assert got.loose == ref(ct, c1)
-    else:
-        assert got.loose is None
+    assert got.one is None
     assert ct not in await _tables(db)
 
 
@@ -457,30 +410,27 @@ async def test_a_reference_into_a_versioned_table_that_was_never_made_reads_as_n
     await db._ensure_versioned_table(parent.__tablename__)
     ct = child.__tablename__
     assert ct not in await _tables(db)
-    pid = await db.insert_document(parent.__tablename__, {"name": "p", "loose": ref(ct, 1)})
+    pid = await db.insert_document(parent.__tablename__, {"name": "p", "one": ref(ct, 1)})
     got, _ = await run_way(db, parent, pid, way)
-    assert got.loose is None
+    assert got.one is None
     assert ct not in await _tables(db)
 
 
-# ---- hostile inputs whose answer this stream sets ----------------------------------
+# ---- hostile inputs at a typed position ---------------------------------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", WAYS)
 @pytest.mark.parametrize("base", sorted(BASES))
 async def test_a_reference_shaped_dict_that_is_not_usable_is_not_walked_into(make_db, base, way):
-    """``{"_table", "_id"}`` with an id that is not one is left as it is, whole."""
+    """``{"_table", "_id"}`` with an id that is not one is left as it is, whole, and no base
+    turns it into a model."""
     db, child, parent, ct = await _bound(make_db, base)
     c1 = await db.insert_document(ct, {"name": "c1"})
     shell = {"_table": ct, "_id": "x", "inner": ref(ct, c1)}
     pid = await db.insert_document(parent.__tablename__, {"name": "p", "loose": shell})
     got, _ = await run_way(db, parent, pid, way)
-    if base.startswith("lite") and way != "refresh":
-        version = 0 if base == "lite-safe" else "-"
-        assert describe(got.loose) == ("Child", "x", version, {"name": "", "other": None})
-    else:
-        assert got.loose == shell
+    assert got.loose == shell
 
 
 @pytest.mark.asyncio
@@ -499,430 +449,312 @@ async def test_an_id_past_sqlite_integer_range_is_left_as_it_is(make_db, base, w
 # (base, way) -> (fields of the parent row, SELECTs run)
 EXPECTED: dict = {('lite', 'all'): ({'name': 'p',
                     'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                    'many': [('Child', 1, '-', {'name': 'c1', 'other': None}), ('Child', 2, '-', {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                    'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                    'deep': ('dict',
-                             2,
-                             {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                    'cyc': ('dict',
-                            4,
-                            {'name': 'c4',
-                             'other': ('dict',
-                                       5,
-                                       {'name': 'c5',
-                                        'other': ('Child',
-                                                  4,
-                                                  '-',
-                                                  {'name': 'c4',
-                                                   'other': ('Child', 5, '-', '...')})})}),
-                    'me': ('dict',
-                           6,
-                           {'name': 'c6',
-                            'other': ('Child',
-                                      6,
-                                      '-',
-                                      {'name': 'c6', 'other': ('ref', 'arep_lt_child', 6)})}),
-                    'gone': None,
-                    'nowhere': ('dict', 1, {'name': 'nobody'})},
-                   6),
+                    'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
+                             ('Child',
+                              2,
+                              '-',
+                              {'name': 'c2',
+                               'other': ('ref', 'arep_lt_child', 1)})],
+                    'loose': ('ref', 'arep_lt_child', 1),
+                    'deep': ('ref', 'arep_lt_child', 2),
+                    'cyc': ('ref', 'arep_lt_child', 4),
+                    'me': ('ref', 'arep_lt_child', 6),
+                    'gone': ('ref', 'arep_lt_child', 3),
+                    'nowhere': ('ref', 'arep_nobody', 1)},
+                   2),
  ('lite', 'first'): ({'name': 'p',
                       'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                      'many': [('Child', 1, '-', {'name': 'c1', 'other': None}), ('Child', 2, '-', {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                      'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                      'deep': ('dict',
-                               2,
-                               {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                      'cyc': ('dict',
-                              4,
-                              {'name': 'c4',
-                               'other': ('dict',
-                                         5,
-                                         {'name': 'c5', 'other': ('ref', 'arep_lt_child', 4)})}),
-                      'me': ('dict', 6, {'name': 'c6', 'other': ('ref', 'arep_lt_child', 6)}),
+                      'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
+                               ('Child',
+                                2,
+                                '-',
+                                {'name': 'c2',
+                                 'other': ('ref', 'arep_lt_child', 1)})],
+                      'loose': ('ref', 'arep_lt_child', 1),
+                      'deep': ('ref', 'arep_lt_child', 2),
+                      'cyc': ('ref', 'arep_lt_child', 4),
+                      'me': ('ref', 'arep_lt_child', 6),
                       'gone': ('ref', 'arep_lt_child', 3),
-                      'nowhere': ('dict', 1, {'name': 'nobody'})},
-                     4),
+                      'nowhere': ('ref', 'arep_nobody', 1)},
+                     2),
  ('lite', 'from_id'): ({'name': 'p',
                         'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                        'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
+                        'many': [('Child',
+                                  1,
+                                  '-',
+                                  {'name': 'c1', 'other': None}),
                                  ('Child',
                                   2,
                                   '-',
                                   {'name': 'c2',
-                                   'other': ('Child', 1, '-', {'name': 'c1', 'other': None})})],
-                        'loose': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                        'deep': ('Child',
-                                 2,
-                                 '-',
-                                 {'name': 'c2',
-                                  'other': ('Child', 1, '-', {'name': 'c1', 'other': None})}),
-                        'cyc': ('Child',
-                                4,
-                                '-',
-                                {'name': 'c4',
-                                 'other': ('Child',
-                                           5,
-                                           '-',
-                                           {'name': 'c5', 'other': ('ref', 'arep_lt_child', 4)})}),
-                        'me': ('Child',
-                               6,
-                               '-',
-                               {'name': 'c6', 'other': ('ref', 'arep_lt_child', 6)}),
-                        'gone': None,
+                                   'other': ('ref', 'arep_lt_child', 1)})],
+                        'loose': ('ref', 'arep_lt_child', 1),
+                        'deep': ('ref', 'arep_lt_child', 2),
+                        'cyc': ('ref', 'arep_lt_child', 4),
+                        'me': ('ref', 'arep_lt_child', 6),
+                        'gone': ('ref', 'arep_lt_child', 3),
                         'nowhere': ('ref', 'arep_nobody', 1)},
-                       4),
+                       2),
  ('lite', 'from_ids'): ({'name': 'p',
-                         'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                         'many': [('Child', 1, '-', {'name': 'c1', 'other': None}), ('Child', 2, '-', {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                         'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                         'deep': ('dict',
-                                  2,
-                                  {'name': 'c2',
-                                   'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                         'cyc': ('dict',
-                                 4,
-                                 {'name': 'c4',
-                                  'other': ('dict',
-                                            5,
-                                            {'name': 'c5', 'other': ('ref', 'arep_lt_child', 4)})}),
-                         'me': ('dict', 6, {'name': 'c6', 'other': ('ref', 'arep_lt_child', 6)}),
+                         'one': ('Child',
+                                 1,
+                                 '-',
+                                 {'name': 'c1', 'other': None}),
+                         'many': [('Child',
+                                   1,
+                                   '-',
+                                   {'name': 'c1', 'other': None}),
+                                  ('Child',
+                                   2,
+                                   '-',
+                                   {'name': 'c2',
+                                    'other': ('ref', 'arep_lt_child', 1)})],
+                         'loose': ('ref', 'arep_lt_child', 1),
+                         'deep': ('ref', 'arep_lt_child', 2),
+                         'cyc': ('ref', 'arep_lt_child', 4),
+                         'me': ('ref', 'arep_lt_child', 6),
                          'gone': ('ref', 'arep_lt_child', 3),
-                         'nowhere': ('dict', 1, {'name': 'nobody'})},
-                        4),
+                         'nowhere': ('ref', 'arep_nobody', 1)},
+                        2),
  ('lite', 'refresh'): ({'name': 'p',
                         'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                        'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
+                        'many': [('Child',
+                                  1,
+                                  '-',
+                                  {'name': 'c1', 'other': None}),
                                  ('Child',
                                   2,
                                   '-',
                                   {'name': 'c2',
-                                   'other': ('Child', 1, '-', {'name': 'c1', 'other': None})})],
-                        'loose': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                        'deep': ('Child',
-                                 2,
-                                 '-',
-                                 {'name': 'c2',
-                                  'other': ('Child', 1, '-', {'name': 'c1', 'other': None})}),
-                        'cyc': ('Child',
-                                4,
-                                '-',
-                                {'name': 'c4',
-                                 'other': ('Child',
-                                           5,
-                                           '-',
-                                           {'name': 'c5', 'other': ('ref', 'arep_lt_child', 4)})}),
-                        'me': ('Child',
-                               6,
-                               '-',
-                               {'name': 'c6', 'other': ('ref', 'arep_lt_child', 6)}),
-                        'gone': None,
+                                   'other': ('ref', 'arep_lt_child', 1)})],
+                        'loose': ('ref', 'arep_lt_child', 1),
+                        'deep': ('ref', 'arep_lt_child', 2),
+                        'cyc': ('ref', 'arep_lt_child', 4),
+                        'me': ('ref', 'arep_lt_child', 6),
+                        'gone': ('ref', 'arep_lt_child', 3),
                         'nowhere': ('ref', 'arep_nobody', 1)},
-                       4),
+                       2),
  ('lite-safe', 'all'): ({'name': 'p',
                          'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                         'many': [('Child', 1, 0, {'name': 'c1', 'other': None}), ('Child', 2, 0, {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                         'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                         'deep': ('dict',
-                                  2,
-                                  {'name': 'c2',
-                                   'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                         'cyc': ('dict',
-                                 4,
-                                 {'name': 'c4',
-                                  'other': ('dict',
-                                            5,
-                                            {'name': 'c5',
-                                             'other': ('Child',
-                                                       4,
-                                                       0,
-                                                       {'name': 'c4',
-                                                        'other': ('Child', 5, 0, '...')})})}),
-                         'me': ('dict',
-                                6,
-                                {'name': 'c6',
-                                 'other': ('Child',
-                                           6,
-                                           0,
-                                           {'name': 'c6', 'other': ('ref', 'arep_ls_child', 6)})}),
-                         'gone': None,
-                         'nowhere': ('dict', 1, {'name': 'nobody'})},
-                        6),
+                         'many': [('Child',
+                                   1,
+                                   0,
+                                   {'name': 'c1', 'other': None}),
+                                  ('Child',
+                                   2,
+                                   0,
+                                   {'name': 'c2',
+                                    'other': ('ref', 'arep_ls_child', 1)})],
+                         'loose': ('ref', 'arep_ls_child', 1),
+                         'deep': ('ref', 'arep_ls_child', 2),
+                         'cyc': ('ref', 'arep_ls_child', 4),
+                         'me': ('ref', 'arep_ls_child', 6),
+                         'gone': ('ref', 'arep_ls_child', 3),
+                         'nowhere': ('ref', 'arep_nobody', 1)},
+                        2),
  ('lite-safe', 'first'): ({'name': 'p',
-                           'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                           'many': [('Child', 1, 0, {'name': 'c1', 'other': None}), ('Child', 2, 0, {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                           'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                           'deep': ('dict',
-                                    2,
-                                    {'name': 'c2',
-                                     'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                           'cyc': ('dict',
-                                   4,
-                                   {'name': 'c4',
-                                    'other': ('dict',
-                                              5,
-                                              {'name': 'c5',
-                                               'other': ('ref', 'arep_ls_child', 4)})}),
-                           'me': ('dict', 6, {'name': 'c6', 'other': ('ref', 'arep_ls_child', 6)}),
+                           'one': ('Child',
+                                   1,
+                                   0,
+                                   {'name': 'c1', 'other': None}),
+                           'many': [('Child',
+                                     1,
+                                     0,
+                                     {'name': 'c1', 'other': None}),
+                                    ('Child',
+                                     2,
+                                     0,
+                                     {'name': 'c2',
+                                      'other': ('ref', 'arep_ls_child', 1)})],
+                           'loose': ('ref', 'arep_ls_child', 1),
+                           'deep': ('ref', 'arep_ls_child', 2),
+                           'cyc': ('ref', 'arep_ls_child', 4),
+                           'me': ('ref', 'arep_ls_child', 6),
                            'gone': ('ref', 'arep_ls_child', 3),
-                           'nowhere': ('dict', 1, {'name': 'nobody'})},
-                          4),
+                           'nowhere': ('ref', 'arep_nobody', 1)},
+                          2),
  ('lite-safe', 'from_id'): ({'name': 'p',
-                             'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                             'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
+                             'one': ('Child',
+                                     1,
+                                     0,
+                                     {'name': 'c1', 'other': None}),
+                             'many': [('Child',
+                                       1,
+                                       0,
+                                       {'name': 'c1', 'other': None}),
                                       ('Child',
                                        2,
                                        0,
                                        {'name': 'c2',
-                                        'other': ('Child', 1, 0, {'name': 'c1', 'other': None})})],
-                             'loose': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                             'deep': ('Child',
-                                      2,
-                                      0,
-                                      {'name': 'c2',
-                                       'other': ('Child', 1, 0, {'name': 'c1', 'other': None})}),
-                             'cyc': ('Child',
-                                     4,
-                                     0,
-                                     {'name': 'c4',
-                                      'other': ('Child',
-                                                5,
-                                                0,
-                                                {'name': 'c5',
-                                                 'other': ('ref', 'arep_ls_child', 4)})}),
-                             'me': ('Child',
-                                    6,
-                                    0,
-                                    {'name': 'c6', 'other': ('ref', 'arep_ls_child', 6)}),
-                             'gone': None,
+                                        'other': ('ref', 'arep_ls_child', 1)})],
+                             'loose': ('ref', 'arep_ls_child', 1),
+                             'deep': ('ref', 'arep_ls_child', 2),
+                             'cyc': ('ref', 'arep_ls_child', 4),
+                             'me': ('ref', 'arep_ls_child', 6),
+                             'gone': ('ref', 'arep_ls_child', 3),
                              'nowhere': ('ref', 'arep_nobody', 1)},
-                            4),
+                            2),
  ('lite-safe', 'from_ids'): ({'name': 'p',
-                              'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                              'many': [('Child', 1, 0, {'name': 'c1', 'other': None}), ('Child', 2, 0, {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                              'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                              'deep': ('dict',
-                                       2,
-                                       {'name': 'c2',
-                                        'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                              'cyc': ('dict',
-                                      4,
-                                      {'name': 'c4',
-                                       'other': ('dict',
-                                                 5,
-                                                 {'name': 'c5',
-                                                  'other': ('ref', 'arep_ls_child', 4)})}),
-                              'me': ('dict',
-                                     6,
-                                     {'name': 'c6', 'other': ('ref', 'arep_ls_child', 6)}),
+                              'one': ('Child',
+                                      1,
+                                      0,
+                                      {'name': 'c1', 'other': None}),
+                              'many': [('Child',
+                                        1,
+                                        0,
+                                        {'name': 'c1', 'other': None}),
+                                       ('Child',
+                                        2,
+                                        0,
+                                        {'name': 'c2',
+                                         'other': ('ref',
+                                                   'arep_ls_child',
+                                                   1)})],
+                              'loose': ('ref', 'arep_ls_child', 1),
+                              'deep': ('ref', 'arep_ls_child', 2),
+                              'cyc': ('ref', 'arep_ls_child', 4),
+                              'me': ('ref', 'arep_ls_child', 6),
                               'gone': ('ref', 'arep_ls_child', 3),
-                              'nowhere': ('dict', 1, {'name': 'nobody'})},
-                             4),
+                              'nowhere': ('ref', 'arep_nobody', 1)},
+                             2),
  ('lite-safe', 'refresh'): ({'name': 'p',
-                             'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                             'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
+                             'one': ('Child',
+                                     1,
+                                     0,
+                                     {'name': 'c1', 'other': None}),
+                             'many': [('Child',
+                                       1,
+                                       0,
+                                       {'name': 'c1', 'other': None}),
                                       ('Child',
                                        2,
                                        0,
                                        {'name': 'c2',
-                                        'other': ('Child', 1, 0, {'name': 'c1', 'other': None})})],
-                             'loose': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                             'deep': ('Child',
-                                      2,
-                                      0,
-                                      {'name': 'c2',
-                                       'other': ('Child', 1, 0, {'name': 'c1', 'other': None})}),
-                             'cyc': ('Child',
-                                     4,
-                                     0,
-                                     {'name': 'c4',
-                                      'other': ('Child',
-                                                5,
-                                                0,
-                                                {'name': 'c5',
-                                                 'other': ('ref', 'arep_ls_child', 4)})}),
-                             'me': ('Child',
-                                    6,
-                                    0,
-                                    {'name': 'c6', 'other': ('ref', 'arep_ls_child', 6)}),
-                             'gone': None,
+                                        'other': ('ref', 'arep_ls_child', 1)})],
+                             'loose': ('ref', 'arep_ls_child', 1),
+                             'deep': ('ref', 'arep_ls_child', 2),
+                             'cyc': ('ref', 'arep_ls_child', 4),
+                             'me': ('ref', 'arep_ls_child', 6),
+                             'gone': ('ref', 'arep_ls_child', 3),
                              'nowhere': ('ref', 'arep_nobody', 1)},
-                            4),
+                            2),
  ('pydantic', 'all'): ({'name': 'p',
                         'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                        'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
+                        'many': [('Child',
+                                  1,
+                                  '-',
+                                  {'name': 'c1', 'other': None}),
                                  ('Child',
                                   2,
                                   '-',
                                   {'name': 'c2',
-                                   'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                        'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                        'deep': ('dict',
-                                 2,
-                                 {'name': 'c2',
-                                  'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                        'cyc': ('dict',
-                                4,
-                                {'name': 'c4',
-                                 'other': ('dict',
-                                           5,
-                                           {'name': 'c5',
-                                            'other': ('Child',
-                                                      4,
-                                                      '-',
-                                                      {'name': 'c4',
-                                                       'other': ('Child', 5, '-', '...')})})}),
-                        'me': ('dict',
-                               6,
-                               {'name': 'c6',
-                                'other': ('Child',
-                                          6,
-                                          '-',
-                                          {'name': 'c6', 'other': ('ref', 'arep_pd_child', 6)})}),
-                        'gone': None,
-                        'nowhere': ('dict', 1, {'name': 'nobody'})},
-                       6),
+                                   'other': ('ref', 'arep_pd_child', 1)})],
+                        'loose': ('ref', 'arep_pd_child', 1),
+                        'deep': ('ref', 'arep_pd_child', 2),
+                        'cyc': ('ref', 'arep_pd_child', 4),
+                        'me': ('ref', 'arep_pd_child', 6),
+                        'gone': ('ref', 'arep_pd_child', 3),
+                        'nowhere': ('ref', 'arep_nobody', 1)},
+                       2),
  ('pydantic', 'first'): ({'name': 'p',
-                          'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                          'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
+                          'one': ('Child',
+                                  1,
+                                  '-',
+                                  {'name': 'c1', 'other': None}),
+                          'many': [('Child',
+                                    1,
+                                    '-',
+                                    {'name': 'c1', 'other': None}),
                                    ('Child',
                                     2,
                                     '-',
                                     {'name': 'c2',
-                                     'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                          'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                          'deep': ('dict',
-                                   2,
-                                   {'name': 'c2',
-                                    'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                          'cyc': ('dict',
-                                  4,
-                                  {'name': 'c4',
-                                   'other': ('dict',
-                                             5,
-                                             {'name': 'c5',
-                                              'other': ('ref', 'arep_pd_child', 4)})}),
-                          'me': ('dict', 6, {'name': 'c6', 'other': ('ref', 'arep_pd_child', 6)}),
+                                     'other': ('ref', 'arep_pd_child', 1)})],
+                          'loose': ('ref', 'arep_pd_child', 1),
+                          'deep': ('ref', 'arep_pd_child', 2),
+                          'cyc': ('ref', 'arep_pd_child', 4),
+                          'me': ('ref', 'arep_pd_child', 6),
                           'gone': ('ref', 'arep_pd_child', 3),
-                          'nowhere': ('dict', 1, {'name': 'nobody'})},
-                         4),
+                          'nowhere': ('ref', 'arep_nobody', 1)},
+                         2),
  ('pydantic', 'from_id'): ({'name': 'p',
-                            'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                            'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
+                            'one': ('Child',
+                                    1,
+                                    '-',
+                                    {'name': 'c1', 'other': None}),
+                            'many': [('Child',
+                                      1,
+                                      '-',
+                                      {'name': 'c1', 'other': None}),
                                      ('Child',
                                       2,
                                       '-',
                                       {'name': 'c2',
-                                       'other': ('Child', 1, '-', {'name': 'c1', 'other': None})})],
-                            'loose': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                            'deep': ('Child',
-                                     2,
-                                     '-',
-                                     {'name': 'c2',
-                                      'other': ('Child', 1, '-', {'name': 'c1', 'other': None})}),
-                            'cyc': ('Child',
-                                    4,
-                                    '-',
-                                    {'name': 'c4',
-                                     'other': ('Child',
-                                               5,
-                                               '-',
-                                               {'name': 'c5',
-                                                'other': ('ref', 'arep_pd_child', 4)})}),
-                            'me': ('Child',
-                                   6,
-                                   '-',
-                                   {'name': 'c6', 'other': ('ref', 'arep_pd_child', 6)}),
-                            'gone': None,
+                                       'other': ('ref', 'arep_pd_child', 1)})],
+                            'loose': ('ref', 'arep_pd_child', 1),
+                            'deep': ('ref', 'arep_pd_child', 2),
+                            'cyc': ('ref', 'arep_pd_child', 4),
+                            'me': ('ref', 'arep_pd_child', 6),
+                            'gone': ('ref', 'arep_pd_child', 3),
                             'nowhere': ('ref', 'arep_nobody', 1)},
-                           4),
+                           2),
  ('pydantic', 'from_ids'): ({'name': 'p',
-                             'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                             'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
+                             'one': ('Child',
+                                     1,
+                                     '-',
+                                     {'name': 'c1', 'other': None}),
+                             'many': [('Child',
+                                       1,
+                                       '-',
+                                       {'name': 'c1', 'other': None}),
                                       ('Child',
                                        2,
                                        '-',
                                        {'name': 'c2',
-                                        'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                             'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                             'deep': ('dict',
-                                      2,
-                                      {'name': 'c2',
-                                       'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                             'cyc': ('dict',
-                                     4,
-                                     {'name': 'c4',
-                                      'other': ('dict',
-                                                5,
-                                                {'name': 'c5',
-                                                 'other': ('ref', 'arep_pd_child', 4)})}),
-                             'me': ('dict',
-                                    6,
-                                    {'name': 'c6', 'other': ('ref', 'arep_pd_child', 6)}),
+                                        'other': ('ref', 'arep_pd_child', 1)})],
+                             'loose': ('ref', 'arep_pd_child', 1),
+                             'deep': ('ref', 'arep_pd_child', 2),
+                             'cyc': ('ref', 'arep_pd_child', 4),
+                             'me': ('ref', 'arep_pd_child', 6),
                              'gone': ('ref', 'arep_pd_child', 3),
-                             'nowhere': ('dict', 1, {'name': 'nobody'})},
-                            4),
+                             'nowhere': ('ref', 'arep_nobody', 1)},
+                            2),
  ('pydantic', 'refresh'): ({'name': 'p',
-                            'one': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                            'many': [('Child', 1, '-', {'name': 'c1', 'other': None}),
+                            'one': ('Child',
+                                    1,
+                                    '-',
+                                    {'name': 'c1', 'other': None}),
+                            'many': [('Child',
+                                      1,
+                                      '-',
+                                      {'name': 'c1', 'other': None}),
                                      ('Child',
                                       2,
                                       '-',
                                       {'name': 'c2',
-                                       'other': ('Child', 1, '-', {'name': 'c1', 'other': None})})],
-                            'loose': ('Child', 1, '-', {'name': 'c1', 'other': None}),
-                            'deep': ('Child',
-                                     2,
-                                     '-',
-                                     {'name': 'c2',
-                                      'other': ('Child', 1, '-', {'name': 'c1', 'other': None})}),
-                            'cyc': ('Child',
-                                    4,
-                                    '-',
-                                    {'name': 'c4',
-                                     'other': ('Child',
-                                               5,
-                                               '-',
-                                               {'name': 'c5',
-                                                'other': ('ref', 'arep_pd_child', 4)})}),
-                            'me': ('Child',
-                                   6,
-                                   '-',
-                                   {'name': 'c6', 'other': ('ref', 'arep_pd_child', 6)}),
-                            'gone': None,
+                                       'other': ('ref', 'arep_pd_child', 1)})],
+                            'loose': ('ref', 'arep_pd_child', 1),
+                            'deep': ('ref', 'arep_pd_child', 2),
+                            'cyc': ('ref', 'arep_pd_child', 4),
+                            'me': ('ref', 'arep_pd_child', 6),
+                            'gone': ('ref', 'arep_pd_child', 3),
                             'nowhere': ('ref', 'arep_nobody', 1)},
-                           4),
+                           2),
  ('safe', 'all'): ({'name': 'p',
                     'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
                     'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
                              ('Child',
                               2,
                               0,
-                              {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                    'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                    'deep': ('dict',
-                             2,
-                             {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                    'cyc': ('dict',
-                            4,
-                            {'name': 'c4',
-                             'other': ('dict',
-                                       5,
-                                       {'name': 'c5',
-                                        'other': ('Child',
-                                                  4,
-                                                  0,
-                                                  {'name': 'c4',
-                                                   'other': ('ref', 'arep_sf_child', 5)})})}),
-                    'me': ('dict',
-                           6,
-                           {'name': 'c6',
-                            'other': ('Child',
-                                      6,
-                                      0,
-                                      {'name': 'c6', 'other': ('ref', 'arep_sf_child', 6)})}),
-                    'gone': None,
-                    'nowhere': ('dict', 1, {'name': 'nobody'})},
-                   5),
+                              {'name': 'c2',
+                               'other': ('ref', 'arep_sf_child', 1)})],
+                    'loose': ('ref', 'arep_sf_child', 1),
+                    'deep': ('ref', 'arep_sf_child', 2),
+                    'cyc': ('ref', 'arep_sf_child', 4),
+                    'me': ('ref', 'arep_sf_child', 6),
+                    'gone': ('ref', 'arep_sf_child', 3),
+                    'nowhere': ('ref', 'arep_nobody', 1)},
+                   2),
  ('safe', 'first'): ({'name': 'p',
                       'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
                       'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
@@ -930,28 +762,22 @@ EXPECTED: dict = {('lite', 'all'): ({'name': 'p',
                                 2,
                                 0,
                                 {'name': 'c2',
-                                 'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                      'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                      'deep': ('dict',
-                               2,
-                               {'name': 'c2', 'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                      'cyc': ('dict',
-                              4,
-                              {'name': 'c4',
-                               'other': ('dict',
-                                         5,
-                                         {'name': 'c5', 'other': ('ref', 'arep_sf_child', 4)})}),
-                      'me': ('dict', 6, {'name': 'c6', 'other': ('ref', 'arep_sf_child', 6)}),
+                                 'other': ('ref', 'arep_sf_child', 1)})],
+                      'loose': ('ref', 'arep_sf_child', 1),
+                      'deep': ('ref', 'arep_sf_child', 2),
+                      'cyc': ('ref', 'arep_sf_child', 4),
+                      'me': ('ref', 'arep_sf_child', 6),
                       'gone': ('ref', 'arep_sf_child', 3),
-                      'nowhere': ('dict', 1, {'name': 'nobody'})},
-                     4),
+                      'nowhere': ('ref', 'arep_nobody', 1)},
+                     2),
  ('safe', 'from_id'): ({'name': 'p',
                         'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
                         'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
                                  ('Child',
                                   2,
                                   0,
-                                  {'name': 'c2', 'other': ('ref', 'arep_sf_child', 1)})],
+                                  {'name': 'c2',
+                                   'other': ('ref', 'arep_sf_child', 1)})],
                         'loose': ('ref', 'arep_sf_child', 1),
                         'deep': ('ref', 'arep_sf_child', 2),
                         'cyc': ('ref', 'arep_sf_child', 4),
@@ -961,34 +787,30 @@ EXPECTED: dict = {('lite', 'all'): ({'name': 'p',
                        2),
  ('safe', 'from_ids'): ({'name': 'p',
                          'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
-                         'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
+                         'many': [('Child',
+                                   1,
+                                   0,
+                                   {'name': 'c1', 'other': None}),
                                   ('Child',
                                    2,
                                    0,
                                    {'name': 'c2',
-                                    'other': ('dict', 1, {'name': 'c1', 'other': None})})],
-                         'loose': ('dict', 1, {'name': 'c1', 'other': None}),
-                         'deep': ('dict',
-                                  2,
-                                  {'name': 'c2',
-                                   'other': ('dict', 1, {'name': 'c1', 'other': None})}),
-                         'cyc': ('dict',
-                                 4,
-                                 {'name': 'c4',
-                                  'other': ('dict',
-                                            5,
-                                            {'name': 'c5', 'other': ('ref', 'arep_sf_child', 4)})}),
-                         'me': ('dict', 6, {'name': 'c6', 'other': ('ref', 'arep_sf_child', 6)}),
+                                    'other': ('ref', 'arep_sf_child', 1)})],
+                         'loose': ('ref', 'arep_sf_child', 1),
+                         'deep': ('ref', 'arep_sf_child', 2),
+                         'cyc': ('ref', 'arep_sf_child', 4),
+                         'me': ('ref', 'arep_sf_child', 6),
                          'gone': ('ref', 'arep_sf_child', 3),
-                         'nowhere': ('dict', 1, {'name': 'nobody'})},
-                        4),
+                         'nowhere': ('ref', 'arep_nobody', 1)},
+                        2),
  ('safe', 'refresh'): ({'name': 'p',
                         'one': ('Child', 1, 0, {'name': 'c1', 'other': None}),
                         'many': [('Child', 1, 0, {'name': 'c1', 'other': None}),
                                  ('Child',
                                   2,
                                   0,
-                                  {'name': 'c2', 'other': ('ref', 'arep_sf_child', 1)})],
+                                  {'name': 'c2',
+                                   'other': ('ref', 'arep_sf_child', 1)})],
                         'loose': ('ref', 'arep_sf_child', 1),
                         'deep': ('ref', 'arep_sf_child', 2),
                         'cyc': ('ref', 'arep_sf_child', 4),
@@ -999,22 +821,23 @@ EXPECTED: dict = {('lite', 'all'): ({'name': 'p',
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("with_ref,calls", [(False, 0), (True, 3)])
-@pytest.mark.parametrize("base", sorted(COUNTING))
-async def test_all_runs_the_per_row_pass_only_when_a_row_holds_a_reference(
-    make_db, base, with_ref, calls
-):
-    child, parent = COUNTING[base]
+@pytest.mark.parametrize("with_ref", [False, True])
+@pytest.mark.parametrize("base", ["pydantic", "lite"])
+async def test_all_follows_references_level_by_level_and_never_row_by_row(make_db, base, with_ref):
+    """``all()`` of three parents reads the parents and then, if one holds a reference, its
+    child: one SELECT per level, never one per row."""
+    child, parent = BASES[base]
     db = await make_db()
     await bind(db, child, parent)
     c1 = await db.insert_document(child.__tablename__, {"name": "c1"})
     for i in range(3):
-        loose = ref(child.__tablename__, c1) if (with_ref and i == 1) else i
-        await db.insert_document(parent.__tablename__, {"name": f"p{i}", "loose": loose})
-    parent.per_row_calls = 0
-    got = await parent.query().all()
+        one = ref(child.__tablename__, c1) if (with_ref and i == 1) else None
+        await db.insert_document(parent.__tablename__, {"name": f"p{i}", "one": one})
+    with query_logger.capture() as sent:
+        got = await parent.query().all()
     assert [g.name for g in got] == ["p0", "p1", "p2"]
-    assert parent.per_row_calls == calls
+    assert (got[1].one.name if with_ref else got[1].one) == ("c1" if with_ref else None)
+    assert sum(q.sql.lstrip().upper().startswith("SELECT") for q in sent) == 1 + with_ref
 
 
 # ---- typed references keep their row ------------------------------------------------
@@ -1234,7 +1057,7 @@ async def test_a_typed_reference_holds_its_row_and_the_parent_saves_unchanged(ma
         {"_table": ct, "_id": 1}, {"_table": ct, "_id": 2}, {"_table": ct, "_id": 1}
     ]
     assert after["bag"] == {"a": {"_table": ct, "_id": 2}}
-    assert after == ({**stored[0][1], "_version": 1} if base in VERSIONED else stored[0][1])
+    assert after == stored[0][1]  # no document holds the version
     assert await rows_of(db, ct) == children
     assert len(children) == 2
     assert await rows_of(db, gt) == grand
@@ -1269,8 +1092,8 @@ async def test_a_list_holding_one_child_twice_reads_the_child_table_once(make_db
         (c_cls.__name__, 1), (c_cls.__name__, 2), (c_cls.__name__, 1)
     ]
     assert sent_to(sent, c_cls.__tablename__) == 1
-    # as on the base: the per-row ways put one model at both places, the batch one each
-    assert (got.many[0] is got.many[2]) is (way in ("from_id", "refresh"))
+    # one object per row per load, by every way (the batch ways built one each before)
+    assert got.many[0] is got.many[2]
 
 
 def chain(x: Any, depth: int = 4) -> list:
@@ -1288,23 +1111,18 @@ def chain(x: Any, depth: int = 4) -> list:
     return out
 
 
-# SELECTs of the cycle's table to load n1 (n1 -> n2 -> n1) and n3 (n3 -> n3), every way
-# in (refresh includes the first() that loads the row to refresh). On the base all() sent
-# 5 and 3: its per-row pass followed the reference the batch left at the cycle one level
-# further. The batch now hands that pass built children, so all() cuts where the others do.
-CYCLE_SELECTS = {"from_id": 3, "refresh": 4, "from_ids": 3, "all": 3, "first": 3}
-SELF_SELECTS = {"from_id": 2, "refresh": 3, "from_ids": 2, "all": 2, "first": 2}
-# what saving the level below each cut does, per base: on the pydantic bases it holds an
-# empty model and refuses, as AsyncSQLerModel.from_id's answer always did; on lite-safe it
-# is row n1 again, read at a version a.save() moved past; on lite it saves
-_REFUSE = (ValueError, "Related .*model must be saved before saving parent")
-BELOW_CUT = {"pydantic": _REFUSE, "safe": _REFUSE, "lite": None, "lite-safe": (StaleVersionError, None)}
+# SELECTs of the cycle's table to load n1 (n1 -> n2 -> n1) and n3 (n3 -> n3), every way in:
+# one per row (refresh adds the first() that loads the row to refresh)
+CYCLE_SELECTS = {"from_id": 2, "refresh": 3, "from_ids": 2, "all": 2, "first": 2}
+SELF_SELECTS = {"from_id": 1, "refresh": 2, "from_ids": 1, "all": 1, "first": 1}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", sorted(TYPED))
-async def test_a_cycle_through_typed_fields_ends_and_saves(make_db, base, way):
+async def test_a_cycle_through_typed_fields_closes_and_saves(make_db, base, way):
+    """Every way closes a cycle on its objects (it cut it before, leaving a blank model on
+    the pydantic bases whose save() refused); every model of it saves, rows unchanged."""
     db, (_, _, _, n_cls), _ = await _typed_world(make_db, base)
     nt = n_cls.__tablename__
     n1 = await db.insert_document(nt, {"name": "n1", "one": None})
@@ -1319,17 +1137,12 @@ async def test_a_cycle_through_typed_fields_ends_and_saves(make_db, base, way):
     with query_logger.capture() as sent:
         b = await load(n_cls, n3, way)
     assert sent_to(sent, nt) == SELF_SELECTS[way]
-    assert (chain(a, 5), chain(b, 5)) == CYCLE_CHAINS[(base, way)]
+    assert chain(a, 2) == [(1, "n1"), (2, "n2")]
+    assert a.one.one is a
+    assert (b._id, b.name, b.one is b) == (3, "n3", True)
     await a.save()
     await a.one.save()
     await b.save()
-    refused = BELOW_CUT[base]
-    for level in (a.one.one, b.one):
-        if refused is None:
-            await level.save()
-        else:
-            with pytest.raises(refused[0], match=refused[1]):
-                await level.save()
     after = await rows_of(db, nt)
     assert [r[1]["one"] for r in after] == [r[1]["one"] for r in before]
     assert [r[1]["one"] for r in after] == [
@@ -1369,9 +1182,8 @@ async def _gone(make_db, base: str, way: str) -> Any:
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", sorted(TYPED))
 async def test_a_typed_field_whose_row_is_gone(make_db, base, way):
-    """Pinned (see the sync twin): a reference to a row that is gone stays what each way
-    gave on the base; the rows that are there are models of their rows."""
-    assert await _gone(make_db, base, way) == GONE_EXPECTED[(base, way)]
+    """See the sync twin: one answer for every way in (``gone_expected``)."""
+    assert await _gone(make_db, base, way) == gone_expected(base)
 
 
 async def _unfollowed(make_db, base: str, way: str, shape: str) -> Any:
@@ -1387,12 +1199,14 @@ async def _unfollowed(make_db, base: str, way: str, shape: str) -> Any:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("way", TYPED_WAYS)
-@pytest.mark.parametrize("base", sorted(TYPED))
-@pytest.mark.parametrize("shape", ["id-str", "other-table"])
+@pytest.mark.parametrize(*all_pairs(
+    ("shape", ["id-str", "other-table"]),
+    ("base", sorted(TYPED)),
+    ("way", TYPED_WAYS),
+))
 async def test_a_typed_field_holding_a_reference_that_cannot_be_followed(make_db, base, way, shape):
     got = await _unfollowed(make_db, base, way, shape)
-    assert got == UNFOLLOWED_EXPECTED[(shape, base, way)]
+    assert got == unfollowed_expected(base, shape, TYPED[base][1])
 
 
 @pytest.mark.asyncio
@@ -1408,20 +1222,30 @@ async def test_a_thousand_parents_sharing_one_child_read_it_once(make_db, base):
     assert {(type(g.one).__name__, g.one._id, g.one.name) for g in got} == {
         (c_cls.__name__, 2, "c2")
     }
-    assert got[0].one is not got[1].one  # each parent its own model, as on the base
+    assert got[0].one is got[999].one  # one object per row per load (one each before)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("base", ["pydantic", "safe"])
+@pytest.mark.parametrize("base", sorted(TYPED))
 async def test_a_load_without_resolution_is_left_as_it_was(make_db, base):
-    db, (_, _, p_cls, _), pid = await _typed_world(make_db, base)
+    """A reference not followed is the stored reference on the pydantic bases too (they
+    built a blank model of it before, whose parent's save() refused); saving writes the
+    row back unchanged."""
+    db, (_, c_cls, p_cls, _), pid = await _typed_world(make_db, base)
     got = await p_cls.query().filter(F("_id") == pid).resolve(False).first()
-    kind = "ATysC" if base == "safe" else "ATyC"
-    v = 0 if base == "safe" else "-"
-    empty = (kind, None, v, {"name": "", "g": None})
-    assert pic(got)[3] == {"title": "p", "one": empty, "many": [empty] * 3, "bag": {"a": empty}}
-    with pytest.raises(ValueError, match="Related .*model must be saved before saving parent"):
-        await got.save()
+    ct, pt = c_cls.__tablename__, p_cls.__tablename__
+    before = await rows_of(db, pt)
+    assert (got.one, got.many, got.bag) == (
+        {"_table": ct, "_id": 1},
+        [{"_table": ct, "_id": 1}, {"_table": ct, "_id": 2}, {"_table": ct, "_id": 1}],
+        {"a": {"_table": ct, "_id": 2}},
+    )
+    await got.save()
+    after = await rows_of(db, pt)
+    for rows in (before, after):
+        for r in rows:
+            r[1].pop("_version", None)
+    assert after == before
 
 
 # ---- a field validator that drops, reorders or replaces the children ------------------
@@ -1468,9 +1292,11 @@ RESHAPED = {"drop": [2, 3], "reverse": [3, 2, 1], "new": [None, None, None]}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", sorted(RESHAPED))
-@pytest.mark.parametrize("way", TYPED_WAYS)
-@pytest.mark.parametrize("base", sorted(VALIDATED))
+@pytest.mark.parametrize(*all_pairs(
+    ("base", sorted(VALIDATED)),
+    ("way", TYPED_WAYS),
+    ("mode", sorted(RESHAPED)),
+))
 async def test_a_validator_that_reshapes_the_children_keeps_each_child_its_row(
     make_db, base, way, mode
 ):
@@ -1504,21 +1330,20 @@ async def test_a_validator_that_reshapes_the_children_keeps_each_child_its_row(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", TYPED_WAYS)
 @pytest.mark.parametrize("base", VERSIONED)
-async def test_a_child_holds_the_version_of_its_column_not_of_its_json(make_db, base, way):
-    """See the sync twin: ``update_one()`` bumps the column only."""
+async def test_a_child_holds_the_version_its_row_holds_after_a_set_update_and_saves(make_db, base, way):
+    """See the sync twin: ``update_one()`` moves the version in the column, its one place."""
     db, (_, c_cls, p_cls, _), pid = await _typed_world(make_db, base)
     ct = c_cls.__tablename__
     await c_cls.query().filter(F("_id") == 2).update_one(name="u")
     await c_cls.query().filter(F("_id") == 2).update_one(name="c2")
-    assert await version_of(db, ct, 2) == 2
-    assert (await rows_of(db, ct))[1][1]["_version"] == 0
+    assert (await version_of(db, ct, 2), "_version" in (await rows_of(db, ct))[1][1]) == (2, False)
     got = await load(p_cls, pid, way)
     alone = await c_cls.from_id(2)
     assert (got.bag["a"]._version, alone._version) == (2, 2)
-    for inst in (got.bag["a"], alone):
-        with pytest.raises(StaleVersionError):
-            await inst.save()
-    assert await version_of(db, ct, 2) == 2
+    await got.bag["a"].save()
+    with pytest.raises(StaleVersionError):
+        await alone.save()
+    assert (await version_of(db, ct, 2), "_version" in (await rows_of(db, ct))[1][1]) == (3, False)
 
 
 # ---- a child class bound to another database, and one never bound ---------------------
@@ -1614,16 +1439,13 @@ async def _elsewhere(make_db, base: str):
 @pytest.mark.parametrize("base", sorted(ELSEWHERE))
 async def test_a_child_class_bound_elsewhere_or_never_bound(make_db, base, way):
     """A child whose class is bound to another database than the parent's, and one whose
-    class is never bound. On the pydantic bases the batch builds no child of a class bound
-    elsewhere: it stays what the base gave (``_id`` None). On the lite bases the batch
-    gives that child the ``_id`` of the row in the parent's database, and its ``save()``
-    writes the row of that number in its own class's database, as the released version
-    does. A class never bound reads the parent's database, so its child is built with its
-    row."""
+    class is never bound. By every way the first is read from its class's database, where
+    its ``save()`` writes it back; the second from the parent's database. Every way gives
+    what ``from_id`` gives (the batch ways read the parent's database before)."""
     _, _, p_cls = ELSEWHERE[base]
     db, _, rid = await _elsewhere(make_db, base)
     got = await _observe(db, p_cls, rid, way, p_cls.__tablename__)
-    assert got == ELSEWHERE_EXPECTED[(base, way)]
+    assert got == ELSEWHERE_EXPECTED[(base, "from_id")]
 
 
 @pytest.mark.asyncio
@@ -1634,22 +1456,13 @@ async def test_a_child_bound_elsewhere_saves_and_deletes_in_its_own_database(mak
     db, other_db, rid = await _elsewhere(make_db, base)
     ot = o_cls.__tablename__
     child = (await load(p_cls, rid, way)).other
-    if way in ("from_id", "refresh"):
-        # the per-row ways read the child from its own class's database: its row there
-        assert (child._id, child.name) == (1, "in-child-db")
-        child.name = "saved"
-        await child.save()
-        assert [r[1]["name"] for r in await rows_of(other_db, ot)] == ["saved"]
-        await child.delete()
-        assert await rows_of(other_db, ot) == []
-    else:
-        # the batch read the parent's database: the child is not given that row's id
-        assert (child._id, child.name) == (None, "in-parent-db")
-        with pytest.raises(ValueError, match="Cannot delete unsaved model"):
-            await child.delete()
-        await child.save()  # a new row in its own database
-        names = [r[1]["name"] for r in await rows_of(other_db, ot)]
-        assert names == ["in-child-db", "in-parent-db"]
+    # every way reads the child from its own class's database: its row there
+    assert (child._id, child.name) == (1, "in-child-db")
+    child.name = "saved"
+    await child.save()
+    assert [r[1]["name"] for r in await rows_of(other_db, ot)] == ["saved"]
+    await child.delete()
+    assert await rows_of(other_db, ot) == []
     assert [r[1]["name"] for r in await rows_of(db, ot)] == ["in-parent-db"]
 
 
@@ -1671,11 +1484,25 @@ async def test_a_child_of_a_class_never_bound_read_through_using_saves_its_row(
     assert (got.never._id, got.never.name) == (1, "never-bound")
     got.never.name = "renamed"
     await got.never.save(db=db)
-    want = {"name": "renamed", "_version": 1} if base == "safe" else {"name": "renamed"}
-    assert await rows_of(db, ut) == [(1, want)]
+    assert await rows_of(db, ut) == [(1, {"name": "renamed"})]
 
 
 # ---- typed fields of a class --------------------------------------------------------
+
+
+def _at(cls: type) -> Any:
+    """Where ``Optional[cls]`` puts a model: the field's value."""
+    return _refs.Position((cls,), None, None)
+
+
+def _in_list(cls: type) -> Any:
+    """Where ``list[cls]`` puts a model: each entry."""
+    return _refs.Position((), _at(cls), None)
+
+
+def _in_dict(cls: type) -> Any:
+    """Where ``dict[str, cls]`` puts a model: each value."""
+    return _refs.Position((), None, _at(cls))
 
 
 @pytest.mark.asyncio
@@ -1704,8 +1531,8 @@ async def test_typed_fields_of_a_class_defined_before_the_class_it_refers_to(mak
         name: str = ""
 
     AFwdP.model_rebuild()
-    assert _refs.typed_fields(AFwdP) == {"one": (AFwdC,)}
-    assert _refs.typed_fields(ALFwdP) == {"one": (ALFwdC,)}
+    assert _refs.typed_fields(AFwdP) == {"one": _at(AFwdC)}
+    assert _refs.typed_fields(ALFwdP) == {"one": _at(ALFwdC)}
     db = await make_db()
     for c_cls, p_cls in ((AFwdC, AFwdP), (ALFwdC, ALFwdP)):
         ct = c_cls.__tablename__
@@ -1716,8 +1543,8 @@ async def test_typed_fields_of_a_class_defined_before_the_class_it_refers_to(mak
 
 
 def test_typed_fields_names_every_model_class_a_field_admits():
-    assert _refs.typed_fields(ATyP) == {"one": (ATyC,), "many": (ATyC,), "bag": (ATyC,)}
-    assert _refs.typed_fields(ALtyP) == {"one": (ALtyC,), "many": (ALtyC,), "bag": (ALtyC,)}
+    assert _refs.typed_fields(ATyP) == {"one": _at(ATyC), "many": _in_list(ATyC), "bag": _in_dict(ATyC)}
+    assert _refs.typed_fields(ALtyP) == {"one": _at(ALtyC), "many": _in_list(ALtyC), "bag": _in_dict(ALtyC)}
     assert _refs.typed_fields(ATyG) == {}
 
 
@@ -1767,7 +1594,7 @@ async def test_a_child_document_its_class_refuses_fails_the_load_as_on_the_base(
     assert outcome == REFUSED_EXPECTED[(base, way)]
 
 
-# ---- p6: classes never bound, read through using(db) --------------------------------
+# ---- classes never bound, read through using(db) ------------------------------------
 
 
 class AUbC(AsyncSQLerSafeModel):
@@ -1833,498 +1660,68 @@ async def test_a_child_of_a_class_never_bound_holds_its_column_version(make_db, 
 
 
 @pytest.mark.asyncio
-async def test_a_queryset_built_by_hand_without_a_database_builds_no_child(make_db):
+async def test_a_queryset_built_by_hand_without_a_database_reads_a_child_from_its_class_database(make_db):
+    """Without a database handed over, the child of a bound class is read from its class's
+    database and knows its row (it was built without its ``_id`` before)."""
     db, (_, _, p_cls, _), pid = await _typed_world(make_db, "pydantic")
     qs = AsyncSQLerQuerySet(p_cls, AsyncSQLerQuery(table=p_cls.__tablename__, adapter=db.adapter))
     got = await qs.first()
-    assert (type(got.one).__name__, got.one._id, got.one.name) == ("ATyC", None, "c1b")
+    assert (type(got.one).__name__, got.one._id, got.one.name) == ("ATyC", 1, "c1b")
 
 
 # What each way gives, pinned. Where it differs from the base: a child built by the
 # batch gets its row's _id (and _version); the safe from_id / refresh resolve typed
 # references, so they give what AsyncSQLerModel.from_id gives (a ValidationError
 # where a typed field cannot take the row it names).
-# where each way cuts the cycle: at the second time a row is reached below the row
-# loaded; the cut reference is left to the class (an empty model on the pydantic
-# bases, the reference itself on the lite ones)
-CYCLE_CHAINS: dict = {('lite', 'all'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                   [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite', 'first'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                     [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite', 'from_id'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                       [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite', 'from_ids'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                        [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite', 'refresh'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                       [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'all'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                        [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'first'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                          [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'from_id'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                            [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'from_ids'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                             [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('lite-safe', 'refresh'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), ('ref', 2)],
-                            [(3, 'n3'), (3, 'n3'), ('ref', 3)]),
- ('pydantic', 'all'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                       [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('pydantic', 'first'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                         [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('pydantic', 'from_id'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                           [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('pydantic', 'from_ids'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                            [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('pydantic', 'refresh'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                           [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'all'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                   [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'first'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                     [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'from_id'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                       [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'from_ids'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                        [(3, 'n3'), (3, 'n3'), (None, '')]),
- ('safe', 'refresh'): ([(1, 'n1'), (2, 'n2'), (1, 'n1'), (None, '')],
-                       [(3, 'n3'), (3, 'n3'), (None, '')])}
 REFUSED_EXPECTED: dict = {('lite', 'all'): 'TypeError',
  ('lite', 'first'): 'TypeError',
- ('lite', 'from_id'): ('loaded', ('ref', 'arep_lrq_c', 1)),
+ ('lite', 'from_id'): 'TypeError',
  ('lite', 'from_ids'): 'TypeError',
- ('lite', 'refresh'): ('loaded', ('ref', 'arep_lrq_c', 1)),
+ ('lite', 'refresh'): 'TypeError',
  ('pydantic', 'all'): 'ValidationError',
  ('pydantic', 'first'): 'ValidationError',
  ('pydantic', 'from_id'): 'ValidationError',
  ('pydantic', 'from_ids'): 'ValidationError',
  ('pydantic', 'refresh'): 'ValidationError'}
-GONE_EXPECTED: dict = {('lite', 'all'): ({'bag': {},
-                    'many': [('ALtyC',
-                              1,
-                              '-',
-                              {'g': ('ALtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                             None],
-                    'one': None,
-                    'title': 'p2'},
-                   {'bag': {},
-                    'many': [{'_id': 1, '_table': 'arep_lty_c'}, None],
-                    'one': None,
-                    'title': 'p2'}),
- ('lite', 'first'): ({'bag': {},
-                      'many': [('ALtyC',
-                                1,
-                                '-',
-                                {'g': ('ALtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                               ('ref', 'arep_lty_c', 2)],
-                      'one': ('ref', 'arep_lty_c', 2),
-                      'title': 'p2'},
-                     {'bag': {},
-                      'many': [{'_id': 1, '_table': 'arep_lty_c'},
-                               {'_id': 2, '_table': 'arep_lty_c'}],
-                      'one': {'_id': 2, '_table': 'arep_lty_c'},
-                      'title': 'p2'}),
- ('lite', 'from_id'): ({'bag': {},
-                        'many': [('ALtyC',
-                                  1,
-                                  '-',
-                                  {'g': ('ALtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                 None],
-                        'one': None,
-                        'title': 'p2'},
-                       {'bag': {},
-                        'many': [{'_id': 1, '_table': 'arep_lty_c'}, None],
-                        'one': None,
-                        'title': 'p2'}),
- ('lite', 'from_ids'): ({'bag': {},
-                         'many': [('ALtyC',
-                                   1,
-                                   '-',
-                                   {'g': ('ALtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                  ('ref', 'arep_lty_c', 2)],
-                         'one': ('ref', 'arep_lty_c', 2),
-                         'title': 'p2'},
-                        {'bag': {},
-                         'many': [{'_id': 1, '_table': 'arep_lty_c'},
-                                  {'_id': 2, '_table': 'arep_lty_c'}],
-                         'one': {'_id': 2, '_table': 'arep_lty_c'},
-                         'title': 'p2'}),
- ('lite', 'refresh'): ({'bag': {},
-                        'many': [('ALtyC',
-                                  1,
-                                  '-',
-                                  {'g': ('ALtyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                 None],
-                        'one': None,
-                        'title': 'p2'},
-                       {'bag': {},
-                        'many': [{'_id': 1, '_table': 'arep_lty_c'}, None],
-                        'one': None,
-                        'title': 'p2'}),
- ('lite-safe', 'all'): ({'bag': {},
-                         'many': [('ALtysC',
-                                   1,
-                                   1,
-                                   {'g': ('ALtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                  None],
-                         'one': None,
-                         'title': 'p2'},
-                        {'bag': {},
-                         'many': [{'_id': 1, '_table': 'arep_ltys_c'}, None],
-                         'one': None,
-                         'title': 'p2'}),
- ('lite-safe', 'first'): ({'bag': {},
-                           'many': [('ALtysC',
-                                     1,
-                                     1,
-                                     {'g': ('ALtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                    ('ref', 'arep_ltys_c', 2)],
-                           'one': ('ref', 'arep_ltys_c', 2),
-                           'title': 'p2'},
-                          {'bag': {},
-                           'many': [{'_id': 1, '_table': 'arep_ltys_c'},
-                                    {'_id': 2, '_table': 'arep_ltys_c'}],
-                           'one': {'_id': 2, '_table': 'arep_ltys_c'},
-                           'title': 'p2'}),
- ('lite-safe', 'from_id'): ({'bag': {},
-                             'many': [('ALtysC',
-                                       1,
-                                       1,
-                                       {'g': ('ALtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                      None],
-                             'one': None,
-                             'title': 'p2'},
-                            {'bag': {},
-                             'many': [{'_id': 1, '_table': 'arep_ltys_c'}, None],
-                             'one': None,
-                             'title': 'p2'}),
- ('lite-safe', 'from_ids'): ({'bag': {},
-                              'many': [('ALtysC',
-                                        1,
-                                        1,
-                                        {'g': ('ALtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                       ('ref', 'arep_ltys_c', 2)],
-                              'one': ('ref', 'arep_ltys_c', 2),
-                              'title': 'p2'},
-                             {'bag': {},
-                              'many': [{'_id': 1, '_table': 'arep_ltys_c'},
-                                       {'_id': 2, '_table': 'arep_ltys_c'}],
-                              'one': {'_id': 2, '_table': 'arep_ltys_c'},
-                              'title': 'p2'}),
- ('lite-safe', 'refresh'): ({'bag': {},
-                             'many': [('ALtysC',
-                                       1,
-                                       1,
-                                       {'g': ('ALtysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                      None],
-                             'one': None,
-                             'title': 'p2'},
-                            {'bag': {},
-                             'many': [{'_id': 1, '_table': 'arep_ltys_c'}, None],
-                             'one': None,
-                             'title': 'p2'}),
- ('pydantic', 'all'): ('load raised', 'ValidationError'),
- ('pydantic', 'first'): ({'bag': {},
-                          'many': [('ATyC',
-                                    1,
-                                    '-',
-                                    {'g': ('ATyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                   ('ATyC', None, '-', {'g': None, 'name': ''})],
-                          'one': ('ATyC', None, '-', {'g': None, 'name': ''}),
-                          'title': 'p2'},
-                         ('ValueError', 'Related async model must be saved before saving parent')),
- ('pydantic', 'from_id'): ('load raised', 'ValidationError'),
- ('pydantic', 'from_ids'): ({'bag': {},
-                             'many': [('ATyC',
-                                       1,
-                                       '-',
-                                       {'g': ('ATyG', 1, '-', {'name': 'g2'}), 'name': 'c1b'}),
-                                      ('ATyC', None, '-', {'g': None, 'name': ''})],
-                             'one': ('ATyC', None, '-', {'g': None, 'name': ''}),
-                             'title': 'p2'},
-                            ('ValueError',
-                             'Related async model must be saved before saving parent')),
- ('pydantic', 'refresh'): ('load raised', 'ValidationError'),
- ('safe', 'all'): ('load raised', 'ValidationError'),
- ('safe', 'first'): ({'bag': {},
-                      'many': [('ATysC',
-                                1,
-                                1,
-                                {'g': ('ATysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                               ('ATysC', None, 0, {'g': None, 'name': ''})],
-                      'one': ('ATysC', None, 0, {'g': None, 'name': ''}),
-                      'title': 'p2'},
-                     ('ValueError', 'Related async model must be saved before saving parent')),
- ('safe', 'from_id'): ('load raised', 'ValidationError'),
- ('safe', 'from_ids'): ({'bag': {},
-                         'many': [('ATysC',
-                                   1,
-                                   1,
-                                   {'g': ('ATysG', 1, 1, {'name': 'g2'}), 'name': 'c1b'}),
-                                  ('ATysC', None, 0, {'g': None, 'name': ''})],
-                         'one': ('ATysC', None, 0, {'g': None, 'name': ''}),
-                         'title': 'p2'},
-                        ('ValueError', 'Related async model must be saved before saving parent')),
- ('safe', 'refresh'): ('load raised', 'ValidationError')}
-UNFOLLOWED_EXPECTED: dict = {('id-str', 'lite', 'all'): ({'bag': {},
-                              'many': [],
-                              'one': ('ref', 'arep_lty_c', 'x'),
-                              'title': 'h'},
-                             {'bag': {},
-                              'many': [],
-                              'one': {'_id': 'x', '_table': 'arep_lty_c'},
-                              'title': 'h'}),
- ('id-str', 'lite', 'first'): ({'bag': {},
-                                'many': [],
-                                'one': ('ref', 'arep_lty_c', 'x'),
-                                'title': 'h'},
-                               {'bag': {},
-                                'many': [],
-                                'one': {'_id': 'x', '_table': 'arep_lty_c'},
-                                'title': 'h'}),
- ('id-str', 'lite', 'from_id'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('ref', 'arep_lty_c', 'x'),
-                                  'title': 'h'},
-                                 {'bag': {},
-                                  'many': [],
-                                  'one': {'_id': 'x', '_table': 'arep_lty_c'},
-                                  'title': 'h'}),
- ('id-str', 'lite', 'from_ids'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('ref', 'arep_lty_c', 'x'),
-                                   'title': 'h'},
-                                  {'bag': {},
-                                   'many': [],
-                                   'one': {'_id': 'x', '_table': 'arep_lty_c'},
-                                   'title': 'h'}),
- ('id-str', 'lite', 'refresh'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('ref', 'arep_lty_c', 'x'),
-                                  'title': 'h'},
-                                 {'bag': {},
-                                  'many': [],
-                                  'one': {'_id': 'x', '_table': 'arep_lty_c'},
-                                  'title': 'h'}),
- ('id-str', 'lite-safe', 'all'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('ref', 'arep_ltys_c', 'x'),
-                                   'title': 'h'},
-                                  {'bag': {},
-                                   'many': [],
-                                   'one': {'_id': 'x', '_table': 'arep_ltys_c'},
-                                   'title': 'h'}),
- ('id-str', 'lite-safe', 'first'): ({'bag': {},
-                                     'many': [],
-                                     'one': ('ref', 'arep_ltys_c', 'x'),
-                                     'title': 'h'},
-                                    {'bag': {},
-                                     'many': [],
-                                     'one': {'_id': 'x', '_table': 'arep_ltys_c'},
-                                     'title': 'h'}),
- ('id-str', 'lite-safe', 'from_id'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ref', 'arep_ltys_c', 'x'),
-                                       'title': 'h'},
-                                      {'bag': {},
-                                       'many': [],
-                                       'one': {'_id': 'x', '_table': 'arep_ltys_c'},
-                                       'title': 'h'}),
- ('id-str', 'lite-safe', 'from_ids'): ({'bag': {},
-                                        'many': [],
-                                        'one': ('ref', 'arep_ltys_c', 'x'),
-                                        'title': 'h'},
-                                       {'bag': {},
-                                        'many': [],
-                                        'one': {'_id': 'x', '_table': 'arep_ltys_c'},
-                                        'title': 'h'}),
- ('id-str', 'lite-safe', 'refresh'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ref', 'arep_ltys_c', 'x'),
-                                       'title': 'h'},
-                                      {'bag': {},
-                                       'many': [],
-                                       'one': {'_id': 'x', '_table': 'arep_ltys_c'},
-                                       'title': 'h'}),
- ('id-str', 'pydantic', 'all'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('ATyC', None, '-', {'g': None, 'name': ''}),
-                                  'title': 'h'},
-                                 ('ValueError',
-                                  'Related async model must be saved before saving parent')),
- ('id-str', 'pydantic', 'first'): ({'bag': {},
-                                    'many': [],
-                                    'one': ('ATyC', None, '-', {'g': None, 'name': ''}),
-                                    'title': 'h'},
-                                   ('ValueError',
-                                    'Related async model must be saved before saving parent')),
- ('id-str', 'pydantic', 'from_id'): ({'bag': {},
-                                      'many': [],
-                                      'one': ('ATyC', None, '-', {'g': None, 'name': ''}),
-                                      'title': 'h'},
-                                     ('ValueError',
-                                      'Related async model must be saved before saving parent')),
- ('id-str', 'pydantic', 'from_ids'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ATyC', None, '-', {'g': None, 'name': ''}),
-                                       'title': 'h'},
-                                      ('ValueError',
-                                       'Related async model must be saved before saving parent')),
- ('id-str', 'pydantic', 'refresh'): ({'bag': {},
-                                      'many': [],
-                                      'one': ('ATyC', None, '-', {'g': None, 'name': ''}),
-                                      'title': 'h'},
-                                     ('ValueError',
-                                      'Related async model must be saved before saving parent')),
- ('id-str', 'safe', 'all'): ({'bag': {},
-                              'many': [],
-                              'one': ('ATysC', None, 0, {'g': None, 'name': ''}),
-                              'title': 'h'},
-                             ('ValueError',
-                              'Related async model must be saved before saving parent')),
- ('id-str', 'safe', 'first'): ({'bag': {},
-                                'many': [],
-                                'one': ('ATysC', None, 0, {'g': None, 'name': ''}),
-                                'title': 'h'},
-                               ('ValueError',
-                                'Related async model must be saved before saving parent')),
- ('id-str', 'safe', 'from_id'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('ATysC', None, 0, {'g': None, 'name': ''}),
-                                  'title': 'h'},
-                                 ('ValueError',
-                                  'Related async model must be saved before saving parent')),
- ('id-str', 'safe', 'from_ids'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('ATysC', None, 0, {'g': None, 'name': ''}),
-                                   'title': 'h'},
-                                  ('ValueError',
-                                   'Related async model must be saved before saving parent')),
- ('id-str', 'safe', 'refresh'): ({'bag': {},
-                                  'many': [],
-                                  'one': ('ATysC', None, 0, {'g': None, 'name': ''}),
-                                  'title': 'h'},
-                                 ('ValueError',
-                                  'Related async model must be saved before saving parent')),
- ('other-table', 'lite', 'all'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('ALtyC', 1, '-', {'g': None, 'name': 'g2'}),
-                                   'title': 'h'},
-                                  {'bag': {},
-                                   'many': [],
-                                   'one': {'_id': 1, '_table': 'arep_lty_c'},
-                                   'title': 'h'}),
- ('other-table', 'lite', 'first'): ({'bag': {},
-                                     'many': [],
-                                     'one': ('ALtyC', 1, '-', {'g': None, 'name': 'g2'}),
-                                     'title': 'h'},
-                                    {'bag': {},
-                                     'many': [],
-                                     'one': {'_id': 1, '_table': 'arep_lty_c'},
-                                     'title': 'h'}),
- ('other-table', 'lite', 'from_id'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ALtyG', 1, '-', {'name': 'g2'}),
-                                       'title': 'h'},
-                                      {'bag': {},
-                                       'many': [],
-                                       'one': {'_id': 1, '_table': 'arep_lty_g'},
-                                       'title': 'h'}),
- ('other-table', 'lite', 'from_ids'): ({'bag': {},
-                                        'many': [],
-                                        'one': ('ALtyC', 1, '-', {'g': None, 'name': 'g2'}),
-                                        'title': 'h'},
-                                       {'bag': {},
-                                        'many': [],
-                                        'one': {'_id': 1, '_table': 'arep_lty_c'},
-                                        'title': 'h'}),
- ('other-table', 'lite', 'refresh'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ALtyG', 1, '-', {'name': 'g2'}),
-                                       'title': 'h'},
-                                      {'bag': {},
-                                       'many': [],
-                                       'one': {'_id': 1, '_table': 'arep_lty_g'},
-                                       'title': 'h'}),
- ('other-table', 'lite-safe', 'all'): ({'bag': {},
-                                        'many': [],
-                                        'one': ('ALtysC', 1, 0, {'g': None, 'name': 'g2'}),
-                                        'title': 'h'},
-                                       {'bag': {},
-                                        'many': [],
-                                        'one': {'_id': 1, '_table': 'arep_ltys_c'},
-                                        'title': 'h'}),
- ('other-table', 'lite-safe', 'first'): ({'bag': {},
-                                          'many': [],
-                                          'one': ('ALtysC', 1, 0, {'g': None, 'name': 'g2'}),
-                                          'title': 'h'},
-                                         {'bag': {},
-                                          'many': [],
-                                          'one': {'_id': 1, '_table': 'arep_ltys_c'},
-                                          'title': 'h'}),
- ('other-table', 'lite-safe', 'from_id'): ({'bag': {},
-                                            'many': [],
-                                            'one': ('ALtysG', 1, 1, {'name': 'g2'}),
-                                            'title': 'h'},
-                                           {'bag': {},
-                                            'many': [],
-                                            'one': {'_id': 1, '_table': 'arep_ltys_g'},
-                                            'title': 'h'}),
- ('other-table', 'lite-safe', 'from_ids'): ({'bag': {},
-                                             'many': [],
-                                             'one': ('ALtysC', 1, 0, {'g': None, 'name': 'g2'}),
-                                             'title': 'h'},
-                                            {'bag': {},
-                                             'many': [],
-                                             'one': {'_id': 1, '_table': 'arep_ltys_c'},
-                                             'title': 'h'}),
- ('other-table', 'lite-safe', 'refresh'): ({'bag': {},
-                                            'many': [],
-                                            'one': ('ALtysG', 1, 1, {'name': 'g2'}),
-                                            'title': 'h'},
-                                           {'bag': {},
-                                            'many': [],
-                                            'one': {'_id': 1, '_table': 'arep_ltys_g'},
-                                            'title': 'h'}),
- ('other-table', 'pydantic', 'all'): ({'bag': {},
-                                       'many': [],
-                                       'one': ('ATyC', None, '-', {'g': None, 'name': 'g2'}),
-                                       'title': 'h'},
-                                      ('ValueError',
-                                       'Related async model must be saved before saving parent')),
- ('other-table', 'pydantic', 'first'): ({'bag': {},
-                                         'many': [],
-                                         'one': ('ATyC', None, '-', {'g': None, 'name': 'g2'}),
-                                         'title': 'h'},
-                                        ('ValueError',
-                                         'Related async model must be saved before saving parent')),
- ('other-table', 'pydantic', 'from_id'): ('load raised', 'ValidationError'),
- ('other-table', 'pydantic', 'from_ids'): ({'bag': {},
-                                            'many': [],
-                                            'one': ('ATyC', None, '-', {'g': None, 'name': 'g2'}),
-                                            'title': 'h'},
-                                           ('ValueError',
-                                            'Related async model must be saved before saving '
-                                            'parent')),
- ('other-table', 'pydantic', 'refresh'): ('load raised', 'ValidationError'),
- ('other-table', 'safe', 'all'): ({'bag': {},
-                                   'many': [],
-                                   'one': ('ATysC', None, 0, {'g': None, 'name': 'g2'}),
-                                   'title': 'h'},
-                                  ('ValueError',
-                                   'Related async model must be saved before saving parent')),
- ('other-table', 'safe', 'first'): ({'bag': {},
-                                     'many': [],
-                                     'one': ('ATysC', None, 0, {'g': None, 'name': 'g2'}),
-                                     'title': 'h'},
-                                    ('ValueError',
-                                     'Related async model must be saved before saving parent')),
- ('other-table', 'safe', 'from_id'): ('load raised', 'ValidationError'),
- ('other-table', 'safe', 'from_ids'): ({'bag': {},
-                                        'many': [],
-                                        'one': ('ATysC', None, 0, {'g': None, 'name': 'g2'}),
-                                        'title': 'h'},
-                                       ('ValueError',
-                                        'Related async model must be saved before saving parent')),
- ('other-table', 'safe', 'refresh'): ('load raised', 'ValidationError')}
+def gone_expected(base: str) -> Any:
+    """One answer for every way in: the reference to the row that is gone reads as ``None``
+    in ``one`` and is left out of ``many``; the row that is there is a model of its row.
+    Saving writes the parent without the reference to the gone row."""
+    g_cls, c_cls, _, _ = TYPED[base]
+    v = 1 if base in VERSIONED else "-"
+    child = (c_cls.__name__, 1, v, {"g": (g_cls.__name__, 1, v, {"name": "g2"}), "name": "c1b"})
+    return (
+        {"bag": {}, "many": [child], "one": None, "title": "p2"},
+        {"bag": {}, "many": [{"_id": 1, "_table": c_cls.__tablename__}], "one": None, "title": "p2"},
+    )
+
+
+# a typed reference that cannot be followed leads to no row of the field's class: ``None``,
+# on every base and every way in, and saving writes ``None`` in its place
+UNFOLLOWED_EXPECTED = (
+    {"bag": {}, "many": [], "one": None, "title": "h"},
+    {"bag": {}, "many": [], "one": None, "title": "h"},
+)
+
+
+def unfollowed_expected(base: str, shape: str, c_cls: type) -> Any:
+    """``other-table`` is a reference into another class's table (``UNFOLLOWED_EXPECTED``).
+    ``id-str``, an ``_id`` that is text, is no reference: a dict like any other at that
+    position. A lite base keeps it and saving writes it back; a pydantic base validates it
+    as a blank child, which the parent's save refuses."""
+    if shape == "other-table":
+        return UNFOLLOWED_EXPECTED
+    held = {"_table": c_cls.__tablename__, "_id": "x"}
+    if base.startswith("lite"):
+        return (
+            {"bag": {}, "many": [], "one": ("ref", held["_table"], "x"), "title": "h"},
+            {"bag": {}, "many": [], "one": held, "title": "h"},
+        )
+    blank = (c_cls.__name__, None, 0 if base in VERSIONED else "-", {"name": "", "g": None})
+    return (
+        {"bag": {}, "many": [], "one": blank, "title": "h"},
+        ("ValueError", "Related async model must be saved before saving parent"),
+    )
 ELSEWHERE_EXPECTED: dict = {('lite', 'all'): ({'never': ('ALtyuC', 1, '-', {'name': 'never-bound'}),
                     'other': ('ALtyoC', 1, '-', {'name': 'in-parent-db'}),
                     'title': 'e'},
@@ -2458,11 +1855,11 @@ async def test_a_batch_read_adds_no_version_column_and_the_child_saves(make_db, 
     before = await _columns(db, ANcC.__tablename__)
     got = await _batch(db, way)
     assert await _columns(db, ANcC.__tablename__) == before == ["_id", "data"]
-    assert (got.one._id, got.one._version, got.loose) == (1, 0, {"name": "c", "_id": 1})
+    assert (got.one._id, got.one._version, got.loose) == (1, 0, {"_table": ANcC.__tablename__, "_id": 1})
     got.one.name = "c2"
     await got.one.save(db=db)
     assert await version_of(db, ANcC.__tablename__, 1) == 1
-    assert await rows_of(db, ANcC.__tablename__) == [(1, {"name": "c2", "_version": 1})]
+    assert await rows_of(db, ANcC.__tablename__) == [(1, {"name": "c2"})]
 
 
 @pytest.mark.asyncio
@@ -2535,20 +1932,20 @@ async def test_a_batch_read_keeps_a_raw_statement_left_uncommitted(tmp_path, way
 
 
 def _pragmas(sent: list, table: str) -> int:
-    return len([q for q in sent if q.sql == f'PRAGMA table_info("{table}");'])
+    return len([q for q in sent if q.sql == f'PRAGMA table_xinfo("{table}");'])
 
 
 @pytest.mark.asyncio
 async def test_a_second_read_of_a_version_less_table_asks_the_table_once(make_db):
-    """The second batch read by the same object sends one ``PRAGMA`` and one ``SELECT`` on
-    the child table: nothing remembered, no statement that fails."""
+    """The second batch read by the same object sends one ``SELECT`` on the child table: the
+    table is remembered without the column, no statement that fails."""
     db = await make_db()
     await _plain_child_table(db)
     await _batch(db, "from_ids")
     with query_logger.capture() as sent:
         got = await _batch(db, "from_ids")
     assert got.one._version == 0
-    assert (_pragmas(sent, ANcC.__tablename__), sent_to(sent, ANcC.__tablename__)) == (1, 1)
+    assert (_pragmas(sent, ANcC.__tablename__), sent_to(sent, ANcC.__tablename__)) == (0, 1)
 
 
 @pytest.mark.asyncio
@@ -2618,7 +2015,7 @@ def test_a_literal_field_is_not_typed_and_the_answer_is_kept(p_cls, c_cls):
     """The values of a ``Literal`` are not names; the answer is found once and kept."""
     _refs._TYPED.pop(p_cls, None)
     first = _refs.typed_fields(p_cls)
-    assert first == {"one": (c_cls,)}
+    assert first == {"one": _at(c_cls)}
     assert p_cls in _refs._TYPED
     assert _refs.typed_fields(p_cls) is first
 
@@ -2660,3 +2057,609 @@ async def test_a_before_validator_on_a_typed_field_receives_an_instance(make_db,
     got = await load(ABvP, 1, way)
     assert SEEN_BEFORE[-1] == "ABvC"
     assert (got.one._id, got.one.name) == (1, "c")
+
+
+# ---- one loader: a typed reference is the model of its row ----------------------------
+#
+# The async twin of the section of the same name in tests/test_relation_entry_points.py.
+
+
+class AGnBad(AsyncSQLerModel):
+    __tablename__ = "arep_gn_bad"
+    n: int
+
+
+class AGnNode(AsyncSQLerModel):
+    __tablename__ = "arep_gn_node"
+    name: str = ""
+    next: Optional[AGnNode] = None
+    kids: list[AGnNode] = PydField(default_factory=list)
+    bad: Optional[AGnBad] = None
+    bads: list[AGnBad] = PydField(default_factory=list)
+
+
+class AGsBad(AsyncSQLerSafeModel):
+    __tablename__ = "arep_gs_bad"
+    n: int
+
+
+class AGsNode(AsyncSQLerSafeModel):
+    __tablename__ = "arep_gs_node"
+    name: str = ""
+    next: Optional[AGsNode] = None
+    kids: list[AGsNode] = PydField(default_factory=list)
+    bad: Optional[AGsBad] = None
+    bads: list[AGsBad] = PydField(default_factory=list)
+
+
+@dataclass
+class AGlBad(AsyncSQLerLiteModel):
+    __tablename__ = "arep_gl_bad"
+    n: int
+
+
+@dataclass
+class AGlNode(AsyncSQLerLiteModel):
+    __tablename__ = "arep_gl_node"
+    name: str = ""
+    next: Optional[AGlNode] = None
+    kids: list[AGlNode] = field(default_factory=list)
+    bad: Optional[AGlBad] = None
+    bads: list[AGlBad] = field(default_factory=list)
+
+
+@dataclass
+class AGlsBad(AsyncSQLerLiteSafeModel):
+    __tablename__ = "arep_gls_bad"
+    n: int
+
+
+@dataclass
+class AGlsNode(AsyncSQLerLiteSafeModel):
+    __tablename__ = "arep_gls_node"
+    name: str = ""
+    next: Optional[AGlsNode] = None
+    kids: list[AGlsNode] = field(default_factory=list)
+    bad: Optional[AGlsBad] = None
+    bads: list[AGlsBad] = field(default_factory=list)
+
+
+AGnNode.model_rebuild()
+AGsNode.model_rebuild()
+
+AGRAPH = {
+    "pydantic": (AGnNode, AGnBad),
+    "safe": (AGsNode, AGsBad),
+    "lite": (AGlNode, AGlBad),
+    "lite-safe": (AGlsNode, AGlsBad),
+}
+
+
+async def _graph(make_db, base: str):
+    db = await make_db()
+    node, bad = AGRAPH[base]
+    await bind(db, bad, node)
+    return db, node, bad
+
+
+def _node(name: str, **fields: Any) -> dict:
+    return {"name": name, "next": None, "kids": [], "bad": None, "bads": [], **fields}
+
+
+def _selects(sent: list) -> int:
+    return sum(1 for q in sent if q.sql.lstrip().upper().startswith("SELECT"))
+
+
+async def _put(db: AsyncSQLerDB, node: type, doc: dict, rid: Optional[int] = None) -> int:
+    if rid is None:
+        return await db.insert_document(node.__tablename__, doc)
+    await db.upsert_document(node.__tablename__, rid, doc)
+    return rid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+@pytest.mark.parametrize("length", [2000])  # past the recursion limit, on every base and way
+async def test_a_chain_is_followed_to_its_end_by_every_way(make_db, base, way, length):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    # a fresh table numbers its rows 1..length: row i references row i + 1
+    ids = await db.insert_many(t, [
+        _node(f"n{i}", next=ref(t, i + 1) if i < length else None) for i in range(1, length + 1)
+    ])
+    assert ids == list(range(1, length + 1))
+    with query_logger.capture() as sent:
+        got = await load(node, ids[0], way)
+    names, x = [], got
+    while x is not None:
+        assert x._id == ids[len(names)]
+        names.append(x.name)
+        x = x.next
+    assert names == [f"n{i}" for i in range(1, length + 1)]
+    assert _selects(sent) == length + (way == "refresh")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_a_cycle_closes_on_its_objects_and_saves_by_every_way(make_db, base, way):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    s = await _put(db, node, _node("s"))
+    await _put(db, node, _node("s", next=ref(t, s)), s)
+    a, b = await _put(db, node, _node("a")), await _put(db, node, _node("b"))
+    await _put(db, node, _node("a", next=ref(t, b)), a)
+    await _put(db, node, _node("b", next=ref(t, a)), b)
+    k1, k2 = await _put(db, node, _node("k1")), await _put(db, node, _node("k2"))
+    await _put(db, node, _node("k1", kids=[ref(t, k2)]), k1)
+    await _put(db, node, _node("k2", kids=[ref(t, k1)]), k2)
+    before = await rows_of(db, t)
+    me = await load(node, s, way)
+    assert me.next is me
+    got = await load(node, a, way)
+    assert (got.name, got.next.name, got.next.next is got) == ("a", "b", True)
+    k = await load(node, k1, way)
+    assert ([c.name for c in k.kids], k.kids[0].kids[0] is k) == (["k2"], True)
+    shown = repr(got)
+    assert (shown.count("name='a'"), shown.count("name='b'"), "..." in shown) == (1, 1, True)
+    for x in (me, got, got.next, k, k.kids[0]):
+        await x.save()
+    after = await rows_of(db, t)
+    for rows in (before, after):
+        for r in rows:
+            r[1].pop("_version", None)
+    assert after == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_two_rows_of_one_all_that_reference_each_other_are_the_result_objects(make_db, base):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    a, b = await _put(db, node, _node("a")), await _put(db, node, _node("b"))
+    await _put(db, node, _node("a", next=ref(t, b)), a)
+    await _put(db, node, _node("b", next=ref(t, a)), b)
+    got = await node.query().order_by("name").all()
+    assert [g.name for g in got] == ["a", "b"]
+    assert (got[0].next is got[1], got[1].next is got[0]) == (True, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_a_diamond_and_a_repeated_list_entry_are_one_object(make_db, base, way):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    d = await _put(db, node, _node("d"))
+    b = await _put(db, node, _node("b", next=ref(t, d)))
+    c = await _put(db, node, _node("c", next=ref(t, d)))
+    a = await _put(db, node, _node("a", kids=[ref(t, b), ref(t, c), ref(t, b)]))
+    with query_logger.capture() as sent:
+        got = await load(node, a, way)
+    assert [k.name for k in got.kids] == ["b", "c", "b"]
+    assert (got.kids[0] is got.kids[2], got.kids[0].next is got.kids[1].next) == (True, True)
+    assert _selects(sent) == 3 + (way == "refresh")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", ["safe", "lite-safe"])
+async def test_a_versioned_child_in_a_diamond_saves_through_both_parents(make_db, base, way):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    d = await _put(db, node, _node("d"))
+    b = await _put(db, node, _node("b", next=ref(t, d)))
+    c = await _put(db, node, _node("c", next=ref(t, d)))
+    a = await _put(db, node, _node("a", kids=[ref(t, b), ref(t, c)]))
+    got = await load(node, a, way)
+    got.kids[0].next.name = "d1"
+    await got.kids[0].next.save()
+    got.kids[1].next.name = "d2"
+    await got.kids[1].next.save()  # one object: it holds the version the first save wrote
+    assert await version_of(db, t, d) == 2
+    assert (await rows_of(db, t))[0][1]["name"] == "d2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(*all_pairs(
+    ("where", ["field-depth-1", "list-depth-1", "field-depth-3", "list-depth-3"]),
+    ("base", sorted(AGRAPH)),
+    ("way", TYPED_WAYS),
+))
+async def test_a_referenced_row_its_class_refuses_raises_with_a_note(make_db, base, way, where):
+    db, node, bad = await _graph(make_db, base)
+    t, bt = node.__tablename__, bad.__tablename__
+    b = await db.insert_document(bt, {})  # no ``n``: the class refuses the row
+    in_list = where.startswith("list")
+    holder = _node("h3", **({"bads": [ref(bt, b)]} if in_list else {"bad": ref(bt, b)}))
+    top = await _put(db, node, holder)
+    if where.endswith("3"):
+        mid = await _put(db, node, _node("h2", next=ref(t, top)))
+        top = await _put(db, node, _node("h1", next=ref(t, mid)))
+    try:
+        await bad.from_id(b)
+    except Exception as exc:  # the type its own from_id raises is the expectation
+        want = type(exc)
+    with pytest.raises(want) as caught:
+        await load(node, top, way)
+    assert type(caught.value) is want
+    holder_id = top if where.endswith("1") else top - 2
+    assert caught.value.__notes__ == [
+        f"loading row {b} of {bt!r}, referenced by field {'bads' if in_list else 'bad'!r}"
+        f" of row {holder_id} of {t!r}"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_a_gone_row_inside_a_cycle_and_at_depth_three(make_db, base, way):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    gone = await _put(db, node, _node("gone"))
+    a, b = await _put(db, node, _node("a")), await _put(db, node, _node("b"))
+    await _put(db, node, _node("a", next=ref(t, b), kids=[ref(t, gone), ref(t, b)]), a)
+    await _put(db, node, _node("b", next=ref(t, a), kids=[ref(t, gone)]), b)
+    d3 = await _put(db, node, _node("d3", next=ref(t, gone)))
+    d2 = await _put(db, node, _node("d2", next=ref(t, d3)))
+    d1 = await _put(db, node, _node("d1", next=ref(t, d2)))
+    await db.delete_document(t, gone)
+    got = await load(node, a, way)
+    assert (got.next.next is got, [k.name for k in got.kids], got.kids[0] is got.next) == (
+        True, ["b"], True
+    )
+    assert got.next.kids == []
+    deep = await load(node, d1, way)
+    assert [deep.name, deep.next.name, deep.next.next.name] == ["d1", "d2", "d3"]
+    assert deep.next.next.next is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_a_reference_not_followed_is_the_stored_reference_and_saves_back(make_db, base):
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    one, two = await _put(db, node, _node("one")), await _put(db, node, _node("two"))
+    await _put(db, node, _node("two", next=ref(t, one), kids=[ref(t, one), ref(t, two)]), two)
+    before = await rows_of(db, t)
+    got = await node.query().filter(F("_id") == two).resolve(False).first()
+    assert (got.next, got.kids) == (ref(t, one), [ref(t, one), ref(t, two)])
+    await got.save()
+    after = await rows_of(db, t)
+    for rows in (before, after):
+        for r in rows:
+            r[1].pop("_version", None)
+    assert after == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", sorted(AGRAPH))
+async def test_statement_budget_of_a_hundred_children(make_db, base):
+    """100 parents each holding one of 100 children: 2 SELECTs by ``all()``; one parent
+    holding the 100 in a typed list: 2 by ``from_id``."""
+    db, node, _ = await _graph(make_db, base)
+    t = node.__tablename__
+    kids = await db.insert_many(t, [_node(f"k{i}") for i in range(100)])
+    await db.insert_many(t, [_node(f"p{i}", next=ref(t, k)) for i, k in enumerate(kids)])
+    p = await _put(db, node, _node("q", kids=[ref(t, k) for k in kids]))
+    with query_logger.capture() as sent:
+        got = await node.query().filter(F("name").like("p%")).all()
+    assert ([g.next.name for g in got], _selects(sent)) == ([f"k{i}" for i in range(100)], 2)
+    with query_logger.capture() as sent:
+        one = await node.from_id(p)
+    assert ([k.name for k in one.kids], _selects(sent)) == ([f"k{i}" for i in range(100)], 2)
+
+
+# ---- the object a row in a cycle becomes ------------------------------------------------
+#
+# The async twin of the section of the same name in tests/test_relation_entry_points.py
+# (there is no async msgspec model).
+
+
+@dataclass(slots=True)
+class ACsSlots(AsyncSQLerLiteModel):
+    __tablename__ = "arep_cs_slots"
+    name: str
+    n: int = 0
+    next: Optional[ACsSlots] = None
+
+
+@dataclass(frozen=True)
+class ACsLiteFrozen(AsyncSQLerLiteModel):
+    __tablename__ = "arep_cs_lite_frozen"
+    name: str
+    n: int = 0
+    next: Optional[ACsLiteFrozen] = None
+
+
+@dataclass(frozen=True, slots=True)
+class ACsLiteFrozenSlots(AsyncSQLerLiteModel):
+    __tablename__ = "arep_cs_lite_frozen_slots"
+    name: str
+    n: int = 0
+    next: Optional[ACsLiteFrozenSlots] = None
+
+
+class ACsPydFrozen(AsyncSQLerModel):
+    __tablename__ = "arep_cs_pyd_frozen"
+    model_config = {"frozen": True}
+    name: str
+    n: int = 0
+    next: Optional[ACsPydFrozen] = None
+
+
+class ACsPydPrivate(AsyncSQLerModel):
+    __tablename__ = "arep_cs_pyd_private"
+    name: str
+    n: int = 0
+    next: Optional[ACsPydPrivate] = None
+    _tag: str = PrivateAttr(default="unset")
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        self._tag = f"tag-{self.name}"
+
+
+ACsPydFrozen.model_rebuild()
+ACsPydPrivate.model_rebuild()
+
+STATE_CLASSES = {
+    "lite-slots": ACsSlots,
+    "lite-frozen": ACsLiteFrozen,
+    "lite-frozen-slots": ACsLiteFrozenSlots,
+    "pydantic-frozen": ACsPydFrozen,
+    "pydantic-private": ACsPydPrivate,
+}
+# Left out: ``refresh()`` assigns the fields of the instance it refreshes, which a frozen
+# pydantic model refuses before any reference is loaded.
+STATE_LEFT_OUT = {("pydantic-frozen", "refresh")}
+STATE_WAYS = [
+    (kind, way)
+    for kind in STATE_CLASSES
+    for way in TYPED_WAYS
+    if (kind, way) not in STATE_LEFT_OUT
+]
+
+
+async def _two_cycle(make_db, cls: type) -> tuple:
+    """A database with ``cls`` bound, and its rows a (n=1) and b (n=2), each ``next`` the
+    other: ``(a, b)``."""
+    db = await make_db()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cls.set_db(db)
+    await db._ensure_table(cls.__tablename__)
+    t = cls.__tablename__
+    a = await _put(db, cls, {"name": "a", "n": 1})
+    b = await _put(db, cls, {"name": "b", "n": 2})
+    await _put(db, cls, {"name": "a", "n": 1, "next": ref(t, b)}, a)
+    await _put(db, cls, {"name": "b", "n": 2, "next": ref(t, a)}, b)
+    return a, b
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("kind", "way"), STATE_WAYS)
+async def test_a_row_in_a_cycle_holds_every_field_whatever_way_its_class_keeps_state(
+    make_db, kind, way
+):
+    cls = STATE_CLASSES[kind]
+    a, b = await _two_cycle(make_db, cls)
+    got = await load(cls, a, way)
+    assert (type(got.next), got.next.next is got) == (cls, True)
+    assert [(x._id, x.name, x.n) for x in (got, got.next)] == [(a, "a", 1), (b, "b", 2)]
+    if kind.startswith("lite"):  # the async pydantic base has no synchronous ``is_dirty``
+        assert [cls.is_dirty(x) for x in (got, got.next)] == [False, False]
+    if kind == "pydantic-private":
+        assert (got._tag, got.next._tag) == ("tag-a", "tag-b")
+
+
+HOOKED: list = []
+
+
+class AHkPydPost(AsyncSQLerModel):
+    __tablename__ = "arep_hk_pyd_post"
+    name: str
+    next: Optional[AHkPydPost] = None
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        HOOKED.append(self)
+
+
+class AHkPydAfter(AsyncSQLerModel):
+    __tablename__ = "arep_hk_pyd_after"
+    name: str
+    next: Optional[AHkPydAfter] = None
+
+    @model_validator(mode="after")
+    def _keep(self) -> AHkPydAfter:
+        HOOKED.append(self)
+        return self
+
+
+@dataclass
+class AHkLite(AsyncSQLerLiteModel):
+    __tablename__ = "arep_hk_lite"
+    name: str
+    next: Optional[AHkLite] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        HOOKED.append(self)
+
+
+AHkPydPost.model_rebuild()
+AHkPydAfter.model_rebuild()
+HOOK_CLASSES = {"pydantic-post-init": AHkPydPost, "pydantic-after": AHkPydAfter, "lite": AHkLite}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("kind", sorted(HOOK_CLASSES))
+async def test_a_hook_that_keeps_self_keeps_the_object_the_graph_holds(make_db, kind, way):
+    """Each row's hook runs on the object the loaded graph holds for the row: once per row,
+    except that pydantic runs a class's after-validators again on every instance of it that
+    it validates as a field value. ``refresh()`` reads its row's fields onto the instance: on
+    pydantic from a model it validates for that, which the hook of the row runs on; on lite
+    without building one, so no hook runs for the row."""
+    cls = HOOK_CLASSES[kind]
+    a, _ = await _two_cycle(make_db, cls)
+    after = kind == "pydantic-after"
+    if way == "refresh":
+        inst = await cls.query().filter(F("_id") == a).resolve(False).first()
+        HOOKED.clear()
+        got = await inst.refresh()
+        assert (got is inst, got.next.next is got) == (True, True)
+        graph_objects = [x for x in HOOKED if x is got or x is got.next]
+        assert [x is got.next for x in graph_objects] == ([False, True, True] if after else [True])
+        assert len(HOOKED) == (4 if after else 1 if kind == "lite" else 2)
+        return
+    HOOKED.clear()
+    got = await load(cls, a, way)
+    assert got.next.next is got
+    assert len(HOOKED) == (4 if after else 2)
+    assert {id(x) for x in HOOKED} == {id(got), id(got.next)}
+
+
+# ---- a class that builds its model its own way ------------------------------------------
+
+
+def _named_by_title(data: dict) -> dict:
+    """``data`` of the shape these classes read: a row written before ``title`` became
+    ``name`` is given its ``name``."""
+    return {**data, "name": data["title"]} if "title" in data else data
+
+
+class AOvPyd(AsyncSQLerModel):
+    __tablename__ = "arep_ov_pyd"
+    name: str
+    next: Optional[AOvPyd] = None
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> AOvPyd:
+        return super().model_validate(_named_by_title(obj), **kwargs)
+
+
+class AOvPydWrap(AsyncSQLerModel):
+    __tablename__ = "arep_ov_pyd_wrap"
+    name: str
+    next: Optional[AOvPydWrap] = None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _another(cls, data: Any, handler: Any) -> AOvPydWrap:
+        if not isinstance(data, dict):
+            return handler(data)  # a model in a field of another: itself
+        return handler(_named_by_title(data)).model_copy()  # a row: not the object given
+
+
+@dataclass
+class AOvLite(AsyncSQLerLiteModel):
+    __tablename__ = "arep_ov_lite"
+    name: str = ""
+    next: Optional[AOvLite] = None
+
+    @classmethod
+    def model_validate(cls, data: dict) -> AOvLite:
+        return AsyncSQLerLiteModel.model_validate.__func__(cls, _named_by_title(data))
+
+
+@dataclass(frozen=True, slots=True)
+class AOvLiteFrozenSlots(AsyncSQLerLiteModel):
+    __tablename__ = "arep_ov_lite_frozen_slots"
+    name: str = ""
+    next: Optional[AOvLiteFrozenSlots] = None
+
+    @classmethod
+    def model_validate(cls, data: dict) -> AOvLiteFrozenSlots:
+        return AsyncSQLerLiteModel.model_validate.__func__(cls, _named_by_title(data))
+
+
+AOvPyd.model_rebuild()
+AOvPydWrap.model_rebuild()
+OWN_WAY = {
+    "pydantic-model-validate": AOvPyd,
+    "pydantic-wrap-validator": AOvPydWrap,
+    "lite": AOvLite,
+    "lite-frozen-slots": AOvLiteFrozenSlots,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", TYPED_WAYS)
+@pytest.mark.parametrize("kind", sorted(OWN_WAY))
+async def test_a_class_that_builds_its_model_its_own_way_builds_a_row_in_a_cycle_that_way(
+    make_db, kind, way
+):
+    """Rows stored with ``title`` load only through the class's own ``model_validate`` (or
+    its validator): outside a cycle and inside one."""
+    cls = OWN_WAY[kind]
+    db = await make_db()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cls.set_db(db)
+    t = cls.__tablename__
+    await db._ensure_table(t)
+    a, b = await _put(db, cls, {"title": "a"}), await _put(db, cls, {"title": "b"})
+    await _put(db, cls, {"title": "a", "next": ref(t, b)}, a)
+    await _put(db, cls, {"title": "b", "next": ref(t, a)}, b)
+    got = await load(cls, a, way)
+    assert (type(got.next), got.next.next is got) == (cls, True)
+    assert [(x._id, x.name) for x in (got, got.next)] == [(a, "a"), (b, "b")]
+
+
+# ---- a frozen class read by a queryset --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AFzLite(AsyncSQLerLiteModel):
+    __tablename__ = "arep_fz_lite"
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AFzLiteSlots(AsyncSQLerLiteModel):
+    __tablename__ = "arep_fz_lite_slots"
+    name: str = ""
+
+
+class AFzPyd(AsyncSQLerModel):
+    __tablename__ = "arep_fz_pyd"
+    model_config = {"frozen": True}
+    name: str
+
+
+FROZEN = {"lite": AFzLite, "lite-slots": AFzLiteSlots, "pydantic": AFzPyd}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["all", "first", "update_one", "update_n", "other-table"])
+@pytest.mark.parametrize("kind", sorted(FROZEN))
+async def test_a_frozen_class_read_by_a_queryset_knows_its_row(make_db, kind, how):
+    cls = FROZEN[kind]
+    db = await make_db()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cls.set_db(db)
+    await db._ensure_table(cls.__tablename__)
+    rid = await _put(db, cls, {"name": "n"})
+    rows = cls.query().filter(F("_id") == rid)
+    other = f"{cls.__tablename__}_copy"
+    if how == "all":
+        got = (await rows.all())[0]
+    elif how == "first":
+        got = await rows.first()
+    elif how == "update_one":
+        got = await rows.update_one(name="m")
+    elif how == "update_n":
+        got = (await rows.update_n(1, name="m"))[0]
+    else:
+        await db._ensure_table(other)
+        assert await db.insert_document(other, {"name": "n"}) == rid
+        got = (await cls.using(db, other).all())[0]
+    assert (type(got), got._id, got.name) == (cls, rid, "m" if how.startswith("update") else "n")
+    if kind.startswith("lite"):  # the async pydantic base has no synchronous ``is_dirty``
+        assert cls.is_dirty(got) is False
+    assert got._snapshot == {"name": got.name}
+    assert _ref_table(got) == (other if how == "other-table" else cls.__tablename__)

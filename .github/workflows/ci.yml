@@ -60,3 +60,39 @@ jobs:
           if [ -f examples/sync_model_quickstart.py ]; then
             uv run python examples/sync_model_quickstart.py > /dev/null
           fi
+
+  lowest-versions:
+    name: Tests • lowest allowed versions • py3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync dependencies (main + dev)
+        run: uv sync --dev --frozen
+
+      - name: Install the lowest versions pyproject.toml allows
+        run: |
+          # The floors are read from pyproject.toml, so raising one there moves this job with it.
+          uv pip compile pyproject.toml --extra pydantic --extra msgspec \
+            --resolution lowest-direct --python-version 3.12 \
+            -o "${{ runner.temp }}/lowest.txt"
+          uv pip install -r "${{ runner.temp }}/lowest.txt"
+
+      - name: Show versions
+        run: |
+          uv run --no-sync python --version
+          uv run --no-sync python -c "import aiosqlite, msgspec, pydantic; print('aiosqlite', aiosqlite.__version__, 'msgspec', msgspec.__version__, 'pydantic', pydantic.VERSION)"
+
+      - name: Run unit tests (perf excluded)
+        env:
+          PYTHONUTF8: "1"
+        run: uv run --no-sync pytest -q -m "not perf" --disable-warnings

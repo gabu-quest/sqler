@@ -29,7 +29,7 @@ def _(mo):
     1. Metrics collection (Prometheus/StatsD compatible)
     2. Query result caching with TTL
     3. Cache-aware models
-    4. Connection pooling concepts
+    4. Connections for threads and tasks
 
     Let's explore!
     """)
@@ -53,7 +53,7 @@ def _():
 
     db = SQLerDB.in_memory()
     print("Database connected!")
-    print("Imports ready: metrics, cache, pool modules")
+    print("Imports ready: metrics and cache modules")
     return (
         CacheAwareModel,
         F,
@@ -316,26 +316,28 @@ def _(mo):
     mo.md(r"""
     ## 8. Connection Pooling
 
-    For production with concurrent access, use connection pools.
+    `SQLerDB` gives each thread its own connection and returns it when the
+    thread ends, so threads share one `SQLerDB`. `AsyncSQLerDB` pools its
+    connections and reports them with `pool_stats()`.
 
-    **Note:** Pools require disk-based databases, so we'll show the API:
+    **Note:** threads need a disk-based database, so we'll show the API:
     """)
     return
 
 
 @app.cell
 def _():
-    print("Connection Pool Features:")
+    print("Connections per thread and per task:")
     print("")
-    print("  # Create pooled database")
-    print("  db = PooledSQLerDB.on_disk('app.db', max_connections=10)")
-    print("")
-    print("  # Use exactly like SQLerDB")
+    print("  # One SQLerDB for every thread")
+    print("  db = SQLerDB.on_disk('app.db')")
     print("  User.set_db(db)")
-    print("  users = User.query().all()")
+    print("  threads = [threading.Thread(target=lambda: User.query().all()) for _ in range(10)]")
     print("")
-    print("  # Check pool stats")
-    print("  stats = db.pool_stats()")
+    print("  # Async: a pool of connections, and its numbers")
+    print("  adb = AsyncSQLerDB.on_disk('app.db')")
+    print("  await adb.connect()")
+    print("  stats = adb.pool_stats()")
     print("  print(f'In use: {stats.in_use_connections}')")
     print("  print(f'Available: {stats.available_connections}')")
     print("")
@@ -395,14 +397,13 @@ def _(mo):
     | `@cached_query` | Decorator for automatic caching |
     | `.invalidate_pattern()` | Wildcard cache invalidation |
     | `CacheAwareModel` | Auto-invalidate on model changes |
-    | `ConnectionPool` | Thread-safe connection pooling |
-    | `PooledSQLerDB` | SQLerDB with built-in pooling |
+    | `AsyncSQLerDB.pool_stats()` | The async connection pool's numbers |
 
     **Best Practices:**
     - Enable metrics for production monitoring
     - Cache expensive queries with appropriate TTL
     - Use `invalidate_table()` after bulk updates
-    - Use connection pooling for concurrent access
+    - Share one `SQLerDB` between threads; `AsyncSQLerDB` pools its connections for tasks
     - Set `slow_threshold_ms` to track slow queries
 
     **That's the end of the SQLer tour!**

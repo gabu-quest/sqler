@@ -1,11 +1,14 @@
 """``from_id`` and ``refresh`` load references with the batched loader ``from_ids`` uses.
 
-Counted through the driver's trace callback: a two-row cycle takes 3 SELECTs, a row
-holding 20 references takes 2, whichever way the row is loaded.
+``other`` is typed: it admits both classes, alone, as the entries of a list, or as the
+values of a dict inside a dict.
+
+Counted through the driver's trace callback: a two-row cycle takes 2 SELECTs (one per row),
+a row holding 20 references takes 2, whichever way the row is loaded.
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Optional, Union
 
 import pytest
 from sqler import SQLerDB, SQLerModel
@@ -16,42 +19,45 @@ from sqler.models.lite.safe import SQLerLiteSafeModel
 class PxA(SQLerModel):
     __tablename__ = "fx_px_a"
     name: str
-    other: Any = None
+    other: "Optional[Union[PxA, PxB, list[Union[PxA, PxB]], dict[str, dict[str, Union[PxA, PxB]]], list, dict]]" = None
 
 
 class PxB(SQLerModel):
     __tablename__ = "fx_px_b"
     name: str
-    other: Any = None
+    other: "Optional[Union[PxA, PxB, list[Union[PxA, PxB]], dict[str, dict[str, Union[PxA, PxB]]], list, dict]]" = None
 
 
 @dataclass
 class LxA(SQLerLiteModel):
     __tablename__ = "fx_lx_a"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[LxA, LxB, list[Union[LxA, LxB]], dict[str, dict[str, Union[LxA, LxB]]], list, dict]]" = None
 
 
 @dataclass
 class LxB(SQLerLiteModel):
     __tablename__ = "fx_lx_b"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[LxA, LxB, list[Union[LxA, LxB]], dict[str, dict[str, Union[LxA, LxB]]], list, dict]]" = None
 
 
 @dataclass
 class LsA(SQLerLiteSafeModel):
     __tablename__ = "fx_ls_a"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[LsA, LsB, list[Union[LsA, LsB]], dict[str, dict[str, Union[LsA, LsB]]], list, dict]]" = None
 
 
 @dataclass
 class LsB(SQLerLiteSafeModel):
     __tablename__ = "fx_ls_b"
     name: str = ""
-    other: Any = None
+    other: "Optional[Union[LsA, LsB, list[Union[LsA, LsB]], dict[str, dict[str, Union[LsA, LsB]]], list, dict]]" = None
 
+
+PxA.model_rebuild()
+PxB.model_rebuild()
 
 BASES = {"pydantic": (PxA, PxB), "lite": (LxA, LxB), "lite-safe": (LsA, LsB)}
 
@@ -100,13 +106,12 @@ def test_from_id_of_a_two_row_cycle_runs_as_many_selects_as_from_ids(world):
     db.upsert_document(a_cls.__tablename__, a, {"name": "a", "other": ref(b_cls, b)})
     got, from_id_selects = selects(db, lambda: a_cls.from_id(a))
     _, from_ids_selects = selects(db, lambda: a_cls.from_ids([a]))
-    assert len(from_ids_selects) == 3
-    assert len(from_id_selects) == 3
+    assert len(from_ids_selects) == 2
+    assert len(from_id_selects) == 2
     assert got.name == "a"
     assert got.other.name == "b"
-    assert got.other.other.name == "a"
-    # the cycle is cut where the batched loader cuts it: a reference is left
-    assert got.other.other.other == ref(b_cls, b)
+    # the cycle closes on its objects: the row read first is the one ``b`` references
+    assert got.other.other is got
 
 
 def test_from_id_of_a_row_with_twenty_references_runs_two_selects(world):
@@ -126,22 +131,22 @@ def test_refresh_runs_as_many_selects_as_from_ids(world):
     inst = a_cls.from_id(a)
     inst.name = "stale"
     _, n = selects(db, inst.refresh)
-    assert len(n) == 3
+    assert len(n) == 2
     assert inst.name == "a"
     assert inst.other.name == "b"
+    assert inst.other.other is inst
 
 
-def test_a_row_referencing_itself_is_cut_after_one_round(world):
+def test_a_row_referencing_itself_is_its_own_reference_after_one_read(world):
     db, a_cls, _ = world
     a = put(db, a_cls, name="a")
     db.upsert_document(a_cls.__tablename__, a, {"name": "a", "other": ref(a_cls, a)})
     got, n = selects(db, lambda: a_cls.from_id(a))
-    assert len(n) == 2
-    assert got.other.name == "a"
-    assert got.other.other == ref(a_cls, a)
+    assert len(n) == 1
+    assert got.other is got
 
 
-def test_a_three_row_cycle_across_two_tables_takes_one_select_per_table_per_round(world):
+def test_a_three_row_cycle_across_two_tables_takes_one_select_per_row(world):
     db, a_cls, b_cls = world
     a1 = put(db, a_cls, name="a1")
     b1 = put(db, b_cls, name="b1", other=ref(a_cls, a1))
@@ -149,8 +154,9 @@ def test_a_three_row_cycle_across_two_tables_takes_one_select_per_table_per_roun
     db.upsert_document(a_cls.__tablename__, a1, {"name": "a1", "other": ref(a_cls, a2)})
     got, from_id_n = selects(db, lambda: a_cls.from_id(a1))
     _, from_ids_n = selects(db, lambda: a_cls.from_ids([a1]))
-    assert len(from_id_n) == len(from_ids_n) == 4
+    assert len(from_id_n) == len(from_ids_n) == 3
     assert [got.name, got.other.name, got.other.other.name] == ["a1", "a2", "b1"]
+    assert got.other.other.other is got
 
 
 def test_a_reference_to_a_deleted_row_reads_as_none(world):
@@ -179,11 +185,11 @@ def test_a_reference_nested_in_a_dict_is_loaded(world):
     assert got.other["deep"]["x"].name == "b"
 
 
-def test_a_reference_to_a_table_that_does_not_exist_stays_a_reference(world):
+def test_a_reference_to_a_table_no_class_owns_reads_as_none(world):
     db, a_cls, _ = world
     dangling = {"_table": "fx_no_such_table", "_id": 1}
     a = put(db, a_cls, name="a", other=dangling)
-    assert a_cls.from_id(a).other == dangling
+    assert a_cls.from_id(a).other is None
 
 
 def test_a_safe_row_whose_referenced_row_changed_version_loads_the_new_one():

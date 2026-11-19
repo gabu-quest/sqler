@@ -35,7 +35,6 @@ from sqler import (
     StaleVersionError,
 )
 from sqler.exceptions import LockTimeoutError
-from sqler.utils import ReferenceTracker
 
 
 @pytest.fixture
@@ -357,22 +356,6 @@ class TestDeepNestingAndCircularReferences:
         # Query should not hang or crash
         nodes = Node.query().all()
         assert len(nodes) == 3
-
-    def test_reference_tracker_prevents_infinite_loop(self):
-        """Test that ReferenceTracker catches cycles."""
-        tracker = ReferenceTracker(max_depth=100, raise_on_cycle=False)
-
-        # Simulate visiting in a cycle
-        with tracker.visit("a", 1) as ok1:
-            assert ok1
-            with tracker.visit("b", 2) as ok2:
-                assert ok2
-                with tracker.visit("c", 3) as ok3:
-                    assert ok3
-                    # Try to visit 'a' again - should fail
-                    with tracker.visit("a", 1) as ok4:
-                        assert not ok4  # Cycle detected
-
 
 class TestLargeScaleOperations:
     """Tests for operations on large datasets."""

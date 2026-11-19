@@ -25,9 +25,6 @@ def test_hydration_handles_cycle_once():
     rows = A.query().all()
     aa = rows[0]
     assert isinstance(aa.b, B)
-    # second hop should not recurse infinitely; back-ref may remain a ref or a shallow dict
-    # ensure it is not a fully hydrated deep chain by checking attribute type or None
-    # acceptable: either None or a dict-like (ref), but not same instance recursion
-    if isinstance(aa.b.a, A):
-        # ensure it stops here; the nested back-reference should not have its own .b hydrated again
-        assert aa.b.a.b is None or not isinstance(aa.b.a.b, B)
+    assert aa.b.name == "b"
+    # the cycle closes on its objects: the back-reference is the row loaded first
+    assert aa.b.a is aa

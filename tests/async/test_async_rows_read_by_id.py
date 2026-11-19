@@ -7,7 +7,7 @@ promoted columns, and for a versioned table its version, as ``find_document`` gi
 import sqlite3
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional, Union
 
 import pytest
 import pytest_asyncio
@@ -34,7 +34,7 @@ class ArbiHolder(AsyncSQLerModel):
     __tablename__ = "arbi_holders"
     name: str = ""
     typed: Optional[ArbiJob] = None
-    untyped: Any = None
+    held: "Union[dict, ArbiJob, None]" = None
 
 
 class ArbiSafeJob(AsyncSQLerSafeModel):
@@ -48,7 +48,7 @@ class ArbiSafeHolder(AsyncSQLerModel):
     __tablename__ = "arbi_safe_holders"
     name: str = ""
     typed: Optional[ArbiSafeJob] = None
-    untyped: Any = None
+    held: "Union[dict, ArbiSafeJob, None]" = None
 
 
 @dataclass
@@ -63,7 +63,7 @@ class ArbiLiteJob(AsyncSQLerLiteModel):
 class ArbiLiteHolder(AsyncSQLerLiteModel):
     __tablename__ = "arbi_lite_holders"
     name: str = ""
-    untyped: Any = None
+    held: "Union[dict, ArbiLiteJob, None]" = None
 
 
 @dataclass
@@ -78,7 +78,7 @@ class ArbiLiteSafeJob(AsyncSQLerLiteSafeModel):
 class ArbiLiteSafeHolder(AsyncSQLerLiteModel):
     __tablename__ = "arbi_lite_safe_holders"
     name: str = ""
-    untyped: Any = None
+    held: "Union[dict, ArbiLiteSafeJob, None]" = None
 
 
 class ArbiPlain(AsyncSQLerModel):
@@ -108,7 +108,7 @@ class ArbiLate(AsyncSQLerModel):
 
 class ArbiLateHolder(AsyncSQLerModel):
     __tablename__ = "arbi_late_holders"
-    untyped: Any = None
+    held: "Union[dict, ArbiLate, None]" = None
 
 
 FAMILIES = {
@@ -179,10 +179,10 @@ async def test_a_class_that_declares_a_column_its_table_was_made_without(db):
     one = await ArbiLate.from_id(1)
     assert one.status == "json"
     assert [r.status for r in await ArbiLate.from_ids([1])] == ["json"]
-    await ArbiLateHolder(untyped={"_table": "arbi_lates", "_id": 1}).save()
-    assert (await ArbiLateHolder.from_id(1)).untyped.status == "json"
-    assert (await ArbiLateHolder.from_ids([1]))[0].untyped["status"] == "json"
-    assert (await ArbiLateHolder.query().all())[0].untyped["status"] == "json"
+    await ArbiLateHolder(held={"_table": "arbi_lates", "_id": 1}).save()
+    assert (await ArbiLateHolder.from_id(1)).held.status == "json"
+    assert (await ArbiLateHolder.from_ids([1]))[0].held.status == "json"
+    assert (await ArbiLateHolder.query().all())[0].held.status == "json"
 
 
 WAYS = ["from_id", "from_ids", "all", "first"]
@@ -204,12 +204,12 @@ async def test_a_referenced_row_carries_its_promoted_column(db, family, way):
     job_cls, holder_cls = FAMILIES[family]
     job = job_cls(name="j", status="ready")
     await job.save()
-    fields = {"untyped": job}
+    fields = {"held": job}
     if "typed" in getattr(holder_cls, "model_fields", {}):
         fields["typed"] = job
     await holder_cls(name="h", **fields).save()
     got = await _load(holder_cls, way)
-    assert _status(got.untyped) == "ready"
+    assert _status(got.held) == "ready"
     if "typed" in fields:
         assert got.typed.status == "ready"
 
@@ -252,8 +252,13 @@ async def test_from_ids_on_a_table_made_before_versioning_does_what_from_id_does
     await db.insert_document(table, {"name": "old"})
     got = await cls.from_ids([1])
     assert [(g.name, g._version) for g in got] == [("old", 0)]
+    with sqlite3.connect(path) as conn:  # the read changed no schema
+        assert [r[1] for r in conn.execute(f"PRAGMA table_info({table})")] == ["_id", "data"]
+    got[0].name = "new"
+    await got[0].save()  # the first versioned write adds the column
+    assert got[0]._version == 1
     with sqlite3.connect(path) as conn:
-        assert conn.execute(f"SELECT _version FROM {table} WHERE _id = 1").fetchone() == (0,)
+        assert conn.execute(f"SELECT _version FROM {table} WHERE _id = 1").fetchone() == (1,)
 
 
 @pytest.mark.parametrize("cls", [ArbiPlain, ArbiSafe, ArbiLiteSafe])
@@ -302,7 +307,7 @@ async def fresh(path, db):
 async def _with_ready_job(status="ready"):
     job = ArbiJob(name="j", status=status)
     await job.save()
-    await ArbiHolder(name="h", typed=job, untyped=job).save()
+    await ArbiHolder(name="h", typed=job, held=job).save()
 
 
 def _reads(captured):
@@ -327,7 +332,7 @@ async def test_a_referenced_row_read_through_using_a_fresh_database_object_is_wh
     await _with_ready_job()
     got = await ArbiHolder.using(fresh).first()
     assert got.typed.status == "ready"
-    assert got.untyped == {"name": "j", "_id": 1, "status": "ready"}
+    assert (type(got.held), got.held._id, got.held.status) == (ArbiJob, 1, "ready")
     assert [h.typed.status for h in await ArbiHolder.using(fresh).all()] == ["ready"]
 
 
@@ -342,14 +347,23 @@ async def test_set_db_on_a_fresh_database_object_then_from_id_gives_the_column(d
     assert _stored(path, "arbi_jobs", 1) == "ready"
 
 
+# the guard each read built from what the database remembers carries: a branch that never runs
+_G_JOBS = "CASE WHEN 1 THEN 1 ELSE (SELECT (`_id`, `data`, `status`) IN (SELECT * FROM arbi_jobs) FROM arbi_jobs) END"
+_G_PLAINS = "CASE WHEN 1 THEN 1 ELSE (SELECT (`_id`, `data`) IN (SELECT * FROM arbi_plains) FROM arbi_plains) END"
+
+
 async def test_a_table_is_learned_once_and_a_known_table_asks_nothing(db, fresh):
     await _with_ready_job()
     with query_logger.capture() as first:
         await fresh.find_document("arbi_jobs", 1)
     with query_logger.capture() as second:
         await fresh.find_document("arbi_jobs", 1)
-    assert _reads(first) == ['PRAGMA table_info("arbi_jobs");', "SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?);"]
-    assert _reads(second) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?);"]
+    assert _reads(first) == [
+        'PRAGMA table_xinfo("arbi_jobs");',
+        "SELECT col FROM _sqler_promoted WHERE tbl = ?;",  # its record of settled columns, read once
+        "SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";",
+    ]
+    assert _reads(second) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";"]
 
 
 async def test_what_is_learned_inside_a_transaction_that_rolls_back_is_dropped(db, fresh, path):
@@ -375,32 +389,36 @@ async def test_what_is_learned_inside_a_transaction_that_commits_is_kept(db, fre
         assert (await fresh.find_document("arbi_jobs", 1))["status"] == "ready"
     with query_logger.capture() as captured:
         await fresh.find_document("arbi_jobs", 1)
-    assert _reads(captured) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?);"]
+    assert _reads(captured) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";"]
 
 
-async def test_two_querysets_of_one_class_on_two_databases_read_their_own_child_rows(db, tmp_path):
+async def test_a_child_of_a_bound_class_is_read_from_its_class_database_through_any_queryset(db, tmp_path):
+    """The parent rows are read from the queryset's database; a referenced row of a class
+    bound to a database is read from that one, where its ``save()`` writes it back."""
     await _with_ready_job(status="here")
     other = AsyncSQLerDB.on_disk(str(tmp_path / "other.db"))
     await other.connect()
     try:
         job = ArbiJob(name="o", status="there")
         await job.save(db=other)
-        await ArbiHolder(name="h2", typed=job, untyped=job).save(db=other)
+        await ArbiHolder(name="h2", typed=job, held=job).save(db=other)
         mine, theirs = await ArbiHolder.using(db).first(), await ArbiHolder.using(other).first()
     finally:
         await other.close()
-    assert (mine.typed.name, mine.typed.status, mine.untyped["status"]) == ("j", "here", "here")
-    assert (theirs.typed.name, theirs.typed.status, theirs.untyped["status"]) == ("o", "there", "there")
+    assert (mine.typed.name, mine.typed.status, _status(mine.held)) == ("j", "here", "here")
+    assert theirs.name == "h2"
+    assert (theirs.typed.name, theirs.typed.status, _status(theirs.held)) == ("j", "here", "here")
 
 
-async def test_a_queryset_built_by_hand_reads_child_rows_as_before(db):
-    """Pinned: with no database handed over, a child row is read as ``_id`` and ``data``."""
+async def test_a_queryset_built_by_hand_reads_the_child_rows_of_a_bound_class(db):
+    """With no database handed over, a child of a bound class is read from its database."""
     from sqler.models.async_queryset import AsyncSQLerQuerySet
     from sqler.query.async_query import AsyncSQLerQuery
 
     await _with_ready_job()
     qs = AsyncSQLerQuerySet(ArbiHolder, AsyncSQLerQuery(table="arbi_holders", adapter=db.adapter))
-    assert (await qs.first()).untyped == {"name": "j", "_id": 1}
+    got = (await qs.first()).held
+    assert (got._id, got.status) == (1, "ready")
 
 
 # --- a queryset's copy carries everything the queryset holds -------------------------------
@@ -419,7 +437,7 @@ CHAINS = {
     "exclude": lambda qs: qs.exclude(_name_is("x")),
     "or_filter": lambda qs: qs.or_filter(_name_is("h")),
     "distinct": lambda qs: qs.distinct(),
-    "select": lambda qs: qs.select("name", "untyped"),
+    "select": lambda qs: qs.select("name", "held"),
     "order_by": lambda qs: qs.order_by("name"),
     "limit": lambda qs: qs.limit(5),
     "offset": lambda qs: qs.limit(5).offset(0),
@@ -437,8 +455,8 @@ async def test_every_chaining_method_keeps_resolve_off(db, method):
     assert qs._resolve is False
     assert qs._db is db
     if method in ROWS:
-        assert (await qs.first()).untyped == _REF
-        assert [h.untyped for h in await qs.all()] == [_REF]
+        assert (await qs.first()).held == _REF
+        assert [h.held for h in await qs.all()] == [_REF]
 
 
 @pytest.mark.parametrize("method", list(CHAINS))
@@ -448,7 +466,8 @@ async def test_every_chaining_method_keeps_the_database_of_using(db, fresh, meth
     assert qs._resolve is True
     assert qs._db is fresh
     if method in ROWS:
-        assert (await qs.first()).untyped == {"name": "j", "_id": 1, "status": "ready"}
+        got = (await qs.first()).held
+        assert (got._id, got.status) == (1, "ready")
 
 
 # --- the async reader's own path: the shapes the sync file pins ---------------------------
@@ -469,10 +488,19 @@ async def test_a_null_column_and_a_json_key_of_its_name_read_as_find_document_re
         {"name": "m", "status": "col", "_id": 2},
     ]
     assert await db.find_documents("arbi_jobs", [1, 2]) == one
-    await ArbiHolder(untyped={"_table": "arbi_jobs", "_id": 1}).save()
-    await ArbiHolder(untyped={"_table": "arbi_jobs", "_id": 2}).save()
-    assert [h.untyped["status"] for h in await ArbiHolder.query().all()] == [None, "col"]
-    assert [h.untyped["status"] for h in await ArbiHolder.from_ids([1, 2])] == [None, "col"]
+    await ArbiHolder(held={"_table": "arbi_jobs", "_id": 2}).save()
+    await ArbiHolder(held={"_table": "arbi_jobs", "_id": 1}).save()
+    assert [_status(h.held) for h in await ArbiHolder.query().limit(1).all()] == ["col"]
+    assert [_status(h.held) for h in await ArbiHolder.from_ids([1])] == ["col"]
+    # the NULL column is the row's ``status``: its class refuses it, by every way in
+    from pydantic import ValidationError
+
+    for load in (lambda: ArbiHolder.from_id(2), lambda: ArbiHolder.query().all()):
+        with pytest.raises(ValidationError) as caught:
+            await load()
+        assert caught.value.__notes__ == [
+            "loading row 1 of 'arbi_jobs', referenced by field 'held' of row 2 of 'arbi_holders'"
+        ]
 
 
 class ArbiBare(AsyncSQLerModel):
@@ -485,7 +513,7 @@ class ArbiBare(AsyncSQLerModel):
 
 class ArbiBareHolder(AsyncSQLerModel):
     __tablename__ = "arbi_bare_holders"
-    untyped: Any = None
+    held: "Union[dict, ArbiBare, None]" = None
 
 
 async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_none(db):
@@ -497,10 +525,10 @@ async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_
         ArbiBareHolder.set_db(db)
     assert (await ArbiBare.from_id(1)).status == "ready"
     assert [b.status for b in await ArbiBare.from_ids([1])] == ["ready"]
-    await ArbiBareHolder(untyped={"_table": "arbi_bares", "_id": 1}).save()
-    assert (await ArbiBareHolder.from_id(1)).untyped.status == "ready"
-    assert (await ArbiBareHolder.from_ids([1]))[0].untyped["status"] == "ready"
-    assert (await ArbiBareHolder.query().first()).untyped["status"] == "ready"
+    await ArbiBareHolder(held={"_table": "arbi_bares", "_id": 1}).save()
+    assert (await ArbiBareHolder.from_id(1)).held.status == "ready"
+    assert (await ArbiBareHolder.from_ids([1]))[0].held.status == "ready"
+    assert (await ArbiBareHolder.query().first()).held.status == "ready"
 
 
 @pytest.mark.parametrize(
@@ -515,11 +543,11 @@ async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_
             "CREATE TABLE arbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, "
             "_version INTEGER NOT NULL DEFAULT 0)",
             ("""'{"name": "a"}'""",),
-            {"name": "a", "_id": 1},
+            {"name": "a", "_id": 1, "_version": 0},  # the column is the row's version: every read gives it
         ),
         (
             "CREATE TABLE arbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, extra TEXT)",
-            ("""'{"name": "a", "extra": "json"}'""", "'col'"),
+            ("""'{"name": "a"}'""", "'col'"),  # a key "extra" in the document too is refused
             {"name": "a", "_id": 1, "extra": "col"},
         ),
         (
@@ -584,8 +612,7 @@ class ArbiLitePlain(AsyncSQLerLiteModel):
 
 
 async def _save_many(cls, instances):
-    many = getattr(cls, "asave_many", None) or cls.save_many
-    await many(instances)
+    await cls.save_many(instances)
 
 
 @pytest.mark.parametrize("cls", [ArbiPlain, ArbiSafe, ArbiLitePlain, ArbiLiteSafe], ids=lambda c: c.__name__)
@@ -614,7 +641,7 @@ async def test_ids_up_to_the_bound_are_one_variable_each_and_past_it_one_json_ar
     with query_logger.capture() as over:
         await db.find_documents("arbi_plains", list(range(1, 1001)))
     assert [s.count("?") for s in _reads(under)] == [999]
-    assert _reads(over) == ["SELECT _id, data FROM arbi_plains WHERE _id IN (SELECT value FROM json_each(?));"]
+    assert _reads(over) == ["SELECT _id, data FROM arbi_plains WHERE _id IN (SELECT value FROM json_each(?)) AND " + _G_PLAINS + ";"]
 
 
 # --- a save inside a transaction that rolls back ------------------------------------------

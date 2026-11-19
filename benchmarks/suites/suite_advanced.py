@@ -21,7 +21,6 @@ import time
 from sqler import (
     F,
     FTSIndex,
-    PooledSQLerDB,
     SQLerDB,
     StaleVersionError,
     cached_query,
@@ -57,6 +56,30 @@ def _alternate_arms(scenario_name: str, arms: list[tuple]) -> list[tuple]:
     if hash(scenario_name) % 2:
         return list(reversed(arms))
     return list(arms)
+
+
+def _timed_together(n_threads: int, open_connection, work) -> float:
+    """Wall time in ms of ``work(i)`` run on ``n_threads`` threads at once.
+
+    Each thread first calls ``open_connection(i)``, then all wait at one gate, and the
+    clock starts when the last one arrives. The timed window holds the queries alone:
+    no thread start and no opening of a connection, in every arm.
+    """
+    started: list[float] = []
+    gate = threading.Barrier(n_threads + 1, action=lambda: started.append(time.perf_counter()))
+
+    def run(i: int) -> None:
+        open_connection(i)
+        gate.wait(60)
+        work(i)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    gate.wait(60)
+    for t in threads:
+        t.join()
+    return (time.perf_counter() - started[0]) * 1000
 
 
 class FullTextSearch:
@@ -100,7 +123,11 @@ class FullTextSearch:
                             )
                             article.save()
 
-                        fts = FTSIndex(BenchmarkArticle, fields=["title", "content"])
+                        # no triggers and an empty index after create(), as the
+                        # baseline's: both arms then time the same rebuild and searches
+                        fts = FTSIndex(
+                            BenchmarkArticle, fields=["title", "content"], content_sync=False
+                        )
                         fts.create()
 
                         def do_rebuild(fts=fts):
@@ -466,15 +493,16 @@ class QueryCacheImpact:
 
 
 class ConnectionPoolThroughput:
-    """Scenario 17: PooledSQLerDB concurrent readers vs plain SQLerDB.
+    """Scenario 17: one SQLerDB shared by concurrent readers vs one SQLerDB per thread.
 
-    v1.2: Pre-open baseline connections outside timed window (M-6).
-    Always disk-based (connection pool requires it).
+    SQLerDB gives each thread its own connection, whichever object the thread uses, so
+    every arm opens its threads' connections before the timed window (M-6).
+    Always disk-based (threads need a file).
     """
 
     name = "connection_pool"
     suite = SUITE_NAME
-    description = "PooledSQLerDB concurrent query throughput vs plain SQLerDB"
+    description = "Shared SQLerDB concurrent query throughput vs one SQLerDB per thread"
 
     def setup(self, config: BenchmarkConfig) -> None:
         self.gen = DocumentGenerator(seed=42)
@@ -499,23 +527,17 @@ class ConnectionPoolThroughput:
                     plain_db = SQLerDB.on_disk(plain_path)
                     plain_db.bulk_upsert("bench", docs)
 
-                    # Pre-open connections outside timed window (M-6)
                     local_dbs = [SQLerDB.on_disk(plain_path) for _ in range(n_threads)]
 
-                    def plain_worker(ldb):
+                    def plain_open(i):
+                        local_dbs[i].adapter.execute("SELECT 1").fetchall()
+
+                    def plain_worker(i):
+                        ldb = local_dbs[i]
                         for _ in range(queries_per_thread):
                             ldb.query("bench").filter(F("value") > 5000).limit(10).all()
 
-                    start = time.perf_counter()
-                    threads = [
-                        threading.Thread(target=plain_worker, args=(local_dbs[i],))
-                        for i in range(n_threads)
-                    ]
-                    for t in threads:
-                        t.start()
-                    for t in threads:
-                        t.join()
-                    plain_wall_times.append((time.perf_counter() - start) * 1000)
+                    plain_wall_times.append(_timed_together(n_threads, plain_open, plain_worker))
 
                     for ldb in local_dbs:
                         ldb.close()
@@ -527,37 +549,35 @@ class ConnectionPoolThroughput:
 
                 arm_results["sqler_plain"] = timing_stats_from_list(sorted(plain_wall_times))
 
-            def measure_pooled():
-                pool_wall_times: list[float] = []
+            def measure_shared():
+                shared_wall_times: list[float] = []
 
                 for _ in range(config.iterations):
                     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-                        pool_path = f.name
+                        shared_path = f.name
 
-                    setup_db = SQLerDB.on_disk(pool_path)
-                    setup_db.bulk_upsert("bench", docs)
-                    setup_db.close()
-                    pool_db = PooledSQLerDB.on_disk(pool_path, max_connections=n_threads)
+                    shared_db = SQLerDB.on_disk(shared_path)
+                    shared_db.bulk_upsert("bench", docs)
 
-                    def pool_worker():
+                    def shared_open(i):
+                        shared_db.adapter.execute("SELECT 1").fetchall()
+
+                    def shared_worker(i):
                         for _ in range(queries_per_thread):
-                            pool_db.query("bench").filter(F("value") > 5000).limit(10).all()
+                            shared_db.query("bench").filter(F("value") > 5000).limit(10).all()
 
-                    start = time.perf_counter()
-                    threads = [threading.Thread(target=pool_worker) for _ in range(n_threads)]
-                    for t in threads:
-                        t.start()
-                    for t in threads:
-                        t.join()
-                    pool_wall_times.append((time.perf_counter() - start) * 1000)
+                    shared_wall_times.append(
+                        _timed_together(n_threads, shared_open, shared_worker)
+                    )
 
-                    os.unlink(pool_path)
+                    shared_db.close()
+                    os.unlink(shared_path)
                     for suffix in ("-wal", "-shm"):
-                        p = pool_path + suffix
+                        p = shared_path + suffix
                         if os.path.exists(p):
                             os.unlink(p)
 
-                arm_results["sqler_pooled"] = timing_stats_from_list(sorted(pool_wall_times))
+                arm_results["sqler_shared"] = timing_stats_from_list(sorted(shared_wall_times))
 
             def measure_sqlite():
                 sqlite_wall_times: list[float] = []
@@ -571,10 +591,13 @@ class ConnectionPoolThroughput:
                     insert_many(sq_conn, "bench", docs)
                     sq_conn.close()
 
-                    # Pre-open connections outside timed window (M-6)
                     pre_conns = [create_conn(sq_path, "disk") for _ in range(n_threads)]
 
-                    def sqlite_worker(c):
+                    def sqlite_open(i):
+                        pre_conns[i].execute("SELECT 1").fetchall()
+
+                    def sqlite_worker(i):
+                        c = pre_conns[i]
                         for _ in range(queries_per_thread):
                             cursor = c.execute(
                                 "SELECT data FROM [bench] "
@@ -583,16 +606,9 @@ class ConnectionPoolThroughput:
                             )
                             fetch_as_strings(cursor)
 
-                    start = time.perf_counter()
-                    threads = [
-                        threading.Thread(target=sqlite_worker, args=(pre_conns[i],))
-                        for i in range(n_threads)
-                    ]
-                    for t in threads:
-                        t.start()
-                    for t in threads:
-                        t.join()
-                    sqlite_wall_times.append((time.perf_counter() - start) * 1000)
+                    sqlite_wall_times.append(
+                        _timed_together(n_threads, sqlite_open, sqlite_worker)
+                    )
 
                     for c in pre_conns:
                         c.close()
@@ -607,7 +623,7 @@ class ConnectionPoolThroughput:
             # Alternate sqler group vs sqlite (M-1)
             arms = _alternate_arms(
                 f"{self.name}_{n_threads}",
-                [("sqler_group", lambda: (measure_plain(), gc.collect(), measure_pooled())),
+                [("sqler_group", lambda: (measure_plain(), gc.collect(), measure_shared())),
                  ("sqlite", measure_sqlite)],
             )
             for label, fn in arms:
@@ -617,7 +633,7 @@ class ConnectionPoolThroughput:
             total_queries = n_threads * queries_per_thread
             for label, stats_key, baseline in [
                 (f"sqler_disk_plain_{n_threads}t", "sqler_plain", "sqler"),
-                (f"sqler_disk_pooled_{n_threads}t", "sqler_pooled", "sqler"),
+                (f"sqler_disk_shared_{n_threads}t", "sqler_shared", "sqler"),
                 (f"sqlite_disk_{n_threads}t", "sqlite", "sqlite"),
             ]:
                 stats = arm_results[stats_key]

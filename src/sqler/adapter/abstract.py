@@ -1,12 +1,38 @@
 import sqlite3
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from typing import Any, Iterator, List, NoReturn, Optional, Protocol
 
 
 class AdapterError(Exception):
     """Base exception for database adapter errors."""
 
     pass
+
+
+class CursorLike(Protocol):
+    """What ``execute`` gives back: the part of ``sqlite3.Cursor`` that reads a statement's
+    result. A ``sqlite3.Cursor`` is one; so are the rows an adapter has already read."""
+
+    @property
+    def description(self) -> Any: ...
+
+    @property
+    def rowcount(self) -> int: ...
+
+    @property
+    def lastrowid(self) -> Optional[int]: ...
+
+    def fetchone(self) -> Any: ...
+
+    def fetchmany(self, size: Optional[int] = ...) -> list[Any]: ...
+
+    def fetchall(self) -> list[Any]: ...
+
+    def __iter__(self) -> Iterator[Any]: ...
+
+    def __next__(self) -> Any: ...
+
+    def close(self) -> None: ...
 
 
 class AdapterABC(ABC):
@@ -23,11 +49,23 @@ class AdapterABC(ABC):
         pass
 
     @abstractmethod
-    def execute(self, query: str, params: Optional[List[Any]] = None) -> sqlite3.Cursor:
+    def execute(self, query: str, params: Optional[List[Any]] = None) -> CursorLike:
         """Execute a single query with optional params.
-        returns a sqlite3 cursor
+        returns a cursor: a ``sqlite3.Cursor``, or rows already read that answer as one
         """
         pass
+
+    def _execute_judged(self, query: str, params: Optional[List[Any]] = None) -> CursorLike:
+        """``execute`` for sqler's own senders, which read some failures of a statement as an
+        answer. An adapter that does not tell the two apart sends it as any statement: by the
+        time the failure is read, its ``execute`` has ended what it ends."""
+        return self.execute(query, params)
+
+    def _end_failed_statement(self, exc: Exception) -> NoReturn:
+        """Raise ``exc``, the failure of a statement sent with ``_execute_judged`` that its
+        sender did not read as an answer, once what a failed statement ends is ended: here
+        ``execute`` ended it already."""
+        raise exc
 
     @abstractmethod
     def executemany(self, query: str, param_list: List[List[Any]]) -> sqlite3.Cursor:
@@ -74,6 +112,14 @@ class AsyncAdapterABC(ABC):
         Returns a cursor-like object.
         """
         pass
+
+    async def _execute_judged(self, query: str, params: Optional[List[Any]] = None) -> Any:
+        """Async twin of :meth:`AdapterABC._execute_judged`."""
+        return await self.execute(query, params)
+
+    async def _end_failed_statement(self, exc: Exception) -> NoReturn:
+        """Async twin of :meth:`AdapterABC._end_failed_statement`."""
+        raise exc
 
     @abstractmethod
     async def executemany(self, query: str, param_list: List[List[Any]]) -> Any:

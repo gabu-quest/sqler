@@ -7,11 +7,9 @@ from pydantic import PrivateAttr
 
 from sqler.exceptions import StaleVersionError
 from sqler.models import _dirty, _refs
-from sqler.models._table_names import _instance_binding
 
 from . import save_retry as _retry
 from .model import SQLerModel
-from .queryset import SQLerQuerySet
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     RebaseConfig,
@@ -69,68 +67,14 @@ class SQLerSafeModel(SQLerModel):
         db._ensure_versioned_table(cls._table)  # type: ignore[arg-type]
 
     @classmethod
-    def _load_refs(cls: Type[TSafe], ids: list, seen: frozenset) -> dict:  # type: ignore[override]
-        """Load the rows ``ids`` with their versions and snapshots, one statement."""
-        db, table = cls._require_binding()
-        out: dict = {}
-        for doc in _refs.read_versioned(db, table, ids):
-            rid = doc["_id"]
-            try:
-                typed = _refs.resolve(doc, db, seen | {(table, rid)}, _refs.typed_fields(cls))
-                inst = _refs.from_row(cls, typed, doc)
-            except (LookupError, RuntimeError, ValueError):
-                out[rid] = _refs.KEEP
-                continue
-            out[rid] = inst
-        return out
-
-    @classmethod
-    def from_id(cls: Type[TSafe], id_: int) -> Optional[TSafe]:  # type: ignore[override]
-        db, table = cls._require_binding()
-        doc = db.find_document_with_version(table, id_)
-        if doc is None:
-            return None
-        typed = _refs.resolve(doc, db, frozenset(), _refs.typed_fields(cls))
-        return _refs.from_row(cls, typed, doc)  # type: ignore[return-value]
-
-    @classmethod
-    def query(cls: Type[TSafe]) -> SQLerQuerySet[TSafe]:  # type: ignore[override]
-        db, table = cls._require_binding()
-        q = db.query(table).with_version()
-        promoted = getattr(cls, "__promoted__", None)
-        if promoted:
-            q = q._clone(promoted_fields=list(promoted.keys()))
-        return SQLerQuerySet[TSafe](cls, q, db)
-
-    @classmethod
-    def save_many(cls: Type[TSafe], instances: list[TSafe], *, db=None) -> list[TSafe]:  # type: ignore[override]
-        """Insert multiple new instances with ``_version=0``.
-
-        Uses multi-row INSERT for significantly better throughput. Only
-        supports new (unsaved) instances. All instances get ``_version=0``.
-
-        Args:
-            instances: List of model instances with ``_id is None``.
-            db: Optional database (overrides class-level binding).
-
-        Returns:
-            list: The same instances with ``_id`` and ``_version`` populated.
-
-        Raises:
-            ValueError: If any instance already has an ``_id``.
-        """
-        if not instances:
-            return instances
-        for inst in instances:
-            if inst._id is not None:
-                raise ValueError("save_many() only accepts new instances (_id must be None)")
-
-        db, table = cls._resolve_binding(db)
+    def _insert_rows(cls, db, table: str, instances: list) -> None:
+        """Write new instances in one batch at ``_version=0``; each takes its ``_id``,
+        ``_version`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
 
         if promoted:
             checks = getattr(cls, "__checks__", None)
-            db._ensure_promoted(table, promoted, checks)
+            db._ensure_promoted(table, promoted, checks, model=cls)
         db._ensure_versioned_table(table)
 
         payloads = [inst._dump_with_relations() for inst in instances]
@@ -145,27 +89,19 @@ class SQLerSafeModel(SQLerModel):
             inst._id = id_
             inst._version = version
             inst._snapshot = _dirty.snapshot(payload)
-        return instances
 
-    def save(self: TSafe, *, db=None) -> TSafe:  # type: ignore[override]
-        """Insert or update with optimistic locking and intent rebasing.
+    def _write(self, db, table: str, _partial: bool):
+        """Write this instance's row with optimistic locking and intent rebasing (``save()``).
 
         If the save fails due to a stale version (another process updated
         the row), and the changes qualify for rebasing (based on ``_rebase_config``),
         the library will automatically fetch the latest version and reapply
         your changes on top of it.
 
-        Args:
-            db: Optional database to write to (overrides class-level binding).
-
-        Returns:
-            Self: The saved instance with updated ``_id`` and ``_version``.
-
         Raises:
             StaleVersionError: If the version is stale and cannot be rebased.
         """
         cls = self.__class__
-        db, table = _instance_binding(self, db)
 
         # Get the rebase configuration for this model class
         rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
@@ -179,25 +115,30 @@ class SQLerSafeModel(SQLerModel):
         retry = _retry.SaveRetry(rebase_config)
 
         payload, written = held, None
+        version, base = self._version, snap  # the model keeps its own until a write succeeds
         while True:
             retry.begin_try()
             try:
-                attempt_payload = dict(payload)
-                attempt_payload["_version"] = 0 if self._id is None else self._version + 1
                 promoted = getattr(cls, "__promoted__", None)
                 if promoted:
-                    db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None))
+                    db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
+                if _partial:
+                    changed = _dirty.changed_fields(base or {}, payload)
+                    new_id, new_version = self._id, db._update_fields(
+                        table, self._id, payload, changed, promoted or (), version
+                    )
+                elif promoted:
                     new_id, new_version = db.upsert_with_version_promoted(
-                        table, self._id, attempt_payload, self._version,
+                        table, self._id, payload, version,
                         list(promoted.keys()),
                     )
                 else:
                     new_id, new_version = db.upsert_with_version(
-                        table, self._id, attempt_payload, self._version
+                        table, self._id, payload, version
                     )
                 self._id = new_id
                 self._version = new_version
-                self._snapshot = _dirty.snapshot(attempt_payload)
+                self._snapshot = _dirty.snapshot(payload)
                 if written is not None:  # rebased: the row holds the other writer's work too
                     _retry.settle(self, held, written)
                 return self
@@ -215,30 +156,17 @@ class SQLerSafeModel(SQLerModel):
                 latest_doc = retry.reread(lambda: db.find_document_with_version(table, self._id))
                 if latest_doc is None:
                     raise
-                payload = _retry.rebase(latest_doc, held, snap, delta)
-                written = retry.build(
-                    stale, lambda: cls.model_validate(_refs.resolve(payload, db, frozenset(), _refs.typed_fields(cls)))
+                payload = _retry.rebase(
+                    latest_doc, held, snap, delta, stale, getattr(cls, "_update_stamps", dict)()
                 )
-                self._version = latest_doc.get("_version", 0)
-                self._snapshot = _dirty.snapshot(latest_doc)
+                written = retry.build(
+                    stale, lambda: cls.model_validate(_refs.resolve(payload, db, frozenset(), cls))
+                )
+                version, base = latest_doc.get("_version", 0), _dirty.snapshot(latest_doc)
 
             _retry.sleep(delay)
 
-    def refresh(self: TSafe) -> TSafe:  # type: ignore[override]
-        cls = self.__class__
-        db, table = _instance_binding(self)
-        if self._id is None:
-            raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = db.find_document_with_version(table, self._id)
-        if doc is None:
-            raise LookupError(f"Row {self._id} not found for refresh")
-        row, doc = doc, _refs.resolve(doc, db, frozenset(), _refs.typed_fields(cls))
-        fresh = cls.model_validate(doc)  # type: ignore[call-arg]
-        for fname in self.__class__.model_fields:
-            if fname == "_id":
-                continue
-            setattr(self, fname, getattr(fresh, fname))
-        self._id = doc.get("_id")
+    def _refreshed(self: TSafe, doc: dict, row: dict) -> TSafe:
+        super()._refreshed(doc, row)
         self._version = doc.get("_version", 0)
-        self._snapshot = _dirty.snapshot(row)
         return self

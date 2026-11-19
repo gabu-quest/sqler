@@ -187,7 +187,7 @@ class MigrationRunner:
         );
         """
         self.db.adapter.execute(ddl)
-        self.db.adapter.commit()
+        self.db.adapter.auto_commit()  # inside the caller's transaction the table is theirs to roll back
 
     def _validate_migrations(self) -> None:
         """Validate migration versions are sequential and unique."""
@@ -694,6 +694,10 @@ class AsyncMigrationRunner:
             current_version=await self.current_version(),
             target_version=target_version,
         )
+
+    async def reset(self) -> MigrationResult:
+        """Rollback all migrations (reset to version 0), as the sync runner's ``reset()``."""
+        return await self.rollback(target_version=0)
 
     async def status(self) -> dict[str, Any]:
         """Get migration status summary (the same fields as the sync runner)."""
