@@ -47,7 +47,9 @@ jobs:
           uv run pytest --version
 
       - name: Lint (ruff)
-        run: uv run ruff check .
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
 
       - name: Type check (mypy)
         if: matrix.os == 'ubuntu-latest'
