@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from test_class_calls_name_their_database import (  # tests/ is on the import path
     ALL_ROWS,
+    NAMES_A_DATABASE,
     WAYS,
     WRONG_KIND_CALLS,
     _all_names,
@@ -77,7 +78,7 @@ async def test_each_way_works_on_an_unbound_class(base, mixin, name, own_table, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("base", "mixin", "name"),
-    [c for c in subject_cases(want_async=True) if WAYS[c.values[2]][0] in ("db=", "using(db)")],
+    [c for c in subject_cases(want_async=True) if WAYS[c.values[2]][0] in NAMES_A_DATABASE],
 )
 async def test_each_way_leaves_the_bound_database(base, mixin, name, two_dbs):
     """A class bound to one database, called with another, changes only the given one."""

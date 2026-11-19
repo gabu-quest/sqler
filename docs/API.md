@@ -145,6 +145,9 @@ user = User.from_id(1, db=db)
 # One query on another table; the class binding is not changed
 archived = User.using(db, "users_archive").all()
 
+# A query on the database (and table) a row lives in
+orders = Order.beside(user).all()        # the orders in user's database
+
 # Instance-level: target a specific DB for writes
 user = User(name="Alice", age=30)
 user.save(db=db1)       # writes to db1
@@ -253,6 +256,15 @@ read from; `row.save(db=other_db)` updates the row with the same `_id` in that t
 `other_db`. `as_ref(row)`, and the reference a model holding it stores, name that table.
 On a versioned (safe) class, `using()` reads each row's version as `query()` does, so a
 set-based update through either moves the version and a stale `save()` is refused.
+
+**`beside(row)`.** Returns the queryset `using()` returns for the database `row` was
+read from or last written to. The table is `row`'s table when `type(row) is cls` (a row
+read through `using(db, "archive")` is queried in `archive`), else the class's own table,
+so `Order.beside(user)` is the orders in that user's database. It raises `NotBoundError`
+for a row with no home (never read or saved, or unpickled; a `set_db()` binding is not
+used), `TypeError` for a row whose database is of the other kind (as `using()` does), and
+`TypeError` for an argument that is no model instance. On the async bases it is a plain
+classmethod like `using()`: the queryset's reads are awaited.
 
 **A read creates no table.** `using(db)`, `using(db, table)` and `query()` on an async
 bound class run no `CREATE TABLE`: on a table nobody created, `all()` is `[]`,

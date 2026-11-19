@@ -240,6 +240,23 @@ class SQLerModel(BaseModel):
         return cls._queryset(db, table)
 
     @classmethod
+    def beside(cls: Type[TModel], row: Any) -> SQLerQuerySet[TModel]:
+        """Return the queryset ``using()`` returns for the database ``row`` lives in.
+
+        The database is the one ``row`` was read from or last written to. The table is
+        ``row``'s table when ``type(row) is cls`` (a row read through ``using(db, "archive")``
+        is queried in ``archive``), else this class's own table.
+
+        Raises:
+            TypeError: ``row`` is no model instance, or its database is not of the kind
+                this class takes.
+            NotBoundError: ``row`` was never read or saved (or was unpickled); a
+                ``set_db()`` binding is not used.
+        """
+        db, table = _table_names._beside_place(cls, row)
+        return cls._queryset(db, table)
+
+    @classmethod
     def _queryset(cls: Type[TModel], db: SQLerDB, table: str) -> SQLerQuerySet[TModel]:
         """The queryset on ``table`` of ``db`` that ``query()`` and ``using()`` give: rows
         read with their version where the class's rows are versioned."""

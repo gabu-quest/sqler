@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`Model.beside(row)`** returns the queryset `using()` returns for the database (and, for a row of the same class, the table) `row` was read from or last written to, on all six model bases.
+
 ## [1.2026.11.1] - 2026-11-19
 
 ### Security
