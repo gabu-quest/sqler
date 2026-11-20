@@ -105,6 +105,25 @@ class Traced:
         await self.adapter.auto_commit()
 
 
+def open_files_under(folder: str) -> list[str]:
+    """The names of the files under ``folder`` this process holds open, where ``/proc`` tells
+    (Linux); elsewhere none. Windows cannot remove a file that is open, Linux can: this makes
+    a file left open fail here as well."""
+    names = []
+    try:
+        fds = os.listdir("/proc/self/fd")
+    except OSError:
+        return names
+    for fd in fds:
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:  # closed since the listing
+            continue
+        if os.path.dirname(target) == folder:
+            names.append(os.path.basename(target))
+    return sorted(names)
+
+
 @pytest_asyncio.fixture
 async def make_db():
     made: list[AsyncSQLerDB] = []
@@ -129,6 +148,11 @@ async def make_db():
         finally:
             for db in made:
                 await db.close()
+            # SQLite keeps the file of a closed connection open while a cursor with unread rows
+            # lives. A test that closes a connection under such a cursor leaves it in the
+            # traceback of the error it caught, which only the collector frees.
+            gc.collect()
+            assert open_files_under(tmpdir) == []
 
 
 def max_open_savepoints(statements: list[str]) -> int:
