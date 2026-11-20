@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Generic, Iterator, Optional, Type, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Iterator, Optional, Type, TypeVar
 
 from sqler import registry
 from sqler.models import _refs, _write_rules
 from sqler.models._table_names import _Home
 from sqler.query import SQLerExpression, SQLerQuery
+
+if TYPE_CHECKING:
+    from sqler.db.sqler_db import SQLerDB
 
 T = TypeVar("T")
 
@@ -61,6 +64,15 @@ class SQLerQuerySet(Generic[T]):
         if checked is None:
             checked = self._ready[use] = self._query._clone(db=self._db, use=use)
         return checked
+
+    def db(self) -> SQLerDB:
+        """Return the database this queryset's next read or write uses: the one
+        ``using()`` or ``beside()`` gave it, else the one its query holds.
+
+        Raises:
+            NoAdapterError: neither the queryset nor its query has a database.
+        """
+        return self._query.db() if self._db is None else self._db
 
     def resolve(self, flag: bool) -> "SQLerQuerySet[T]":
         """Toggle relation hydration on result materialization (default True)."""

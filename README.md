@@ -45,6 +45,24 @@ db.close()
 
 `save(db=db)` writes one object. `User.using(db)` starts a query. Nothing is bound to the class.
 
+With more than one database, `User.beside(row)` queries the database `row` was read from:
+
+```python
+from sqler import SQLerDB, SQLerModel
+
+class User(SQLerModel):
+    name: str
+
+kyoto, osaka = SQLerDB.in_memory(), SQLerDB.in_memory()
+User(name="Aiko").save(db=kyoto)
+User(name="Ren").save(db=osaka)
+
+ren = User.using(osaka).first()
+assert [u.name for u in User.beside(ren).all()] == ["Ren"]
+```
+
+A query names its database: `User.beside(ren).db() is osaka`, as `User.db()` names the one a class is bound to.
+
 ## What is in the file
 
 The quick start leaves this in `app.db`, readable with any SQLite tool:

@@ -6,9 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [Unreleased]
+## [1.2026.11.2] - 2026-11-20
 
-## [1.2026.11.1] - 2026-11-19
+### Added
+
+- **`Model.beside(row)`** returns the queryset `using()` returns for the database (and, for a row of the same class, the table) `row` was read from or last written to, on all six model bases.
+- **`db()` on a query and on a queryset** returns the database its next read or write uses (`Model.using(db).db() is db`, `db.query("users").db() is db`), on the sync and the async query and queryset (an async database's `query()` is awaited first). A query built by hand from an adapter alone has no database and raises `NoAdapterError`.
+
+## [1.2026.11.1] - 2026-11-20
 
 ### Security
 

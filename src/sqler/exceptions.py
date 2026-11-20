@@ -64,7 +64,8 @@ class QueryError(SQLerError):
 
 
 class NoAdapterError(QueryError, builtins.ConnectionError):
-    """Raised when attempting to execute a query without an adapter.
+    """Raised when attempting to execute a query without an adapter, or when a query built
+    from an adapter alone is asked for its database (``db()``).
 
     The one error for a sync and an async query. It is a ``SQLerError`` and also
     Python's built-in ``ConnectionError``, which the sync query's own class used to

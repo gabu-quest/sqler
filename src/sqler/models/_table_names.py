@@ -187,6 +187,34 @@ def _resolve_binding(cls, db=None) -> tuple[Any, str]:
     return _require_binding(cls)
 
 
+def _beside_place(cls, row) -> tuple[Any, str]:
+    """The database and table ``cls.beside(row)`` queries: ``row``'s home database, with
+    ``row``'s table when ``type(row) is cls`` and ``cls``'s own table otherwise.
+
+    Raises:
+        TypeError: ``row`` is no model instance, or its database is not of ``cls``'s kind
+            (:func:`_check_database`).
+        NotBoundError: ``row`` has no home (never read or saved, or unpickled). A class
+            binding made with ``set_db()`` is not used.
+    """
+    if getattr(type(row), "_takes_db", None) is None:
+        raise TypeError(
+            f"{cls.__name__}.beside() takes a model instance, not an object of type "
+            f"{type(row).__name__}."
+        )
+    home = _home_of(row)
+    if home is None:
+        name = type(row).__name__
+        raise NotBoundError(
+            f"{name} instance has no database: it was never read or saved, or it was unpickled. "
+            "Use .using(db) for a query on a database.",
+            details={"model": name},
+        )
+    _check_database(cls, home.db)
+    table = home.table if type(row) is cls else _model_table_name(cls)
+    return home.db, table
+
+
 class _Home:
     """The database and table of the row an instance stands for: where it was read from or
     last written to.

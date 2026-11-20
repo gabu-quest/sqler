@@ -13,6 +13,7 @@ from sqler.utils import validate_field_name, validate_table_name
 
 if TYPE_CHECKING:
     from sqler.adapter.synchronous import SQLiteAdapter
+    from sqler.db.sqler_db import SQLerDB
 
 
 def _rewrite_promoted_refs(sql: str, promoted_fields: Any) -> str:
@@ -199,6 +200,17 @@ class _Statements:
     )
     # the related tables a statement built from this query reads, with the names each was laid out from
     _others: tuple[tuple[str, Optional[tuple[str, ...]]], ...] = ()
+
+    def db(self) -> Any:
+        """Return the database this query reads and writes through.
+
+        Raises:
+            NoAdapterError: the query has no database behind it (it was built from an
+                adapter alone, not by ``db.query(table)`` or a model).
+        """
+        if self._db is None:
+            raise NoAdapterError("No database set for query")
+        return self._db
 
     def _filter_sql(self) -> str:
         """The ``WHERE`` of a statement on the query's rows: its filter, and the guard of a
@@ -598,6 +610,10 @@ class SQLerQuery(_Statements):
     default, ``all()`` and ``first()`` return raw JSON strings from SQLite. Use
     ``all_dicts()`` and ``first_dict()`` to get parsed dicts with ``_id``.
     """
+
+    if TYPE_CHECKING:  # the body is the shared one; only the type differs from the async twin
+
+        def db(self) -> SQLerDB: ...
 
     _adapter: Optional["SQLiteAdapter"]
 

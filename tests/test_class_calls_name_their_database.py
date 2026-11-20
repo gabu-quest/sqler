@@ -3,7 +3,8 @@
 
 ``WAYS`` is the one table: for each public class-level callable (found by introspection of
 every base and mixin) how it is called on an unbound class, ``db=`` (a call that is not a
-query), ``using(db)`` (a query) or ``none`` (it needs no database), with the binding calls
+query), ``using(db)`` (a query), ``beside(row)`` (a query on the database a row lives in)
+or ``none`` (it needs no database), with the binding calls
 themselves (``set_db``, ``bind``, ``db``) as ``binding``. A callable missing from the table
 fails ``test_every_class_callable_has_a_way``. Each row is exercised on an unbound class with
 rows in a database (``test_each_way_works_on_an_unbound_class``), and on a class bound to
@@ -248,6 +249,11 @@ async def r_filter(cls, db, table):
     return _names(await _v(cls.using(db).filter(F("name") == "banana").all()))
 
 
+async def r_beside(cls, db, table):
+    row = await _v(cls.using(db).order_by("_id").first())
+    return _names(await _v(cls.beside(row).order_by("_id").all()))
+
+
 async def r_ref(cls, db, table):
     built = cls.ref("home").field("city") == "Kyoto"
     return (re.search(r"SELECT _id AS rid FROM (\w+) rt ", built.sql).group(1), built.params)
@@ -325,6 +331,7 @@ WAYS = {
     "first": ("using(db)", r_first, "apple"),
     "count": ("using(db)", r_count, 3),
     "filter": ("using(db)", r_filter, ["banana"]),
+    "beside": ("beside(row)", r_beside, NAMES),
     "ref": ("none", r_ref, ("homes", ["Kyoto"])),
     "model_validate": ("none", r_model_validate, "kiwi"),
     "get_field_names": ("none", r_get_field_names, ["name"]),
@@ -335,6 +342,10 @@ WAYS = {
     "bind": ("binding", r_bind, NAMES),
     "db": ("binding", r_db, "NotBoundError"),
 }
+
+
+# the ways that name a database, which a class bound to another one must leave as it was
+NAMES_A_DATABASE = ("db=", "using(db)", "beside(row)")
 
 
 def expected_of(name: str, table: str):
@@ -473,8 +484,14 @@ def test_the_subjects_are_every_base_and_mixin():
     )
 
 
-def test_every_way_is_one_of_four():
-    assert sorted({way for way, _, _ in WAYS.values()}) == ["binding", "db=", "none", "using(db)"]
+def test_every_way_is_one_of_five():
+    assert sorted({way for way, _, _ in WAYS.values()}) == [
+        "beside(row)",
+        "binding",
+        "db=",
+        "none",
+        "using(db)",
+    ]
 
 
 # ``create_search_index(db=None)`` takes its database positionally as well: it did before
@@ -531,7 +548,7 @@ def test_each_way_works_on_an_unbound_class(base, mixin, name, own_table, two_db
 
 @pytest.mark.parametrize(
     ("base", "mixin", "name"),
-    [c for c in subject_cases(want_async=False) if WAYS[c.values[2]][0] in ("db=", "using(db)")],
+    [c for c in subject_cases(want_async=False) if WAYS[c.values[2]][0] in NAMES_A_DATABASE],
 )
 def test_each_way_leaves_the_bound_database(base, mixin, name, two_dbs):
     """A class bound to one database, called with another, changes only the given one."""

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import Any, AsyncIterator, Generic, Optional, Type, TypeVar
+from typing import TYPE_CHECKING, Any, AsyncIterator, Generic, Optional, Type, TypeVar
 
 from sqler import registry
 from sqler.models import _refs, _write_rules
 from sqler.models._table_names import _Home
 from sqler.query import SQLerExpression
 from sqler.query.async_query import AsyncSQLerQuery
+
+if TYPE_CHECKING:
+    from sqler.db.async_db import AsyncSQLerDB
 
 T = TypeVar("T")
 
@@ -51,6 +54,15 @@ class AsyncSQLerQuerySet(Generic[T]):
         if checked is None:
             checked = self._ready[use] = self._query._clone(db=self._db, use=use)
         return checked
+
+    def db(self) -> AsyncSQLerDB:
+        """Return the database this queryset's next read or write uses: the one
+        ``using()`` or ``beside()`` gave it, else the one its query holds.
+
+        Raises:
+            NoAdapterError: neither the queryset nor its query has a database.
+        """
+        return self._query.db() if self._db is None else self._db
 
     def resolve(self, flag: bool) -> "AsyncSQLerQuerySet[T]":
         """Toggle relation hydration on result materialization (default True)."""
