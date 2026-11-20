@@ -61,6 +61,8 @@ ren = User.using(osaka).first()
 assert [u.name for u in User.beside(ren).all()] == ["Ren"]
 ```
 
+A query names its database: `User.beside(ren).db() is osaka`, as `User.db()` names the one a class is bound to.
+
 ## What is in the file
 
 The quick start leaves this in `app.db`, readable with any SQLite tool:

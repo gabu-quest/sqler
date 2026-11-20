@@ -1,7 +1,7 @@
 import contextlib
 import json
 import sqlite3
-from typing import Any, AsyncGenerator, AsyncIterator, Optional, Self
+from typing import TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Optional, Self
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
@@ -19,11 +19,18 @@ from sqler.query.query import (
 )
 from sqler.utils import validate_field_name
 
+if TYPE_CHECKING:
+    from sqler.db.async_db import AsyncSQLerDB
+
 
 class AsyncSQLerQuery(_Statements):
     """Async query builder/executor mirroring SQLerQuery semantics."""
 
     _adapter: Optional[AsyncSQLiteAdapter]
+
+    if TYPE_CHECKING:  # the body is the shared one; only the type differs from the sync twin
+
+        def db(self) -> AsyncSQLerDB: ...
 
     def __init__(
         self,
