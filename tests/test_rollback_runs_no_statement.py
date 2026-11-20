@@ -9,6 +9,7 @@ import os
 import tempfile
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 
 

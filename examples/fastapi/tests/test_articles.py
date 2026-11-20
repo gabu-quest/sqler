@@ -68,7 +68,9 @@ class TestArticlesCRUD:
         titles = [a["title"] for a in articles]
         assert "The Art of Silence" in titles
 
-    def test_list_articles_filter_by_writer(self, client: TestClient, writer_haruki: dict, article_silence: dict):
+    def test_list_articles_filter_by_writer(
+        self, client: TestClient, writer_haruki: dict, article_silence: dict
+    ):
         """List articles filtered by writer."""
         resp = client.get(f"/api/articles?writer_id={writer_haruki['_id']}")
         assert resp.status_code == 200
@@ -103,7 +105,9 @@ class TestArticlesCRUD:
         assert "negative space" in data["content"]
         assert data["writer"]["name"] == "Haruki Tanaka"
 
-    def test_patch_article_writer(self, client: TestClient, article_silence: dict, city_tokyo: dict):
+    def test_patch_article_writer(
+        self, client: TestClient, article_silence: dict, city_tokyo: dict
+    ):
         """Update article's writer."""
         # Create another writer
         new_writer_resp = client.post(

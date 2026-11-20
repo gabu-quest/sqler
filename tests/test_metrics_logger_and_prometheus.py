@@ -1,13 +1,17 @@
 """metrics.disable() restores the query logger; capture() gives the statements of its block;
 the Prometheus output parses."""
 
+import math
 import re
 from contextlib import ExitStack
 
 import pytest
+
+from sqler import metrics
 from sqler.db.sqler_db import SQLerDB
 from sqler.logging import QueryLogger, query_logger
 from sqler.metrics import MetricsCollector
+from sqler.models.model import SQLerModel
 
 
 @pytest.fixture(autouse=True)
@@ -221,7 +225,7 @@ def _parse_sample(line):
                 assert line[i] == "}", f"expected , or }} at {i}: {line!r}"
     assert line[i] == " ", f"space before value: {line!r}"
     value = line[i + 1 :]
-    assert value in ("+Inf", "-Inf", "NaN") or float(value) is not None
+    assert math.isfinite(float(value)), f"sample value is not a finite number: {line!r}"
     return name, labels, float(value)
 
 
@@ -329,3 +333,135 @@ def test_a_valid_custom_label_still_parses_beside_the_fixed_ones():
         _parse_exposition(collector.prometheus_export())
     finally:
         collector.disable()
+
+
+class TestMetrics:
+    """Tests for the metrics collection system."""
+
+    def test_metrics_disabled_by_default(self):
+        """Metrics are disabled by default."""
+        # Ensure clean state (another test may have enabled metrics)
+        metrics.disable()
+        metrics.reset()
+        assert metrics._enabled is False
+
+    def test_metrics_enable_disable(self):
+        """Can enable and disable metrics."""
+        metrics.enable()
+        assert metrics._enabled is True
+
+        metrics.disable()
+        assert metrics._enabled is False
+
+    def test_metrics_record_queries(self):
+        """Metrics are recorded when enabled."""
+        metrics.reset()
+        metrics.enable()
+
+        db = SQLerDB.in_memory(shared=False)
+
+        class User(SQLerModel):
+            name: str
+
+        User.set_db(db)
+        User(name="Alice").save()
+        User(name="Bob").save()
+
+        data = metrics.get_metrics()
+        assert data["queries"]["total_queries"] == 5
+
+        metrics.disable()
+
+    def test_prometheus_export(self):
+        """Prometheus format export works."""
+        metrics.reset()
+        metrics.enable()
+
+        db = SQLerDB.in_memory(shared=False)
+        db.adapter.execute("SELECT 1;")
+
+        output = metrics.prometheus_export()
+        assert "sqler_queries_total" in output
+        assert "sqler_query_duration_ms_bucket" in output
+
+        metrics.disable()
+
+    def test_metrics_histogram_buckets(self):
+        """Duration histogram has correct buckets."""
+        metrics.reset()
+        metrics.enable()
+
+        db = SQLerDB.in_memory(shared=False)
+        db.adapter.execute("SELECT 1;")
+
+        data = metrics.get_metrics()
+        histogram = data["queries"]["histogram"]
+        assert "le_1" in histogram
+        assert "le_100" in histogram
+        assert "le_inf" in histogram
+
+        metrics.disable()
+
+    def test_no_timing_overhead_when_disabled(self):
+        """No query logging or timing occurs when metrics are disabled."""
+        from sqler.logging import query_logger
+
+        metrics.reset()
+        metrics.disable()
+        query_logger.disable()
+        query_logger.clear()
+        assert metrics._enabled is False
+        assert query_logger.enabled is False
+
+        db = SQLerDB.in_memory(shared=False)
+
+        class Item(SQLerModel):
+            name: str
+
+        Item.set_db(db)
+        Item(name="test").save()
+        Item.query().all()
+
+        # Logger should have captured nothing — timing was skipped entirely
+        assert len(query_logger.logs) == 0
+
+    def test_timing_active_when_enabled(self):
+        """Queries are timed and logged when metrics are enabled."""
+        from sqler.logging import query_logger
+
+        metrics.reset()
+        metrics.enable()
+
+        db = SQLerDB.in_memory(shared=False)
+
+        class Item(SQLerModel):
+            name: str
+
+        Item.set_db(db)
+        Item(name="test").save()
+
+        # The save() must produce at least one INSERT log; counting only INSERTs
+        # makes this resilient to changes in surrounding bookkeeping SQL while
+        # still failing loudly if the logger silently stopped collecting.
+        insert_logs = [log for log in query_logger.logs if "INSERT" in log.sql.upper()]
+        assert len(insert_logs) == 1
+        assert "items" in insert_logs[0].sql.lower()
+        assert all(log.duration_ms >= 0 for log in query_logger.logs)
+
+        metrics.disable()
+
+    def test_metrics_callback(self):
+        """Custom callbacks receive query logs."""
+        metrics.reset()
+        metrics.enable()
+
+        captured = []
+        metrics.add_callback(lambda log: captured.append(log))
+
+        db = SQLerDB.in_memory(shared=False)
+        db.adapter.execute("SELECT 42;")
+
+        assert len(captured) == 1
+        assert "SELECT 42" in captured[-1].sql
+
+        metrics.disable()

@@ -15,6 +15,7 @@ import time
 import warnings
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.exceptions import NoAdapterError
 from sqler.logging import query_logger
@@ -277,7 +278,12 @@ def _answers(d, path, route, call):
 @pytest.mark.parametrize("name", list(QUERY_CALLS))
 def test_the_query_of_a_missing_table_answers_as_an_empty_one(db, path, route, name):
     call, empty = QUERY_CALLS[name]
-    assert _answers(db, path, QUERY_ROUTES[route], call) == (empty, empty, _sent(route, name), False)
+    assert _answers(db, path, QUERY_ROUTES[route], call) == (
+        empty,
+        empty,
+        _sent(route, name),
+        False,
+    )
 
 
 @pytest.mark.parametrize("route", list(QS_ROUTES))

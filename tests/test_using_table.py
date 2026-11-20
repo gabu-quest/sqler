@@ -12,10 +12,12 @@ from dataclasses import dataclass
 import msgspec
 import pytest
 import pytest_asyncio
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     SQLerDB,
     SQLerLiteModel,
     SQLerModel,
@@ -59,10 +61,16 @@ class UtALiteJob(AsyncSQLerLiteModel):
     status: str = "new"
 
 
+class UtAMsJob(AsyncSQLerMsgspecModel):
+    __tablename__ = "ut_ams_jobs"
+    name: str = ""
+    status: str = "new"
+
+
 SYNC = [UtPyJob, UtLiteJob, UtMsJob]
 SYNC_IDS = ["pydantic", "lite", "msgspec"]
-ASYNC = [UtAsJob, UtALiteJob]
-ASYNC_IDS = ["async-pydantic", "async-lite"]
+ASYNC = [UtAsJob, UtALiteJob, UtAMsJob]
+ASYNC_IDS = ["async-pydantic", "async-lite", "async-msgspec"]
 
 
 def _binding(cls):
@@ -328,7 +336,9 @@ def test_queryset_run_again_after_the_class_was_rebound_still_writes_to_its_own_
 
 
 @pytest.mark.asyncio
-async def test_async_queryset_run_again_after_the_class_was_rebound_still_writes_to_its_own_table(adb):
+async def test_async_queryset_run_again_after_the_class_was_rebound_still_writes_to_its_own_table(
+    adb,
+):
     class UtAsRebound(AsyncSQLerModel):
         __tablename__ = "ut_as_rebound"
         name: str = ""
@@ -345,7 +355,9 @@ async def test_async_queryset_run_again_after_the_class_was_rebound_still_writes
     row.name = "changed"
     await row.save()
 
-    cur = await adb.adapter.execute("SELECT json_extract(data, '$.name') FROM ut_as_rebound ORDER BY _id")
+    cur = await adb.adapter.execute(
+        "SELECT json_extract(data, '$.name') FROM ut_as_rebound ORDER BY _id"
+    )
     own = [r[0] for r in await cur.fetchall()]
     cur = await adb.adapter.execute("SELECT count(*) FROM ut_as_rebound_other")
     other = (await cur.fetchone())[0]

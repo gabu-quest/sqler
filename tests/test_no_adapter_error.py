@@ -5,6 +5,7 @@ import builtins
 import pickle
 
 import pytest
+
 import sqler
 from sqler import SQLerError
 from sqler.query import SQLerQuery

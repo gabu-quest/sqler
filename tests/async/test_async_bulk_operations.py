@@ -1,6 +1,7 @@
 """Tests for async bulk operations: find_documents, from_ids, count."""
 
 import pytest
+
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models import AsyncSQLerModel
 

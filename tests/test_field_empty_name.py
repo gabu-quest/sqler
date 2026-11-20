@@ -1,6 +1,7 @@
 """F() refuses an empty field name or an empty path segment when it is built."""
 
 import pytest
+
 from sqler.exceptions import InvalidFieldNameError
 from sqler.query import F
 

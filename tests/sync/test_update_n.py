@@ -1,6 +1,7 @@
 """Sync tests for update_n (batch update with RETURNING)."""
 
 import pytest
+
 from sqler import F, SQLerDB, SQLerModel, SQLerSafeModel
 
 
@@ -91,18 +92,12 @@ class TestSyncUpdateNBasic:
 
     def test_empty_match_returns_empty_list(self, db_with_items):
         results = (
-            SyncItem.query()
-            .filter(F("status") == "nonexistent")
-            .update_n(5, status="running")
+            SyncItem.query().filter(F("status") == "nonexistent").update_n(5, status="running")
         )
         assert results == []
 
     def test_n_exceeds_available(self, db_with_items):
-        results = (
-            SyncItem.query()
-            .filter(F("status") == "pending")
-            .update_n(100, status="running")
-        )
+        results = SyncItem.query().filter(F("status") == "pending").update_n(100, status="running")
         assert len(results) == 4
 
     def test_f_expression_in_update(self, db_with_items):
@@ -164,8 +159,7 @@ class TestSyncUpdateNPromoted:
             .update_n(2, priority=F("priority") + 100)
         )
         assert len(results) == 2
-        for r in results:
-            assert r.priority >= 105
+        assert sorted(r.priority for r in results) == [105, 110]
 
 
 class TestSyncUpdateNVersioned:

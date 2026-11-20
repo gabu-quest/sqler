@@ -159,7 +159,8 @@ class AsyncSQLerQuerySet(Generic[T]):
         return await self._checked().distinct_values(field)
 
     async def update(self, **fields) -> int:
-        """Update matching rows with the given field values; the class's rules apply as in
+        """Update the rows :meth:`all` would return, as :meth:`SQLerQuerySet.update` takes
+        them, with the given field values; the class's rules apply as in
         :meth:`SQLerQuerySet.update` (version, stamps, audit rows; no hook is called).
 
         Args:
@@ -203,7 +204,8 @@ class AsyncSQLerQuerySet(Generic[T]):
         return self._models(docs)
 
     async def delete_all(self, on_delete: str = "restrict") -> int:
-        """Delete all matching rows (bulk delete).
+        """Delete the rows :meth:`all` would return (bulk delete), as
+        :meth:`SQLerQuerySet.delete_all` takes them.
 
         Note: This is named delete_all to avoid confusion with model.delete().
         ``on_delete`` and the unit are as :meth:`SQLerQuerySet.delete_all` has them. A
@@ -217,6 +219,30 @@ class AsyncSQLerQuerySet(Generic[T]):
             return self._told(await self._checked().delete())
         return len(await self._written("rows", self._deleted_rows, on_delete))
 
+    async def delete(self, on_delete: str = "restrict") -> int:
+        """Async twin of :meth:`SQLerQuerySet.delete`: :meth:`delete_all` under the name a
+        query's ``delete()`` has."""
+        return await self.delete_all(on_delete)
+
+    async def copy_to(self, table: str) -> int:
+        """Async twin of :meth:`SQLerQuerySet.copy_to`: the same rows, target rules, refusals
+        and unit."""
+        target = self._query._copy_target(table)
+        _write_rules.refuse_self_copy(self._model_cls, self._query._table)
+        db = self._db
+        if db is None:
+            raise RuntimeError(
+                f"{self._model_cls.__name__}: copy_to() needs the queryset's database"
+            )
+        source = self._query._table
+        async with db.transaction():
+            if not await db._copy_target(
+                source, target, getattr(self._model_cls, "__checks__", None)
+            ):
+                return 0
+            count = await self._checked("rows")._copied(target)
+            return _write_rules.copied(self._model_cls, db, target, count)
+
     @staticmethod
     async def _deleted_rows(query: AsyncSQLerQuery) -> list:
         return [(doc, None) for doc in await query._deleted()]
@@ -227,7 +253,9 @@ class AsyncSQLerQuerySet(Generic[T]):
         fields = _write_rules.stamped(self._model_cls, fields)
         if not _write_rules.row_rules(self._model_cls):
             return self._told(await self._checked("update")._update_picked(fields, n, op))
-        return [after for _, after in await self._written("update", lambda q: q._changed(fields, n))]
+        return [
+            after for _, after in await self._written("update", lambda q: q._changed(fields, n))
+        ]
 
     def _told(self, result):
         """``result`` of a write that went past the row rules; the class is told of it."""

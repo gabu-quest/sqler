@@ -10,14 +10,13 @@ class User(SQLerModel):
 
 def main():
     db = SQLerDB.in_memory()
-    User.set_db(db)
     for i in range(100):
-        User(name=f"U{i}", age=i, address={"city": "X" if i % 2 else "Y"}).save()
+        User(name=f"U{i}", age=i, address={"city": "X" if i % 2 else "Y"}).save(db=db)
 
     # ensure index on a ref-like path
-    User.ensure_index("address.city")
+    User.ensure_index("address.city", db=db)
 
-    qs = User.query().filter(F("address.city") == "X")
+    qs = User.using(db).filter(F("address.city") == "X")
     print("SQL:", qs.debug())
     plan = qs.explain_query_plan(db.adapter)
     print("PLAN:", plan)

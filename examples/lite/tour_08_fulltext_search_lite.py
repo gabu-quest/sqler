@@ -103,8 +103,8 @@ def _(mo):
     >     class FTS:
     >         fields = ["title", "body"]
     >
-    > BlogPost.create_search_index()
-    > results = BlogPost.search("python")  # search directly on model
+    > BlogPost.create_search_index(db=db)
+    > results = BlogPost.search("python", db=db)  # search directly on model
     > ```
     >
     > Run locally: `uv run marimo edit examples/tour_08_fulltext_search.py`
@@ -126,13 +126,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import importlib
     from dataclasses import dataclass
@@ -173,12 +169,13 @@ def _(SQLerLiteModel, dataclass, db):
         content: str
         author: str
 
-    # Register the model with the database
-    Article.set_db(db)
-
     # Create sample articles
     _articles = [
-        ("Python Basics", "Learn Python programming fundamentals. Variables, loops, and functions.", "Alice"),
+        (
+            "Python Basics",
+            "Learn Python programming fundamentals. Variables, loops, and functions.",
+            "Alice",
+        ),
         ("Advanced Python", "Decorators, generators, and metaclasses in Python.", "Alice"),
         ("Web Development", "Build web applications with Flask and Django frameworks.", "Bob"),
         ("Data Science", "Pandas, NumPy, and machine learning with Python.", "Carol"),
@@ -188,9 +185,9 @@ def _(SQLerLiteModel, dataclass, db):
         ("SQLite Guide", "Using SQLite for embedded database applications.", "Eve"),
     ]
     for _title, _content, _author in _articles:
-        Article(title=_title, content=_content, author=_author).save()
+        Article(title=_title, content=_content, author=_author).save(db=db)
 
-    print(f"Created {Article.count()} articles")
+    print(f"Created {Article.using(db).count()} articles")
     return (Article,)
 
 
@@ -206,9 +203,9 @@ def _(mo):
 
 
 @app.cell
-def _(Article, FTSIndex):
+def _(Article, FTSIndex, db):
     # Create FTS index on title and content fields
-    fts = FTSIndex(Article, fields=["title", "content"])
+    fts = FTSIndex(Article, fields=["title", "content"], db=db)
 
     # Create the FTS5 virtual table
     fts.create()
@@ -369,9 +366,7 @@ def _(mo):
 @app.cell
 def _(fts):
     # Search with highlights - returns SearchResult with highlights dict
-    _highlighted = fts.search_with_highlights(
-        "python", highlight_start="**", highlight_end="**"
-    )
+    _highlighted = fts.search_with_highlights("python", highlight_start="**", highlight_end="**")
 
     print("Results with highlights:")
     for _r in _highlighted:

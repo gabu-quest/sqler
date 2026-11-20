@@ -7,7 +7,6 @@ compatibility with SQLerSafeModel while being Pydantic-free.
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import fields
 from typing import (
     TYPE_CHECKING,
@@ -17,21 +16,23 @@ from typing import (
     TypeVar,
 )
 
-from sqler.exceptions import StaleVersionError
-from sqler.models import _dirty
+from sqler.models import _dirty, _write_rules
 from sqler.models import save_retry as _retry
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.utils import (
     DEFAULT_REBASE_CONFIG,
     RebaseConfig,
-    can_rebase_deltas,
-    compute_numeric_scalar_deltas,
 )
 
 if TYPE_CHECKING:
     from sqler.db.sqler_db import SQLerDB
 
 TSafe = TypeVar("TSafe", bound="SQLerLiteSafeModel")
+
+
+def _resolve(payload: dict, db, cls) -> dict:
+    """``payload`` with the model of each typed reference in place, read from ``db``."""
+    return cls._resolve_relations(payload, db=db)
 
 
 class SQLerLiteSafeModel(SQLerLiteModel):
@@ -66,8 +67,8 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         c2.save(db=db)  # _version = 1
 
     .. note::
-        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
-        ``.save(db=db)`` / ``.delete(db=db)`` for writes.
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and ``db=`` for
+        every other call (``.save(db=db)``, ``Model.from_id(id, db=db)``).
 
     Attributes:
         _version: The current version number for optimistic locking.
@@ -102,19 +103,12 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         """Write new instances in one batch at ``_version=0``; each takes its ``_id``,
         ``_version`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
-
         if promoted:
-            checks = getattr(cls, "__checks__", None)
-            db._ensure_promoted(table, promoted, checks, model=cls)
+            _write_rules.ensure_columns(cls, db, table, promoted)
         db._ensure_versioned_table(table)
-
         payloads = [inst._dump_with_relations() for inst in instances]
-
-        if promoted:
-            promoted_fields = list(promoted.keys())
-            id_version_pairs = db.insert_many_with_version_promoted(table, payloads, promoted_fields)
-        else:
-            id_version_pairs = db.insert_many_with_version(table, payloads)
+        insert, args = _write_rules.rows_insert(db, table, payloads, promoted, versioned=True)
+        id_version_pairs = insert(*args)
 
         for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             object.__setattr__(inst, "_id", id_)
@@ -127,73 +121,15 @@ class SQLerLiteSafeModel(SQLerLiteModel):
         If the save fails due to a stale version (another process updated
         the row), and the changes qualify for rebasing (based on ``_rebase_config``),
         the library will automatically fetch the latest version and reapply
-        your changes on top of it.
+        your changes on top of it. The steps and their order are
+        :func:`sqler.models.save_retry.run`.
 
         Raises:
             StaleVersionError: If the version is stale and cannot be rebased.
         """
-        cls = self.__class__
-
-        # Get the rebase configuration for this model class
-        rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
-
-        # The caller's intent: the counter deltas from its snapshot to its payload
-        snap = self._snapshot
-        held = self._dump_with_relations()
-        delta = compute_numeric_scalar_deltas(snap, held) if snap else None
-        can_rebase = bool(delta) and can_rebase_deltas(delta, rebase_config)
-
-        retry = _retry.SaveRetry(rebase_config)
-
-        payload, written = held, None
-        version, base = self._version, snap  # the model keeps its own until a write succeeds
-        while True:
-            retry.begin_try()
-            try:
-                promoted = getattr(cls, "__promoted__", None)
-                if promoted:
-                    db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
-                if _partial:
-                    changed = _dirty.changed_fields(base or {}, payload)
-                    new_id, new_version = self._id, db._update_fields(
-                        table, self._id, payload, changed, promoted or (), version
-                    )
-                elif promoted:
-                    new_id, new_version = db.upsert_with_version_promoted(
-                        table, self._id, payload, version,
-                        list(promoted.keys()),
-                    )
-                else:
-                    new_id, new_version = db.upsert_with_version(
-                        table, self._id, payload, version
-                    )
-                object.__setattr__(self, "_id", new_id)
-                object.__setattr__(self, "_version", new_version)
-                object.__setattr__(self, "_snapshot", _dirty.snapshot(payload))
-                if written is not None:  # rebased: the row holds the other writer's work too
-                    _retry.settle(self, held, written)
-                return self
-            except sqlite3.OperationalError as e:
-                if not _retry.is_lock_error(e):
-                    raise
-                delay = retry.after_lock(e)
-            except StaleVersionError as stale:
-                # Stale version: only rebase intent for simple counter deltas
-                if not can_rebase:
-                    raise
-                if self._id is None:
-                    raise
-                delay = retry.after_conflict()
-                latest_doc = retry.reread(lambda: db.find_document_with_version(table, self._id))
-                if latest_doc is None:
-                    raise
-                payload = _retry.rebase(
-                    latest_doc, held, snap, delta, stale, getattr(cls, "_update_stamps", dict)()
-                )
-                written = retry.build(stale, lambda: cls.model_validate(cls._resolve_relations(payload, db=db)))
-                version, base = latest_doc.get("_version", 0), _dirty.snapshot(latest_doc)
-
-            _retry.sleep(delay)
+        return _retry.run(
+            self, db, table, _partial, self._dump_with_relations(), _resolve, object.__setattr__
+        )
 
     def _refreshed(self: TSafe, doc: dict, row: dict) -> TSafe:
         super()._refreshed(doc, row)

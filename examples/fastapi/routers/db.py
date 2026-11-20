@@ -6,10 +6,9 @@ Demonstrates: health_check, get_stats, vacuum, checkpoint, schema
 
 from typing import Any
 
+from fastapi import APIRouter
 from sqler.ops import checkpoint, get_stats, health_check, vacuum
 from sqler.utils import SQLER_TABLES
-
-from fastapi import APIRouter
 
 from ..db import get_db, seed_db
 from ..utils import db_call
@@ -104,12 +103,14 @@ def _get_schema() -> dict[str, Any]:
         # Column info from PRAGMA (a read, so execute_sql takes it)
         columns = []
         for col in db.execute_sql(f"PRAGMA table_info({table_name})"):
-            columns.append({
-                "name": col["name"],
-                "type": col["type"] or "BLOB",
-                "pk": bool(col["pk"]),
-                "nullable": not bool(col["notnull"]),
-            })
+            columns.append(
+                {
+                    "name": col["name"],
+                    "type": col["type"] or "BLOB",
+                    "pk": bool(col["pk"]),
+                    "nullable": not bool(col["notnull"]),
+                }
+            )
 
         # Get row count (skip for FTS internal tables)
         row_count = 0
@@ -120,12 +121,14 @@ def _get_schema() -> dict[str, Any]:
             except Exception:
                 row_count = 0
 
-        tables.append({
-            "name": table_name,
-            "category": category,
-            "columns": columns,
-            "row_count": row_count,
-        })
+        tables.append(
+            {
+                "name": table_name,
+                "category": category,
+                "columns": columns,
+                "row_count": row_count,
+            }
+        )
 
     # Get indices - include expression-based indices
     indices_result = db.list_indexes()
@@ -138,6 +141,7 @@ def _get_schema() -> dict[str, Any]:
         # Extract column info from SQL for expression-based indices
         # Pattern: json_extract(data, '$.field') or json_extract(data, '$.ref._id')
         import re
+
         json_pattern = r"json_extract\s*\(\s*data\s*,\s*'\$\.([^']+)'\s*\)"
         matches = re.findall(json_pattern, sql)
         columns = matches if matches else []
@@ -148,22 +152,26 @@ def _get_schema() -> dict[str, Any]:
             columns = [col["name"] for col in index_info if col["name"]]
 
         if columns:
-            indices.append({
-                "name": index_name,
-                "table": table_name,
-                "columns": columns,
-            })
+            indices.append(
+                {
+                    "name": index_name,
+                    "table": table_name,
+                    "columns": columns,
+                }
+            )
 
     # Build relationships from foreign keys
     relationships = []
     for table_name in table_names:
         for fk in db.execute_sql(f"PRAGMA foreign_key_list({table_name})"):
-            relationships.append({
-                "from_table": table_name,
-                "from_column": fk["from"],
-                "to_table": fk["table"],
-                "to_column": fk["to"],
-            })
+            relationships.append(
+                {
+                    "from_table": table_name,
+                    "from_column": fk["from"],
+                    "to_table": fk["table"],
+                    "to_column": fk["to"],
+                }
+            )
 
     # If no explicit foreign keys, infer from SQLer RefField patterns
     # SQLer stores references as nested objects with _id, so look at index columns
@@ -186,12 +194,14 @@ def _get_schema() -> dict[str, Any]:
                             ref_table = dt
                             break
                     if ref_table and table_name != ref_table:
-                        relationships.append({
-                            "from_table": table_name,
-                            "from_column": col,
-                            "to_table": ref_table,
-                            "to_column": "_id",
-                        })
+                        relationships.append(
+                            {
+                                "from_table": table_name,
+                                "from_column": col,
+                                "to_table": ref_table,
+                                "to_column": "_id",
+                            }
+                        )
 
     return {
         "tables": tables,

@@ -41,14 +41,16 @@ def compare(baseline_path: str, current_path: str, threshold_pct: float = 10) ->
         else:
             delta_pct = 0
 
-        regressions.append({
-            "name": name,
-            "baseline_mb": base_peak,
-            "current_mb": curr_peak,
-            "delta_mb": round(curr_peak - base_peak, 2),
-            "delta_pct": round(delta_pct, 1),
-            "regressed": delta_pct > threshold_pct,
-        })
+        regressions.append(
+            {
+                "name": name,
+                "baseline_mb": base_peak,
+                "current_mb": curr_peak,
+                "delta_mb": round(curr_peak - base_peak, 2),
+                "delta_pct": round(delta_pct, 1),
+                "regressed": delta_pct > threshold_pct,
+            }
+        )
 
     return regressions
 
@@ -57,8 +59,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Compare memory profiles for regressions")
     parser.add_argument("baseline", help="Path to baseline memprofile JSON")
     parser.add_argument("current", help="Path to current memprofile JSON")
-    parser.add_argument("--threshold", type=float, default=10,
-                        help="Regression threshold in %% (default 10)")
+    parser.add_argument(
+        "--threshold", type=float, default=10, help="Regression threshold in %% (default 10)"
+    )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
 
@@ -76,15 +79,17 @@ def main() -> None:
         print(json.dumps({"threshold_pct": args.threshold, "results": results}, indent=2))
     else:
         print(f"\n  Memory Regression Report (threshold: {args.threshold}%)")
-        print(f"  {'='*60}")
+        print(f"  {'=' * 60}")
         print(f"\n  {'Scenario':<35} {'Base MB':>8} {'Curr MB':>8} {'Delta':>8} {'Status':>10}")
-        print(f"  {'-'*35} {'-'*8} {'-'*8} {'-'*8} {'-'*10}")
+        print(f"  {'-' * 35} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 10}")
 
         for r in sorted(results, key=lambda x: x["delta_pct"], reverse=True):
             status = "REGRESSED" if r["regressed"] else "ok"
             sign = "+" if r["delta_pct"] > 0 else ""
-            print(f"  {r['name']:<35} {r['baseline_mb']:8.1f} {r['current_mb']:8.1f} "
-                  f"{sign}{r['delta_pct']:6.1f}%  {status:>10}")
+            print(
+                f"  {r['name']:<35} {r['baseline_mb']:8.1f} {r['current_mb']:8.1f} "
+                f"{sign}{r['delta_pct']:6.1f}%  {status:>10}"
+            )
 
         print()
         if regressed:

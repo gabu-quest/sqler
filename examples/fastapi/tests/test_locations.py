@@ -101,7 +101,9 @@ class TestCities:
         assert "Tokyo" in names
         assert "Kyoto" in names
 
-    def test_list_cities_by_country(self, client: TestClient, country_japan: dict, city_tokyo: dict, city_kyoto: dict):
+    def test_list_cities_by_country(
+        self, client: TestClient, country_japan: dict, city_tokyo: dict, city_kyoto: dict
+    ):
         """List cities filtered by country."""
         resp = client.get(f"/api/locations/countries/{country_japan['_id']}/cities")
         assert resp.status_code == 200

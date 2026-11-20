@@ -12,6 +12,7 @@ import warnings
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel
 from sqler.exceptions import NoAdapterError
 from sqler.logging import query_logger
@@ -245,14 +246,26 @@ async def _answers(d, path, route, call):
     q = await route(d, "absent")
     with query_logger.capture() as sent:
         result = await call(q)
-    return reference, result, len(sent), "absent" in _tables(path), d.pool_stats().in_use_connections
+    return (
+        reference,
+        result,
+        len(sent),
+        "absent" in _tables(path),
+        d.pool_stats().in_use_connections,
+    )
 
 
 @pytest.mark.parametrize("route", list(QUERY_ROUTES))
 @pytest.mark.parametrize("name", list(QUERY_CALLS))
 async def test_the_query_of_a_missing_table_answers_as_an_empty_one(db, path, route, name):
     call, empty = QUERY_CALLS[name]
-    assert await _answers(db, path, QUERY_ROUTES[route], call) == (empty, empty, _sent(route, name), False, 0)
+    assert await _answers(db, path, QUERY_ROUTES[route], call) == (
+        empty,
+        empty,
+        _sent(route, name),
+        False,
+        0,
+    )
 
 
 @pytest.mark.parametrize("route", list(QS_ROUTES))
@@ -288,7 +301,12 @@ async def test_writes_of_a_missing_table_in_a_transaction_leave_it_usable(db, pa
     await db.insert_document("kept", {"n": 1})
     async with db.transaction():
         q = await QUERY_ROUTES[route](db, "absent")
-        answers = (await q.update(n=1), await q.update_one(n=1), await q.update_n(2, k=1), await q.delete())
+        answers = (
+            await q.update(n=1),
+            await q.update_one(n=1),
+            await q.update_n(2, k=1),
+            await q.delete(),
+        )
         await db.adapter.execute("INSERT INTO kept (data) VALUES ('{\"n\": 2}')")
     assert (answers, _rows(path, "kept"), "absent" in _tables(path)) == ((0, None, [], 0), 2, False)
     assert db.pool_stats().in_use_connections == 0

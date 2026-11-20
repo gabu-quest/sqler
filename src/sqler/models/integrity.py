@@ -32,24 +32,6 @@ Read = tuple[str, str, list]
 Rows = Union[list, sqlite3.OperationalError, None]
 
 
-def _is_valid_table_name(table: str) -> bool:
-    """Check if a table name is valid (safe for SQL use).
-
-    Args:
-        table: Table name to validate.
-
-    Returns:
-        bool: True if the table name is valid.
-    """
-    from sqler.exceptions import InvalidTableNameError
-
-    try:
-        validate_table_name(table)
-    except InvalidTableNameError:
-        return False
-    return True
-
-
 # ----- which tables can refer to a table --------------------------------------------------
 
 # the position of a class whose annotations are not all known yet: a reference anywhere
@@ -74,7 +56,9 @@ def _joined(a: Optional[_refs.Position], b: Optional[_refs.Position]) -> Optiona
     if a == b:
         return a
     return _refs.Position(
-        tuple(dict.fromkeys(a.admits + b.admits)), _joined(a.item, b.item), _joined(a.value, b.value)
+        tuple(dict.fromkeys(a.admits + b.admits)),
+        _joined(a.item, b.item),
+        _joined(a.value, b.value),
     )
 
 
@@ -96,7 +80,8 @@ def _referring(target_table: str) -> tuple:
     complete = True
     if isinstance(target, type):
         for table, classes in registry.holders().items():
-            fields: Optional[dict] = {}
+            held: dict = {}
+            fields: Optional[dict] = held
             for cls in classes:
                 typed = _refs.known_typed_fields(cls)
                 if typed is None:
@@ -104,7 +89,7 @@ def _referring(target_table: str) -> tuple:
                     break
                 for name, at in typed.items():
                     if _can_hold(at, target):
-                        fields[name] = _joined(fields.get(name), at)
+                        held[name] = _joined(held.get(name), at)
             if fields is None:
                 complete = False
                 found.append((table, None))
@@ -162,7 +147,9 @@ def _swap(value: Any, at: _refs.Position, hit: Callable, path: str, paths: list)
         inner = at if anywhere else at.value
         if inner is None:
             return value
-        return {k: _swap(v, inner, hit, f"{path}.{k}" if path else k, paths) for k, v in value.items()}
+        return {
+            k: _swap(v, inner, hit, f"{path}.{k}" if path else k, paths) for k, v in value.items()
+        }
     if isinstance(value, list):
         inner = at if anywhere else at.item
         if inner is None:
@@ -283,13 +270,16 @@ def answers(exc: Exception, table: str) -> bool:
     The look sends its reads with the adapter's ``_execute_judged``, so an answer ends
     nothing that was pending on the connection; any other failure ends what a failed
     statement ends (``_end_failed_statement``) and is raised."""
-    return is_missing_table(exc, table) or (isinstance(exc, sqlite3.OperationalError) and "JSON" in str(exc))
+    return is_missing_table(exc, table) or (
+        isinstance(exc, sqlite3.OperationalError) and "JSON" in str(exc)
+    )
 
 
 def failed_read(exc: Exception, table: str) -> Rows:
     """What a read of the look whose failure ``exc`` :func:`answers` it gives: None for a
     table that is not there; ``exc`` itself for :func:`_look` to read the table without
     SQLite's JSON functions."""
+    assert isinstance(exc, sqlite3.OperationalError)  # :func:`answers` holds only for one
     return None if is_missing_table(exc, table) else exc
 
 
@@ -349,7 +339,11 @@ def find_ref_paths(data: dict, allowed_tables: set[str], target_id: int) -> list
 
     def walk(value, path: str):
         if isinstance(value, dict):
-            if is_ref_dict(value) and value["_table"] in allowed_tables and value["_id"] == target_id:
+            if (
+                is_ref_dict(value)
+                and value["_table"] in allowed_tables
+                and value["_id"] == target_id
+            ):
                 paths.append(path or "$")
             for k, v in value.items():
                 walk(v, f"{path}.{k}" if path else k)
@@ -361,7 +355,9 @@ def find_ref_paths(data: dict, allowed_tables: set[str], target_id: int) -> list
     return paths
 
 
-def set_null_referrers(db: "SQLerDB", target_table: str, target_id, referrers: list[Referrer]) -> None:
+def set_null_referrers(
+    db: "SQLerDB", target_table: str, target_id, referrers: list[Referrer]
+) -> None:
     """Null the references to the target rows in the referring rows.
 
     Each reference to the target (one ``_id`` or a collection) at a position the referring
@@ -378,7 +374,9 @@ def set_null_referrers(db: "SQLerDB", target_table: str, target_id, referrers: l
         validate_table_name(table)
     null = _nulled(target_table, target_id)
     for table, row_id, _meta in referrers:
-        row = db.adapter.execute(f"SELECT _id, data FROM {table} WHERE _id = ?;", [row_id]).fetchone()
+        row = db.adapter.execute(
+            f"SELECT _id, data FROM {table} WHERE _id = ?;", [row_id]
+        ).fetchone()
         if row:
             _write_rules.null_referrer(db, table, row_id, null(table, json.loads(row[1])))
 
@@ -450,7 +448,7 @@ def validate_references(db: "SQLerDB"):
                 if is_ref_dict(value):
                     t, i = value["_table"], value["_id"]
                     # Validate table name to prevent SQL injection
-                    if not _is_valid_table_name(t):
+                    if not _refs._is_table_name(t):
                         # Invalid table name in reference - treat as broken
                         broken.append(
                             BrokenRef(

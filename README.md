@@ -4,47 +4,120 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/sqler)](https://pypi.org/project/sqler/)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
-[![Tests](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml/badge.svg)](https://github.com/gabu-quest/SQLer/actions/workflows/ci.yml)
+[![Tests](https://github.com/gabu-quest/sqler/actions/workflows/ci.yml/badge.svg)](https://github.com/gabu-quest/sqler/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**A lightweight, JSON-first micro-ORM for SQLite.** Define models with Pydantic, dataclasses, or msgspec — persist them as JSON documents, query with a fluent API. Sync and async.
+sqler stores Python objects as JSON documents in SQLite and lets you query inside them. You write a model class; sqler keeps one table per model, one row per object, and builds the `json_extract` SQL for you. Sync and async, one file on disk, no server.
 
 ## Install
 
 ```bash
-pip install sqler
+pip install 'sqler[pydantic]'   # Pydantic models (the examples below)
+pip install sqler               # dataclass models only; no other dependency
+pip install 'sqler[msgspec]'    # msgspec models
 ```
 
-Python 3.12+ · SQLite with JSON1 (bundled on most platforms).
+Python 3.12 or newer. SQLite needs the JSON1 functions, which the SQLite bundled with Python has.
 
-## Quick Start
+## Quick start
 
 ```python
-from sqler import SQLerDB, SQLerModel
-from sqler.query import SQLerField as F
+from sqler import F, SQLerDB, SQLerModel
 
 class User(SQLerModel):
     name: str
     age: int
     tags: list[str] = []
 
-db = SQLerDB.in_memory()
-User.set_db(db)
+db = SQLerDB.on_disk("app.db")        # or SQLerDB.in_memory()
 
-User(name="Alice", age=30, tags=["admin"]).save()
-User(name="Bob", age=25, tags=["user"]).save()
+User(name="Alice", age=30, tags=["admin"]).save(db=db)
+User(name="Bob", age=25, tags=["user"]).save(db=db)
 
-admins = User.query().filter(F("tags").contains("admin")).all()
-assert admins[0].name == "Alice"
+admins = User.using(db).filter(F("tags").contains("admin")).all()
+assert [u.name for u in admins] == ["Alice"]
 
-young = User.query().filter(F("age") < 28).order_by("name").all()
-assert young[0].name == "Bob"
+young = User.using(db).filter(F("age") < 28).order_by("name").all()
+assert [u.name for u in young] == ["Bob"]
+
+db.close()
 ```
 
-### Three Model Backends, One API
+`save(db=db)` writes one object. `User.using(db)` starts a query. Nothing is bound to the class.
 
-<details>
-<summary><b>Dataclass</b> — zero dependencies, WASM compatible</summary>
+## What is in the file
+
+The quick start leaves this in `app.db`, readable with any SQLite tool:
+
+```sql
+CREATE TABLE users (
+    _id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    data JSON NOT NULL
+);
+-- 1 | {"name":"Alice","age":30,"tags":["admin"]}
+-- 2 | {"name":"Bob","age":25,"tags":["user"]}
+```
+
+The table name is the lowercase plural of the class name, or `__tablename__` if you set it. `_id` is the object's `_id` attribute after a save. Safe models (below) add a `_version` column. A reference to another model is stored as `{"_table": "...", "_id": ...}`.
+
+## Queries
+
+```python
+from sqler import F, SQLerDB, SQLerModel
+
+class Order(SQLerModel):
+    customer: dict
+    items: list[dict] = []
+
+db = SQLerDB.in_memory()
+Order(customer={"name": "Ada", "city": "Kyoto"}, items=[{"sku": "A1", "qty": 2}]).save(db=db)
+Order(customer={"name": "Bob", "city": "Osaka"}, items=[{"sku": "B7", "qty": 1}]).save(db=db)
+
+# a nested field
+kyoto = Order.using(db).filter(F("customer")["city"] == "Kyoto").all()
+assert [o.customer["name"] for o in kyoto] == ["Ada"]
+
+# any element of an array
+bulk = Order.using(db).filter(F(["items"]).any().where(F("qty") > 1)).all()
+assert [o.customer["name"] for o in bulk] == ["Ada"]
+```
+
+Also: `exclude`, `order_by`, `paginate`, `count`, `first`, `isin`, `between`, `contains`. `debug()` and `explain_query_plan()` show the SQL and how SQLite runs it. A query on a JSON field scans the table unless you create an index for that field with `db.create_index(...)`.
+
+## Async
+
+The async classes mirror the sync ones.
+
+```python
+import asyncio
+from sqler import AsyncSQLerDB, AsyncSQLerModel, F
+
+class Job(AsyncSQLerModel):
+    name: str
+    done: bool = False
+
+async def main():
+    db = AsyncSQLerDB.on_disk("app.db")
+    await db.connect()
+
+    await Job(name="resize").save(db=db)
+    await Job(name="email", done=True).save(db=db)
+
+    pending = await Job.using(db).filter(F("done") == False).all()
+    assert [j.name for j in pending] == ["resize"]
+
+    await db.close()
+
+asyncio.run(main())
+```
+
+## Three kinds of model
+
+| Base class | Install | Use it when |
+|---|---|---|
+| `SQLerModel` | `sqler[pydantic]` | you want validation and Pydantic's serialization |
+| `SQLerLiteModel` (a dataclass) | `sqler` | you want no dependency, or you run in Pyodide |
+| `SQLerMsgspecModel` | `sqler[msgspec]` | decoding speed matters more than validation features |
 
 ```python
 from dataclasses import dataclass
@@ -58,173 +131,15 @@ class User(SQLerLiteModel):
     age: int = 0
 
 db = SQLerDB.in_memory()
-User.set_db(db)
-User(name="Alice", age=30).save()
+User(name="Alice", age=30).save(db=db)
+assert User.using(db).count() == 1
 ```
 
-</details>
+The query API is the same for all three.
 
-<details>
-<summary><b>msgspec</b> — C-level JSON performance</summary>
+## Safe models: two writers, one row
 
-```python
-from sqler import SQLerDB
-from sqler.models.msgspec import SQLerMsgspecModel
-
-class User(SQLerMsgspecModel):
-    __tablename__ = "users"
-    name: str = ""
-    age: int = 0
-
-db = SQLerDB.in_memory()
-User.set_db(db)
-User(name="Alice", age=30).save()
-```
-
-</details>
-
-All three backends share the same query API (`filter`, `order_by`, `save_many`, etc.), safe model variants with optimistic locking, and sync + async support.
-
-## See It in Action
-
-![sqler demo](docs/demo.gif)
-
-```bash
-git clone https://github.com/gabu-quest/sqler.git && cd sqler
-uv run python demo.py
-```
-
----
-
-## Interactive Tour
-
-Learn sqler hands-on with [marimo](https://marimo.io) notebooks — run and modify code directly in your browser.
-
-**[Launch Interactive Tour →](https://gabu-quest.github.io/sqler/)**
-
-**Run in browser** (Lite models — no install needed):
-
-| Tour | Topics |
-|------|--------|
-| [01. Fundamentals](https://gabu-quest.github.io/sqler/lite/tour_01_fundamentals_lite/) | Models, CRUD, queries, aggregations |
-| [02. Relationships](https://gabu-quest.github.io/sqler/lite/tour_02_relationships_lite/) | References, hydration, cross-model queries |
-| [03. Safe Models](https://gabu-quest.github.io/sqler/lite/tour_03_safe_models_lite/) | Optimistic locking, conflict resolution |
-| [04. Transactions](https://gabu-quest.github.io/sqler/lite/tour_04_transactions_lite/) | Atomic operations, rollback |
-| [05. Mixins](https://gabu-quest.github.io/sqler/lite/tour_05_mixins_lite/) | Timestamps, soft delete, lifecycle hooks |
-| [06. Advanced](https://gabu-quest.github.io/sqler/lite/tour_06_advanced_lite/) | Bulk ops, indexes, integrity, raw SQL |
-| [07. Export/Import](https://gabu-quest.github.io/sqler/lite/tour_07_export_import_lite/) | CSV, JSON, JSONL |
-| [08. Full-Text Search](https://gabu-quest.github.io/sqler/lite/tour_08_fulltext_search_lite/) | FTS5, boolean queries, ranking |
-| [09. Change Tracking](https://gabu-quest.github.io/sqler/lite/tour_09_change_tracking_lite/) | Dirty checking, change detection |
-| [10. Database Ops](https://gabu-quest.github.io/sqler/lite/tour_10_db_operations_lite/) | Health checks, stats, vacuum, logging |
-| [11. Metrics & Caching](https://gabu-quest.github.io/sqler/lite/tour_11_metrics_caching_lite/) | Prometheus metrics, query caching, pools |
-
-**Run locally** (full Pydantic features — all 11 tours):
-
-```bash
-git clone https://github.com/gabu-quest/sqler.git && cd sqler
-uv sync --dev
-uv run marimo edit examples/tour_01_fundamentals.py
-```
-
-<details>
-<summary>All 11 tours</summary>
-
-| Tour | Topics |
-|------|--------|
-| 01. Fundamentals | Models, CRUD, queries, aggregations |
-| 02. Relationships | References, hydration, cross-model queries |
-| 03. Safe Models | Optimistic locking, conflict resolution |
-| 04. Transactions | Atomic operations, rollback |
-| 05. Mixins | Timestamps, soft delete, lifecycle hooks |
-| 06. Advanced | Bulk ops, indexes, integrity, raw SQL |
-| 07. Export/Import | CSV, JSON, JSONL |
-| 08. Full-Text Search | FTS5, boolean queries, ranking |
-| 09. Change Tracking | Dirty checking, partial updates, diff |
-| 10. Database Ops | Health checks, stats, vacuum, logging |
-| 11. Metrics & Caching | Prometheus metrics, query caching, pools |
-
-</details>
-
----
-
-## Why sqler?
-
-SQLite is the most deployed database on earth, and JSON1 turns it into a document store. sqler bridges that gap: define models with your preferred backend (Pydantic, dataclasses, or msgspec), get document-style flexibility with a fluent query builder that reaches into nested JSON, and real data integrity (optimistic locking, referential policies, transactions) — all in a single file, zero-config database.
-
----
-
-## Performance
-
-Real numbers from the benchmark suite (22 scenarios, Python 3.12, SQLite 3.50):
-
-| Operation | Result | Context |
-|-----------|--------|---------|
-| Bulk insert | **84K rows/sec** | `bulk_upsert()` at 10K rows |
-| Index speedup | **470x** | 9.4ms → 0.02ms with `create_index()` |
-| Cache hit | **7,000x** | 14ms → 0.002ms with `@cached_query` |
-| FTS search | **0.28ms** | Sub-millisecond across all dataset sizes |
-| Bulk vs single | **5.2x** | `bulk_upsert` vs `save()` loop at 10K |
-| Lite/msgspec models | **1.3x** | Dataclass or msgspec variant vs Pydantic overhead |
-
-### Honest Limitations
-
-- **Single writer** — SQLite's architecture. Use `save_many()` / `bulk_upsert` and transactions to batch writes.
-- **JSON overhead** — Fields are extracted via `json_extract()`, not native columns. Indexes close the gap.
-- **No JOINs** — Relationships use reference hydration, not SQL JOINs. Fine for typical document patterns.
-- **Memory-bound** — Large result sets materialize in Python. Use `paginate()` and `count()` to limit.
-
-Run `uv run python -m benchmarks run --scale medium --storage both` to generate your own report.
-
----
-
-## Features
-
-**Core**
-- Three model backends — all with the same API:
-  - **Pydantic** (`SQLerModel`) — full validation, rich serialization
-  - **Dataclass** (`SQLerLiteModel`) — zero dependencies, WASM/Pyodide compatible
-  - **msgspec** (`SQLerMsgspecModel`) — C-level JSON performance, Struct-based
-- Fluent query builder: `filter`, `exclude`, `order_by`, `paginate`, `contains`, `isin`, `between`
-- `F()` operator for nested fields: `F("x")["y"]`, `F(["items"]).any().where(...)`
-- Sync and async APIs with matching semantics
-
-**Safety & Integrity**
-- `SQLerSafeModel` with optimistic locking (`_version` + `StaleVersionError`)
-- Referential integrity: `cascade`, `restrict`, `set_null` delete policies
-- Transaction-aware saves — `model.save()` inside `with db.transaction():` rolls back properly
-- `save_many()` for fast bulk creation, sync and async (multi-row INSERT with auto-chunking)
-- `bulk_upsert` for efficient batch writes
-
-**Developer Experience**
-- FTS5 full-text search with ranking and highlights
-- Query caching with TTL and LRU eviction
-- Connection pooling, schema migrations, metrics collection
-- Export/import: CSV, JSON, JSONL (sync + async)
-- 11 interactive marimo tour notebooks
-- Query logging, `debug()`, `explain_query_plan()`
-
----
-
-## When to Use sqler
-
-**Good fit:**
-- Fast prototyping with real persistence
-- SQLite as embedded app state (Electron, CLI tools, mobile)
-- JSON flexibility + data integrity in one package
-- Pick your model backend: Pydantic (validation), dataclasses (lightweight), msgspec (speed)
-- Browser/WASM apps via Pyodide (dataclass backend)
-
-**Consider alternatives:**
-- Need multi-database support → [SQLAlchemy](https://www.sqlalchemy.org/)
-- Purely relational SQLite workflows → [sqlite-utils](https://sqlite-utils.datasette.io/)
-- Complex JOINs at scale → a full ORM with proper relational modeling
-- Write-heavy under contention → PostgreSQL
-
----
-
-## Showcase
-
-### Safe Models — Optimistic Locking
+`SQLerSafeModel` keeps a version number per row. A save that started from an old version fails instead of overwriting.
 
 ```python
 from sqler import SQLerDB, SQLerSafeModel, StaleVersionError
@@ -234,113 +149,128 @@ class Account(SQLerSafeModel):
     balance: int
 
 db = SQLerDB.in_memory()
-Account.set_db(db)
+mine = Account(owner="Ada", balance=100).save(db=db)
 
-acc = Account(owner="Ada", balance=100).save()  # _version == 0
-acc.balance = 120
-acc.save()                                       # _version == 1
+theirs = Account.using(db).first()      # someone else loads the same row
+theirs.balance = 50
+theirs.save(db=db)
 
-# Another process changes the row...
-# Your next save detects the conflict:
+mine.balance = 120
 try:
-    acc.balance = 130
-    acc.save()
+    mine.save(db=db)
 except StaleVersionError:
-    acc.refresh()  # reload from DB, then decide
+    pass                                # reload, then decide
 ```
 
-[Full tour →](https://gabu-quest.github.io/sqler/tour_03_safe_models/) · [API reference →](docs/API.md#c06-optimistic-versioning)
-
-### Relationships — Hydration & Cross-Filtering
+## Transactions
 
 ```python
-from sqler import SQLerDB, SQLerModel
+with db.transaction():
+    Account(owner="Bob", balance=50).save(db=db)
+    raise RuntimeError("abort")         # the row is not written
+```
+
+## Relationships
+
+A field typed as another model is stored as a reference and loaded as that model.
+
+```python
+from sqler import ReferentialIntegrityError, SQLerDB, SQLerModel
 
 class Address(SQLerModel):
     city: str
-    country: str
 
 class User(SQLerModel):
     name: str
     address: Address | None = None
 
 db = SQLerDB.in_memory()
-Address.set_db(db)
-User.set_db(db)
+home = Address(city="Kyoto").save(db=db)
+user = User(name="Alice", address=home).save(db=db)
 
-home = Address(city="Kyoto", country="JP").save()
-user = User(name="Alice", address=home).save()
+assert User.from_id(user._id, db=db).address.city == "Kyoto"      # the reference is loaded
 
-loaded = User.from_id(user._id)
-assert loaded.address.city == "Kyoto"  # auto-hydrated
+in_kyoto = User.using(db).filter(User.ref("address").field("city") == "Kyoto").all()
+assert [u.name for u in in_kyoto] == ["Alice"]
 
-kyoto_users = User.query().filter(
-    User.ref("address").field("city") == "Kyoto"
-).all()
-assert kyoto_users[0].name == "Alice"
+try:
+    home.delete(db=db)                  # Alice still refers to it
+except ReferentialIntegrityError:
+    pass
 ```
 
-[Full tour →](https://gabu-quest.github.io/sqler/tour_02_relationships/) · [API reference →](docs/API.md#c04-hydration--cross-filtering)
+A delete is refused while another row refers to the object. `delete_with_policy(on_delete="cascade")` deletes the referring rows too; `on_delete="set_null"` clears their field.
 
-### Full-Text Search
+## Full-text search
 
 ```python
-from sqler import SQLerDB, SQLerModel, FTSIndex
+from sqler import FTSIndex, SQLerDB, SQLerModel
 
-class Article(SQLerModel):
-    title: str
-    content: str
+class Note(SQLerModel):
+    text: str
 
 db = SQLerDB.in_memory()
-Article.set_db(db)
+Note(text="buy rice").save(db=db)
 
-Article(title="Python Tips", content="Learn Python fast").save()
-Article(title="SQLite Guide", content="Master SQLite queries").save()
+index = FTSIndex(Note, fields=["text"])     # SQLite FTS5
+index.create(db)                            # indexes the rows already there
+Note(text="cook rice").save(db=db)          # and follows every later write
 
-fts = FTSIndex(Article, fields=["title", "content"])
-fts.create(db)
-fts.rebuild()
-
-results = fts.search("Python")        # instant — 0.28ms at any scale
-ranked = fts.search_ranked("Python")   # with relevance scores
+assert sorted(n.text for n in index.search("rice")) == ["buy rice", "cook rice"]
 ```
 
-[Full tour →](https://gabu-quest.github.io/sqler/tour_08_fulltext_search/) · [API reference →](docs/API.md#c41-full-text-search-fts5)
+## What sqler does not do
 
----
+- **One writer at a time.** That is SQLite. Batch writes with `save_many()`, `bulk_upsert()` and transactions.
+- **No JOINs.** A reference is loaded with a second query, not joined.
+- **Fields are not columns.** Every field read goes through `json_extract`; an index on the field closes most of the gap.
+- **Results are loaded into memory.** Use `paginate()` and `count()` on large tables.
+- **One database engine.** For PostgreSQL or several engines, use SQLAlchemy. For plain relational SQLite work, use sqlite-utils.
 
-## Documentation
+## More
 
-| Resource | Description |
-|----------|-------------|
-| [API Reference](docs/API.md) | All 46 tested contracts (C01–C46) |
-| [Examples Cookbook](docs/EXAMPLES.md) | End-to-end scripts for every feature |
-| [Interactive Tours](https://gabu-quest.github.io/sqler/) | 11 marimo notebooks — run in browser |
-| Benchmark Suite | `uv run python -m benchmarks run` — 22 scenarios |
-| [Changelog](CHANGELOG.md) | Version history |
+- Mixins for timestamps, soft delete and audit fields; lifecycle hooks; change tracking.
+- Export and import: CSV, JSON, JSONL.
+- Query caching, schema migrations, metrics.
+- [API reference](docs/API.md) · [Examples](docs/EXAMPLES.md) · [Changelog](CHANGELOG.md)
 
----
+## Interactive tour
 
-## Testing
+Eleven [marimo](https://marimo.io) notebooks: **[open the tour](https://gabu-quest.github.io/sqler/)**. The dataclass versions run in the browser with nothing installed.
+
+| Tour | Topics |
+|------|--------|
+| [01. Fundamentals](https://gabu-quest.github.io/sqler/lite/tour_01_fundamentals_lite/) | Models, CRUD, queries, aggregations |
+| [02. Relationships](https://gabu-quest.github.io/sqler/lite/tour_02_relationships_lite/) | References, loading, cross-model queries |
+| [03. Safe Models](https://gabu-quest.github.io/sqler/lite/tour_03_safe_models_lite/) | Optimistic locking, conflicts |
+| [04. Transactions](https://gabu-quest.github.io/sqler/lite/tour_04_transactions_lite/) | Atomic operations, rollback |
+| [05. Mixins](https://gabu-quest.github.io/sqler/lite/tour_05_mixins_lite/) | Timestamps, soft delete, hooks |
+| [06. Advanced](https://gabu-quest.github.io/sqler/lite/tour_06_advanced_lite/) | Bulk operations, indexes, integrity, raw SQL |
+| [07. Export/Import](https://gabu-quest.github.io/sqler/lite/tour_07_export_import_lite/) | CSV, JSON, JSONL |
+| [08. Full-Text Search](https://gabu-quest.github.io/sqler/lite/tour_08_fulltext_search_lite/) | FTS5, boolean queries, ranking |
+| [09. Change Tracking](https://gabu-quest.github.io/sqler/lite/tour_09_change_tracking_lite/) | Dirty checking, change detection |
+| [10. Database Ops](https://gabu-quest.github.io/sqler/lite/tour_10_db_operations_lite/) | Health checks, stats, vacuum, logging |
+| [11. Metrics & Caching](https://gabu-quest.github.io/sqler/lite/tour_11_metrics_caching_lite/) | Metrics, query caching |
+
+To run the Pydantic versions locally: `uv sync --dev`, then `uv run marimo edit examples/tour_01_fundamentals.py`.
+
+## The -ler family
+
+| Package | What it is |
+|---|---|
+| **sqler** | This package: JSON documents in SQLite |
+| [qler](https://github.com/gabu-quest/qler) | A background job queue that stores its jobs with sqler |
+| [logler](https://github.com/gabu-quest/logler) | Log investigation; its `--db` option reads a sqler database file |
+
+## Development
 
 ```bash
-uv run pytest -q                                       # unit tests
-uv run pytest -q -m perf                               # performance benchmarks
-uv run python -m benchmarks run --scale small           # full benchmark suite
-uv run python -m benchmarks plot                        # generate charts
+uv sync --dev
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -m "not perf"                                        # the whole suite; over twenty minutes
+uv run python -m benchmarks run --scale medium --storage both      # benchmarks, with SQLite baselines
 ```
-
----
-
-## Contributing
-
-```bash
-uv run ruff format .                                   # format
-uv run ruff check .                                    # lint
-uv run pytest -q --cov=src --cov-report=term-missing   # test with coverage
-```
-
----
 
 ## License
 

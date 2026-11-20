@@ -19,6 +19,7 @@ import time
 import aiosqlite
 import pytest
 import pytest_asyncio
+
 from sqler.adapter.asynchronous import (
     _AIOSQLITE_CALLS,
     _AIOSQLITE_PRIVATE,
@@ -34,9 +35,7 @@ from sqler.logging import query_logger
 pytestmark = pytest.mark.asyncio
 
 N = 2000
-FIVE_MILLION = (
-    "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000000) SELECT x FROM c"
-)
+FIVE_MILLION = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000000) SELECT x FROM c"
 
 
 @pytest_asyncio.fixture(params=["in_memory", "on_disk"])
@@ -137,7 +136,9 @@ async def _read_while_another_context_writes(adapter, cur, read):
 
 
 @pytest.mark.parametrize("how", ["its transaction ended", "auto_commit", "still pinned"])
-async def test_a_cursor_read_while_another_context_writes_on_its_connection_returns_its_statements_rows(ad, how):
+async def test_a_cursor_read_while_another_context_writes_on_its_connection_returns_its_statements_rows(
+    ad, how
+):
     if how == "its transaction ended":
         await ad.begin_transaction()
         cur = await ad.execute("SELECT n, v FROM t")
@@ -157,7 +158,10 @@ async def test_a_cursor_that_read_10_rows_gets_the_other_1990_clean_and_in_order
     first = await cur.fetchmany(10)
     await mem.auto_commit()
     rest = await _read_while_another_context_writes(mem, cur, lambda c: c.fetchall())
-    assert ([r[0] for r in first + rest], _tally(rest)) == (list(range(N)), "1990 rows; 1990 clean, 0 dirty")
+    assert ([r[0] for r in first + rest], _tally(rest)) == (
+        list(range(N)),
+        "1990 rows; 1990 clean, 0 dirty",
+    )
 
 
 async def test_rows_the_cursors_own_transaction_wrote_and_rolled_back_are_served(mem):
@@ -200,7 +204,10 @@ async def test_two_cursors_on_one_lease_one_half_read_both_keep_their_rows(mem):
 
     rest, other = await _read_while_another_context_writes(mem, None, both)
     assert [r[0] for r in first + rest] == list(range(N))
-    assert ([r[0] for r in other], _tally(other)) == (list(range(N - 1, -1, -1)), "2000 rows; 2000 clean, 0 dirty")
+    assert ([r[0] for r in other], _tally(other)) == (
+        list(range(N - 1, -1, -1)),
+        "2000 rows; 2000 clean, 0 dirty",
+    )
 
 
 async def test_the_cursor_of_an_insert_has_nothing_to_read_after_a_hand_over(mem):
@@ -234,7 +241,11 @@ async def test_a_child_task_that_shares_the_pin_and_only_reads(mem):
     counted = await asyncio.wait_for(asyncio.create_task(child()), 10)
     got = await asyncio.wait_for(cur.fetchall(), 10)
     await mem.auto_commit()
-    assert (counted, [r[0] for r in got], _tally(got)) == (N, list(range(N)), "2000 rows; 2000 clean, 0 dirty")
+    assert (counted, [r[0] for r in got], _tally(got)) == (
+        N,
+        list(range(N)),
+        "2000 rows; 2000 clean, 0 dirty",
+    )
     await _whole(mem)
 
 
@@ -263,7 +274,9 @@ async def test_twenty_tasks_sharing_one_transaction_each_with_an_unread_cursor(a
     await _whole(ad)
 
 
-async def test_closing_the_adapter_with_an_unread_cursor_alive_raises_not_connected_on_its_read(mem):
+async def test_closing_the_adapter_with_an_unread_cursor_alive_raises_not_connected_on_its_read(
+    mem,
+):
     cur = await mem.execute("SELECT n, v FROM t")
     await asyncio.wait_for(mem.close(), 10)
     with pytest.raises(NotConnectedError, match="closed"):
@@ -286,7 +299,9 @@ async def test_a_cursor_read_from_another_task_than_the_one_that_made_it(mem):
 # --- item 2: a cursor reads lazily until a statement is sent on its connection ------------
 
 
-async def test_a_row_the_same_task_inserts_before_the_first_fetch_is_not_in_what_the_cursor_returns(mem):
+async def test_a_row_the_same_task_inserts_before_the_first_fetch_is_not_in_what_the_cursor_returns(
+    mem,
+):
     cur = await mem.execute("SELECT n, v FROM t ORDER BY rowid")
     await mem.execute("INSERT INTO t VALUES (?, 'later')", [N])
     got = await asyncio.wait_for(cur.fetchall(), 10)
@@ -340,7 +355,9 @@ async def test_a_cursor_let_go_is_not_read_when_its_connection_changes_hands(mem
     assert (count, elapsed < 0.5) == (N, True)
 
 
-async def test_a_cursor_dropped_before_any_fetch_is_not_read_when_its_connection_changes_hands(mem, read_ahead):
+async def test_a_cursor_dropped_before_any_fetch_is_not_read_when_its_connection_changes_hands(
+    mem, read_ahead
+):
     await mem.execute(FIVE_MILLION)  # the cursor is dropped at once: nobody can read its rows
     other = await asyncio.wait_for(asyncio.create_task(mem.execute("SELECT count(*) FROM t")), 30)
     count = (await other.fetchall())[0][0]
@@ -393,7 +410,9 @@ async def test_a_cursor_read_ahead_answers_what_a_lazy_cursor_answers(statement,
         await adapter.connect()
         try:
             await adapter.execute("CREATE TABLE t (n INTEGER, v TEXT)")
-            await adapter.executemany("INSERT INTO t VALUES (?, ?)", [(n, f"v{n}") for n in range(10)])
+            await adapter.executemany(
+                "INSERT INTO t VALUES (?, ?)", [(n, f"v{n}") for n in range(10)]
+            )
             await adapter.auto_commit()
             await adapter.begin_transaction()
             seen[hand_over] = await _observe(adapter, STATEMENTS[statement], hand_over=hand_over)
@@ -401,7 +420,12 @@ async def test_a_cursor_read_ahead_answers_what_a_lazy_cursor_answers(statement,
             await adapter.close()
     assert seen[True] == seen[False]
     got = seen[True]
-    served = ([got["first"]] if got["first"] is not None else []) + got["two"] + got["three"] + got["rest"]
+    served = (
+        ([got["first"]] if got["first"] is not None else [])
+        + got["two"]
+        + got["three"]
+        + got["rest"]
+    )
     expected = {
         "rows": [(n, f"v{n}") for n in range(10)],
         "no-row": [],
@@ -409,7 +433,11 @@ async def test_a_cursor_read_ahead_answers_what_a_lazy_cursor_answers(statement,
         "returning": [(-1, "r1"), (-2, "r2")],
         "plain-insert": [],
     }[statement]
-    assert (served, len(got["two"]), got["connection"]) == (expected, min(2, max(len(expected) - 1, 0)), True)
+    assert (served, len(got["two"]), got["connection"]) == (
+        expected,
+        min(2, max(len(expected) - 1, 0)),
+        True,
+    )
 
 
 # --- items 5 and 6: rows that cannot be read; the read ahead cannot break the hand-over -----
@@ -427,9 +455,13 @@ async def _six_fetchones(cur) -> list:
 
 
 @pytest.mark.parametrize("hand_over", [False, True], ids=["read-lazily", "read-ahead"])
-async def test_a_statement_whose_fifth_row_raises_raises_at_the_read_that_reaches_it(mem, hand_over):
+async def test_a_statement_whose_fifth_row_raises_raises_at_the_read_that_reaches_it(
+    mem, hand_over
+):
     await mem.execute("CREATE TABLE j (v TEXT)")
-    await mem.executemany("INSERT INTO j VALUES (?)", [('{"a": 1}',)] * 4 + [("{bad",)] + [('{"a": 2}',)] * 2)
+    await mem.executemany(
+        "INSERT INTO j VALUES (?)", [('{"a": 1}',)] * 4 + [("{bad",)] + [('{"a": 2}',)] * 2
+    )
     await mem.auto_commit()
     cur = await mem.execute("SELECT json(v) FROM j ORDER BY rowid")
     await mem.auto_commit()  # the connection goes back unread
@@ -440,19 +472,26 @@ async def test_a_statement_whose_fifth_row_raises_raises_at_the_read_that_reache
     await _whole(mem)
     count = await mem.execute("SELECT count(*) FROM t")
     # sqlite3 steps to the next row when it returns one: the fourth read steps the fifth row
-    assert (seen, (await count.fetchone())[0]) == (['{"a":1}'] * 3 + ["raised malformed JSON", None, None], N)
+    assert (seen, (await count.fetchone())[0]) == (
+        ['{"a":1}'] * 3 + ["raised malformed JSON", None, None],
+        N,
+    )
     await mem.auto_commit()
 
 
 @pytest.mark.parametrize("share", ["transaction", "pin"])
-async def test_a_statement_cancelled_while_the_read_ahead_it_triggered_runs_keeps_the_cursors_rows(mem, share):
+async def test_a_statement_cancelled_while_the_read_ahead_it_triggered_runs_keeps_the_cursors_rows(
+    mem, share
+):
     million = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 1000000) SELECT x FROM c"
     if share == "transaction":
         await mem.begin_transaction()
     cur = await mem.execute(million)
     first = await cur.fetchone()
     other = asyncio.create_task(mem.execute("INSERT INTO t VALUES (-1, 'dirty')"))
-    await asyncio.sleep(0)  # one turn: the other context's step has queued the read ahead, then its INSERT
+    await asyncio.sleep(
+        0
+    )  # one turn: the other context's step has queued the read ahead, then its INSERT
     reading = cur._taking is not None and not cur._taking.done()
     other.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -468,7 +507,9 @@ async def test_a_statement_cancelled_while_the_read_ahead_it_triggered_runs_keep
     await asyncio.wait_for(mem.close(), 10)
 
 
-async def test_a_statement_cancelled_inside_a_transaction_leaves_its_tasks_other_cursor_its_rows(mem):
+async def test_a_statement_cancelled_inside_a_transaction_leaves_its_tasks_other_cursor_its_rows(
+    mem,
+):
     slow = (
         "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 8000000) "
         "SELECT count(*) FROM c"
@@ -490,13 +531,18 @@ async def test_a_statement_cancelled_inside_a_transaction_leaves_its_tasks_other
 # --- cost: execute then fetchall sends what it sent before ---------------------------------
 
 
-async def test_execute_then_fetchall_sends_one_statement_and_reads_nothing_ahead(mem, read_ahead, trips):
+async def test_execute_then_fetchall_sends_one_statement_and_reads_nothing_ahead(
+    mem, read_ahead, trips
+):
     with query_logger.capture() as captured:
         for _ in range(3):
             cur = await mem.execute("SELECT n FROM t WHERE n < 3")
             rows = await cur.fetchall()
             await mem.auto_commit()
-    assert ([q.sql for q in captured], [r[0] for r in rows]) == (["SELECT n FROM t WHERE n < 3"] * 3, [0, 1, 2])
+    assert ([q.sql for q in captured], [r[0] for r in rows]) == (
+        ["SELECT n FROM t WHERE n < 3"] * 3,
+        [0, 1, 2],
+    )
     # the trips to the connection's thread: the statement and the read, one each as aiosqlite's
     # own execute and fetchall make them, then auto_commit's commit
     assert (trips, read_ahead) == (["execute", "fetch", "commit"] * 3, [])
@@ -543,7 +589,9 @@ async def _write(adapter: AsyncSQLiteAdapter, write: str) -> None:
 
 
 async def _reader(adapter: AsyncSQLiteAdapter, turns: int) -> list:
-    cur = await adapter.execute("SELECT n, v FROM t ORDER BY rowid")  # no sort: rows are stepped as fetched
+    cur = await adapter.execute(
+        "SELECT n, v FROM t ORDER BY rowid"
+    )  # no sort: rows are stepped as fetched
     for _ in range(turns):
         await asyncio.sleep(0)  # give the loop turns: no wait on anything
     return await cur.fetchall()
@@ -556,9 +604,12 @@ SHARES = ["transaction", "pin"]
 @pytest.mark.parametrize(
     "share,write",
     # executescript raises QueryError inside a transaction: a script is sent on a shared pin only
-    [(share, write) for share in SHARES for write in ("insert", "update", "delete")] + [("pin", "script")],
+    [(share, write) for share in SHARES for write in ("insert", "update", "delete")]
+    + [("pin", "script")],
 )
-async def test_a_select_handed_to_the_connection_before_a_siblings_write_is_answered_whole(mem, share, write, turns):
+async def test_a_select_handed_to_the_connection_before_a_siblings_write_is_answered_whole(
+    mem, share, write, turns
+):
     await _share(mem, share)
     got, _ = await asyncio.wait_for(asyncio.gather(_reader(mem, turns), _write(mem, write)), 20)
     await _unshare(mem, share)
@@ -569,7 +620,9 @@ async def test_a_select_handed_to_the_connection_before_a_siblings_write_is_answ
 
 @pytest.mark.parametrize("write", ["insert", "update", "delete"])
 @pytest.mark.parametrize("share", SHARES)
-async def test_a_select_handed_to_the_connection_after_a_siblings_write_gets_what_the_write_left(mem, share, write):
+async def test_a_select_handed_to_the_connection_after_a_siblings_write_gets_what_the_write_left(
+    mem, share, write
+):
     await _share(mem, share)
     _, got = await asyncio.wait_for(asyncio.gather(_write(mem, write), _reader(mem, 1)), 20)
     await _unshare(mem, share)
@@ -581,7 +634,9 @@ async def test_a_select_handed_to_the_connection_after_a_siblings_write_gets_wha
 async def test_twenty_readers_and_one_writer_started_together_each_get_one_whole_answer(mem, share):
     await _share(mem, share)
     readers = [_reader(mem, 1) for _ in range(20)]
-    results = await asyncio.wait_for(asyncio.gather(*readers[:10], _write(mem, "update"), *readers[10:]), 30)
+    results = await asyncio.wait_for(
+        asyncio.gather(*readers[:10], _write(mem, "update"), *readers[10:]), 30
+    )
     await _unshare(mem, share)
     got = [_tally(rows) for rows in results[:10] + results[11:]]
     assert got == [BEFORE_WRITE] * 10 + [AFTER_WRITE["update"]] * 10
@@ -597,7 +652,9 @@ async def test_two_readers_and_no_writer_read_the_same_rows(mem, share):
 
 
 @pytest.mark.parametrize("share", SHARES)
-async def test_a_reader_whose_statement_fails_while_a_write_is_queued_behind_it_leaves_no_cursor(mem, share):
+async def test_a_reader_whose_statement_fails_while_a_write_is_queued_behind_it_leaves_no_cursor(
+    mem, share
+):
     await _share(mem, share)
 
     async def failing_reader():
@@ -641,10 +698,14 @@ async def test_a_reader_cancelled_in_flight_with_a_siblings_write_behind_has_non
 ):
     await _share(mem, share)
     go = threading.Event()
-    waiting = asyncio.create_task(_in_thread(mem.connection, lambda db: go.wait(10)))  # holds the thread
+    waiting = asyncio.create_task(
+        _in_thread(mem.connection, lambda db: go.wait(10))
+    )  # holds the thread
     reader = asyncio.create_task(_reader(mem, 0))
     writer = asyncio.create_task(_write(mem, "update"))
-    await asyncio.sleep(0)  # one turn: the wait, the SELECT, its read ahead and the UPDATE are queued, in that order
+    await asyncio.sleep(
+        0
+    )  # one turn: the wait, the SELECT, its read ahead and the UPDATE are queued, in that order
     reader.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(reader, 10)
@@ -655,8 +716,12 @@ async def test_a_reader_cancelled_in_flight_with_a_siblings_write_behind_has_non
     assert read_ahead == [0]  # the SELECT ran, and nobody can read its N rows
 
 
-@pytest.mark.parametrize("given_up_at,stepped_to", [(None, []), (3, [0, 1, 2, 3])], ids=["before", "at-row-3"])
-async def test_a_read_ahead_of_a_cursor_nobody_can_read_steps_no_further(mem, given_up_at, stepped_to):
+@pytest.mark.parametrize(
+    "given_up_at,stepped_to", [(None, []), (3, [0, 1, 2, 3])], ids=["before", "at-row-3"]
+)
+async def test_a_read_ahead_of_a_cursor_nobody_can_read_steps_no_further(
+    mem, given_up_at, stepped_to
+):
     await mem.execute("SELECT 1")
     cur = _Cursor(mem, None, mem.connection)
     stepped: list = []
@@ -688,7 +753,9 @@ async def test_a_read_ahead_of_a_cursor_nobody_can_read_steps_no_further(mem, gi
     ],
 )
 async def test_a_cursor_with_nothing_left_to_read_is_not_kept_for_a_read_ahead(mem, how, kept):
-    await mem.begin_transaction()  # the connection stays this task's: no other context takes a cursor off it
+    await (
+        mem.begin_transaction()
+    )  # the connection stays this task's: no other context takes a cursor off it
     if how == "failed":
         with pytest.raises(sqlite3.OperationalError, match="no such table: no_such_table") as held:
             await mem.execute("SELECT n FROM no_such_table")
@@ -725,7 +792,9 @@ async def test_a_select_with_no_rows_beside_a_siblings_write_leaves_no_cursor(me
 
 
 @pytest.mark.parametrize("share", SHARES)
-async def test_an_insert_returning_in_flight_with_a_siblings_write_behind_returns_its_own_rows(mem, share):
+async def test_an_insert_returning_in_flight_with_a_siblings_write_behind_returns_its_own_rows(
+    mem, share
+):
     await _share(mem, share)
 
     async def returning():
@@ -753,7 +822,9 @@ async def test_a_cursor_on_a_connection_whose_reclaim_rollback_fails_raises_not_
     await asyncio.wait_for(asyncio.create_task(leave_it()), 10)
     await asyncio.wait_for(made.wait(), 5)
     await _whole(mem)
-    with pytest.raises(NotConnectedError, match="could not be read before its connection changed hands"):
+    with pytest.raises(
+        NotConnectedError, match="could not be read before its connection changed hands"
+    ):
         await asyncio.wait_for(box["cur"].fetchall(), 5)
     count = await mem.execute("SELECT count(*) FROM t")
     replaced = (box["raw"] in mem._all_conns, box["raw"] in mem._unread, len(mem._all_conns))
@@ -767,11 +838,15 @@ async def test_a_cursor_on_a_connection_whose_reclaim_rollback_fails_raises_not_
 @pytest.mark.parametrize("name", _AIOSQLITE_PRIVATE)
 async def test_the_installed_aiosqlite_has_each_private_name_the_adapter_uses(name):
     owner, attribute = name.split(".")
-    assert hasattr(getattr(aiosqlite, owner), attribute), f"aiosqlite {aiosqlite.__version__} has no {name}"
+    assert hasattr(getattr(aiosqlite, owner), attribute), (
+        f"aiosqlite {aiosqlite.__version__} has no {name}"
+    )
 
 
 @pytest.mark.parametrize("name", _AIOSQLITE_PRIVATE)
-async def test_a_missing_aiosqlite_name_is_raised_at_connect_naming_aiosqlite_its_version_and_the_name(name):
+async def test_a_missing_aiosqlite_name_is_raised_at_connect_naming_aiosqlite_its_version_and_the_name(
+    name,
+):
     owner, attribute = name.split(".")
     adapter = AsyncSQLiteAdapter.in_memory(acquire_timeout=5)
     with pytest.MonkeyPatch.context() as patch:
@@ -793,7 +868,9 @@ _CHANGED_CALLS = {
 
 
 @pytest.mark.parametrize("call", _AIOSQLITE_CALLS)
-async def test_a_call_aiosqlite_no_longer_takes_is_raised_at_connect_naming_aiosqlite_its_version_and_the_call(call):
+async def test_a_call_aiosqlite_no_longer_takes_is_raised_at_connect_naming_aiosqlite_its_version_and_the_call(
+    call,
+):
     owner, attribute, changed = _CHANGED_CALLS[call]
     adapter = AsyncSQLiteAdapter.in_memory(acquire_timeout=5)
     with pytest.MonkeyPatch.context() as patch:

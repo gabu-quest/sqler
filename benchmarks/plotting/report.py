@@ -45,7 +45,8 @@ def generate_report(input_path: str, output_dir: str) -> None:
             "Bulk Insert Scaling — bulk_upsert() vs sqlite3 executemany",
             system_info,
             charts_dir / "01_bulk_scaling",
-            xlabel="Rows", ylabel="Time (ms)",
+            xlabel="Rows",
+            ylabel="Time (ms)",
         )
 
     if "single_vs_bulk" in by_scenario:
@@ -295,8 +296,9 @@ def _fmt_p95(val) -> str:
     return f"{val:.2f}"
 
 
-def _write_markdown_report(path: Path, data: dict, chart_paths: dict[str, Path],
-                            charts_dir: Path) -> None:
+def _write_markdown_report(
+    path: Path, data: dict, chart_paths: dict[str, Path], charts_dir: Path
+) -> None:
     """Write the final markdown report."""
     system = data.get("system", {})
     config = data.get("config", {})
@@ -316,12 +318,14 @@ def _write_markdown_report(path: Path, data: dict, chart_paths: dict[str, Path],
     ]
 
     # Summary table
-    lines.extend([
-        "## Summary",
-        "",
-        "| Suite | Scenario | Parameter | Median (ms) | P95 (ms) | Throughput |",
-        "|-------|----------|-----------|-------------|----------|------------|",
-    ])
+    lines.extend(
+        [
+            "## Summary",
+            "",
+            "| Suite | Scenario | Parameter | Median (ms) | P95 (ms) | Throughput |",
+            "|-------|----------|-----------|-------------|----------|------------|",
+        ]
+    )
 
     for r in results:
         tp = f"{r.get('throughput', 0):,.0f}/s" if r.get("throughput", 0) > 0 else "\u2014"
@@ -337,28 +341,30 @@ def _write_markdown_report(path: Path, data: dict, chart_paths: dict[str, Path],
     lines.append("")
 
     # Reading the charts
-    lines.extend([
-        "## Reading the Charts",
-        "",
-        "Every benchmark runs multiple iterations. The numbers you see are:",
-        "",
-        "- **Median** \u2014 the middle value across all iterations. "
-        "Half the runs were faster, half were slower. "
-        "More stable than the mean because a single slow run (GC pause, OS scheduling) doesn't skew it.",
-        "- **P95 (95th percentile)** \u2014 95% of runs finished at or below this time. "
-        "This is your realistic worst-case: the latency your users will occasionally hit "
-        "but not often enough to show up in the median.",
-        "- **Shaded bands** (on scaling line charts) \u2014 the area between median and p95. "
-        "A narrow band means the operation is predictable. "
-        "A wide band means variance is high \u2014 expect occasional slow runs, "
-        "often from SQLite page cache misses, GC pauses, or OS-level contention.",
-        "- **Error caps** (on bar charts) \u2014 the vertical whisker above each bar extends to p95. "
-        "Same interpretation: how much slower than the median can a single run get.",
-        "- **Orange bars** = sqler, **Blue bars** = raw sqlite3 baseline.",
-        "- **Solid lines** = in-memory, **Dashed lines** = on-disk (when running `--storage both`).",
-        "- **Hatched bars** = on-disk storage mode.",
-        "",
-    ])
+    lines.extend(
+        [
+            "## Reading the Charts",
+            "",
+            "Every benchmark runs multiple iterations. The numbers you see are:",
+            "",
+            "- **Median** \u2014 the middle value across all iterations. "
+            "Half the runs were faster, half were slower. "
+            "More stable than the mean because a single slow run (GC pause, OS scheduling) doesn't skew it.",
+            "- **P95 (95th percentile)** \u2014 95% of runs finished at or below this time. "
+            "This is your realistic worst-case: the latency your users will occasionally hit "
+            "but not often enough to show up in the median.",
+            "- **Shaded bands** (on scaling line charts) \u2014 the area between median and p95. "
+            "A narrow band means the operation is predictable. "
+            "A wide band means variance is high \u2014 expect occasional slow runs, "
+            "often from SQLite page cache misses, GC pauses, or OS-level contention.",
+            "- **Error caps** (on bar charts) \u2014 the vertical whisker above each bar extends to p95. "
+            "Same interpretation: how much slower than the median can a single run get.",
+            "- **Orange bars** = sqler, **Blue bars** = raw sqlite3 baseline.",
+            "- **Solid lines** = in-memory, **Dashed lines** = on-disk (when running `--storage both`).",
+            "- **Hatched bars** = on-disk storage mode.",
+            "",
+        ]
+    )
 
     # Charts section
     lines.extend(["## Charts", ""])
@@ -392,70 +398,76 @@ def _write_markdown_report(path: Path, data: dict, chart_paths: dict[str, Path],
     for key, chart_path in chart_paths.items():
         title = chart_titles.get(key, key)
         rel_path = chart_path.relative_to(charts_dir.parent) if chart_path else ""
-        lines.extend([
-            f"### {title}",
-            "",
-            f"![{title}]({rel_path})",
-            "",
-        ])
+        lines.extend(
+            [
+                f"### {title}",
+                "",
+                f"![{title}]({rel_path})",
+                "",
+            ]
+        )
 
     # Methodology section — v1.2 is fair, document what we do
-    lines.extend([
-        "## Methodology (v1.2)",
-        "",
-        "This benchmark suite is designed to survive adversarial peer review.",
-        "Every comparison is apples-to-apples: same SQL, same PRAGMAs, same serialization.",
-        "",
-        "### Configuration Parity",
-        "",
-        "- Both arms use **identical PRAGMAs** copied from sqler's adapter source code",
-        "  - In-memory: `synchronous=OFF`, `journal_mode=MEMORY`, `cache_size=-32000`, `locking_mode=EXCLUSIVE`",
-        "  - On-disk: `journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-64000`, `mmap_size=256MB`",
-        "- Both arms use `row_factory = sqlite3.Row`",
-        "- Both arms get the same warmup treatment",
-        "",
-        "### Operation Parity",
-        "",
-        "- Both arms execute **equivalent SQL** (verified by inspection)",
-        "- Array queries use `json_each(data, '$.path')` in both arms (not `json_each(json_extract(...))`)",
-        "- Both arms deserialize JSON via `json.loads()` for result parity",
-        "- Export benchmarks round-trip JSON (`json.loads` + `json.dumps`) in both arms",
-        "- Documents are deep-copied before each insert to prevent mutation bias",
-        "",
-        "### Measurement Parity",
-        "",
-        "- Both arms use `time.perf_counter()` for timing",
-        "- GC is disabled during measurement (`gc_isolation`) and `gc.collect()` runs between arms",
-        "- Arm execution order is **alternated** per scenario (deterministic hash-based flip)",
-        "- Warmup runs happen for both arms, discarded from measurements",
-        "- Connection setup and teardown are both outside the timed window",
-        "- Pre-allocated DB/connection pools are created before timing starts",
-        "",
-        "### Known Remaining Asymmetries",
-        "",
-        "These are **documented, not hidden**:",
-        "",
-        "- sqler's query logger adds per-query instrumentation overhead (~1-5% on fast queries)."
-        " This is legitimate ORM cost, not a measurement bias.",
-        "- sqler's cold query includes `_ensure_table()` overhead on first access."
-        " This is real ORM initialization cost.",
-        "- `@cached_query` uses sqler's decorator vs a raw dict lookup for the baseline."
-        " The comparison measures decorator overhead specifically.",
-        "",
-    ])
+    lines.extend(
+        [
+            "## Methodology (v1.2)",
+            "",
+            "This benchmark suite is designed to survive adversarial peer review.",
+            "Every comparison is apples-to-apples: same SQL, same PRAGMAs, same serialization.",
+            "",
+            "### Configuration Parity",
+            "",
+            "- Both arms use **identical PRAGMAs** copied from sqler's adapter source code",
+            "  - In-memory: `synchronous=OFF`, `journal_mode=MEMORY`, `cache_size=-32000`, `locking_mode=EXCLUSIVE`",
+            "  - On-disk: `journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-64000`, `mmap_size=256MB`",
+            "- Both arms use `row_factory = sqlite3.Row`",
+            "- Both arms get the same warmup treatment",
+            "",
+            "### Operation Parity",
+            "",
+            "- Both arms execute **equivalent SQL** (verified by inspection)",
+            "- Array queries use `json_each(data, '$.path')` in both arms (not `json_each(json_extract(...))`)",
+            "- Both arms deserialize JSON via `json.loads()` for result parity",
+            "- Export benchmarks round-trip JSON (`json.loads` + `json.dumps`) in both arms",
+            "- Documents are deep-copied before each insert to prevent mutation bias",
+            "",
+            "### Measurement Parity",
+            "",
+            "- Both arms use `time.perf_counter()` for timing",
+            "- GC is disabled during measurement (`gc_isolation`) and `gc.collect()` runs between arms",
+            "- Arm execution order is **alternated** per scenario (deterministic hash-based flip)",
+            "- Warmup runs happen for both arms, discarded from measurements",
+            "- Connection setup and teardown are both outside the timed window",
+            "- Pre-allocated DB/connection pools are created before timing starts",
+            "",
+            "### Known Remaining Asymmetries",
+            "",
+            "These are **documented, not hidden**:",
+            "",
+            "- sqler's query logger adds per-query instrumentation overhead (~1-5% on fast queries)."
+            " This is legitimate ORM cost, not a measurement bias.",
+            "- sqler's cold query includes `_ensure_table()` overhead on first access."
+            " This is real ORM initialization cost.",
+            "- `@cached_query` uses sqler's decorator vs a raw dict lookup for the baseline."
+            " The comparison measures decorator overhead specifically.",
+            "",
+        ]
+    )
 
     # Future work
-    lines.extend([
-        "## Known Gaps / Future Work",
-        "",
-        "1. **Result count verification** \u2014 automated assertion that sqler and sqlite return same row counts",
-        "2. **Deep nested JSON path equality** \u2014 `$.level_0.level_1.field` direct equality untested",
-        "3. **Auxiliary inverted index tables** \u2014 no public API for array membership tables",
-        "4. **Async adapter benchmarks** \u2014 all scenarios use the synchronous adapter",
-        "",
-        "---",
-        "",
-        "*Generated by sqler benchmark suite v1.2 \u2014 fair comparison, matched baselines, no fiction.*",
-    ])
+    lines.extend(
+        [
+            "## Known Gaps / Future Work",
+            "",
+            "1. **Result count verification** \u2014 automated assertion that sqler and sqlite return same row counts",
+            "2. **Deep nested JSON path equality** \u2014 `$.level_0.level_1.field` direct equality untested",
+            "3. **Auxiliary inverted index tables** \u2014 no public API for array membership tables",
+            "4. **Async adapter benchmarks** \u2014 all scenarios use the synchronous adapter",
+            "",
+            "---",
+            "",
+            "*Generated by sqler benchmark suite v1.2 \u2014 fair comparison, matched baselines, no fiction.*",
+        ]
+    )
 
     path.write_text("\n".join(lines))

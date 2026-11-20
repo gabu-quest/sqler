@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-import sqlite3
-from typing import ClassVar, Optional, TypeVar
+from typing import Awaitable, ClassVar, Optional, TypeVar
 
 from pydantic import PrivateAttr
 
-from sqler.exceptions import StaleVersionError
-from sqler.models import _dirty, _refs
+from sqler.models import _dirty, _refs, _write_rules
 
 from . import save_retry as _retry
 from .async_model import AsyncSQLerModel
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     RebaseConfig,
-    can_rebase_deltas,
-    compute_numeric_scalar_deltas,
 )
 
 TASafe = TypeVar("TASafe", bound="AsyncSQLerSafeModel")
+
+
+def _resolve(payload: dict, db, cls) -> Awaitable[dict]:
+    """``payload`` with the model of each typed reference in place, read from ``db``."""
+    return _refs.aresolve(payload, db, frozenset(), cls)
 
 
 class AsyncSQLerSafeModel(AsyncSQLerModel):
@@ -71,19 +72,12 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         """Write new instances in one batch at ``_version=0``; each takes its ``_id``,
         ``_version`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
-
         if promoted:
-            checks = getattr(cls, "__checks__", None)
-            await db._ensure_promoted(table, promoted, checks, model=cls)
+            await _write_rules.ensure_columns(cls, db, table, promoted)
         await db._ensure_versioned_table(table)
-
         payloads = [await inst._adump_with_relations() for inst in instances]
-
-        if promoted:
-            promoted_fields = list(promoted.keys())
-            id_version_pairs = await db.insert_many_with_version_promoted(table, payloads, promoted_fields)
-        else:
-            id_version_pairs = await db.insert_many_with_version(table, payloads)
+        insert, args = _write_rules.rows_insert(db, table, payloads, promoted, versioned=True)
+        id_version_pairs = await insert(*args)
 
         for inst, (id_, version), payload in zip(instances, id_version_pairs, payloads):
             inst._id = id_
@@ -96,74 +90,14 @@ class AsyncSQLerSafeModel(AsyncSQLerModel):
         If the save fails due to a stale version (another process updated
         the row), and the changes qualify for rebasing (based on ``_rebase_config``),
         the library will automatically fetch the latest version and reapply
-        your changes on top of it.
+        your changes on top of it. The steps and their order are
+        :func:`sqler.models.save_retry.arun`.
 
         Raises:
             StaleVersionError: If the version is stale and cannot be rebased.
         """
-        cls = self.__class__
-
-        # Get the rebase configuration for this model class
-        rebase_config = getattr(cls, "_rebase_config", DEFAULT_REBASE_CONFIG)
-
-        # The caller's intent: the counter deltas from its snapshot to its payload
-        snap = getattr(self, "_snapshot", None)
         held = await self._adump_with_relations()
-        delta = compute_numeric_scalar_deltas(snap, held) if snap else None
-        can_rebase = bool(delta) and can_rebase_deltas(delta, rebase_config)
-
-        retry = _retry.SaveRetry(rebase_config)
-
-        payload, written = held, None
-        version, base = self._version, snap  # the model keeps its own until a write succeeds
-        while True:
-            retry.begin_try()
-            try:
-                promoted = getattr(cls, "__promoted__", None)
-                if promoted:
-                    await db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
-                if _partial:
-                    changed = _dirty.changed_fields(base or {}, payload)
-                    new_id, new_version = self._id, await db._update_fields(
-                        table, self._id, payload, changed, promoted or (), version
-                    )
-                elif promoted:
-                    new_id, new_version = await db.upsert_with_version_promoted(
-                        table, self._id, payload, version,
-                        list(promoted.keys()),
-                    )
-                else:
-                    new_id, new_version = await db.upsert_with_version(
-                        table, self._id, payload, version
-                    )
-                self._id = new_id
-                self._version = new_version
-                self._snapshot = _dirty.snapshot(payload)
-                if written is not None:  # rebased: the row holds the other writer's work too
-                    _retry.settle(self, held, written)
-                return self
-            except StaleVersionError as stale:
-                if not can_rebase:
-                    raise
-                if self._id is None:
-                    raise
-                delay = retry.after_conflict()
-                latest_doc = await retry.areread(lambda: db.find_document_with_version(table, self._id))
-                if latest_doc is None:
-                    raise
-                payload = _retry.rebase(
-                    latest_doc, held, snap, delta, stale, getattr(cls, "_update_stamps", dict)()
-                )
-                async def build():
-                    return cls.model_validate(await _refs.aresolve(payload, db, frozenset(), cls))
-
-                written = await retry.abuild(stale, build)
-                version, base = latest_doc.get("_version", 0), _dirty.snapshot(latest_doc)
-            except sqlite3.OperationalError as e:
-                if not _retry.is_lock_error(e):
-                    raise
-                delay = retry.after_lock(e)
-            await _retry.asleep(delay)
+        return await _retry.arun(self, db, table, _partial, held, _resolve, setattr)
 
     def _refreshed(self: TASafe, doc: dict, row: dict) -> TASafe:
         super()._refreshed(doc, row)

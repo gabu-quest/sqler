@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import pytest
+
 from sqler import AsyncSQLerDB
 from sqler.adapter.abstract import AsyncAdapterABC
 from sqler.adapter.asynchronous import DEFAULT_ACQUIRE_TIMEOUT_S
@@ -17,8 +18,14 @@ def test_defaults_match_the_adapter(tmp_path):
 
 def test_factories_hand_it_on(tmp_path):
     assert AsyncSQLerDB.in_memory(acquire_timeout=0.25).adapter.acquire_timeout == 0.25
-    assert AsyncSQLerDB.in_memory(False, name=None, acquire_timeout=None).adapter.acquire_timeout is None
-    assert AsyncSQLerDB.on_disk(str(tmp_path / "d.db"), acquire_timeout=2.0).adapter.acquire_timeout == 2.0
+    assert (
+        AsyncSQLerDB.in_memory(False, name=None, acquire_timeout=None).adapter.acquire_timeout
+        is None
+    )
+    assert (
+        AsyncSQLerDB.on_disk(str(tmp_path / "d.db"), acquire_timeout=2.0).adapter.acquire_timeout
+        == 2.0
+    )
 
 
 @pytest.mark.asyncio

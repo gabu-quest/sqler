@@ -10,6 +10,7 @@ import logging
 import sqlite3
 
 import pytest
+
 from sqler.db.async_db import AsyncSQLerDB
 
 REPLACED = "rollback of a reclaimed connection failed (OperationalError: interrupted); replacing it"
@@ -40,11 +41,18 @@ async def test_a_block_whose_rollback_fails_replaces_its_connection(tmp_path, ca
                 old = db.adapter.connection
                 await old.set_progress_handler(lambda: 1, 1)
                 raise ValueError("the block's own error")
-        assert (str(raised.value), getattr(raised.value, "__notes__", [])) == ("the block's own error", [])
+        assert (str(raised.value), getattr(raised.value, "__notes__", [])) == (
+            "the block's own error",
+            [],
+        )
         assert _committed(path) == ["before"]
         assert [r.getMessage() for r in caplog.records] == [REPLACED]
         pooled = list(db.adapter._pool._queue)
-        assert (db.adapter.pool_stats().total_connections, old in db.adapter._all_conns, old in pooled) == (
+        assert (
+            db.adapter.pool_stats().total_connections,
+            old in db.adapter._all_conns,
+            old in pooled,
+        ) == (
             total,
             False,
             False,

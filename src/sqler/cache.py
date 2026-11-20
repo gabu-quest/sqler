@@ -37,7 +37,7 @@ import weakref
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Generic, Optional, TypeVar, Union
+from typing import Any, Callable, Generic, Optional, TypeVar, Union, overload
 
 from sqler.models._table_names import _unchecked_table_name
 from sqler.models._write_rules import WriteRules
@@ -54,6 +54,12 @@ _held: dict[str, int] = {}
 _held_lock = threading.Lock()
 
 
+@overload
+def _table_name(table: Union[str, type]) -> str: ...
+@overload
+def _table_name(table: None) -> None: ...
+@overload
+def _table_name(table: Union[str, type, None]) -> Optional[str]: ...
 def _table_name(table: Union[str, type, None]) -> Optional[str]:
     """The name an entry of ``table`` is kept under: a model class stands for its table, and
     SQLite does not tell table names apart by case."""
@@ -251,7 +257,12 @@ class QueryCache:
         self._store(key, value, ttl_seconds, _table_name(table), None)
 
     def _store(
-        self, key: str, value: Any, ttl_seconds: Optional[float], table: Optional[str], generation: Optional[int]
+        self,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[float],
+        table: Optional[str],
+        generation: Optional[int],
     ) -> None:
         """Store ``value``, unless ``table`` is held or was written since ``generation``
         (``None``: not checked)."""
@@ -260,7 +271,8 @@ class QueryCache:
 
         with self._lock:
             if table is not None and (
-                table in _held or (generation is not None and self._generations.get(table, 0) != generation)
+                table in _held
+                or (generation is not None and self._generations.get(table, 0) != generation)
             ):
                 return
             # Evict if at capacity and this is a new key
@@ -287,7 +299,7 @@ class QueryCache:
                     self._table_keys[table] = set()
                 self._table_keys[table].add(key)
 
-    def get(self, key: str, default: T = None) -> Optional[T]:
+    def get(self, key: str, default: Optional[T] = None) -> Optional[T]:
         """Get a cached value.
 
         Args:
@@ -334,6 +346,7 @@ class QueryCache:
         is held (the result is not stored)."""
         with self._lock:
             if table in _held:
+                self._stats.misses += 1
                 return False, None
             entry = self._cache.get(key)
             if entry is not None:
@@ -344,7 +357,8 @@ class QueryCache:
                     return True, entry.value
                 self._remove_key(key)
                 self._stats.expirations += 1
-            return False, self._generations.get(table, 0)
+            self._stats.misses += 1
+            return False, self._generations.get(table, 0) if table is not None else 0
 
     def invalidate(self, key: str) -> bool:
         """Invalidate a specific key.
@@ -536,7 +550,7 @@ def cached_query(
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            c = cache or get_cache()
+            c = get_cache() if cache is None else cache
             cache_key = key or _make_cache_key(func, args, kwargs)
             name = _table_name(table)
             found, value = c._lookup(cache_key, name)
@@ -548,10 +562,10 @@ def cached_query(
             return result
 
         # Add cache control methods
-        wrapper.invalidate = lambda: (cache or get_cache()).invalidate(
-            key or _make_cache_key(func, (), {})
-        )
-        wrapper.cache_key = key
+        wrapper.invalidate = lambda: (  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
+            get_cache() if cache is None else cache
+        ).invalidate(key or _make_cache_key(func, (), {}))
+        wrapper.cache_key = key  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
 
         return wrapper
 
@@ -569,7 +583,7 @@ def async_cached_query(
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            c = cache or get_cache()
+            c = get_cache() if cache is None else cache
             cache_key = key or _make_cache_key(func, args, kwargs)
             name = _table_name(table)
             found, value = c._lookup(cache_key, name)
@@ -580,10 +594,10 @@ def async_cached_query(
                 c._store(cache_key, result, ttl_seconds, name, value)
             return result
 
-        wrapper.invalidate = lambda: (cache or get_cache()).invalidate(
-            key or _make_cache_key(func, (), {})
-        )
-        wrapper.cache_key = key
+        wrapper.invalidate = lambda: (  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
+            get_cache() if cache is None else cache
+        ).invalidate(key or _make_cache_key(func, (), {}))
+        wrapper.cache_key = key  # type: ignore[attr-defined]  # a function takes attributes; mypy types it without them
 
         return wrapper
 
@@ -655,7 +669,9 @@ class CacheAwareModel(WriteRules):
     def _get_cache_table(cls) -> str:
         """The name of this class's cached results besides its table: ``Meta.cache_table``
         where the class sets one, else its table."""
-        return getattr(getattr(cls, "Meta", None), "cache_table", None) or _unchecked_table_name(cls)
+        return getattr(getattr(cls, "Meta", None), "cache_table", None) or _unchecked_table_name(
+            cls
+        )
 
     @classmethod
     def _table_written(cls, db, table: str) -> None:

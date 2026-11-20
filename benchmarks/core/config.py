@@ -68,8 +68,11 @@ class ScaleConfig:
     @classmethod
     def from_name(cls, name: str) -> ScaleConfig:
         configs = {
-            "small": cls.small, "medium": cls.medium, "large": cls.large,
-            "xlarge": cls.xlarge, "xxlarge": cls.xxlarge,
+            "small": cls.small,
+            "medium": cls.medium,
+            "large": cls.large,
+            "xlarge": cls.xlarge,
+            "xxlarge": cls.xxlarge,
         }
         factory = configs.get(name)
         if factory is None:

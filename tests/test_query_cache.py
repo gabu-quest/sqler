@@ -20,11 +20,13 @@ from typing import Optional
 import pydantic
 import pytest
 import pytest_asyncio
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
     AsyncSQLerLiteSafeModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     AsyncSQLerSafeModel,
     QueryCache,
     SQLerDB,
@@ -169,24 +171,38 @@ class TestQueryCache:
 class TestCachedQueryDecorator:
     """Tests for cached_query decorator."""
 
-    def test_cached_query_decorator(self):
-        """Decorator caches function results."""
-        call_count = 0
+    @pytest.mark.parametrize("flavour", ["sync", "async"])
+    def test_a_decorated_function_runs_once_and_its_cache_counts_the_miss_and_the_hit(
+        self, flavour
+    ):
+        cache = QueryCache()
+        calls = 0
 
-        @cached_query(ttl_seconds=60)
-        def expensive_function():
-            nonlocal call_count
-            call_count += 1
-            return {"result": "data"}
+        if flavour == "sync":
 
-        # First call executes function
-        result1 = expensive_function()
-        assert call_count == 1
+            @cached_query(ttl_seconds=60, cache=cache)
+            def expensive():
+                nonlocal calls
+                calls += 1
+                return {"result": "data"}
 
-        # Second call returns cached result
-        result2 = expensive_function()
-        assert call_count == 1  # Not incremented
-        assert result1 == result2
+            results = [expensive(), expensive()]
+        else:
+
+            @async_cached_query(ttl_seconds=60, cache=cache)
+            async def expensive():
+                nonlocal calls
+                calls += 1
+                return {"result": "data"}
+
+            async def twice():
+                return [await expensive(), await expensive()]
+
+            results = asyncio.run(twice())
+
+        assert (calls, results) == (1, [{"result": "data"}, {"result": "data"}])
+        stats = cache.stats
+        assert (stats.hits, stats.misses, stats.hit_rate) == (1, 1, 0.5)
 
 
 # =============================================================================
@@ -205,6 +221,7 @@ ASYNC_BASES = {
     "pydantic_safe": AsyncSQLerSafeModel,
     "lite": AsyncSQLerLiteModel,
     "lite_safe": AsyncSQLerLiteSafeModel,
+    "msgspec": AsyncSQLerMsgspecModel,
 }
 
 _tables = itertools.count()
@@ -217,9 +234,16 @@ def make(base, *mixins, table=None, alias=None):
     """A class of ``base`` with the cache mixin, the ``mixins`` and a ``name`` field, on a
     table of its own; ``alias``: its ``Meta.cache_table``."""
     table = table or f"qc_{base.__name__.lower()}_{next(_tables)}"
-    ns = {"__module__": __name__, "__tablename__": table, "name": "", "__annotations__": {"name": str}}
-    kwds = {"tag": False} if base is SQLerMsgspecModel else {}
-    cls = types.new_class(f"Item_{table}", (CacheAwareModel, *mixins, base), kwds, lambda body: body.update(ns))
+    ns = {
+        "__module__": __name__,
+        "__tablename__": table,
+        "name": "",
+        "__annotations__": {"name": str},
+    }
+    kwds = {"tag": False} if base in (SQLerMsgspecModel, AsyncSQLerMsgspecModel) else {}
+    cls = types.new_class(
+        f"Item_{table}", (CacheAwareModel, *mixins, base), kwds, lambda body: body.update(ns)
+    )
     if alias is not None:
         cls.Meta = type("Meta", (), {"cache_table": alias})
     return dataclass(cls) if base in LITE else cls
@@ -267,7 +291,7 @@ def _plain(base, *mixins):
     """A class of ``base`` with the ``mixins`` and no cache mixin."""
     table = f"qc_plain_{next(_tables)}"
     ns = {"__tablename__": table, "name": "", "__annotations__": {"name": str}}
-    kwds = {"tag": False} if base is SQLerMsgspecModel else {}
+    kwds = {"tag": False} if base in (SQLerMsgspecModel, AsyncSQLerMsgspecModel) else {}
     cls = types.new_class(f"Plain_{table}", (*mixins, base), kwds, lambda body: body.update(ns))
     return dataclass(cls) if base in LITE else cls
 
@@ -367,23 +391,39 @@ async def test_a_result_read_before_a_commit_is_not_served_after_it_async(tmp_pa
 
 # ----- every way of writing, on every base ---------------------------------------------
 
+
 def _first(q, name):
     return [m for m in q.all() if m.name == name][0]
 
 
 SYNC_WAYS = {
     "save_new": (lambda cls, db: cls(name="new").save(db=db), ["a", "b", "new"]),
-    "save_changed": (lambda cls, db: _renamed(_first(cls.using(db), "a")).save(db=db), ["b", "new"]),
-    "save_partial": (lambda cls, db: _renamed(_first(cls.using(db), "a")).save_partial(db=db), ["b", "new"]),
+    "save_changed": (
+        lambda cls, db: _renamed(_first(cls.using(db), "a")).save(db=db),
+        ["b", "new"],
+    ),
+    "save_partial": (
+        lambda cls, db: _renamed(_first(cls.using(db), "a")).save_partial(db=db),
+        ["b", "new"],
+    ),
     "delete": (lambda cls, db: _first(cls.using(db), "a").delete(db=db), ["b"]),
     "delete_with_policy": (
         lambda cls, db: _first(cls.using(db), "a").delete_with_policy(db=db, on_delete="cascade"),
         ["b"],
     ),
-    "save_many": (lambda cls, db: cls.save_many([cls(name="new"), cls(name="new2")], db=db), ["a", "b", "new", "new2"]),
+    "save_many": (
+        lambda cls, db: cls.save_many([cls(name="new"), cls(name="new2")], db=db),
+        ["a", "b", "new", "new2"],
+    ),
     "update": (lambda cls, db: cls.using(db).update(name="new"), ["new", "new"]),
-    "update_one": (lambda cls, db: cls.using(db).filter(F("name") == "a").update_one(name="new"), ["b", "new"]),
-    "update_n": (lambda cls, db: cls.using(db).filter(F("name") == "a").update_n(1, name="new"), ["b", "new"]),
+    "update_one": (
+        lambda cls, db: cls.using(db).filter(F("name") == "a").update_one(name="new"),
+        ["b", "new"],
+    ),
+    "update_n": (
+        lambda cls, db: cls.using(db).filter(F("name") == "a").update_n(1, name="new"),
+        ["b", "new"],
+    ),
     "delete_all": (lambda cls, db: cls.using(db).filter(F("name") == "a").delete_all(), ["b"]),
 }
 SET_WAYS = {"update", "update_one", "update_n", "delete_all"}
@@ -397,8 +437,6 @@ def _renamed(m):
 def _sync_cells():
     for way in SYNC_WAYS:
         for kind, base in SYNC_BASES.items():
-            if way == "save_partial" and base is SQLerMsgspecModel:
-                continue  # the change tracker does not support msgspec models
             yield pytest.param(way, kind, id=f"{way}-{kind}")
 
 
@@ -455,10 +493,19 @@ ASYNC_WAYS = {
     "save_partial": (_asave_partial, ["b", "new"]),
     "delete": (_adelete, ["b"]),
     "delete_with_policy": (_adelete_with_policy, ["b"]),
-    "save_many": (lambda cls, db: cls.save_many([cls(name="new"), cls(name="new2")], db=db), ["a", "b", "new", "new2"]),
+    "save_many": (
+        lambda cls, db: cls.save_many([cls(name="new"), cls(name="new2")], db=db),
+        ["a", "b", "new", "new2"],
+    ),
     "update": (lambda cls, db: cls.using(db).update(name="new"), ["new", "new"]),
-    "update_one": (lambda cls, db: cls.using(db).filter(F("name") == "a").update_one(name="new"), ["b", "new"]),
-    "update_n": (lambda cls, db: cls.using(db).filter(F("name") == "a").update_n(1, name="new"), ["b", "new"]),
+    "update_one": (
+        lambda cls, db: cls.using(db).filter(F("name") == "a").update_one(name="new"),
+        ["b", "new"],
+    ),
+    "update_n": (
+        lambda cls, db: cls.using(db).filter(F("name") == "a").update_n(1, name="new"),
+        ["b", "new"],
+    ),
     "delete_all": (lambda cls, db: cls.using(db).filter(F("name") == "a").delete_all(), ["b"]),
 }
 
@@ -511,7 +558,9 @@ def test_a_set_based_write_of_a_class_with_an_audit_log_makes_the_cached_result_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", sorted(SET_WAYS))
-async def test_a_set_based_write_of_a_class_with_an_audit_log_makes_the_cached_result_fresh_async(adb, way):
+async def test_a_set_based_write_of_a_class_with_an_audit_log_makes_the_cached_result_fresh_async(
+    adb, way
+):
     Item = make(AsyncSQLerModel, AsyncAuditLogMixin)
     await Item.save_many([Item(name="a"), Item(name="b")], db=adb)
     f = Counted(Item, adb, is_async=True)
@@ -614,11 +663,15 @@ def test_the_rows_a_policy_changes_make_their_cached_result_fresh(db, policy):
 @pytest.mark.parametrize("policy", list(POLICIES))
 async def test_the_rows_a_policy_changes_make_their_cached_result_fresh_async(adb, policy):
     shelf = await AQcShelf(name="s").save(db=adb)
-    await AQcBook.save_many([AQcBook(name="a", shelf=shelf), AQcBook(name="b", shelf=shelf)], db=adb)
+    await AQcBook.save_many(
+        [AQcBook(name="a", shelf=shelf), AQcBook(name="b", shelf=shelf)], db=adb
+    )
 
     @async_cached_query(table=AQcBook, key="abooks")
     async def books():
-        return sorted((b.name, b.shelf is not None) for b in await AQcBook.using(adb).resolve(False).all())
+        return sorted(
+            (b.name, b.shelf is not None) for b in await AQcBook.using(adb).resolve(False).all()
+        )
 
     assert await books() == [("a", True), ("b", True)]
 
@@ -664,7 +717,9 @@ def test_another_threads_result_during_a_transaction_does_not_survive_its_commit
 
 
 @pytest.mark.asyncio
-async def test_inside_a_transaction_the_writers_task_reads_through_and_the_end_drops_the_rest(tmp_path):
+async def test_inside_a_transaction_the_writers_task_reads_through_and_the_end_drops_the_rest(
+    tmp_path,
+):
     adb = AsyncSQLerDB.on_disk(str(tmp_path / "t.db"))
     await adb.connect()
     try:
@@ -1076,4 +1131,3 @@ def test_the_cache_lock_is_free_while_a_cached_function_runs(db):
 
     assert names() == []
     assert free == [True]
-

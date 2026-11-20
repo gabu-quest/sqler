@@ -1,14 +1,10 @@
-"""There is one ``is_missing_table``, in the query layer; the model layer's old name is it."""
+"""There is one ``is_missing_table``, in the query layer."""
 
 import sqlite3
 
 import pytest
-from sqler.models import _table_names
+
 from sqler.query import query
-
-
-def test_model_layer_name_is_the_query_layer_function():
-    assert _table_names._is_missing_table is query.is_missing_table
 
 
 @pytest.mark.parametrize(

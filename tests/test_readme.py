@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerModel,
@@ -491,6 +492,32 @@ def test_C20_index_helpers_readme():
 
 
 # ---------------- [C21] README FastAPI mapping ----------------
+def test_C20_index_over_several_fields():
+    db = SQLerDB.in_memory()
+    db.ensure_table("jobs", promoted={"status": "TEXT", "priority": "INTEGER"})
+    for p in range(3):
+        db.insert_document("jobs", {"queue": "a", "status": "pending", "priority": p, "eta": p})
+
+    db.create_index(
+        "jobs",
+        ["queue", ("priority", "desc"), "eta"],
+        where="status = 'pending' AND json_extract(data, '$.eta') >= 0",
+    )
+    (index,) = db.list_indexes("jobs")
+    assert index["name"] == "idx_jobs_queue__priority_desc__eta"
+    assert (
+        "(json_extract(data, '$.queue'), priority DESC, json_extract(data, '$.eta'))"
+        in index["sql"]
+    )
+
+    q = (
+        db.query("jobs")
+        .filter((F("queue") == "a") & (F("status") == "pending"))
+        .order_by("priority", desc=True)
+    )
+    assert [d["priority"] for d in q.all_dicts()] == [2, 1, 0]
+
+
 def test_C21_fastapi_mapping_readme():
     try:
         from fastapi import HTTPException  # type: ignore
@@ -624,6 +651,7 @@ def test_C26_timestamp_mixin():
     post = post.save()
 
     from datetime import datetime, timezone
+
     now = datetime.now(timezone.utc)
     assert isinstance(post.created_at, datetime)
     assert isinstance(post.updated_at, datetime)
@@ -646,6 +674,7 @@ def test_C27_soft_delete_mixin():
     c.soft_delete()
     assert c.is_deleted == True
     from datetime import datetime, timezone
+
     now = datetime.now(timezone.utc)
     assert isinstance(c.deleted_at, datetime)
     assert abs((now - c.deleted_at.replace(tzinfo=timezone.utc)).total_seconds()) < 5
@@ -679,14 +708,13 @@ def test_C28_lifecycle_hooks_mixin():
     db = SQLerDB.in_memory()
     AuditedUser.set_db(db)
 
-    # Hooks are called manually by caller
-    u = AuditedUser(email="  ALICE@Example.COM  ")
-    if u.before_save():
-        u = u.save()
-        u.after_save()
+    # save() runs before_save() first and after_save() after the write
+    u = AuditedUser(email="  ALICE@Example.COM  ").save()
 
     assert u.email == "alice@example.com"
-    assert u.normalized == True
+    assert u.normalized is True
+    stored = db.find_document(AuditedUser.__tablename__, u._id)
+    assert stored["email"] == "alice@example.com"
 
 
 # ---------------- [C29] Query logging ----------------
@@ -720,7 +748,7 @@ def test_C29_query_logging():
 
     # Stats count matches total logged queries
     stats = query_logger.get_stats()
-    assert stats["count"] >= 2
+    assert stats["count"] == 4
 
     query_logger.disable()
     query_logger.clear()
@@ -949,6 +977,7 @@ def test_C36_rebase_config():
 
     s2.value += 1
     import pytest
+
     with pytest.raises(StaleVersionError):
         s2.save()  # Should raise because rebasing is disabled
 
@@ -1150,7 +1179,9 @@ def test_C43_schema_migrations():
         Migration(
             version=1,
             name="create_items",
-            up=lambda d: d.adapter.execute("CREATE TABLE items (_id INTEGER PRIMARY KEY, data JSON)"),
+            up=lambda d: d.adapter.execute(
+                "CREATE TABLE items (_id INTEGER PRIMARY KEY, data JSON)"
+            ),
             down=lambda d: d.adapter.execute("DROP TABLE items"),
         ),
         Migration(
@@ -1203,7 +1234,7 @@ def test_C44_metrics_collection():
 
     # Get metrics
     data = metrics.get_metrics()
-    assert data["queries"]["total_queries"] >= 3
+    assert data["queries"]["total_queries"] == 6
 
     # Prometheus format export
     prometheus = metrics.prometheus_export()

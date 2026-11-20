@@ -11,6 +11,7 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.db.sqler_db import SQLerDB
@@ -197,9 +198,7 @@ async def test_rollback_with_nothing_applied_is_a_successful_no_op(db):
 
 @pytest.mark.asyncio
 async def test_failing_down_keeps_the_schema_and_the_version_row(db):
-    runner = AsyncMigrationRunner(
-        db, [AsyncMigration(1, "a", up_create_a, down_drop_then_raise)]
-    )
+    runner = AsyncMigrationRunner(db, [AsyncMigration(1, "a", up_create_a, down_drop_then_raise)])
     assert (await runner.migrate()).success
     result = await runner.rollback()
 
@@ -407,7 +406,10 @@ async def test_results_match_the_sync_runner(db, tmp_path):
     )
     arunner = AsyncMigrationRunner(
         db,
-        [AsyncMigration(1, "a", up_create_a, down_drop_a), AsyncMigration(2, "half", up_create_then_raise)],
+        [
+            AsyncMigration(1, "a", up_create_a, down_drop_a),
+            AsyncMigration(2, "half", up_create_then_raise),
+        ],
     )
 
     def shape(r):
@@ -443,7 +445,10 @@ async def test_results_match_the_sync_runner(db, tmp_path):
     s4, a4 = srunner.reset(), await arunner.reset()
     assert shape(a4) == shape(s4) == (True, [], [(1, "a")], 0, 0, None, None)
 
-    stables = {r[0] for r in sdb.adapter.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    stables = {
+        r[0]
+        for r in sdb.adapter.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
     assert (await _tables(db)) == stables
 
 

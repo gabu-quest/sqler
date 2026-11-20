@@ -19,11 +19,13 @@ from typing import Any, NamedTuple, Optional
 
 import pydantic
 import pytest
-from sqler import AsyncSQLerDB, AsyncSQLerSafeModel, SQLerDB, SQLerModel, SQLerSafeModel
+
+from sqler import AsyncSQLerDB, AsyncSQLerSafeModel, AuditMixin, SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.exceptions import NotFoundError
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.mixins import AsyncAuditLogMixin, AuditLogMixin, TimestampMixin
+from sqler.models.msgspec.async_model import AsyncSQLerMsgspecModel
 from sqler.models.msgspec.model import SQLerMsgspecModel
 
 DAY = date(2026, 11, 14)
@@ -56,6 +58,7 @@ BASES = {
     "msgspec": Base(SQLerMsgspecModel, AuditLogMixin, False, False),
     "async": Base(AsyncSQLerModel, AsyncAuditLogMixin, True, True),
     "async-lite": Base(AsyncSQLerLiteModel, AsyncAuditLogMixin, True, False),
+    "async-msgspec": Base(AsyncSQLerMsgspecModel, AsyncAuditLogMixin, True, False),
 }
 BASE_IDS = list(BASES)
 
@@ -68,7 +71,11 @@ def make(spec: Base, name: str, **fields):
         ann[key] = annotation if spec.typed else Any
         body[key] = default
     body["__annotations__"] = ann
-    kwargs = {"kw_only": True, "tag": False} if spec.cls is SQLerMsgspecModel else {}
+    kwargs = (
+        {"kw_only": True, "tag": False}
+        if spec.cls in (SQLerMsgspecModel, AsyncSQLerMsgspecModel)
+        else {}
+    )
     cls = type(name, (spec.mixin, spec.cls), body, **kwargs)
     return dataclass(cls) if spec.cls is AsyncSQLerLiteModel else cls
 
@@ -468,3 +475,78 @@ def test_a_save_merged_with_a_newer_row_is_audited_against_that_row(is_async):
         ("update", {"count": {"old": 10, "new": 11}}),
         ("update", {"count": {"old": 11, "new": 12}, "name": {"old": "a", "new": "mine"}}),
     ]
+
+
+class TestAuditMixin:
+    """Tests for the AuditMixin."""
+
+    def test_audit_mixin_tracks_user_on_save(self):
+        """AuditMixin tracks created_by and updated_by automatically on save()."""
+        db = SQLerDB.in_memory(shared=False)
+
+        class AuditedUser(AuditMixin, SQLerModel):
+            name: str
+
+        AuditedUser.set_db(db)
+
+        # Set current user
+        AuditMixin.set_current_user("admin@example.com")
+
+        # save() should automatically set audit fields
+        user = AuditedUser(name="Alice").save()
+
+        assert user.created_by == "admin@example.com"
+        assert user.updated_by == "admin@example.com"
+        assert user.created_at is not None
+        assert user.updated_at is not None
+
+        # Verify persisted to database
+        reloaded = AuditedUser.from_id(user._id)
+        assert reloaded.created_by == "admin@example.com"
+        assert reloaded.updated_by == "admin@example.com"
+
+        # Clean up
+        AuditMixin.set_current_user(None)
+
+    def test_audit_mixin_getter(self):
+        """AuditMixin supports user getter function."""
+
+        def get_user():
+            return "dynamic_user"
+
+        AuditMixin.set_current_user_getter(get_user)
+        assert AuditMixin.get_current_user() == "dynamic_user"
+
+        # Clean up
+        AuditMixin.set_current_user_getter(None)
+        AuditMixin.set_current_user(None)
+
+    def test_audit_timestamps_on_update(self):
+        """Updated_at changes on subsequent saves, created_by unchanged."""
+        db = SQLerDB.in_memory(shared=False)
+
+        class AuditedUser(AuditMixin, SQLerModel):
+            name: str
+
+        AuditedUser.set_db(db)
+        AuditMixin.set_current_user("user1")
+
+        user = AuditedUser(name="Alice").save()
+        first_created = user.created_at
+        first_updated = user.updated_at
+
+        import time
+
+        time.sleep(0.01)  # Small delay
+
+        # Different user updates
+        AuditMixin.set_current_user("user2")
+        user.name = "Alice Smith"
+        user.save()
+
+        assert user.updated_at > first_updated
+        assert user.created_at == first_created  # created_at unchanged
+        assert user.created_by == "user1"  # created_by unchanged
+        assert user.updated_by == "user2"  # updated_by changed
+
+        AuditMixin.set_current_user(None)

@@ -95,7 +95,7 @@ def _(mo):
     > ```python
     > # Pydantic version — one-line export
     > from sqler.export import export_csv_string
-    > csv_data = export_csv_string(User.query())
+    > csv_data = export_csv_string(User.using(db))
     > ```
     >
     > Run locally: `uv run marimo edit examples/tour_07_export_import.py`
@@ -116,13 +116,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import csv
     import importlib
@@ -153,8 +149,6 @@ def _(SQLerLiteModel, dataclass, db):
         age: int
         active: bool = True
 
-    User.set_db(db)
-
     # Create sample data
     users_data = [
         ("Alice", "alice@example.com", 30),
@@ -164,9 +158,9 @@ def _(SQLerLiteModel, dataclass, db):
         ("Eve", "eve@example.com", 32),
     ]
     for name, email, age in users_data:
-        User(name=name, email=email, age=age).save()
+        User(name=name, email=email, age=age).save(db=db)
 
-    print(f"Created {User.query().count()} users")
+    print(f"Created {User.using(db).count()} users")
     return (User,)
 
 
@@ -182,9 +176,9 @@ def _(mo):
 
 
 @app.cell
-def _(User, csv, io):
+def _(User, csv, db, io):
     # Get all users
-    users = User.query().all()
+    users = User.using(db).all()
 
     # Create CSV in memory
     csv_buffer = io.StringIO()
@@ -214,9 +208,9 @@ def _(mo):
 
 
 @app.cell
-def _(F, User, csv, io):
+def _(F, User, csv, db, io):
     # Export filtered results (age > 28)
-    older_users = User.query().filter(F("age") > 28).all()
+    older_users = User.using(db).filter(F("age") > 28).all()
 
     csv_filtered_buffer = io.StringIO()
     if older_users:
@@ -244,9 +238,9 @@ def _(mo):
 
 
 @app.cell
-def _(User, json):
+def _(User, db, json):
     # Export all users to JSON
-    users_json = User.query().all()
+    users_json = User.using(db).all()
     json_data = json.dumps([u.model_dump() for u in users_json], indent=2)
 
     print("JSON Export:")
@@ -265,9 +259,9 @@ def _(mo):
 
 
 @app.cell
-def _(User, csv, io, json):
+def _(User, csv, db, io, json):
     # CSV with selected fields (name and email only)
-    users_partial = User.query().all()
+    users_partial = User.using(db).all()
 
     csv_partial_buffer = io.StringIO()
     if users_partial:
@@ -285,13 +279,24 @@ def _(User, csv, io, json):
 
     # JSON with selected fields (name and age only)
     json_partial = json.dumps(
-        [{k: v for k, v in u_p.model_dump().items() if k in ["name", "age"]}
-         for u_p in users_partial],
-        indent=2
+        [
+            {k: v for k, v in u_p.model_dump().items() if k in ["name", "age"]}
+            for u_p in users_partial
+        ],
+        indent=2,
     )
     print("\nJSON with selected fields:")
     print(json_partial)
-    return csv_partial, csv_partial_buffer, json_partial, row, selected_fields, u_p, users_partial, writer_partial
+    return (
+        csv_partial,
+        csv_partial_buffer,
+        json_partial,
+        row,
+        selected_fields,
+        u_p,
+        users_partial,
+        writer_partial,
+    )
 
 
 @app.cell
@@ -314,8 +319,6 @@ def _(SQLerLiteModel, csv, dataclass, db, io):
         price: float
         category: str
 
-    Product.set_db(db)
-
     # Simulate CSV data (in real usage, this would come from a file)
     csv_content = """name,price,category
 Widget,29.99,electronics
@@ -328,11 +331,11 @@ Book,14.99,media"""
     imported = []
     for row_p in reader:
         p = Product(name=row_p["name"], price=float(row_p["price"]), category=row_p["category"])
-        p.save()
+        p.save(db=db)
         imported.append(p)
 
     print(f"Imported {len(imported)} products")
-    for p in Product.query().all():
+    for p in Product.using(db).all():
         print(f"  {p.name}: ${p.price} ({p.category})")
     return Product, csv_content, imported, p, reader, row_p
 
@@ -357,8 +360,6 @@ def _(SQLerLiteModel, dataclass, db, json):
         total: float
         status: str = "pending"
 
-    Order.set_db(db)
-
     # Simulate JSON data
     json_content = """[
         {"customer": "Alice", "total": 99.99, "status": "shipped"},
@@ -369,10 +370,10 @@ def _(SQLerLiteModel, dataclass, db, json):
     # Parse and import
     orders_data = json.loads(json_content)
     for order_dict in orders_data:
-        Order(**order_dict).save()
+        Order(**order_dict).save(db=db)
 
-    print(f"Imported {Order.query().count()} orders")
-    for o in Order.query().all():
+    print(f"Imported {Order.using(db).count()} orders")
+    for o in Order.using(db).all():
         print(f"  {o.customer}: ${o.total} ({o.status})")
     return Order, json_content, o, order_dict, orders_data
 
@@ -388,12 +389,12 @@ def _(mo):
 
 
 @app.cell
-def _(User, json):
+def _(User, db, json):
     # JSONL format: one JSON object per line
     # Great for streaming large datasets
 
     jsonl_lines = []
-    for user_j in User.query().all():
+    for user_j in User.using(db).all():
         # Each line is a separate JSON object
         jsonl_lines.append(json.dumps(user_j.model_dump()))
 
@@ -429,8 +430,6 @@ def _(SQLerLiteModel, dataclass, db, json):
         timestamp: str
         user_id: int
 
-    Event.set_db(db)
-
     # Simulate JSONL data
     jsonl_import = """{"event_type": "login", "timestamp": "2024-01-01T10:00:00", "user_id": 1}
 {"event_type": "view", "timestamp": "2024-01-01T10:05:00", "user_id": 1}
@@ -439,10 +438,10 @@ def _(SQLerLiteModel, dataclass, db, json):
     # Parse JSONL line by line
     for line in jsonl_import.strip().split("\n"):
         event_dict = json.loads(line)
-        Event(**event_dict).save()
+        Event(**event_dict).save(db=db)
 
-    print(f"Imported {Event.query().count()} events")
-    for e in Event.query().all():
+    print(f"Imported {Event.using(db).count()} events")
+    for e in Event.using(db).all():
         print(f"  {e.event_type} at {e.timestamp} (user {e.user_id})")
     return Event, e, event_dict, jsonl_import, line
 

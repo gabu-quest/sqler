@@ -115,13 +115,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import importlib
     from dataclasses import dataclass
@@ -159,8 +155,6 @@ def _(SQLerLiteModel, dataclass, db):
         price: float
         in_stock: bool = True
 
-    Product.set_db(db)
-
     # Create sample data
     products = [
         ("Widget A", "electronics", 29.99),
@@ -171,7 +165,7 @@ def _(SQLerLiteModel, dataclass, db):
         ("Tool 3", "hardware", 14.99),
     ]
     for name, cat, price in products:
-        Product(name=name, category=cat, price=price).save()
+        Product(name=name, category=cat, price=price).save(db=db)
 
     print(f"Created {len(products)} products")
     return (Product,)
@@ -188,23 +182,23 @@ def _(mo):
 
 
 @app.cell
-def _(F, Product):
+def _(F, Product, db):
     # Mark all hardware as out of stock
-    updated_count = Product.query().filter(F("category") == "hardware").update(in_stock=False)
+    updated_count = Product.using(db).filter(F("category") == "hardware").update(in_stock=False)
     print(f"Marked {updated_count} hardware products as out of stock")
 
     # Verify
-    out_of_stock = Product.query().filter(F("in_stock") == False).all()
+    out_of_stock = Product.using(db).filter(F("in_stock") == False).all()
     print(f"Out of stock: {[p.name for p in out_of_stock]}")
     return
 
 
 @app.cell
-def _(F, Product):
+def _(F, Product, db):
     # Update prices for a category
-    Product.query().filter(F("category") == "electronics").update(price=49.99)
+    Product.using(db).filter(F("category") == "electronics").update(price=49.99)
 
-    electronics = Product.query().filter(F("category") == "electronics").all()
+    electronics = Product.using(db).filter(F("category") == "electronics").all()
     print("Electronics prices after bulk update:")
     for p in electronics:
         print(f"  {p.name}: ${p.price}")
@@ -222,15 +216,15 @@ def _(mo):
 
 
 @app.cell
-def _(F, Product):
-    print(f"Products before: {Product.query().count()}")
+def _(F, Product, db):
+    print(f"Products before: {Product.using(db).count()}")
 
     # Delete all hardware products
-    deleted_count = Product.query().filter(F("category") == "hardware").delete_all()
+    deleted_count = Product.using(db).filter(F("category") == "hardware").delete_all()
     print(f"Deleted {deleted_count} hardware products")
 
-    print(f"Products after: {Product.query().count()}")
-    remaining = Product.query().all()
+    print(f"Products after: {Product.using(db).count()}")
+    remaining = Product.using(db).all()
     print(f"Remaining: {[p.name for p in remaining]}")
     return
 
@@ -256,8 +250,6 @@ def _(SQLerLiteModel, dataclass, db):
         age: int
         country: str
 
-    User.set_db(db)
-
     # Create sample users (reduced for WASM performance)
     for i in range(20):
         User(
@@ -265,24 +257,24 @@ def _(SQLerLiteModel, dataclass, db):
             email=f"user{i}@example.com",
             age=40 + (i % 50),
             country=["US", "UK", "JP"][i % 3],
-        ).save()
+        ).save(db=db)
 
-    print(f"Created {User.query().count()} users")
+    print(f"Created {User.using(db).count()} users")
     return (User,)
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # Create an index on the email field
-    User.add_index("email", unique=True)
+    User.add_index("email", unique=True, db=db)
     print("Created unique index on 'email'")
 
     # Create a non-unique index on age
-    User.add_index("age")
+    User.add_index("age", db=db)
     print("Created index on 'age'")
 
     # Create a compound index (if supported)
-    User.add_index("country")
+    User.add_index("country", db=db)
     print("Created index on 'country'")
     return
 
@@ -311,10 +303,10 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # Safe to call multiple times
-    User.ensure_index("email", unique=True)
-    User.ensure_index("email", unique=True)  # No error, no duplicate
+    User.ensure_index("email", unique=True, db=db)
+    User.ensure_index("email", unique=True, db=db)  # No error, no duplicate
     print("ensure_index is safe to call multiple times")
     return
 
@@ -347,13 +339,10 @@ def _(SQLerLiteModel, dataclass, db):
         title: str
         author: Author | None = None
 
-    Author.set_db(db)
-    Book.set_db(db)
-
     # Create test data
-    author = Author(name="Alice").save()
-    book1 = Book(title="Book One", author=author).save()
-    book2 = Book(title="Book Two", author=author).save()
+    author = Author(name="Alice").save(db=db)
+    book1 = Book(title="Book One", author=author).save(db=db)
+    book2 = Book(title="Book Two", author=author).save(db=db)
 
     print(f"Created author '{author.name}' with 2 books")
     return Author, Book, author
@@ -375,16 +364,16 @@ def _(mo):
 
 
 @app.cell
-def _(Author, IntegrityError, author):
+def _(Author, IntegrityError, author, db):
     # Try to delete author with restrict policy
     try:
-        author.delete_with_policy(on_delete="restrict")
+        author.delete_with_policy(on_delete="restrict", db=db)
         print("Author deleted (unexpected!)")
     except IntegrityError as _e:
         print(f"IntegrityError: Cannot delete - {_e}")
 
     # Author still exists
-    still_exists = Author.from_id(author._id)
+    still_exists = Author.from_id(author._id, db=db)
     print(f"Author still exists: {still_exists.name}")
     return
 
@@ -400,23 +389,23 @@ def _(mo):
 
 
 @app.cell
-def _(Author, Book, F):
+def _(Author, Book, F, db):
     # Create a new author
-    bob = Author(name="Bob").save()
-    book3 = Book(title="Book Three", author=bob).save()
+    bob = Author(name="Bob").save(db=db)
+    book3 = Book(title="Book Three", author=bob).save(db=db)
 
     print(f"Before: Book '{book3.title}' has author '{book3.author.name}'")
 
     # Delete with set_null policy
-    bob.delete_with_policy(on_delete="set_null")
+    bob.delete_with_policy(on_delete="set_null", db=db)
     print("\nDeleted Bob with set_null policy")
 
     # Check the book - author should be None
-    book3.refresh()
+    book3.refresh(db=db)
     print(f"After: Book '{book3.title}' has author: {book3.author}")
 
     # Verify Bob is deleted
-    bob_exists = Author.query().filter(F("name") == "Bob").exists()
+    bob_exists = Author.using(db).filter(F("name") == "Bob").exists()
     print(f"Bob exists: {bob_exists}")
     return
 
@@ -432,22 +421,22 @@ def _(mo):
 
 
 @app.cell
-def _(Author, Book):
+def _(Author, Book, db):
     # Create another author with books
-    carol = Author(name="Carol").save()
-    Book(title="Carol's Book 1", author=carol).save()
-    Book(title="Carol's Book 2", author=carol).save()
+    carol = Author(name="Carol").save(db=db)
+    Book(title="Carol's Book 1", author=carol).save(db=db)
+    Book(title="Carol's Book 2", author=carol).save(db=db)
 
     _carol_id = carol._id
-    _total_before = Book.query().count()
+    _total_before = Book.using(db).count()
     print("Created Carol with 2 books")
     print(f"Total books before: {_total_before}")
 
     # Delete with cascade
-    carol.delete_with_policy(on_delete="cascade")
+    carol.delete_with_policy(on_delete="cascade", db=db)
     print("\nDeleted Carol with cascade policy")
 
-    _total_after = Book.query().count()
+    _total_after = Book.using(db).count()
     print(f"Total books after: {_total_after}")
     print(f"Carol's books removed: {_total_before - _total_after}")
     return
@@ -473,7 +462,7 @@ def _(User, db):
 
     print("Raw SQL results (users over 40):")
     for row in _result:
-        _user = User.from_id(row[0])
+        _user = User.from_id(row[0], db=db)
         print(f"  {_user.name}, age {_user.age}")
     return
 
@@ -489,10 +478,10 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # Build a complex query
     _query = (
-        User.query()
+        User.using(db)
         .filter(F("age") > 30)
         .filter(F("country") == "US")
         .order_by("age", desc=True)
@@ -517,9 +506,9 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # Get debug info for a query
-    _query = User.query().filter(F("email").contains("user1"))
+    _query = User.using(db).filter(F("email").contains("user1"))
     _sql, _params = _query.debug()
 
     print("Debug output:")
@@ -539,10 +528,10 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # Find users in US OR UK
     results = (
-        User.query().filter(F("country") == "US").or_filter(F("country") == "UK").limit(10).all()
+        User.using(db).filter(F("country") == "US").or_filter(F("country") == "UK").limit(10).all()
     )
 
     print("Users in US or UK:")
@@ -562,13 +551,13 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # Get distinct countries
-    countries = User.query().distinct_values("country")
+    countries = User.using(db).distinct_values("country")
     print(f"Distinct countries: {countries}")
 
     # Get distinct ages (first 10)
-    ages = User.query().distinct_values("age")
+    ages = User.using(db).distinct_values("age")
     print(f"Distinct ages: {sorted(ages)[:10]}...")
     return
 

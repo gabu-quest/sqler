@@ -4,8 +4,8 @@
 
 All examples use in-memory SQLite for speed and no side effects.
 
-> **Note:** Examples use `set_db()` for brevity. In new code, prefer `using()` for
-> class-level binding and `save(db=)` / `delete(db=)` for per-call DB targeting.
+> **Note:** Nothing is bound to a class. Queries start at `Model.using(db)`, and every other
+> call takes the database: `save(db=)`, `delete(db=)`, `from_id(id, db=)`.
 > See the [API Reference — Per-Call DB Binding](API.md#per-call-db-binding) section.
 
 Run with `uv`:
@@ -69,17 +69,16 @@ class Account(SQLerModel):
     balance: int
 
 db = SQLerDB.in_memory()
-Account.set_db(db)
 
 # Atomic batch operation
 with db.transaction():
-    Account(name="Alice", balance=1000).save()
-    Account(name="Bob", balance=500).save()
+    Account(name="Alice", balance=1000).save(db=db)
+    Account(name="Bob", balance=500).save(db=db)
 
 # Rollback on error
 try:
     with db.transaction():
-        Account(name="Charlie", balance=200).save()
+        Account(name="Charlie", balance=200).save(db=db)
         raise ValueError("Abort!")
 except ValueError:
     pass  # Charlie not saved
@@ -99,13 +98,12 @@ class Sale(SQLerModel):
     quantity: int
 
 db = SQLerDB.in_memory()
-Sale.set_db(db)
 
-Sale(product="A", amount=100.0, quantity=5).save()
-Sale(product="B", amount=50.0, quantity=10).save()
-Sale(product="C", amount=75.0, quantity=3).save()
+Sale(product="A", amount=100.0, quantity=5).save(db=db)
+Sale(product="B", amount=50.0, quantity=10).save(db=db)
+Sale(product="C", amount=75.0, quantity=3).save(db=db)
 
-q = Sale.query()
+q = Sale.using(db)
 print(f"Total quantity: {q.sum('quantity')}")      # 18
 print(f"Average amount: {q.avg('amount')}")        # 75.0
 print(f"Min amount: {q.min('amount')}")            # 50.0
@@ -125,14 +123,13 @@ class Post(SQLerModel):
     views: int
 
 db = SQLerDB.in_memory()
-Post.set_db(db)
 
 # Create 100 posts
 for i in range(100):
-    Post(title=f"Post {i}", views=i * 10).save()
+    Post(title=f"Post {i}", views=i * 10).save(db=db)
 
 # Get page 3 with 10 items per page
-page = Post.query().order_by("views", desc=True).paginate(page=3, per_page=10)
+page = Post.using(db).order_by("views", desc=True).paginate(page=3, per_page=10)
 
 print(f"Page {page.page} of {page.total_pages}")
 print(f"Items: {len(page.items)}")
@@ -151,11 +148,10 @@ class Article(TimestampMixin, SQLerModel):
     title: str
 
 db = SQLerDB.in_memory()
-Article.set_db(db)
 
 article = Article(title="Hello World")
 article._set_timestamps()
-article = article.save()
+article = article.save(db=db)
 
 print(f"Created: {article.created_at}")
 print(f"Updated: {article.updated_at}")
@@ -171,13 +167,12 @@ class Document(SoftDeleteMixin, SQLerModel):
     name: str
 
 db = SQLerDB.in_memory()
-Document.set_db(db)
 
-doc = Document(name="Report").save()
+doc = Document(name="Report").save(db=db)
 doc.soft_delete()  # Sets deleted_at, doesn't remove
 
 # Query excluding deleted
-active = Document.query().filter(F("deleted_at") == None).all()
+active = Document.using(db).filter(F("deleted_at") == None).all()
 
 doc.restore()  # Clears deleted_at
 ```
@@ -198,12 +193,8 @@ class User(HooksMixin, SQLerModel):
         print(f"Saved user: {self.email}")
 
 db = SQLerDB.in_memory()
-User.set_db(db)
 
-u = User(email="  ADMIN@EXAMPLE.COM  ")
-if u.before_save():
-    u = u.save()
-    u.after_save()
+u = User(email="  ADMIN@EXAMPLE.COM  ").save(db=db)  # save() calls both hooks
 # Output: Saved user: admin@example.com
 ```
 
@@ -218,13 +209,12 @@ class LoggedModel(SQLerModel):
     name: str
 
 db = SQLerDB.in_memory()
-LoggedModel.set_db(db)
 
 # Enable logging
 query_logger.enable()
 
 # ... perform queries ...
-LoggedModel(name="Test").save()
+LoggedModel(name="Test").save(db=db)
 
 # Manually log for demonstration
 query_logger.log("SELECT * FROM loggedmodels", [], 1.5)

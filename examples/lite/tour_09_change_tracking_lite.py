@@ -102,7 +102,7 @@ def _(mo):
     >
     > user.get_change_history()  # timestamped FieldChange objects
     > user.revert_changes()      # undo all unsaved changes
-    > user.save_partial()        # only UPDATE changed columns
+    > user.save_partial(db=db)   # only UPDATE changed columns
     > ```
     >
     > Run locally: `uv run marimo edit examples/tour_09_change_tracking.py`
@@ -124,13 +124,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import importlib
     from dataclasses import dataclass
@@ -171,10 +167,8 @@ def _(SQLerLiteModel, dataclass, db):
         email: str
         age: int
 
-    User.set_db(db)
-
     # Create a user
-    _user = User(name="Alice", email="alice@example.com", age=30).save()
+    _user = User(name="Alice", email="alice@example.com", age=30).save(db=db)
     print(f"Created: {_user.name}, {_user.email}, age {_user.age}")
     print(f"is_dirty(): {_user.is_dirty()}")  # False - save() marks as clean
     print(f"get_dirty_fields(): {_user.get_dirty_fields()}")  # Empty set
@@ -195,9 +189,9 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # Load user
-    _user = User.from_id(1)
+    _user = User.from_id(1, db=db)
     print(f"Loaded: {_user.name}, is_dirty(): {_user.is_dirty()}")
 
     # Make changes
@@ -221,8 +215,8 @@ def _(mo):
 
 
 @app.cell
-def _(User):
-    _user = User.from_id(1)
+def _(User, db):
+    _user = User.from_id(1, db=db)
 
     # Modify some fields
     _user.name = "Alice Williams"
@@ -260,11 +254,9 @@ def _(SQLerLiteModel, dataclass, db):
         price: float
         stock: int
 
-    Product.set_db(db)
-
     # Create two products
-    prod1 = Product(name="Widget", price=29.99, stock=100).save()
-    prod2 = Product(name="Widget", price=24.99, stock=85).save()
+    prod1 = Product(name="Widget", price=29.99, stock=100).save(db=db)
+    prod2 = Product(name="Widget", price=24.99, stock=85).save(db=db)
 
     print(f"Product 1: name={prod1.name}, price={prod1.price}, stock={prod1.stock}")
     print(f"Product 2: name={prod2.name}, price={prod2.price}, stock={prod2.stock}")
@@ -291,8 +283,8 @@ def _(mo):
 
 
 @app.cell
-def _(User):
-    _user = User.from_id(1)
+def _(User, db):
+    _user = User.from_id(1, db=db)
 
     # Modify and check
     _user.age = 33
@@ -300,7 +292,7 @@ def _(User):
     print(f"  dirty fields: {_user.get_dirty_fields()}")
 
     # Save and check again
-    _user.save()
+    _user.save(db=db)
     print(f"\nAfter save: is_dirty() = {_user.is_dirty()}")
     print(f"  dirty fields: {_user.get_dirty_fields()}")
     return
@@ -318,8 +310,8 @@ def _(mo):
 
 
 @app.cell
-def _(User):
-    _user = User.from_id(1)
+def _(User, db):
+    _user = User.from_id(1, db=db)
     _original_name = _user.name
     print(f"Original name: {_original_name}")
 
@@ -352,8 +344,8 @@ def _(mo):
 
 
 @app.cell
-def _(User):
-    _user = User.from_id(1)
+def _(User, db):
+    _user = User.from_id(1, db=db)
     print(f"Original: name={_user.name}, age={_user.age}")
 
     # Change both fields

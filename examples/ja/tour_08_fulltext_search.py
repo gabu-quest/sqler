@@ -69,8 +69,6 @@ def _(SQLerModel, db):
         content: str
         author: str
 
-    Article.set_db(db)
-
     # サンプル記事を作成
     _articles = [
         ("Python 入門", "Python プログラミングの基礎。変数、ループ、関数。", "Alice"),
@@ -83,9 +81,9 @@ def _(SQLerModel, db):
         ("SQLite ガイド", "組み込みデータベースアプリケーションのための SQLite。", "Eve"),
     ]
     for _title, _content, _author in _articles:
-        Article(title=_title, content=_content, author=_author).save()
+        Article(title=_title, content=_content, author=_author).save(db=db)
 
-    print(f"{Article.query().count()} 件の記事を作成しました")
+    print(f"{Article.using(db).count()} 件の記事を作成しました")
     return (Article,)
 
 
@@ -102,9 +100,9 @@ def _(mo):
 
 
 @app.cell
-def _(Article, FTSIndex):
+def _(Article, FTSIndex, db):
     # title と content フィールドに FTS インデックスを作成
-    fts = FTSIndex(Article, fields=["title", "content"])
+    fts = FTSIndex(Article, fields=["title", "content"], db=db)
 
     # FTS5 仮想テーブルを作成
     fts.create()
@@ -275,9 +273,7 @@ def _(mo):
 @app.cell
 def _(fts):
     # ハイライト付き検索 - highlights 辞書付きの SearchResult を返す
-    _highlighted = fts.search_with_highlights(
-        "python", highlight_start="**", highlight_end="**"
-    )
+    _highlighted = fts.search_with_highlights("python", highlight_start="**", highlight_end="**")
 
     print("ハイライト付き結果：")
     for _r in _highlighted:
@@ -337,17 +333,15 @@ def _(SQLerModel, db):
         class FTS:
             fields = ["title", "body"]
 
-    BlogPost.set_db(db)
-
     # 検索インデックスを作成
-    BlogPost.create_search_index()
+    BlogPost.create_search_index(db=db)
 
     # 投稿を作成してインデックス
-    BlogPost(title="Hello World", body="Python についての最初のブログ投稿").save()
-    BlogPost(title="SQLer のコツ", body="SQLer ORM を使うベストプラクティス").save()
+    BlogPost(title="Hello World", body="Python についての最初のブログ投稿").save(db=db)
+    BlogPost(title="SQLer のコツ", body="SQLer ORM を使うベストプラクティス").save(db=db)
 
     # モデル上で直接検索 - モデルインスタンスを返す
-    _results = BlogPost.search("python")
+    _results = BlogPost.search("python", db=db)
     print("BlogPost.search('python')：")
     for _post in _results:
         print(f"  - {_post.title}")

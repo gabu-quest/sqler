@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any, List, Sequence, Type, Union
 
 from sqler._stored import stored
+from sqler.models._table_names import _model_table_name
 from sqler.models.model import SQLerModel
-from sqler.query.expression import SQLerExpression
+from sqler.query.expression import Related, SQLerExpression
+from sqler.query.query import SQLerQuery, related_rows
 
 
 class SQLerModelField:
@@ -13,10 +15,17 @@ class SQLerModelField:
     Example:
       SQLerModelField(User, ["address", "city"]) == "Kyoto"
       -> EXISTS (
-           SELECT 1 FROM addresses r
-           WHERE r._id = json_extract(data, '$.address._id')
-             AND json_extract(r.data, '$.city') = ?
+           SELECT 1 FROM (SELECT _id AS rid FROM addresses rt
+                          WHERE json_extract(rt.data, '$.city') = ?) r
+           WHERE r.rid = json_extract(data, '$.address._id')
          )
+
+    The condition on the related row is a query on the related table: a query with a
+    database behind it lays it out as that database remembers the table (a promoted
+    ``city`` is read from its column; ``sqler.query.query.related_rows``), as it lays out
+    its own. The related rows give only ``rid``, so ``data`` outside them is the column of
+    the row the query reads, in whatever table it reads: the class's own, or another one
+    (``using(db, table)``).
     """
 
     def __init__(
@@ -35,7 +44,6 @@ class SQLerModelField:
             raise ValueError("Empty path for model field")
         from sqler.exceptions import InvalidFieldNameError
         from sqler.query.field import _json_path_literal
-        from sqler.utils import validate_table_name
 
         for seg in self.path:
             if isinstance(seg, str) and not seg:
@@ -52,54 +60,26 @@ class SQLerModelField:
         # the key escape is the owner's: it raises before any SQL exists for a key it cannot carry
         first_literal = _json_path_literal([first])
         ref_literal = _json_path_literal([first, "_id"])
-        # related table name is default-plural of field type's class; we rely on registry-set table on model
-        # find table by inspecting registry mapping; use child model's _table
-        # fall back to pluralized field name if unknown
-        try:
-            # prefer registry-known names
-            from sqler import registry as _reg
+        table = _related_table(self.model, first, self.array_any)
 
-            keys = set(_reg.tables().keys())
-            if first in keys:
-                table = first
-            elif f"{first}s" in keys:
-                table = f"{first}s"
-            elif first.lower().endswith("s"):
-                table = first.lower()
-            else:
-                table = f"{first.lower()}s"
-        except Exception:
-            table = first.lower() if first.lower().endswith("s") else f"{first.lower()}s"
-        # the table name goes into the statement as an identifier: the owner's check
-        validate_table_name(table)
-
-        outer_table = validate_table_name(
-            getattr(self.model, "_table", None) or self.model.__name__.lower() + "s"
-        )
-
-        # Check if querying for _id specifically (it's a column, not in JSON)
+        # the condition on a related row, as a query on its table writes it; ``_id`` is a column
         is_id_field = rest == ["_id"]
-        rest_literal = _json_path_literal(list(rest)) if rest and not is_id_field else None
+        if rest and not is_id_field:
+            where = f"json_extract(data, {_json_path_literal(list(rest))}) {op} ?"
+        else:
+            where = f"_id {op} ?"
+        # its rows as a query on that table with no database behind it reads them; a query
+        # with a database behind it lays them out as that database remembers the table
+        rows = related_rows(table, SQLerQuery(table, expression=SQLerExpression(where))._where()[0])
 
         if self.array_any:
-            # iterate refs array: json_each over $.<first>, join related on ref._id
-            # EXISTS (SELECT 1 FROM json_each(outer.data,'$.first') a JOIN table r ON r._id = json_extract(a.value,'$._id') WHERE json_extract(r.data,'$.rest') OP ?)
-            joins = f"json_each({outer_table}.data, {first_literal}) a JOIN {table} r ON r._id = json_extract(a.value, '$._id')"
-            if rest_literal is None:
-                where_right = f"r._id {op} ?"
-            else:
-                where_right = f"json_extract(r.data, {rest_literal}) {op} ?"
-            sql = f"EXISTS (SELECT 1 FROM {joins} WHERE {where_right})"
+            # each entry of the outer row's array of references, joined to its related row
+            sql = f"EXISTS (SELECT 1 FROM json_each(data, {first_literal}) a JOIN {rows} r ON r.rid = json_extract(a.value, '$._id'))"
         else:
-            if rest_literal is None:
-                where_right = f"r._id {op} ?"
-            else:
-                where_right = f"json_extract(r.data, {rest_literal}) {op} ?"
-            sql = (
-                "EXISTS (SELECT 1 FROM "
-                f"{table} r WHERE r._id = json_extract({outer_table}.data, {ref_literal}) AND {where_right})"
-            )
-        return SQLerExpression(sql, [stored(val)])
+            sql = f"EXISTS (SELECT 1 FROM {rows} r WHERE r.rid = json_extract(data, {ref_literal}))"
+        made = SQLerExpression(sql, [stored(val)])
+        made.related = (Related(table, where, rows),)
+        return made
 
     def __compare(self, op: str, val: Any) -> SQLerExpression:
         return self._build_exists(op, val)
@@ -121,3 +101,58 @@ class SQLerModelField:
 
     def __le__(self, other: Any) -> SQLerExpression:
         return self.__compare("<=", other)
+
+
+def _related_table(model: type, first: str, array_any: bool) -> str:
+    """The table the rows a reference field of ``model`` points to are stored in.
+
+    It is the table of the model class the field's annotation admits there
+    (``Optional[Team]``, ``Team``; each entry of ``list[Team]`` with ``any()``), from
+    the owners of both rules: :func:`typed_fields` and :func:`_model_table_name`.
+
+    A field whose annotation admits no model class there (a plain ``dict``, a key the
+    class does not declare) keeps the table its name gives (``team`` -> ``teams``, or a
+    table of that name the registry knows), as before. A field that admits classes of
+    several tables uses that name's table only when it is one of them.
+
+    Raises:
+        ValueError: The field admits classes of several tables and its name gives none of them.
+    """
+    from sqler.models._refs import typed_fields
+
+    at = typed_fields(model).get(first)
+    if at is None:
+        admits: tuple = ()
+    elif array_any:
+        admits = at.item.admits if at.item is not None else ()
+    else:
+        admits = at.admits
+    tables = list(dict.fromkeys(_model_table_name(cls) for cls in admits))
+    if len(tables) == 1:
+        return tables[0]
+    guess = _table_of_field_name(first)
+    if tables and guess not in tables:
+        raise ValueError(
+            f"{model.__name__}.{first}: its annotation admits classes of the tables "
+            f"{', '.join(tables)}, so a filter through it cannot name one table"
+        )
+    return guess
+
+
+def _table_of_field_name(first: str) -> str:
+    """The table a field's name gives: one the registry knows by that name or its plural,
+    else the plural of the name."""
+    from sqler import registry
+    from sqler.utils import validate_table_name
+
+    keys = set(registry.tables().keys())
+    if first in keys:
+        table = first
+    elif f"{first}s" in keys:
+        table = f"{first}s"
+    elif first.lower().endswith("s"):
+        table = first.lower()
+    else:
+        table = f"{first.lower()}s"
+    # the table name goes into the statement as an identifier: the owner's check
+    return validate_table_name(table)

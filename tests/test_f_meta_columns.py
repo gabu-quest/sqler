@@ -9,6 +9,7 @@ before executing the query.
 """
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.query import F
 
@@ -192,9 +193,7 @@ class TestFIdWithPromotedModel:
         item = PromotedItem(name="test", status="active")
         item.save()
         results = (
-            PromotedItem.query()
-            .filter((F("_id") == item._id) & (F("status") == "active"))
-            .all()
+            PromotedItem.query().filter((F("_id") == item._id) & (F("status") == "active")).all()
         )
         assert len(results) == 1
         assert results[0].name == "test"

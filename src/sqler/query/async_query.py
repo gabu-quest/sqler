@@ -1,26 +1,29 @@
+import contextlib
 import json
-import re
 import sqlite3
-from typing import Any, AsyncIterator, Optional, Self
+from typing import Any, AsyncGenerator, AsyncIterator, Optional, Self
 
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError
 from sqler.query.expression import SQLerExpression
 from sqler.query.query import (
-    _META_COLUMNS,
     _NAMES_SQL,
     PaginatedResult,
     _has_version,
-    _rewrite_promoted_refs,
-    _WriteStatements,
+    _Statements,
     aend_failed,
     is_missing_table,
+    related_tables,
+    whole_number,
+    with_related,
 )
 from sqler.utils import validate_field_name
 
 
-class AsyncSQLerQuery(_WriteStatements):
+class AsyncSQLerQuery(_Statements):
     """Async query builder/executor mirroring SQLerQuery semantics."""
+
+    _adapter: Optional[AsyncSQLiteAdapter]
 
     def __init__(
         self,
@@ -44,8 +47,9 @@ class AsyncSQLerQuery(_WriteStatements):
         self._expression = expression
         self._order = order
         self._desc = desc
-        self._limit = limit
-        self._offset = offset
+        # written into the SQL text: checked as limit() and offset() check them (whole_number)
+        self._limit = None if limit is None else whole_number(limit, "limit")
+        self._offset = None if offset is None else whole_number(offset, "offset")
         self._include_version = include_version
         self._select_fields = select_fields
         self._distinct = distinct
@@ -82,17 +86,49 @@ class AsyncSQLerQuery(_WriteStatements):
         """Async twin of :meth:`sqler.query.query.SQLerQuery._laid_out`."""
         db, table = self._db, self._table
         promoted, names, version = await db._shape_of(table)
-        if not version and self._include_version and self._use == "update" and await db._has_version_column(table) is False:
+        if (
+            not version
+            and self._include_version
+            and self._use == "update"
+            and await db._has_version_column(table) is False
+        ):
             await db._ensure_versioned_table(table)
             promoted, names, version = await db._shape_of(table)
-        key = (names, promoted, version)
+        key: Any = (names, promoted, version)
+        others = related_tables(self._expression)
+        if others:
+            key = (key, tuple([(await db._shape_of(other))[:2] for other in others]))
         laid = self._laid
         if laid is None or laid[0] != key:
             made = self._clone(
-                promoted_fields=promoted, include_version=version, db=None, guard=db._guard_of(table, names), names=names
+                promoted_fields=promoted,
+                include_version=version,
+                db=None,
+                guard=db._guard_of(table, names),
+                names=names,
             )
+            if others:
+                made._expression, made._others = await self._related_laid_out()
             laid = self._laid = (key, made)
         return laid[1]
+
+    async def _related_laid_out(self) -> tuple[SQLerExpression, tuple]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._related_laid_out`."""
+        expression, db = self._expression, self._db
+        assert expression is not None  # only a filter reads other tables
+        laid: dict[Any, tuple[str, bool]] = {}
+        names: dict[str, Any] = {}
+        for part in dict.fromkeys(expression.related):
+            used = AsyncSQLerQuery(part.table, expression=SQLerExpression(part.where))
+            used._db = db
+            used = await used._laid_out()
+            if part.table not in names:  # a table not remembered may be missing: it is read once
+                names[part.table] = (
+                    used._names,
+                    used._names is None and not (await db._names(part.table))[0],
+                )
+            laid[part] = (used._where()[0], names[part.table][1])
+        return with_related(expression, laid), tuple((table, n) for table, (n, _) in names.items())
 
     async def _execute(self, build) -> tuple[Self, Any]:
         """Async twin of :meth:`sqler.query.query.SQLerQuery._execute`."""
@@ -101,13 +137,16 @@ class AsyncSQLerQuery(_WriteStatements):
         async def make() -> tuple[str, list[Any], Any]:
             nonlocal used
             used = await self._laid_out()
-            return (*build(used), used._names)
+            return (*build(used), used._names, used._others)
 
         try:
             if self._db is not None:
                 cursor = await self._db._sent(self._table, make)
                 return used, cursor
             sql, params = build(self)
+            assert (
+                self._adapter is not None
+            )  # with no database behind the query its caller refused a query with no adapter
             try:
                 return self, await self._adapter._execute_judged(sql, params)
             except Exception as exc:
@@ -121,12 +160,53 @@ class AsyncSQLerQuery(_WriteStatements):
         """Async twin of :meth:`sqler.query.query.SQLerQuery._updating`."""
         if self._db is not None or self._include_version:
             return self
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         cur = await self._adapter.execute(_NAMES_SQL, [self._table])
         try:
             names = tuple(row[0] for row in await cur.fetchall())
         finally:
             await cur.close()
         return self._clone(include_version=True) if _has_version(names) else self
+
+    @contextlib.asynccontextmanager
+    async def _held(self) -> AsyncIterator[None]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._held`: the pick and the write on
+        one pinned connection, in one unit that holds the write lock from its start."""
+        if self._db is not None:
+            async with self._db.transaction():
+                yield
+            return
+        from sqler.db.sqler_db import _ended_while_leaving
+
+        adapter = self._adapter
+        assert adapter is not None  # each caller refused a query with no adapter
+        await adapter.begin_transaction()
+        try:
+            yield
+        except BaseException as exc:
+            try:
+                await adapter.end_transaction(commit=False)
+            except Exception as ended:
+                _ended_while_leaving(ended, exc)
+            raise
+        await adapter.end_transaction(commit=True)
+
+    async def _picked_rows(self, n: Optional[int] = None) -> tuple[Self, Optional[list]]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._picked_rows`."""
+        query, cur = await self._execute(lambda q: q._build_query(include_id=True))
+        if cur is None:
+            return query, None
+        try:
+            return query, await (cur.fetchall() if n is None else cur.fetchmany(n))
+        finally:
+            await cur.close()
+
+    async def _picked_ids(self, n: Optional[int] = None) -> Optional[list]:
+        """Async twin of :meth:`sqler.query.query.SQLerQuery._picked_ids`."""
+        if not self._windowed():
+            return None
+        _, rows = await self._picked_rows(n)
+        return [row[0] for row in rows or []]
 
     async def _rows(self, *, include_id: bool = False) -> list[tuple]:
         """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
@@ -182,7 +262,7 @@ class AsyncSQLerQuery(_WriteStatements):
         return self._clone(order=None, desc=False, order_fields=parsed)
 
     def limit(self, n: int) -> Self:
-        return self._clone(limit=n)
+        return self._clone(limit=whole_number(n, "limit"))
 
     def offset(self, n: int) -> Self:
         """Return a new query with an OFFSET clause.
@@ -193,7 +273,7 @@ class AsyncSQLerQuery(_WriteStatements):
         Returns:
             AsyncSQLerQuery: New query instance.
         """
-        return self._clone(offset=n)
+        return self._clone(offset=whole_number(n, "offset"))
 
     def select(self, *fields: str) -> Self:
         """Return a new query that only retrieves specified fields.
@@ -221,79 +301,6 @@ class AsyncSQLerQuery(_WriteStatements):
         """Return a new query with a HAVING clause (requires group_by)."""
         return self._clone(having=expression)
 
-    def _field_expr(self, field: str) -> str:
-        """Return the SQL expression for a field (promoted or json_extract)."""
-        if field == "_id":
-            return "_id"
-        if field == "_version":
-            return "_version"
-        if self._promoted_fields and field in self._promoted_fields:
-            return field
-        return f"json_extract(data, '$.{field}')"
-
-    def _build_grouped_aggregate_query(
-        self, func: str, field: Optional[str] = None
-    ) -> tuple[str, list[Any]]:
-        """Build a grouped aggregate query."""
-        group_exprs = [self._field_expr(f) for f in self._group_by_fields]
-
-        if field is None:
-            agg = f"{func}(*)"
-        else:
-            if field != "_id":
-                validate_field_name(field)
-            agg = f"{func}({self._field_expr(field)})"
-
-        select_parts = group_exprs + [agg]
-        where = self._filter_sql()
-        group_by = "GROUP BY " + ", ".join(group_exprs)
-
-        having_clause = ""
-        if self._having:
-            having_sql = self._having.sql
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._count'\)",
-                "COUNT(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._sum'\)",
-                agg if func == "SUM" else "SUM(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._avg'\)",
-                agg if func == "AVG" else "AVG(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._min'\)",
-                agg if func == "MIN" else "MIN(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._max'\)",
-                agg if func == "MAX" else "MAX(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_clause = f"HAVING {having_sql}"
-
-        sql = f"SELECT {', '.join(select_parts)} FROM {self._table} {where} {group_by} {having_clause}".strip()
-        sql = self._squeezed(sql)
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-
-        params = list(self._expression.params) if self._expression else []
-        if self._having:
-            params.extend(self._having.params)
-        return sql, params
-
     async def _execute_grouped_aggregate(
         self, func: str, field: Optional[str] = None
     ) -> list[dict[str, Any]]:
@@ -303,6 +310,7 @@ class AsyncSQLerQuery(_WriteStatements):
             return []
         rows = await cur.fetchall()
         await cur.close()
+        assert self._adapter is not None  # count, sum and avg refused a query with no adapter
         await self._adapter.auto_commit()
         agg_key = func.lower()
         results: list[dict[str, Any]] = []
@@ -313,79 +321,6 @@ class AsyncSQLerQuery(_WriteStatements):
             d[agg_key] = row[len(self._group_by_fields)]
             results.append(d)
         return results
-
-    def _build_query(self, *, include_id: bool = False) -> tuple[str, list[Any]]:
-        where = self._filter_sql()
-        order = ""
-        if self._order_fields:
-            parts = []
-            for field_name, is_desc in self._order_fields:
-                part = f"json_extract(data, '$.{field_name}')"
-                if is_desc:
-                    part += " DESC"
-                parts.append(part)
-            order = "ORDER BY " + ", ".join(parts)
-        elif self._order:
-            order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
-                " DESC" if self._desc else ""
-            )
-        limit_offset = ""
-        if self._limit is not None:
-            limit_offset = f"LIMIT {self._limit}"
-            if self._offset is not None:
-                limit_offset += f" OFFSET {self._offset}"
-        elif self._offset is not None:
-            limit_offset = f"LIMIT -1 OFFSET {self._offset}"
-
-        distinct_kw = "DISTINCT " if self._distinct else ""
-        if include_id:
-            select = "_id, data" + (", _version" if self._include_version else "")
-            if self._promoted_fields:
-                select += ", " + ", ".join(self._promoted_fields)
-        else:
-            select = "data"
-        sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
-        sql = self._squeezed(sql)
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-        params = self._expression.params if self._expression else []
-        return sql, params
-
-    def _build_aggregate_query(
-        self, func: str, field: Optional[str] = None
-    ) -> tuple[str, list[Any]]:
-        """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX)."""
-        if field is not None and field != "_id":
-            validate_field_name(field)
-        where = self._filter_sql()
-        if field is None:
-            select = f"{func}(*)"
-        elif field == "_id":
-            select = f"{func}(_id)"
-        elif self._promoted_fields and field in self._promoted_fields:
-            select = f"{func}({field})"
-        else:
-            select = f"{func}(json_extract(data, '$.{field}'))"
-        sql = f"SELECT {select} FROM {self._table} {where}".strip()
-        sql = self._squeezed(sql)
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-        params = self._expression.params if self._expression else []
-        return sql, params
-
-    @property
-    def sql(self) -> str:
-        return self._build_query()[0]
-
-    @property
-    def params(self) -> list[Any]:
-        return self._build_query()[1]
-
-    def debug(self) -> tuple[str, list[Any]]:
-        """Return (sql, params) for debugging."""
-        return self._build_query()
 
     async def explain(self) -> list[tuple]:
         """Run EXPLAIN <sql> using the bound adapter; return raw rows.
@@ -571,7 +506,7 @@ class AsyncSQLerQuery(_WriteStatements):
         await self._adapter.auto_commit()
         return query._documents(rows)
 
-    async def iter_dicts(self) -> AsyncIterator[dict[str, Any]]:
+    async def iter_dicts(self) -> AsyncGenerator[dict[str, Any], None]:
         """Async twin of :meth:`sqler.query.query.SQLerQuery.iter_dicts`: ``async for doc in
         query.iter_dicts()`` gives the documents ``all_dicts()`` gives, one at a time.
 
@@ -633,7 +568,10 @@ class AsyncSQLerQuery(_WriteStatements):
         return res[0] if res else None
 
     async def update(self, **fields) -> int:
-        """Update matching rows with the given field values.
+        """Update the rows :meth:`all` returns with the given field values: every match,
+        or, on a query with a limit or an offset, the rows the read's own statement returns,
+        read in one transaction with the write after the write lock is taken, then written
+        by id (``UPDATE ... WHERE _id IN (SELECT value FROM json_each(?))``).
 
         Supports F-expressions for atomic operations::
 
@@ -649,11 +587,27 @@ class AsyncSQLerQuery(_WriteStatements):
             int: Number of rows updated.
         """
         self._write_checks(fields)
-        _, cur = await (await self._updating())._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
+        if self._windowed():
+            async with self._held():
+                ids = await self._picked_ids()
+                if not ids:
+                    return 0
+                _, cur = await (await self._updating())._execute(
+                    lambda q: q._update_sql(fields, *q._touched(ids), returning=False)
+                )
+                if cur is None:
+                    return 0
+                rowcount = cur.rowcount
+                await cur.close()
+                return rowcount
+        _, cur = await (await self._updating())._execute(
+            lambda q: q._update_sql(fields, *q._touched(), returning=False)
+        )
         if cur is None:
             return 0
         rowcount = cur.rowcount
         await cur.close()
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         await self._adapter.auto_commit()
         return rowcount if rowcount >= 0 else 0
 
@@ -673,7 +627,7 @@ class AsyncSQLerQuery(_WriteStatements):
         return rows[0] if rows else None
 
     async def update_n(self, n: int, **fields) -> list[dict[str, Any]]:
-        """Atomically update up to *n* matching rows and return them.
+        """Atomically update the first *n* of the rows :meth:`all` returns and return them.
 
         Uses ``UPDATE ... WHERE _id IN (SELECT _id ... LIMIT n) RETURNING ...``
         for race-free batch claiming.
@@ -688,26 +642,52 @@ class AsyncSQLerQuery(_WriteStatements):
         return await self._update_picked(fields, n, "IN")
 
     async def _update_picked(self, fields: dict, n: int, op: str) -> list[dict[str, Any]]:
-        self._write_checks(fields, n)
-        query, cur = await (await self._updating())._execute(lambda q: q._update_picked_sql(fields, n, op))
+        checked = self._write_checks(fields, n)
+        assert checked is not None  # n was given
+        n = checked
+        if self._windowed():
+            async with self._held():
+                ids = await self._picked_ids(n)
+                if not ids:
+                    return []
+                query, cur = await (await self._updating())._execute(
+                    lambda q: q._update_ids_sql(fields, ids)
+                )
+                if cur is None:
+                    return []
+                rows = await cur.fetchall()
+                await cur.close()
+                return [query._returned(row) for row in rows]
+        query, cur = await (await self._updating())._execute(
+            lambda q: q._update_picked_sql(fields, n, op)
+        )
         if cur is None:
             return []
         rows = await cur.fetchall()
         await cur.close()
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         await self._adapter.auto_commit()
         return [query._returned(row) for row in rows]
 
     async def _changed(self, fields: dict, n: Optional[int] = None) -> list[tuple[dict, dict]]:
         """Async twin of :meth:`SQLerQuery._changed` (run it inside a transaction)."""
-        self._write_checks(fields, n)
-        query, cur = await (await self._updating())._execute(lambda q: q._picked(n, q._returning()))
-        if cur is None:
+        n = self._write_checks(fields, n)
+        if self._windowed():  # the caller's transaction holds the write lock
+            query, rows = await (await self._updating())._picked_rows(n)
+        else:
+            query, cur = await (await self._updating())._execute(
+                lambda q: q._picked(n, q._returning())
+            )
+            rows = None
+            if cur is not None:
+                rows = await cur.fetchall()
+                await cur.close()
+        if rows is None:
             return []
-        rows = await cur.fetchall()
-        await cur.close()
         before = {doc["_id"]: doc for doc in map(query._returned, rows)}
         if not before:
             return []
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         cur = await self._adapter.execute(*query._update_ids_sql(fields, list(before)))
         rows = await cur.fetchall()
         await cur.close()
@@ -715,13 +695,27 @@ class AsyncSQLerQuery(_WriteStatements):
         return [(doc, after[_id]) for _id, doc in before.items()]
 
     async def delete(self) -> int:
-        """Delete all matching rows.
+        """Delete the rows :meth:`all` returns: every match, or, on a query with a limit or
+        an offset, the rows the read's own statement returns, read in one transaction with
+        the delete after the write lock is taken, then deleted by id (``DELETE ... WHERE _id
+        IN (SELECT value FROM json_each(?))``).
 
         Returns:
             int: Number of rows deleted.
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._windowed():
+            async with self._held():
+                ids = await self._picked_ids()
+                if not ids:
+                    return 0
+                _, cur = await self._execute(lambda q: q._delete_sql(ids=ids))
+                if cur is None:
+                    return 0
+                rowcount = cur.rowcount
+                await cur.close()
+                return rowcount
         _, cur = await self._execute(lambda q: q._delete_sql())
         if cur is None:
             return 0
@@ -734,9 +728,26 @@ class AsyncSQLerQuery(_WriteStatements):
         """Async twin of :meth:`SQLerQuery._deleted` (run it inside a transaction)."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        query, cur = await self._execute(lambda q: q._delete_sql(returning=True))
+        ids = await self._picked_ids()
+        if ids == []:
+            return []
+        query, cur = await self._execute(lambda q: q._delete_sql(returning=True, ids=ids))
         if cur is None:
             return []
         rows = await cur.fetchall()
         await cur.close()
         return [query._returned(row) for row in rows]
+
+    async def _copied(self, target: str) -> int:
+        """Async twin of :meth:`SQLerQuery._copied`."""
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        ids = await self._picked_ids()
+        if ids == []:
+            return 0
+        _, cur = await self._execute(lambda q: q._copy_sql(target, ids))
+        if cur is None:
+            return 0
+        rowcount = cur.rowcount
+        await cur.close()
+        return rowcount

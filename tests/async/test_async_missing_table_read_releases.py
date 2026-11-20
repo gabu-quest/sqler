@@ -14,6 +14,7 @@ import tempfile
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 
@@ -25,7 +26,9 @@ pytestmark = pytest.mark.asyncio
 async def db():
     with tempfile.TemporaryDirectory() as tmpdir:
         pragmas = ["PRAGMA busy_timeout = 5000", "PRAGMA journal_mode = WAL"]
-        ad = AsyncSQLiteAdapter(os.path.join(tmpdir, "f.db"), pragmas=pragmas, pool_size=1, acquire_timeout=20)
+        ad = AsyncSQLiteAdapter(
+            os.path.join(tmpdir, "f.db"), pragmas=pragmas, pool_size=1, acquire_timeout=20
+        )
         database = AsyncSQLerDB(ad)
         await database.connect()
         await ad.execute("CREATE TABLE t (v TEXT)")
@@ -57,7 +60,9 @@ async def _other_task_reads(db: AsyncSQLerDB) -> int:
     ],
     ids=["find_document", "find_documents"],
 )
-async def test_idle_pinned_task_reading_a_missing_table_gives_its_connection_back(db, read_missing, empty):
+async def test_idle_pinned_task_reading_a_missing_table_gives_its_connection_back(
+    db, read_missing, empty
+):
     cur = await db.adapter.execute("SELECT v FROM t")  # pins the connection, nothing uncommitted
     assert [tuple(r) for r in await cur.fetchall()] == [("a",)]
     assert await read_missing(db) == empty

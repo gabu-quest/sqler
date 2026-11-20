@@ -5,6 +5,7 @@ from typing import Optional
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel, AsyncSQLerSafeModel
 from sqler.adapter import AsyncSQLiteAdapter
 
@@ -76,7 +77,9 @@ async def test_list_of_three_references_at_different_versions_one_select(db):
     conns = list(db.adapter._all_conns)
     for conn in conns:
         await conn.set_trace_callback(
-            lambda q: seen.append(q) if q.lstrip().upper().startswith("SELECT") and "asrv_safes" in q else None
+            lambda q: seen.append(q)
+            if q.lstrip().upper().startswith("SELECT") and "asrv_safes" in q
+            else None
         )
     try:
         got = await AsrvPlain.from_id(p._id)

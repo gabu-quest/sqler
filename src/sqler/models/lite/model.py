@@ -22,6 +22,8 @@ from typing import (
 
 from sqler import registry
 from sqler._stored import stored
+from sqler.db._statements import IndexFields
+from sqler.db.sqler_db import SQLerDB
 from sqler.exceptions import UniqueConstraintError
 from sqler.models import _dirty, _refs, _table_names, _write_rules
 from sqler.models._table_names import (  # noqa: F401
@@ -36,7 +38,6 @@ from sqler.models.lite.base import SQLerLiteModelBase
 from sqler.utils import validate_field_name, validate_table_name
 
 if TYPE_CHECKING:
-    from sqler.db.sqler_db import SQLerDB
     from sqler.models.queryset import SQLerQuerySet
 
 # The deprecation warning is attributed to the first caller outside the sqler package, so a
@@ -68,12 +69,14 @@ class SQLerLiteModel(SQLerLiteModelBase):
         users = User.using(db).filter(F("age") > 30).all()
 
     .. note::
-        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
-        ``.save(db=db)`` / ``.delete(db=db)`` for writes.
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and ``db=`` for
+        every other call (``.save(db=db)``, ``Model.from_id(id, db=db)``).
     """
 
     # Class-level database binding (not dataclass fields)
     _db: ClassVar[Optional["SQLerDB"]] = None
+    # the database this class takes; every way one comes in checks it (``_check_database``)
+    _takes_db: ClassVar[type[SQLerDB]] = SQLerDB
     _table: ClassVar[Optional[str]] = None
     # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
     _versioned_rows: ClassVar[bool] = False
@@ -84,25 +87,27 @@ class SQLerLiteModel(SQLerLiteModelBase):
         """Bind this model class to a database and table.
 
         .. deprecated::
-            Use :meth:`using` for queries and ``save(db=db)``/``delete(db=db)``
-            for writes.
+            Use :meth:`using` for queries and ``db=`` for every other call
+            (``save(db=db)``, ``from_id(id, db=db)``, ``add_index(field, db=db)``).
 
         Args:
             db: Database instance to use for persistence.
             table: Optional table name. Defaults to lowercase plural of the
                 class name (e.g., ``User`` → ``users``).
+
+        Raises:
+            TypeError: ``db`` is neither ``None`` nor a ``SQLerDB``; the class is left as it was.
         """
+        _table_names._check_given(cls, db)
         warnings.warn(
             f"{cls.__name__}.set_db() is deprecated. "
-            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            f"{_table_names.DATABASE_RULE} "
             "set_db() will be removed in a future version.",
             DeprecationWarning,
             skip_file_prefixes=_SQLER_PREFIXES,
         )
         explicit = getattr(cls, "__tablename__", None)
-        chosen = validate_table_name(
-            table or explicit or _default_table_name(cls.__name__)
-        )
+        chosen = validate_table_name(table or explicit or _default_table_name(cls.__name__))
         cls._db = db
         cls._table = chosen
         cls.__tablename__ = chosen  # type: ignore[attr-defined]
@@ -119,7 +124,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         """Alias for set_db() (deprecated)."""
         warnings.warn(
             f"{cls.__name__}.bind() is deprecated. "
-            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            f"{_table_names.DATABASE_RULE} "
             "bind() will be removed in a future version.",
             DeprecationWarning,
             stacklevel=2,
@@ -143,6 +148,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
         A read creates no table: on a table nobody created, ``all()`` is empty,
         ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
         """
+        _table_names._check_database(cls, db)
         table = validate_table_name(table) if table is not None else _model_table_name(cls)
         return cls._queryset(db, table)
 
@@ -200,6 +206,7 @@ class SQLerLiteModel(SQLerLiteModelBase):
             Missing ids are silently omitted from result.
         """
         if not ids:
+            _table_names._check_given(cls, db)
             return []
         db, table = cls._resolve_binding(db)
         read = _refs.read_versioned if cls._versioned_rows else _read_documents
@@ -265,38 +272,37 @@ class SQLerLiteModel(SQLerLiteModelBase):
         inst = cls(**merged)
         try:
             inst.save(db=db)
-        except UniqueConstraintError:
-            # another caller inserted the same lookup between the read and the insert
-            existing = qs.first()
-            if existing is None:
-                raise  # refused by a unique index on a field outside the lookup
-            return existing, False
+        except UniqueConstraintError as error:
+            return _write_rules.found_after_race(qs.first(), error)
         return inst, True
 
     @classmethod
     def add_index(
         cls,
-        field: str,
+        field: IndexFields,
         *,
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
+        db=None,
     ) -> None:
-        """Create an index on a JSON field via the model class."""
-        db, table = cls._require_binding()
+        """Create an index on one field or several (as ``create_index`` takes them) via the model class, in ``db`` when given, else the class's database."""
+        db, table = cls._resolve_binding(db)
         db.create_index(table, field, unique=unique, name=name, where=where)
 
     @classmethod
     def ensure_index(
         cls,
-        field: str,
+        field: IndexFields,
         *,
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
+        db=None,
     ) -> None:
-        """Ensure an index on a JSON path or literal column exists (idempotent)."""
-        cls.add_index(field, unique=unique, name=name, where=where)
+        """Ensure an index on one field or several exists (idempotent), in ``db``
+        when given, else the class's database."""
+        cls.add_index(field, unique=unique, name=name, where=where, db=db)
 
     # ----- instance methods -----
     @classmethod
@@ -306,8 +312,8 @@ class SQLerLiteModel(SQLerLiteModelBase):
         Uses multi-row INSERT for significantly better throughput than
         calling ``save()`` in a loop. Only supports new (unsaved) instances.
         Each instance meets the rules of its class as ``save()`` does: hooks,
-        timestamps and audit rows (see the mixins); with an audit log the batch
-        and its audit rows are one transaction.
+        timestamps and audit rows (see the mixins); with an audit log the batch and
+        its audit rows are one transaction.
 
         Args:
             instances: List of model instances with ``_id is None``.
@@ -325,18 +331,11 @@ class SQLerLiteModel(SQLerLiteModelBase):
     def _insert_rows(cls, db, table: str, instances: list) -> None:
         """Write new instances in one batch; each takes its ``_id`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
-
         if promoted:
-            checks = getattr(cls, "__checks__", None)
-            db._ensure_promoted(table, promoted, checks, model=cls)
-
+            _write_rules.ensure_columns(cls, db, table, promoted)
         payloads = [inst._dump_with_relations() for inst in instances]
-
-        if promoted:
-            promoted_fields = list(promoted.keys())
-            ids = db.insert_many_promoted(table, payloads, promoted_fields)
-        else:
-            ids = db.insert_many(table, payloads)
+        insert, args = _write_rules.rows_insert(db, table, payloads, promoted)
+        ids = insert(*args)
 
         for inst, id_, payload in zip(instances, ids, payloads):
             object.__setattr__(inst, "_id", id_)
@@ -365,16 +364,9 @@ class SQLerLiteModel(SQLerLiteModelBase):
         payload = self._dump_with_relations()
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
-            db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
-        if _partial:
-            new_id = self._id
-            changed = _dirty.changed_fields(self._snapshot or {}, payload)
-            db._update_fields(table, new_id, payload, changed, promoted or ())
-        elif promoted:
-            promoted_fields = list(promoted.keys())
-            new_id = db.upsert_document_promoted(table, self._id, payload, promoted_fields)
-        else:
-            new_id = db.upsert_document(table, self._id, payload)
+            _write_rules.ensure_columns(cls, db, table, promoted)
+        written = _write_rules.row_write(db, table, self, payload, _partial, promoted)
+        new_id = self._id if _partial else written
         object.__setattr__(self, "_id", new_id)
         object.__setattr__(self, "_snapshot", _dirty.snapshot(payload))
         return self
@@ -419,17 +411,16 @@ class SQLerLiteModel(SQLerLiteModelBase):
         db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = _read_document(db, table, self._id, cls._versioned_rows)
-        if doc is None:
-            raise LookupError(f"Row {self._id} not found for refresh")
+        doc = _write_rules.refresh_row(
+            _read_document(db, table, self._id, cls._versioned_rows), self._id
+        )
         own = {(table, self._id): self}
         return _refs.run(_refs.load(cls, [doc], db, table, self._refreshed, own))[0]
 
     def _refreshed(self: T, doc: dict, row: dict) -> T:
         """This instance holding the row ``doc`` (references in place) as ``row`` was read."""
-        for f in fields(self):
-            if not f.name.startswith("_") and f.name in doc:
-                object.__setattr__(self, f.name, doc[f.name])
+        for name, value in type(self)._init_fields(doc).items():  # typed, as a load gives it
+            object.__setattr__(self, name, value)
         object.__setattr__(self, "_snapshot", _dirty.snapshot(row))
         return self
 

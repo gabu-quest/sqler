@@ -120,7 +120,11 @@ class TestWritersCRUD:
         # Create writer with no articles
         create_resp = client.post(
             "/api/writers",
-            json={"name": "Deletable Writer", "bio": "Will be deleted", "city_id": city_tokyo["_id"]},
+            json={
+                "name": "Deletable Writer",
+                "bio": "Will be deleted",
+                "city_id": city_tokyo["_id"],
+            },
         )
         writer_id = create_resp.json()["_id"]
 
@@ -150,7 +154,11 @@ class TestWriterAuditLog:
         # Create writer
         create_resp = client.post(
             "/api/writers",
-            json={"name": "Audit Test Writer", "bio": "Testing audit", "city_id": city_tokyo["_id"]},
+            json={
+                "name": "Audit Test Writer",
+                "bio": "Testing audit",
+                "city_id": city_tokyo["_id"],
+            },
         )
         writer_id = create_resp.json()["_id"]
 
@@ -191,7 +199,9 @@ class TestWriterAuditLog:
 class TestWriterArticles:
     """Writer's articles endpoint tests."""
 
-    def test_get_writer_articles(self, client: TestClient, writer_haruki: dict, article_silence: dict):
+    def test_get_writer_articles(
+        self, client: TestClient, writer_haruki: dict, article_silence: dict
+    ):
         """Get articles written by a specific writer."""
         resp = client.get(f"/api/writers/{writer_haruki['_id']}/articles")
         assert resp.status_code == 200
@@ -204,7 +214,11 @@ class TestWriterArticles:
         # Create writer with no articles
         create_resp = client.post(
             "/api/writers",
-            json={"name": "No Articles Writer", "bio": "Has no articles", "city_id": city_tokyo["_id"]},
+            json={
+                "name": "No Articles Writer",
+                "bio": "Has no articles",
+                "city_id": city_tokyo["_id"],
+            },
         )
         writer_id = create_resp.json()["_id"]
 

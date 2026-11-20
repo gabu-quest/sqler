@@ -8,6 +8,7 @@ SQLerModel, SQLerSafeModel, SQLerLiteModel, SQLerLiteSafeModel.
 from dataclasses import dataclass
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.exceptions import (
     InvalidIdentifierError,
@@ -835,34 +836,45 @@ class TestNegativeInputs:
     """Tests for invalid inputs that must fail clearly, not silently."""
 
     def test_save_with_wrong_db_type_raises(self):
-        """save(db=42) should fail with AttributeError, not silently corrupt."""
+        """save(db=42) raises TypeError naming what it was given, and the item stays new."""
         db = SQLerDB.in_memory(shared=False)
         Item.set_db(db)
         item = Item(name="test", value=1)
-        with pytest.raises(AttributeError, match="object has no attribute"):
+        with pytest.raises(
+            TypeError, match="^Item takes a SQLerDB as its database, not an object of type int: "
+        ):
             item.save(db=42)
+        assert item._id is None
 
     def test_delete_with_wrong_db_type_raises(self):
-        """delete(db='wrong') should fail with AttributeError."""
+        """delete(db='wrong') raises TypeError naming what it was given; the row stays."""
         db = SQLerDB.in_memory(shared=False)
         Item.set_db(db)
         item = Item(name="test", value=1).save()
-        with pytest.raises(AttributeError, match="object has no attribute"):
+        with pytest.raises(
+            TypeError, match="^Item takes a SQLerDB as its database, not an object of type str: "
+        ):
             item.delete(db="wrong")
+        assert Item.count() == 1
 
     def test_using_none_raises(self):
-        """using(None) should raise AttributeError (no .adapter on None)."""
+        """using(None) raises TypeError: a query needs a database."""
         db = SQLerDB.in_memory(shared=False)
         Item.set_db(db)
-        with pytest.raises(AttributeError, match="object has no attribute"):
-            Item.using(None).all()
+        with pytest.raises(
+            TypeError,
+            match="^Item takes a SQLerDB as its database, not an object of type NoneType: ",
+        ):
+            Item.using(None)
 
     def test_using_wrong_type_raises(self):
-        """using(42) should raise AttributeError (no .adapter on int)."""
+        """using(42) raises TypeError naming what it was given."""
         db = SQLerDB.in_memory(shared=False)
         Item.set_db(db)
-        with pytest.raises(AttributeError, match="object has no attribute"):
-            Item.using(42).all()
+        with pytest.raises(
+            TypeError, match="^Item takes a SQLerDB as its database, not an object of type int: "
+        ):
+            Item.using(42)
 
     def test_save_unbound_model_no_db_raises(self):
         """save() on unbound model without db= raises NotBoundError."""

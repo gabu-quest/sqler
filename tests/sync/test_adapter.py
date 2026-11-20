@@ -7,6 +7,7 @@ from typing import Optional
 
 import pytest
 from exception_points import needs_libc_raise, stop_once_and_interrupt
+
 from sqler import SQLerDB, SQLerModel
 from sqler.adapter import AdapterABC, NotConnectedError, SQLiteAdapter
 from sqler.exceptions import TransactionStateError
@@ -147,8 +148,14 @@ def test_pragma_report_in_memory():
         report = adapter.pragma_report()
         assert isinstance(report, dict)
         expected_keys = {
-            "foreign_keys", "busy_timeout", "journal_mode", "synchronous",
-            "cache_size", "wal_autocheckpoint", "mmap_size", "temp_store",
+            "foreign_keys",
+            "busy_timeout",
+            "journal_mode",
+            "synchronous",
+            "cache_size",
+            "wal_autocheckpoint",
+            "mmap_size",
+            "temp_store",
         }
         assert set(report.keys()) == expected_keys
         assert report["foreign_keys"] == 1
@@ -350,7 +357,10 @@ def test_a_migration_runner_made_inside_a_transaction_is_rolled_back_with_it(tmp
                 result = MigrationRunner(db, [migration]).migrate()
                 assert (result.success, [r.version for r in result.applied]) == (True, [1])
                 raise ValueError("undo")
-        names = [r[0] for r in db.adapter.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()]
+        names = [
+            r[0]
+            for r in db.adapter.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
+        ]
         assert names == []
     finally:
         db.close()
@@ -365,7 +375,9 @@ def test_vacuum_inside_a_transaction_raises_and_the_transaction_goes_on(tmp_path
         with pytest.raises(ValueError, match="undo"):
             with db.transaction():
                 db.adapter.execute("INSERT INTO t VALUES ('first')")
-                with pytest.raises(OperationalError, match="cannot VACUUM from within a transaction"):
+                with pytest.raises(
+                    OperationalError, match="cannot VACUUM from within a transaction"
+                ):
                     vacuum(db)
                 assert db.adapter._txn_depth == 1
                 raise ValueError("undo")
@@ -385,10 +397,14 @@ PENDING = (
 
 def _pending(adapter) -> tuple[bool, list[str]]:
     """Whether SQLite counts a transaction open on the thread's connection, and the rows it sees."""
-    return adapter._conn().in_transaction, [r[0] for r in adapter.execute("SELECT v FROM t ORDER BY rowid")]
+    return adapter._conn().in_transaction, [
+        r[0] for r in adapter.execute("SELECT v FROM t ORDER BY rowid")
+    ]
 
 
-@pytest.mark.parametrize("raw", [["INSERT INTO t VALUES ('raw')"], ["BEGIN", "INSERT INTO t VALUES ('raw')"]])
+@pytest.mark.parametrize(
+    "raw", [["INSERT INTO t VALUES ('raw')"], ["BEGIN", "INSERT INTO t VALUES ('raw')"]]
+)
 def test_a_transaction_after_raw_uncommitted_work_is_refused_and_the_work_stays_pending(table, raw):
     for sql in raw:
         table.execute(sql)
@@ -559,7 +575,9 @@ def test_a_look_whose_second_statement_fails_too_raises_and_ends_the_unit(adapte
         return 0
 
     conn.set_trace_callback(
-        lambda sql: armed.append(sql) if sql.startswith("SELECT _id, data FROM raw_holders") and "json_" not in sql else None
+        lambda sql: armed.append(sql)
+        if sql.startswith("SELECT _id, data FROM raw_holders") and "json_" not in sql
+        else None
     )
     conn.set_progress_handler(stop_once, 1)
     try:

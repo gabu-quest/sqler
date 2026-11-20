@@ -26,6 +26,7 @@ from exception_points import (
     trace_raising_at_line,
     tracing,
 )
+
 from sqler import SQLerDB
 from sqler.adapter.synchronous import SQLiteAdapter
 from sqler.exceptions import NotConnectedError, TransactionStateError
@@ -124,8 +125,12 @@ def test_two_threads_transactions_each_keep_or_lose_only_their_own_row(db, a_com
     a_end = "COMMIT" if a_commits else "ROLLBACK"
     b_end = "COMMIT" if b_commits else "ROLLBACK"
     assert sent == [
-        "BEGIN IMMEDIATE", "INSERT INTO t VALUES ('a')", a_end,
-        "BEGIN IMMEDIATE", "INSERT INTO t VALUES ('b')", b_end,
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('a')",
+        a_end,
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('b')",
+        b_end,
     ]
 
 
@@ -170,7 +175,14 @@ def test_another_threads_plain_insert_waits_and_survives_the_rollback(db):
     thread.join(10)
     assert (raised, _rows(db)) == ([], ["b"])
     # the waiter's insert was sent after the holder's end
-    assert sent == ["BEGIN IMMEDIATE", "INSERT INTO t VALUES ('a')", "ROLLBACK", "BEGIN ", "INSERT INTO t VALUES ('b')", "COMMIT"]
+    assert sent == [
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('a')",
+        "ROLLBACK",
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('b')",
+        "COMMIT",
+    ]
 
 
 def test_another_thread_waits_for_a_statement_and_its_commit(db):
@@ -192,7 +204,14 @@ def test_another_thread_waits_for_a_statement_and_its_commit(db):
     thread.join(10)
     assert (raised, _rows(db)) == ([], ["b"])
     # the waiter's insert was sent after the holder's end
-    assert sent == ["BEGIN ", "INSERT INTO t VALUES ('x')", "ROLLBACK", "BEGIN ", "INSERT INTO t VALUES ('b')", "COMMIT"]
+    assert sent == [
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('x')",
+        "ROLLBACK",
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('b')",
+        "COMMIT",
+    ]
 
 
 # ---- the wait is bounded ----
@@ -215,7 +234,10 @@ def test_the_wait_for_another_threads_transaction_runs_out_after_timeout_ms(call
             thread, raised = _start(calls[call])
             thread.join(10)
         assert [(type(e), str(e)) for e in raised] == [
-            (sqlite3.OperationalError, "database is locked: another thread's transaction holds the in-memory connection")
+            (
+                sqlite3.OperationalError,
+                "database is locked: another thread's transaction holds the in-memory connection",
+            )
         ]
         assert _rows(database) == ["a"]
     finally:
@@ -251,8 +273,12 @@ def test_a_thread_that_ends_inside_its_transaction_is_rolled_back_and_the_waiter
     assert db.adapter._conn().in_transaction is False
     # the waiter began after the ended thread's transaction was rolled back
     assert sent == [
-        "BEGIN IMMEDIATE", "INSERT INTO t VALUES ('a')", "ROLLBACK",
-        "BEGIN IMMEDIATE", "INSERT INTO t VALUES ('b')", "COMMIT",
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('a')",
+        "ROLLBACK",
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('b')",
+        "COMMIT",
     ]
 
 
@@ -292,8 +318,12 @@ def test_a_base_exception_in_a_transaction_body_rolls_back_and_frees_the_connect
     assert _rows(db) == ["b"]
     # the waiter began after the interrupted transaction was rolled back
     assert sent == [
-        "BEGIN IMMEDIATE", "INSERT INTO t VALUES ('a')", "ROLLBACK",
-        "BEGIN IMMEDIATE", "INSERT INTO t VALUES ('b')", "COMMIT",
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('a')",
+        "ROLLBACK",
+        "BEGIN IMMEDIATE",
+        "INSERT INTO t VALUES ('b')",
+        "COMMIT",
     ]
 
 
@@ -335,8 +365,13 @@ def test_one_thread_nesting_three_deep_sends_savepoints(kind, tmp_path):
                 with database.transaction():
                     _insert(database, "deep")
         assert sent == [
-            "BEGIN IMMEDIATE", "SAVEPOINT sp_1", "SAVEPOINT sp_2", "INSERT INTO t VALUES ('deep')",
-            "RELEASE SAVEPOINT sp_2", "RELEASE SAVEPOINT sp_1", "COMMIT",
+            "BEGIN IMMEDIATE",
+            "SAVEPOINT sp_1",
+            "SAVEPOINT sp_2",
+            "INSERT INTO t VALUES ('deep')",
+            "RELEASE SAVEPOINT sp_2",
+            "RELEASE SAVEPOINT sp_1",
+            "COMMIT",
         ]
         assert _rows(database) == ["deep"]
     finally:
@@ -354,7 +389,9 @@ def test_the_transaction_depth_is_per_thread(db):
 # ---- a cursor read while another thread's transaction is open ----
 
 
-def test_a_cursor_read_while_another_threads_transaction_is_open_yields_what_its_statement_sorted(db):
+def test_a_cursor_read_while_another_threads_transaction_is_open_yields_what_its_statement_sorted(
+    db,
+):
     for v in ("1", "2"):
         _insert(db, v)
     cursor = db.adapter.execute("SELECT v FROM t ORDER BY v")
@@ -389,7 +426,11 @@ def _items(database: SQLerDB) -> list[dict]:
 
 @pytest.mark.parametrize("kind", ["memory", "file"])
 def test_with_adapter_commits_the_block_on_every_kind_of_database(kind, tmp_path):
-    database = SQLerDB.in_memory(shared=False) if kind == "memory" else SQLerDB.on_disk(str(tmp_path / "w.db"))
+    database = (
+        SQLerDB.in_memory(shared=False)
+        if kind == "memory"
+        else SQLerDB.on_disk(str(tmp_path / "w.db"))
+    )
     try:
         database.bulk_upsert("items", [{"n": i} for i in range(3)])
         assert database.adapter._conn().in_transaction is False
@@ -402,7 +443,11 @@ def test_with_adapter_commits_the_block_on_every_kind_of_database(kind, tmp_path
 
 @pytest.mark.parametrize("kind", ["memory", "file"])
 def test_with_adapter_inside_the_threads_transaction_leaves_the_transaction_open(kind, tmp_path):
-    database = SQLerDB.in_memory(shared=False) if kind == "memory" else SQLerDB.on_disk(str(tmp_path / "w.db"))
+    database = (
+        SQLerDB.in_memory(shared=False)
+        if kind == "memory"
+        else SQLerDB.on_disk(str(tmp_path / "w.db"))
+    )
     try:
         database.ensure_table("items")
         with pytest.raises(RuntimeError):
@@ -434,7 +479,9 @@ def _wait_for_waiters(database: SQLerDB, n: int) -> None:
     """Return once ``n`` threads wait for the connection's turn; fails after 10 s."""
     deadline = time.monotonic() + 10
     while database.adapter._shared._waiting < n:
-        assert time.monotonic() < deadline, f"{database.adapter._shared._waiting} of {n} threads came to wait"
+        assert time.monotonic() < deadline, (
+            f"{database.adapter._shared._waiting} of {n} threads came to wait"
+        )
         time.sleep(0.001)
 
 
@@ -490,7 +537,9 @@ def test_a_holder_and_five_mixed_waiters_all_go_on_when_it_commits(long_db):
     # every waiter's insert was sent after the holder's commit
     assert sent[:3] == ["BEGIN IMMEDIATE", "INSERT INTO t VALUES ('a')", "COMMIT"]
     assert sorted(s for s in sent[3:] if s.startswith("INSERT")) == [
-        "INSERT INTO t VALUES ('plain-1')", "INSERT INTO t VALUES ('plain-2')", "INSERT INTO t VALUES ('txn')",
+        "INSERT INTO t VALUES ('plain-1')",
+        "INSERT INTO t VALUES ('plain-2')",
+        "INSERT INTO t VALUES ('txn')",
     ]
 
 
@@ -518,7 +567,9 @@ def test_a_holder_thread_that_ends_without_closing_frees_both_waiting_readers(lo
 # ---- a thread that leaves the wait by an exception holds nothing ----
 
 
-@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="needs a real signal to the main thread")
+@pytest.mark.skipif(
+    not hasattr(signal, "pthread_kill"), reason="needs a real signal to the main thread"
+)
 def test_an_interrupted_waiter_holds_nothing_and_the_waiter_behind_it_goes_on(long_db):
     if threading.current_thread() is not threading.main_thread():
         pytest.skip("the interrupt goes to the main thread")
@@ -608,7 +659,9 @@ def test_iter_dicts_read_late_holds_only_the_committed_documents():
         database.close()
 
 
-def test_a_cursor_read_across_another_threads_transaction_and_its_rollback_holds_only_committed_rows(db):
+def test_a_cursor_read_across_another_threads_transaction_and_its_rollback_holds_only_committed_rows(
+    db,
+):
     _fill(db, "clean", 2000)
     cursor = db.adapter.execute("SELECT v FROM t")
     rows = [r[0] for r in cursor.fetchmany(1990)]
@@ -692,7 +745,9 @@ def test_a_select_of_100000_rows_is_read_whole(db):
     assert len(db.adapter.execute("SELECT v FROM t").fetchall()) == 100000
 
 
-@pytest.mark.parametrize("inside", [False, True], ids=["outside-a-transaction", "inside-its-transaction"])
+@pytest.mark.parametrize(
+    "inside", [False, True], ids=["outside-a-transaction", "inside-its-transaction"]
+)
 def test_a_select_whose_fifth_row_raises_fails_the_statement_and_frees_the_turn(db, inside):
     def fifth_raises(v):
         if v == "5":
@@ -743,7 +798,10 @@ def test_timeout_ms_zero_goes_on_when_free_and_raises_at_once_when_held():
         other = _start(lambda: database.adapter.execute("SELECT 1"))
         assert _join_all([other]) == [False]
         assert [(type(e), str(e)) for e in other[1]] == [
-            (sqlite3.OperationalError, "database is locked: another thread's transaction holds the in-memory connection")
+            (
+                sqlite3.OperationalError,
+                "database is locked: another thread's transaction holds the in-memory connection",
+            )
         ]
         database.adapter.end_transaction(commit=True)
     finally:
@@ -783,9 +841,12 @@ def test_close_from_another_thread_wakes_three_waiters_with_not_connected(long_d
 def test_a_thread_left_inside_its_transaction_leaves_no_level_for_the_main_thread():
     database = SQLerDB.in_memory(shared=False)
     try:
+
         def a():
             database.transaction().__enter__()
-            database.upsert_with_version("docs", None, {"by": "a"}, None)  # creates the versioned table
+            database.upsert_with_version(
+                "docs", None, {"by": "a"}, None
+            )  # creates the versioned table
             # ends inside the block: its transaction is rolled back, the table with it
 
         thread, raised = _start(a)
@@ -793,7 +854,11 @@ def test_a_thread_left_inside_its_transaction_leaves_no_level_for_the_main_threa
         assert raised == []
         _id, version = database.upsert_with_version("docs", None, {"by": "main"}, None)
         assert (_id, version) == (1, 0)
-        assert database.find_document_with_version("docs", 1) == {"_id": 1, "_version": 0, "by": "main"}
+        assert database.find_document_with_version("docs", 1) == {
+            "_id": 1,
+            "_version": 0,
+            "by": "main",
+        }
     finally:
         database.close()
 
@@ -862,11 +927,19 @@ def _commit_of_a_pending_write(database: SQLerDB) -> None:
 INTERRUPTED_AS = {
     "nested-rollback-to": lambda d: _nested(d, commit=False),
     "nested-release": lambda d: _nested(d, commit=True),
-    "execute-in-a-transaction": lambda d: _inside(d, lambda a: a.execute("INSERT INTO t VALUES ('stopped')")),
-    "executemany-in-a-transaction": lambda d: _inside(d, lambda a: a.executemany("INSERT INTO t VALUES (?)", [["m1"], ["m2"]])),
+    "execute-in-a-transaction": lambda d: _inside(
+        d, lambda a: a.execute("INSERT INTO t VALUES ('stopped')")
+    ),
+    "executemany-in-a-transaction": lambda d: _inside(
+        d, lambda a: a.executemany("INSERT INTO t VALUES (?)", [["m1"], ["m2"]])
+    ),
     "execute": lambda d: _outside(d, lambda a: a.execute("INSERT INTO t VALUES ('stopped')")),
-    "executemany": lambda d: _outside(d, lambda a: a.executemany("INSERT INTO t VALUES (?)", [["m1"], ["m2"]])),
-    "executescript": lambda d: _outside(d, lambda a: a.executescript("INSERT INTO t VALUES ('s1');")),
+    "executemany": lambda d: _outside(
+        d, lambda a: a.executemany("INSERT INTO t VALUES (?)", [["m1"], ["m2"]])
+    ),
+    "executescript": lambda d: _outside(
+        d, lambda a: a.executescript("INSERT INTO t VALUES ('s1');")
+    ),
     "begin": lambda d: _outside(d, lambda a: a.begin_transaction()),
     "outermost-commit": lambda d: _outermost_end(d, commit=True),
     "outermost-rollback": lambda d: _outermost_end(d, commit=False),
@@ -914,7 +987,9 @@ PLACES_AND_WAYS = [
 
 @needs_libc_raise
 @pytest.mark.parametrize(("place", "how"), PLACES_AND_WAYS)
-def test_an_interrupt_pending_as_sqlite_fails_leaves_the_turn_free_and_nothing_half_done(tmp_path, place, how):
+def test_an_interrupt_pending_as_sqlite_fails_leaves_the_turn_free_and_nothing_half_done(
+    tmp_path, place, how
+):
     if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
         pytest.skip("this process does not turn SIGINT into KeyboardInterrupt")
     database = _place_db(place, tmp_path)
@@ -934,7 +1009,14 @@ def test_an_interrupt_pending_as_sqlite_fails_leaves_the_turn_free_and_nothing_h
 
 @needs_libc_raise
 @pytest.mark.parametrize(
-    "how", ["nested-rollback-to", "nested-release", "execute-in-a-transaction", "outermost-commit", "outermost-rollback"]
+    "how",
+    [
+        "nested-rollback-to",
+        "nested-release",
+        "execute-in-a-transaction",
+        "outermost-commit",
+        "outermost-rollback",
+    ],
 )
 def test_a_thread_waiting_for_the_turn_goes_on_after_the_holders_interrupted_end(tmp_path, how):
     """The holder's transaction is open while the reader comes to wait; the interrupt
@@ -963,8 +1045,6 @@ def test_a_thread_waiting_for_the_turn_goes_on_after_the_holders_interrupted_end
         assert (reader[1], counts, _rows(database)) == ([], [1], ["before"])
     finally:
         database.close()
-
-
 
 
 # ---- a holder left behind by any exception keeps no other thread out ----
@@ -1013,7 +1093,9 @@ def _left_by_me(database: SQLerDB):
         return type(exc)
 
 
-def _worker_that_idles(body) -> tuple[tuple[threading.Thread, list[BaseException]], list, threading.Event]:
+def _worker_that_idles(
+    body,
+) -> tuple[tuple[threading.Thread, list[BaseException]], list, threading.Event]:
     """Start a thread that runs ``body`` (which returns what it reports), then waits for
     the returned event before it ends; returns once ``body`` ran."""
     report: list = []
@@ -1043,7 +1125,9 @@ def _what_left(statement, point: str, how: str):
 
 
 @pytest.mark.parametrize(("point", "where", "how"), SKIPPED_PARTS)
-def test_a_read_left_by_an_exception_leaves_no_holder_that_keeps_another_thread_out(point, where, how):
+def test_a_read_left_by_an_exception_leaves_no_holder_that_keeps_another_thread_out(
+    point, where, how
+):
     _needs_sigint(how)
     database = _memory_db(2000)
     shared = database.adapter._shared
@@ -1079,7 +1163,11 @@ def test_a_write_whose_give_is_skipped_keeps_its_transaction_until_its_thread_en
     try:
         worker, report, go_on = _worker_that_idles(
             lambda: (
-                _what_left(lambda: database.adapter.execute("INSERT INTO t VALUES ('of the worker')"), "give-entry", how),
+                _what_left(
+                    lambda: database.adapter.execute("INSERT INTO t VALUES ('of the worker')"),
+                    "give-entry",
+                    how,
+                ),
                 _left_by_me(database),
                 shared.conn.in_transaction,
             )
@@ -1092,7 +1180,11 @@ def test_a_write_whose_give_is_skipped_keeps_its_transaction_until_its_thread_en
         assert _join_all([worker]) == [False]
         assert worker[1] == []
         _insert(database, "after")
-        assert (_rows(database), shared._holder, report[0][1]) == (["after", "before"], None, (False, True, True))
+        assert (_rows(database), shared._holder, report[0][1]) == (
+            ["after", "before"],
+            None,
+            (False, True, True),
+        )
     finally:
         database.close()
 
@@ -1120,7 +1212,9 @@ def _ended_holder(database: SQLerDB, work, unraisable: list, meanwhile=lambda: N
     return report[0]
 
 
-def test_a_thread_whose_end_hook_raises_has_its_transaction_rolled_back_by_the_next_statement(unraisable):
+def test_a_thread_whose_end_hook_raises_has_its_transaction_rolled_back_by_the_next_statement(
+    unraisable,
+):
     database = _memory_db(2000)
 
     def holder() -> None:
@@ -1141,7 +1235,11 @@ def test_a_new_thread_with_the_ident_of_a_dead_holder_joins_nothing_it_left(unra
     database = _memory_db(2000)
     try:
         dead, left = _ended_holder(
-            database, lambda: _what_left(lambda: _in(database, "of the thread that ended"), "give-entry", "trace"), unraisable
+            database,
+            lambda: _what_left(
+                lambda: _in(database, "of the thread that ended"), "give-entry", "trace"
+            ),
+            unraisable,
         )
         assert left == (Skipped, ["give-entry"])
         reused: list[bool] = []
@@ -1197,7 +1295,10 @@ def test_a_block_holding_the_connection_whose_exit_is_skipped_keeps_no_other_thr
     shared = database.adapter._shared
     try:
         if where == "main":
-            assert _what_left(lambda: _read_in_a_block(database), "give-entry", how) == (Skipped, ["give-entry"])
+            assert _what_left(lambda: _read_in_a_block(database), "give-entry", how) == (
+                Skipped,
+                ["give-entry"],
+            )
             left = _left_by_me(database)
             counts: list[int] = []
             other = _start(lambda: counts.append(_count(database)))
@@ -1206,7 +1307,10 @@ def test_a_block_holding_the_connection_whose_exit_is_skipped_keeps_no_other_thr
             assert left == (False, True, True)
         else:
             worker, report, go_on = _worker_that_idles(
-                lambda: (_what_left(lambda: _read_in_a_block(database), "give-entry", how), _left_by_me(database))
+                lambda: (
+                    _what_left(lambda: _read_in_a_block(database), "give-entry", how),
+                    _left_by_me(database),
+                )
             )
             assert report[0][0] == (Skipped, ["give-entry"])
             assert _count(database) == 1  # while the worker idles
@@ -1231,7 +1335,11 @@ def test_a_kept_rollback_whose_give_was_skipped_is_tried_by_the_next_statement_a
         database.adapter.begin_transaction()
         _in(database, "of the thread that ended")
         conn.set_progress_handler(lambda: 1, 1)  # every statement is stopped
-        left.append(_what_left(lambda: database.adapter.end_transaction(commit=False), "give-entry", "trace"))
+        left.append(
+            _what_left(
+                lambda: database.adapter.end_transaction(commit=False), "give-entry", "trace"
+            )
+        )
 
     try:
         ended = _start(holder)
@@ -1247,7 +1355,9 @@ def test_a_kept_rollback_whose_give_was_skipped_is_tried_by_the_next_statement_a
         database.close()
 
 
-def _waiting_count(database: SQLerDB) -> tuple[tuple[threading.Thread, list[BaseException]], list[int]]:
+def _waiting_count(
+    database: SQLerDB,
+) -> tuple[tuple[threading.Thread, list[BaseException]], list[int]]:
     """Start a thread that counts the rows; returns once it waits for the turn."""
     counts: list[int] = []
     waiter = _start(lambda: counts.append(_count(database)))
@@ -1285,7 +1395,9 @@ def test_a_thread_already_waiting_when_the_holders_give_is_skipped_goes_on_when_
         database.close()
 
 
-def test_a_thread_already_waiting_when_the_holders_end_hook_raises_goes_on_when_its_wait_runs_out(unraisable):
+def test_a_thread_already_waiting_when_the_holders_end_hook_raises_goes_on_when_its_wait_runs_out(
+    unraisable,
+):
     """The holder ends inside its write and its end hook raises while another thread
     waits: at the end of its wait the waiter rolls back what the dead thread left and reads."""
     database = _memory_db(3000)
@@ -1431,14 +1543,20 @@ def test_a_thread_whose_transaction_broke_still_raises_after_another_thread_free
         assert _join_all([worker]) == [False]
         assert worker[1] == []
         assert seen == [(RAISED["trace"], ["give-entry"])]
-        assert (freed_for_main, _rows(database), shared._holder) == (1, ["after the transaction", "before"], None)
+        assert (freed_for_main, _rows(database), shared._holder) == (
+            1,
+            ["after the transaction", "before"],
+            None,
+        )
     finally:
         freed.set()
         database.close()
 
 
 @pytest.mark.parametrize("place", ["memory", "file"])
-def test_an_exception_at_any_line_of_an_outermost_rollback_leaves_no_transaction_to_join(tmp_path, place):
+def test_an_exception_at_any_line_of_an_outermost_rollback_leaves_no_transaction_to_join(
+    tmp_path, place
+):
     """Whatever line of ``end_transaction`` the exception lands on, the count and SQLite
     agree: the levels the count still has end rolled back, and the thread's next statement
     commits only its own row. Line by line until the end runs through."""
@@ -1464,4 +1582,4 @@ def test_an_exception_at_any_line_of_an_outermost_rollback_leaves_no_transaction
         if not fired:
             break
         landed.extend(fired)
-    assert (len(landed), line) == ({"memory": 13, "file": 11}[place], len(landed))
+    assert (len(landed), line) == ({"memory": 15, "file": 14}[place], len(landed))

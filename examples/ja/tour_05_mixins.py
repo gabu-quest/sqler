@@ -101,26 +101,25 @@ def _(SQLerModel, TimestampMixin, datetime, db, timezone):
         title: str
         content: str
 
-        def save(self) -> Self:
+        def save(self, *, db=None) -> Self:
             """タイムスタンプを自動設定するために save をオーバーライド。"""
             now = datetime.now(timezone.utc)
             if self._id is None:
                 self.created_at = now
             self.updated_at = now
-            return super().save()
+            return super().save(db=db)
 
-    Post.set_db(db)
     print("TimestampMixin 付きの Post モデル準備完了！")
     return Post, Self
 
 
 @app.cell
-def _(Post):
+def _(Post, db):
     import time
 
     # 投稿を作成
     post = Post(title="Hello World", content="私の最初の投稿")
-    post.save()
+    post.save(db=db)
 
     print(f"投稿を作成: '{post.title}'")
     print(f"  created_at: {post.created_at}")
@@ -129,7 +128,7 @@ def _(Post):
     # 少し待って更新
     time.sleep(0.1)
     post.content = "更新されたコンテンツ！"
-    post.save()
+    post.save(db=db)
 
     print("\n更新後:")
     print(f"  created_at: {post.created_at}（変更なし）")
@@ -152,13 +151,12 @@ def _(mo):
 
 
 @app.cell
-def _(SQLerModel, SoftDeleteMixin, db):
+def _(SQLerModel, SoftDeleteMixin):
     class Document(SoftDeleteMixin, SQLerModel):
         _table = "documents"
         name: str
         content: str
 
-    Document.set_db(db)
     print("SoftDeleteMixin 付きの Document モデル準備完了！")
     print("\nSoftDeleteMixin が提供するもの:")
     print("  - deleted_at: Optional[datetime] フィールド")
@@ -170,47 +168,47 @@ def _(SQLerModel, SoftDeleteMixin, db):
 
 
 @app.cell
-def _(Document, F):
+def _(Document, F, db):
     # いくつかのドキュメントを作成
-    doc1 = Document(name="report.pdf", content="年次レポート").save()
-    doc2 = Document(name="notes.txt", content="会議メモ").save()
-    doc3 = Document(name="draft.doc", content="提案書の下書き").save()
+    doc1 = Document(name="report.pdf", content="年次レポート").save(db=db)
+    doc2 = Document(name="notes.txt", content="会議メモ").save(db=db)
+    doc3 = Document(name="draft.doc", content="提案書の下書き").save(db=db)
 
     print("3つのドキュメントを作成")
-    print(f"データベース内の総数: {Document.query().count()}")
+    print(f"データベース内の総数: {Document.using(db).count()}")
 
     # 1つのドキュメントをソフトデリート
-    doc2.soft_delete()
+    doc2.soft_delete(db=db)
     print(f"\n'{doc2.name}' をソフトデリート")
     print(f"  is_deleted: {doc2.is_deleted}")
     print(f"  deleted_at: {doc2.deleted_at}")
 
     # ドキュメントはまだデータベースに存在する！
-    print(f"\nデータベース内の総数: {Document.query().count()}")
+    print(f"\nデータベース内の総数: {Document.using(db).count()}")
 
     # アクティブなドキュメントのみを取得するフィルター
-    active = Document.query().filter(F("deleted_at").is_null()).all()
+    active = Document.using(db).filter(F("deleted_at").is_null()).all()
     print(f"アクティブなドキュメント: {[d.name for d in active]}")
 
     # 削除されたドキュメントのみを取得するフィルター
-    deleted = Document.query().filter(F("deleted_at").is_not_null()).all()
+    deleted = Document.using(db).filter(F("deleted_at").is_not_null()).all()
     print(f"削除されたドキュメント: {[d.name for d in deleted]}")
     return active, deleted, doc1, doc2, doc3
 
 
 @app.cell
-def _(Document, doc2):
+def _(Document, db, doc2):
     # ソフトデリートされたドキュメントを復元
     print(f"復元前: is_deleted = {doc2.is_deleted}")
 
-    doc2.restore()
+    doc2.restore(db=db)
 
     print(f"復元後: is_deleted = {doc2.is_deleted}")
     print(f"deleted_at: {doc2.deleted_at}")
 
     # ハードデリート（永久削除）
-    doc2.hard_delete()
-    print(f"\nhard_delete 後: ドキュメント数 = {Document.query().count()}")
+    doc2.hard_delete(db=db)
+    print(f"\nhard_delete 後: ドキュメント数 = {Document.using(db).count()}")
     return
 
 
@@ -231,7 +229,7 @@ def _(mo):
 
 
 @app.cell
-def _(HooksMixin, SQLerModel, db):
+def _(HooksMixin, SQLerModel):
     class User(HooksMixin, SQLerModel):
         _table = "users"
         name: str
@@ -258,25 +256,24 @@ def _(HooksMixin, SQLerModel, db):
             """削除後にログ。"""
             print(f"  [after_delete] ユーザー {self.name} を削除しました")
 
-    User.set_db(db)
     print("HooksMixin 付きの User モデル準備完了！")
     return (User,)
 
 
 @app.cell
-def _(User):
+def _(User, db):
     print("乱雑なメールでユーザーを作成中...")
     user = User(name="Alice", email="  ALICE@Example.COM  ")
-    user.save()  # フックは自動的に呼び出される！
+    user.save(db=db)  # フックは自動的に呼び出される！
 
     print(f"\n最終メール: {user.email}")
     return (user,)
 
 
 @app.cell
-def _(user):
+def _(db, user):
     print("\nユーザーを削除中...")
-    user.delete()  # 削除フックは自動的に呼び出される！
+    user.delete(db=db)  # 削除フックは自動的に呼び出される！
     return
 
 
@@ -306,22 +303,20 @@ def _(HooksMixin, SQLerModel, db):
                 return False  # 削除を中止
             return True
 
-    ProtectedRecord.set_db(db)
-
     # ロックされたレコードを作成
-    _record = ProtectedRecord(data="重要なデータ", locked=True).save()
+    _record = ProtectedRecord(data="重要なデータ", locked=True).save(db=db)
     print(f"ロックされたレコードを作成: {_record.data}")
 
     # 削除を試みる
     print("\nロックされたレコードの削除を試行中...")
     try:
-        _record.delete()  # これはブロックされる
+        _record.delete(db=db)  # これはブロックされる
         print("削除成功（予期しない！）")
     except RuntimeError as _e:
         print(f"削除がブロックされました: {_e}")
 
     # まだ存在することを確認
-    _still_exists = ProtectedRecord.from_id(_record._id)
+    _still_exists = ProtectedRecord.from_id(_record._id, db=db)
     print(f"レコードはまだ存在: {_still_exists is not None}")
     return
 
@@ -339,7 +334,7 @@ def _(mo):
 
 
 @app.cell
-def _(FullMixin, SQLerModel, datetime, db, timezone):
+def _(FullMixin, SQLerModel, datetime, timezone):
     from typing import Self as SelfType
 
     class Task(FullMixin, SQLerModel):
@@ -360,7 +355,6 @@ def _(FullMixin, SQLerModel, datetime, db, timezone):
         def after_save(self) -> None:
             print(f"  [after_save] id={self._id} で保存")
 
-    Task.set_db(db)
     print("FullMixin 付きの Task モデル準備完了！")
     print("\nFullMixin が提供するもの:")
     print("  - TimestampMixin: created_at, updated_at")
@@ -370,10 +364,10 @@ def _(FullMixin, SQLerModel, datetime, db, timezone):
 
 
 @app.cell
-def _(Task):
+def _(Task, db):
     # タスクを作成
     task = Task(title="SQLer を学ぶ", description="すべてのチュートリアルを完了", priority=1)
-    task.save()
+    task.save(db=db)
 
     print(f"\nタスク: {task.title}")
     print(f"  priority: {task.priority}")
@@ -382,7 +376,7 @@ def _(Task):
 
     # タスクをソフトデリート
     print("\nタスクをソフトデリート中...")
-    task.soft_delete()
+    task.soft_delete(db=db)
     print(f"  is_deleted: {task.is_deleted}")
     print(f"  deleted_at: {task.deleted_at}")
     return (task,)
@@ -401,25 +395,25 @@ def _(mo):
 
 
 @app.cell
-def _(F, Task):
+def _(F, Task, db):
     # クエリ用にさらにタスクを作成
-    Task(title="タスク A", priority=1).save()
-    Task(title="タスク B", priority=2).save()
-    task_c = Task(title="タスク C", priority=3).save()
-    task_c.soft_delete()
+    Task(title="タスク A", priority=1).save(db=db)
+    Task(title="タスク B", priority=2).save(db=db)
+    task_c = Task(title="タスク C", priority=3).save(db=db)
+    task_c.soft_delete(db=db)
 
     print("ソフトデリート可能なモデルのクエリパターン:\n")
 
     # すべてのレコード（削除されたものを含む）
-    all_tasks = Task.query().all()
+    all_tasks = Task.using(db).all()
     print(f"すべてのタスク: {len(all_tasks)}")
 
     # アクティブのみ（削除されていない）
-    active_tasks = Task.query().filter(F("deleted_at").is_null()).all()
+    active_tasks = Task.using(db).filter(F("deleted_at").is_null()).all()
     print(f"アクティブなタスク: {[t.title for t in active_tasks]}")
 
     # 削除されたもののみ
-    deleted_tasks = Task.query().filter(F("deleted_at").is_not_null()).all()
+    deleted_tasks = Task.using(db).filter(F("deleted_at").is_not_null()).all()
     print(f"削除されたタスク: {[t.title for t in deleted_tasks]}")
     return active_tasks, all_tasks, deleted_tasks, task_c
 
@@ -444,12 +438,10 @@ def _(AuditMixin, SQLerModel, db):
         title: str
         content: str
 
-    Article.set_db(db)
-
     # 現在のユーザーを設定（通常はミドルウェアで行う）
     AuditMixin.set_current_user("alice@example.com")
 
-    _article = Article(title="Hello World", content="最初の投稿！").save()
+    _article = Article(title="Hello World", content="最初の投稿！").save(db=db)
     print(f"作成者: {_article.created_by}")
     print(f"更新者: {_article.updated_by}")
     print(f"作成日時: {_article.created_at}")
@@ -457,7 +449,7 @@ def _(AuditMixin, SQLerModel, db):
     # 別のユーザーが記事を更新
     AuditMixin.set_current_user("bob@example.com")
     _article.content = "更新されたコンテンツ"
-    _article.save()
+    _article.save(db=db)
 
     print("\nBob による更新後:")
     print(f"  作成者: {_article.created_by}（変更なし）")
@@ -486,27 +478,25 @@ def _(AuditLogMixin, AuditMixin, SQLerModel, db):
         price: float
         in_stock: bool = True
 
-    Product.set_db(db)
-
     # 監査ログ用にユーザーを設定
     AuditMixin.set_current_user("admin@shop.com")
 
     # 商品を作成
-    _prod = Product(name="Widget", price=29.99).save()
+    _prod = Product(name="Widget", price=29.99).save(db=db)
     print(f"作成: {_prod.name} @ ${_prod.price}")
 
     # いくつかの変更を行う
     _prod.price = 24.99
-    _prod.save()
+    _prod.save(db=db)
     print(f"価格を ${_prod.price} に更新")
 
     _prod.in_stock = False
-    _prod.save()
+    _prod.save(db=db)
     print("在庫切れとしてマーク")
 
     # 監査ログを表示
     print("\n--- 監査ログ ---")
-    _logs = _prod.get_audit_log()
+    _logs = _prod.get_audit_log(db=db)
     for _log in _logs:
         print(f"{_log['action']} at {_log['timestamp'][:19]} by {_log['user']}")
         if _log["changes"]:

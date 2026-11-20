@@ -11,8 +11,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pytest
-import sqler.models as models
 from pydantic import BaseModel
+
+import sqler.models as models
 from sqler import SQLerDB, StaleVersionError, registry
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.logging import query_logger
@@ -244,7 +245,10 @@ async def test_all_and_first_on_the_async_class_give_its_rows(async_db: AsyncSQL
     for city in ("Kyoto", "Osaka"):
         await IntegrityAddress(city=city).save()
     rows, first = await IntegrityAddress.all(), await IntegrityAddress.first()
-    assert ([(r._id, r.city) for r in rows], (first._id, first.city)) == ([(1, "Kyoto"), (2, "Osaka")], (1, "Kyoto"))
+    assert ([(r._id, r.city) for r in rows], (first._id, first.city)) == (
+        [(1, "Kyoto"), (2, "Osaka")],
+        (1, "Kyoto"),
+    )
 
 
 @pytest.mark.asyncio
@@ -364,6 +368,7 @@ def test_the_table_holds_every_public_base():
         "AsyncSQLerLiteModel",
         "AsyncSQLerLiteSafeModel",
         "AsyncSQLerModel",
+        "AsyncSQLerMsgspecModel",
         "AsyncSQLerSafeModel",
         "SQLerLiteModel",
         "SQLerLiteSafeModel",
@@ -374,7 +379,9 @@ def test_the_table_holds_every_public_base():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("where", ["alone", "raised out of a transaction", "caught in a transaction"])
+@pytest.mark.parametrize(
+    "where", ["alone", "raised out of a transaction", "caught in a transaction"]
+)
 @pytest.mark.parametrize("way", list(WAYS))
 @pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
 async def test_a_delete_of_a_row_that_is_referred_to_is_refused(base, way, where):
@@ -554,9 +561,13 @@ async def test_two_rows_that_refer_to_each_other_go_together_and_not_alone(base)
         await put(db, table, 1, "$.target", ref(table, 2))
         await put(db, table, 2, "$.target", ref(table, 1))
 
-        with pytest.raises(ReferentialIntegrityError, match=rf"^Cannot delete {table}:1; referenced by 1 row\(s\)$"):
+        with pytest.raises(
+            ReferentialIntegrityError, match=rf"^Cannot delete {table}:1; referenced by 1 row\(s\)$"
+        ):
             await settle(one.delete(db=db))
-        with pytest.raises(ReferentialIntegrityError, match=rf"^Cannot delete {table}:2; referenced by 1 row\(s\)$"):
+        with pytest.raises(
+            ReferentialIntegrityError, match=rf"^Cannot delete {table}:2; referenced by 1 row\(s\)$"
+        ):
             await settle(Node.using(db).filter(F("name") == "two").delete_all())
         assert await holds(db, table) == [(1, 2), (2, 1)]
 
@@ -718,7 +729,9 @@ async def test_the_orphan_scan_reports_a_reference_and_never_a_dict_with_more_ke
         target = await settle(Target(name="t").save(db=db))
         await settle(Referrer(title="ref", target=target).save(db=db))
         data = {**ref(Target.__tablename__, 1), "note": "data"}
-        await settle(db.insert_document(Referrer.__tablename__, {"title": "data", "blob": [{"in": data}]}))
+        await settle(
+            db.insert_document(Referrer.__tablename__, {"title": "data", "blob": [{"in": data}]})
+        )
         await settle(db.delete_document(Target.__tablename__, 1))
 
         if base is AsyncSQLerDB:
@@ -729,7 +742,11 @@ async def test_the_orphan_scan_reports_a_reference_and_never_a_dict_with_more_ke
             broken = validate_references(db)
         assert broken == [
             BrokenRef(
-                table=Referrer.__tablename__, row_id=1, path="target", target_table=Target.__tablename__, target_id=1
+                table=Referrer.__tablename__,
+                row_id=1,
+                path="target",
+                target_table=Target.__tablename__,
+                target_id=1,
             )
         ]
     finally:
@@ -768,7 +785,9 @@ async def test_a_referrer_written_by_another_connection_during_the_delete_is_kep
             if not sql.startswith(f"DELETE FROM {Target.__tablename__} ") or refused:
                 return
             try:
-                other.execute(f"INSERT INTO {Referrer.__tablename__} (data) VALUES (json(?))", [late])
+                other.execute(
+                    f"INSERT INTO {Referrer.__tablename__} (data) VALUES (json(?))", [late]
+                )
                 other.commit()
                 refused.append("written")
             except sqlite3.OperationalError as exc:
@@ -777,6 +796,7 @@ async def test_a_referrer_written_by_another_connection_during_the_delete_is_kep
 
         await _trace(db, write_a_referrer)
         try:
+
             async def act():
                 if way == "delete()":
                     await settle(target.delete(db=db))
@@ -854,7 +874,9 @@ async def test_a_referrer_at_an_optional_a_list_a_dict_and_a_nested_position(bas
             await settle(target.delete(db=db))
         await settle(target.delete_with_policy(db=db, on_delete="set_null"))
 
-        stored = [json.loads(r[0]) for r in await rows(db, f"SELECT data FROM {table} ORDER BY _id")]
+        stored = [
+            json.loads(r[0]) for r in await rows(db, f"SELECT data FROM {table} ORDER BY _id")
+        ]
         assert [{k: v for k, v in d.items() if k != "_version"} for d in stored] == [
             d
             for d in (
@@ -912,7 +934,10 @@ async def test_a_class_whose_annotation_resolves_after_the_first_delete(base):
         )
         first = await settle(Target(name="first").save(db=db))
         second = await settle(Target(name="second").save(db=db))
-        for doc in ({"blob": ref(Target.__tablename__, 1)}, {"target": ref(Target.__tablename__, 2)}):
+        for doc in (
+            {"blob": ref(Target.__tablename__, 1)},
+            {"target": ref(Target.__tablename__, 2)},
+        ):
             await settle(db.insert_document(Holder.__tablename__, doc))
 
         with pytest.raises(ReferentialIntegrityError, match=r"referenced by 1 row\(s\)$"):
@@ -940,7 +965,9 @@ def define_after(module: str, name: str, base, fields: dict):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("way", ["delete()", "delete_all()"])
 @pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
-async def test_a_class_never_used_that_names_a_class_defined_after_it_costs_a_delete_no_read(base, way):
+async def test_a_class_never_used_that_names_a_class_defined_after_it_costs_a_delete_no_read(
+    base, way
+):
     """A module that defines ``Early`` before the ``Later`` it names, and uses neither: the
     delete of a row of a class nothing can refer to sends its own statement and no other."""
     db = await open_db(base)
@@ -966,7 +993,9 @@ async def test_a_class_never_used_that_names_a_class_defined_after_it_costs_a_de
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
-async def test_a_class_never_used_that_names_a_class_defined_after_it_refers_where_it_declares(base):
+async def test_a_class_never_used_that_names_a_class_defined_after_it_refers_where_it_declares(
+    base,
+):
     """The positions such a class declares are known with no use of it: a reference in an
     untyped field of its row is data, one in its typed field refuses the delete."""
     db = await open_db(base)
@@ -1156,7 +1185,9 @@ async def _rows_read_and_written_through_using_a_table(base, db):
     Holder = declare(base, "Holder", {"name": (str, ""), **owner_of(Target)})
     table = f"dib_other_{next(_tables)}"
     t = await settle(Target(name="t").save(db=db))
-    await settle(db.insert_document(table, {"name": "h", "owner": ref(Target.__tablename__, t._id)}))
+    await settle(
+        db.insert_document(table, {"name": "h", "owner": ref(Target.__tablename__, t._id)})
+    )
     h = await settle(Holder.using(db, table).first())
     h.name = "read"
     await settle(h.save())
@@ -1179,7 +1210,10 @@ SHARED_TABLES = {
 
 
 async def owners(db, table: str) -> list:
-    return [json.loads(r[0]).get("owner") for r in await rows(db, f"SELECT data FROM {table} ORDER BY _id")]
+    return [
+        json.loads(r[0]).get("owner")
+        for r in await rows(db, f"SELECT data FROM {table} ORDER BY _id")
+    ]
 
 
 @pytest.mark.asyncio
@@ -1189,7 +1223,9 @@ async def test_the_fields_of_every_class_whose_rows_live_in_a_table_count(base, 
     """A row of a table refers to a target at a position any class whose rows live there
     declares as a model: restrict refuses, set_null nulls it, cascade deletes the row; by
     ``delete()`` and by ``delete_all()``."""
-    for way, policy in itertools.product(("delete()", "delete_all()"), ("restrict", "set_null", "cascade")):
+    for way, policy in itertools.product(
+        ("delete()", "delete_all()"), ("restrict", "set_null", "cascade")
+    ):
         db = await open_db(base)
         try:
             # the classes are held here, as a program holds the classes it defines: a
@@ -1200,9 +1236,11 @@ async def test_the_fields_of_every_class_whose_rows_live_in_a_table_count(base, 
             before = await owners(db, table)
             assert before.count(held) == 1
             if way == "delete()":
+
                 def act():
                     return t.delete_with_policy(db=db, on_delete=policy)
             else:
+
                 def act():
                     return Target.using(db).filter(F("name") == "t").delete_all(on_delete=policy)
 
@@ -1221,7 +1259,11 @@ async def test_the_fields_of_every_class_whose_rows_live_in_a_table_count(base, 
                 else:
                     after = [o for o in before if o != held]
 
-            assert (way, policy, await holds(db, Target.__tablename__, "$.name")) == (way, policy, left)
+            assert (way, policy, await holds(db, Target.__tablename__, "$.name")) == (
+                way,
+                policy,
+                left,
+            )
             assert (way, policy, await owners(db, table)) == (way, policy, after)
         finally:
             await settle(db.close())
@@ -1238,9 +1280,12 @@ async def test_a_referring_class_whose_table_is_not_in_this_database(base):
         await settle(target.delete(db=db))
 
         assert await holds(db, Target.__tablename__, "$.name") == []
-        assert await rows(
-            db, f"SELECT name FROM sqlite_master WHERE name = '{Referrer.__tablename__}'"
-        ) == []
+        assert (
+            await rows(
+                db, f"SELECT name FROM sqlite_master WHERE name = '{Referrer.__tablename__}'"
+            )
+            == []
+        )
     finally:
         await settle(db.close())
 
@@ -1353,7 +1398,9 @@ async def test_a_cascade_of_a_set_through_three_classes_with_a_cycle(base):
         await settle(db.insert_document(B.__tablename__, {"a": ref(A.__tablename__, 1)}))
         await settle(db.insert_document(C.__tablename__, {"b": ref(B.__tablename__, 1)}))
 
-        deleted = await settle(A.using(db).filter(F("name") == "set").delete_all(on_delete="cascade"))
+        deleted = await settle(
+            A.using(db).filter(F("name") == "set").delete_all(on_delete="cascade")
+        )
 
         assert deleted == 1
         for cls in (A, B, C):
@@ -1380,7 +1427,8 @@ async def test_delete_all_of_nothing_sends_only_its_own_statement(base, referabl
         row = ", ".join(f"`{name}`" for name in ["_id", "data", *version])
         guard = f"CASE WHEN 1 THEN 1 ELSE (SELECT ({row}) IN (SELECT * FROM {t}) FROM {t}) END"  # never runs
         assert statements == [
-            f"DELETE FROM {t} WHERE JSON_EXTRACT(data, '$.name') = ? AND {guard}" + (returning if referable else "")
+            f"DELETE FROM {t} WHERE JSON_EXTRACT(data, '$.name') = ? AND {guard}"
+            + (returning if referable else "")
         ]
     finally:
         await settle(db.close())
@@ -1425,7 +1473,9 @@ async def test_delete_all_refuses_through_every_door(base, door):
         else:
             q = Alone.using(db, Target.__tablename__)
 
-        with pytest.raises(ReferentialIntegrityError, match=rf"^Cannot delete {Target.__tablename__}:1;"):
+        with pytest.raises(
+            ReferentialIntegrityError, match=rf"^Cannot delete {Target.__tablename__}:1;"
+        ):
             await settle(q.delete_all())
 
         assert await holds(db, Target.__tablename__, "$.name") == [(1, "t")]
@@ -1443,7 +1493,9 @@ async def test_delete_all_with_an_unknown_policy_is_refused_before_anything_runs
         q = Target.using(db)
 
         async def act():
-            with pytest.raises(ValueError, match="^on_delete must be 'restrict', 'set_null', or 'cascade'$"):
+            with pytest.raises(
+                ValueError, match="^on_delete must be 'restrict', 'set_null', or 'cascade'$"
+            ):
                 await settle(q.delete_all(on_delete="CASCADE"))
 
         assert await sent(act) == []
@@ -1476,9 +1528,9 @@ async def test_delete_all_in_a_transaction_the_caller_rolls_back_leaves_both_tab
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
-async def test_delete_all_with_an_order_and_a_limit_deletes_and_looks_at_every_match(base):
-    """A ``DELETE`` takes the filter only, as it did: the limit and the order are not used,
-    and the look covers every row deleted."""
+async def test_delete_all_with_an_order_and_a_limit_deletes_and_looks_at_the_rows_all_returns(base):
+    """A ``DELETE`` of a query with an order and a limit takes the rows ``all()`` returns, and
+    the look at the rows that refer to them covers those rows and no other."""
     db = await open_db(base)
     try:
         Target, Referrer = pair(base)
@@ -1486,13 +1538,17 @@ async def test_delete_all_with_an_order_and_a_limit_deletes_and_looks_at_every_m
             await settle(Target(name=name).save(db=db))
         await settle(Referrer().save(db=db))
         await put(db, Referrer.__tablename__, 1, "$.target", ref(Target.__tablename__, 3))
-        q = Target.using(db).order_by("name").limit(1)
+        first = Target.using(db).order_by("name").limit(1)
+        last = Target.using(db).order_by("name", desc=True).limit(1)
 
-        with pytest.raises(ReferentialIntegrityError, match=r"^Cannot delete 3 rows of "):
-            await settle(q.delete_all())
-        assert await settle(q.delete_all(on_delete="set_null")) == 3
+        assert await settle(first.delete_all()) == 1  # a: nothing refers to it
+        with pytest.raises(
+            ReferentialIntegrityError, match=rf"^Cannot delete {Target.__tablename__}:3; "
+        ):
+            await settle(last.delete_all())
+        assert await settle(last.delete_all(on_delete="set_null")) == 1
 
-        assert await holds(db, Target.__tablename__, "$.name") == []
+        assert await holds(db, Target.__tablename__, "$.name") == [(2, "b")]
         assert await holds(db, Referrer.__tablename__) == [(1, None)]
     finally:
         await settle(db.close())
@@ -1531,7 +1587,9 @@ async def test_a_versioned_referrer_nulled_by_delete_all_refuses_a_stale_save(ba
     ],
 )
 @pytest.mark.parametrize("base", BASES, ids=lambda b: b.__name__)
-async def test_delete_all_of_an_audited_target_and_an_audited_referrer(base, policy, targets, referrers):
+async def test_delete_all_of_an_audited_target_and_an_audited_referrer(
+    base, policy, targets, referrers
+):
     db = await open_db(base)
     try:
         audit = AsyncAuditLogMixin if base in ASYNC_BASES else AuditLogMixin
@@ -1545,6 +1603,9 @@ async def test_delete_all_of_an_audited_target_and_an_audited_referrer(base, pol
             assert policy == "restrict"
 
         for cls, actions in ((Target, targets), (Referrer, referrers)):
-            assert await rows(db, f"SELECT action FROM {cls.__tablename__}_audit ORDER BY _id") == actions
+            assert (
+                await rows(db, f"SELECT action FROM {cls.__tablename__}_audit ORDER BY _id")
+                == actions
+            )
     finally:
         await settle(db.close())

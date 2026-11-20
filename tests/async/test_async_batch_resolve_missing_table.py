@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel
 from sqler.adapter import AsyncSQLiteAdapter
 from sqler.models.lite.async_model import AsyncSQLerLiteModel

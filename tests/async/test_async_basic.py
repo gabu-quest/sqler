@@ -1,4 +1,5 @@
 import pytest
+
 from sqler.query import SQLerField as F
 from sqler.query.async_query import AsyncSQLerQuery
 
@@ -68,8 +69,14 @@ async def test_pragma_report_in_memory(async_adapter):
     report = await async_adapter.pragma_report()
     assert isinstance(report, dict)
     expected_keys = {
-        "foreign_keys", "busy_timeout", "journal_mode", "synchronous",
-        "cache_size", "wal_autocheckpoint", "mmap_size", "temp_store",
+        "foreign_keys",
+        "busy_timeout",
+        "journal_mode",
+        "synchronous",
+        "cache_size",
+        "wal_autocheckpoint",
+        "mmap_size",
+        "temp_store",
     }
     assert set(report.keys()) == expected_keys
     assert report["foreign_keys"] == 1

@@ -14,6 +14,7 @@ import time
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 
@@ -34,7 +35,11 @@ class RollPromo(AsyncSQLerModel):
 
 
 def _db(tmpdir: str, acquire_timeout: float) -> AsyncSQLerDB:
-    pragmas = ["PRAGMA busy_timeout = 5000", "PRAGMA journal_mode = WAL", "PRAGMA synchronous = OFF"]
+    pragmas = [
+        "PRAGMA busy_timeout = 5000",
+        "PRAGMA journal_mode = WAL",
+        "PRAGMA synchronous = OFF",
+    ]
     ad = AsyncSQLiteAdapter(
         os.path.join(tmpdir, "f.db"), pragmas=pragmas, pool_size=1, acquire_timeout=acquire_timeout
     )
@@ -68,7 +73,9 @@ async def _setup(db: AsyncSQLerDB) -> None:
     await db.adapter.auto_commit()
 
 
-async def test_cancelled_statement_reaches_caller_at_once_with_a_remembered_versioned_table(tmpdir_path):
+async def test_cancelled_statement_reaches_caller_at_once_with_a_remembered_versioned_table(
+    tmpdir_path,
+):
     db = _db(tmpdir_path, acquire_timeout=20)
     await _setup(db)
     try:
@@ -76,7 +83,9 @@ async def test_cancelled_statement_reaches_caller_at_once_with_a_remembered_vers
         exc_type, elapsed = await _cancel_in_transaction(db)
         assert (exc_type, elapsed < CALLER_SEES_IT_S) == (TimeoutError, True), elapsed
         # the next versioned write works, once the connection is back
-        rid, version = await asyncio.wait_for(db.upsert_with_version("vers", None, {"n": 1}, None), 15)
+        rid, version = await asyncio.wait_for(
+            db.upsert_with_version("vers", None, {"n": 1}, None), 15
+        )
         assert version == 0
         cur = await db.adapter.execute("SELECT count(*) FROM t")
         assert (await cur.fetchone())[0] == 0  # the insert was rolled back
@@ -85,7 +94,9 @@ async def test_cancelled_statement_reaches_caller_at_once_with_a_remembered_vers
         await db.close()
 
 
-async def test_cancelled_statement_reaches_caller_at_once_with_a_remembered_promoted_table(tmpdir_path):
+async def test_cancelled_statement_reaches_caller_at_once_with_a_remembered_promoted_table(
+    tmpdir_path,
+):
     db = _db(tmpdir_path, acquire_timeout=20)
     await _setup(db)
     try:
@@ -99,7 +110,9 @@ async def test_cancelled_statement_reaches_caller_at_once_with_a_remembered_prom
         await db.close()
 
 
-async def test_cancelled_statement_with_short_acquire_timeout_gives_the_callers_exception(tmpdir_path):
+async def test_cancelled_statement_with_short_acquire_timeout_gives_the_callers_exception(
+    tmpdir_path,
+):
     db = _db(tmpdir_path, acquire_timeout=1)
     await _setup(db)
     try:
@@ -127,7 +140,9 @@ async def test_rollback_on_a_closed_adapter_gives_the_callers_exception(tmpdir_p
         await db.close()
 
 
-async def test_promoted_table_created_and_rolled_back_is_created_again_by_the_next_save(tmpdir_path):
+async def test_promoted_table_created_and_rolled_back_is_created_again_by_the_next_save(
+    tmpdir_path,
+):
     db = _db(tmpdir_path, acquire_timeout=20)
     await _setup(db)
     try:

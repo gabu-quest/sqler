@@ -1,6 +1,7 @@
 """AuditLogMixin: a save and its audit row are both there or neither is."""
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.exceptions import UniqueConstraintError
 from sqler.models.mixins import AuditLogMixin

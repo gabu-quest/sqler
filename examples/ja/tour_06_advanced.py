@@ -79,8 +79,6 @@ def _(SQLerModel, db):
         price: float
         in_stock: bool = True
 
-    Product.set_db(db)
-
     # サンプルデータを作成
     products = [
         ("ウィジェット A", "electronics", 29.99),
@@ -91,7 +89,7 @@ def _(SQLerModel, db):
         ("ツール 3", "hardware", 14.99),
     ]
     for name, cat, price in products:
-        Product(name=name, category=cat, price=price).save()
+        Product(name=name, category=cat, price=price).save(db=db)
 
     print(f"{len(products)} 個の製品を作成")
     return Product, cat, name, price, products
@@ -110,23 +108,23 @@ def _(mo):
 
 
 @app.cell
-def _(F, Product):
+def _(F, Product, db):
     # すべてのハードウェアを在庫切れとしてマーク
-    updated_count = Product.query().filter(F("category") == "hardware").update(in_stock=False)
+    updated_count = Product.using(db).filter(F("category") == "hardware").update(in_stock=False)
     print(f"{updated_count} 個のハードウェア製品を在庫切れとしてマーク")
 
     # 確認
-    out_of_stock = Product.query().filter(F("in_stock") == False).all()
+    out_of_stock = Product.using(db).filter(F("in_stock") == False).all()
     print(f"在庫切れ: {[p.name for p in out_of_stock]}")
     return out_of_stock, updated_count
 
 
 @app.cell
-def _(F, Product):
+def _(F, Product, db):
     # カテゴリの価格を更新
-    Product.query().filter(F("category") == "electronics").update(price=49.99)
+    Product.using(db).filter(F("category") == "electronics").update(price=49.99)
 
-    electronics = Product.query().filter(F("category") == "electronics").all()
+    electronics = Product.using(db).filter(F("category") == "electronics").all()
     print("バルク更新後のエレクトロニクス価格:")
     for p in electronics:
         print(f"  {p.name}: ${p.price}")
@@ -146,15 +144,15 @@ def _(mo):
 
 
 @app.cell
-def _(F, Product):
-    print(f"削除前の製品数: {Product.query().count()}")
+def _(F, Product, db):
+    print(f"削除前の製品数: {Product.using(db).count()}")
 
     # すべてのハードウェア製品を削除
-    deleted_count = Product.query().filter(F("category") == "hardware").delete_all()
+    deleted_count = Product.using(db).filter(F("category") == "hardware").delete_all()
     print(f"{deleted_count} 個のハードウェア製品を削除")
 
-    print(f"削除後の製品数: {Product.query().count()}")
-    remaining = Product.query().all()
+    print(f"削除後の製品数: {Product.using(db).count()}")
+    remaining = Product.using(db).all()
     print(f"残り: {[p.name for p in remaining]}")
     return deleted_count, remaining
 
@@ -181,8 +179,6 @@ def _(SQLerModel, db):
         age: int
         country: str
 
-    User.set_db(db)
-
     # サンプルユーザーを作成（WASM パフォーマンスのため削減）
     for i in range(20):
         User(
@@ -190,24 +186,24 @@ def _(SQLerModel, db):
             email=f"user{i}@example.com",
             age=20 + (i % 50),
             country=["US", "UK", "JP"][i % 3],
-        ).save()
+        ).save(db=db)
 
-    print(f"{User.query().count()} 人のユーザーを作成")
+    print(f"{User.using(db).count()} 人のユーザーを作成")
     return User, i
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # email フィールドにインデックスを作成
-    User.add_index("email", unique=True)
+    User.add_index("email", unique=True, db=db)
     print("'email' にユニークインデックスを作成")
 
     # age に非ユニークインデックスを作成
-    User.add_index("age")
+    User.add_index("age", db=db)
     print("'age' にインデックスを作成")
 
     # country にインデックスを作成
-    User.add_index("country")
+    User.add_index("country", db=db)
     print("'country' にインデックスを作成")
     return
 
@@ -238,10 +234,10 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # 複数回呼び出しても安全
-    User.ensure_index("email", unique=True)
-    User.ensure_index("email", unique=True)  # エラーなし、重複なし
+    User.ensure_index("email", unique=True, db=db)
+    User.ensure_index("email", unique=True, db=db)  # エラーなし、重複なし
     print("ensure_index は複数回呼び出しても安全")
     return
 
@@ -274,13 +270,10 @@ def _(SQLerModel, db):
         title: str
         author: Author | None = None
 
-    Author.set_db(db)
-    Book.set_db(db)
-
     # テストデータを作成
-    author = Author(name="Alice").save()
-    book1 = Book(title="本 1", author=author).save()
-    book2 = Book(title="本 2", author=author).save()
+    author = Author(name="Alice").save(db=db)
+    book1 = Book(title="本 1", author=author).save(db=db)
+    book2 = Book(title="本 2", author=author).save(db=db)
 
     print(f"著者 '{author.name}' を2冊の本とともに作成")
     return Author, Book, author, book1, book2
@@ -299,18 +292,18 @@ def _(mo):
 
 
 @app.cell
-def _(Author, author):
+def _(Author, author, db):
     from sqler.exceptions import IntegrityError
 
     # restrict ポリシーで著者の削除を試みる
     try:
-        author.delete_with_policy(on_delete="restrict")
+        author.delete_with_policy(on_delete="restrict", db=db)
         print("著者を削除（予期しない！）")
     except IntegrityError as _e:
         print(f"IntegrityError: 削除できません - {_e}")
 
     # 著者はまだ存在する
-    still_exists = Author.from_id(author._id)
+    still_exists = Author.from_id(author._id, db=db)
     print(f"著者はまだ存在: {still_exists.name}")
     return IntegrityError, still_exists
 
@@ -328,23 +321,23 @@ def _(mo):
 
 
 @app.cell
-def _(Author, Book, F):
+def _(Author, Book, F, db):
     # 新しい著者を作成
-    bob = Author(name="Bob").save()
-    book3 = Book(title="本 3", author=bob).save()
+    bob = Author(name="Bob").save(db=db)
+    book3 = Book(title="本 3", author=bob).save(db=db)
 
     print(f"削除前: 本 '{book3.title}' の著者は '{book3.author.name}'")
 
     # set_null ポリシーで削除
-    bob.delete_with_policy(on_delete="set_null")
+    bob.delete_with_policy(on_delete="set_null", db=db)
     print("\nset_null ポリシーで Bob を削除")
 
     # 本を確認 - 著者は None になるはず
-    book3.refresh()
+    book3.refresh(db=db)
     print(f"削除後: 本 '{book3.title}' の著者: {book3.author}")
 
     # Bob が削除されたことを確認
-    bob_exists = Author.query().filter(F("name") == "Bob").exists()
+    bob_exists = Author.using(db).filter(F("name") == "Bob").exists()
     print(f"Bob は存在: {bob_exists}")
     return bob, bob_exists, book3
 
@@ -362,23 +355,23 @@ def _(mo):
 
 
 @app.cell
-def _(Author, Book):
+def _(Author, Book, db):
     # 本を持つ別の著者を作成
-    _carol = Author(name="Carol").save()
-    Book(title="Carol の本 1", author=_carol).save()
-    Book(title="Carol の本 2", author=_carol).save()
+    _carol = Author(name="Carol").save(db=db)
+    Book(title="Carol の本 1", author=_carol).save(db=db)
+    Book(title="Carol の本 2", author=_carol).save(db=db)
 
     _carol_id = _carol._id
-    _books_before = Book.query().filter(Book.ref("author").field("_id") == _carol_id).count()
+    _books_before = Book.using(db).filter(Book.ref("author").field("_id") == _carol_id).count()
     print(f"Carol を {_books_before} 冊の本とともに作成")
-    print(f"削除前の本の総数: {Book.query().count()}")
+    print(f"削除前の本の総数: {Book.using(db).count()}")
 
     # cascade で削除
-    _carol.delete_with_policy(on_delete="cascade")
+    _carol.delete_with_policy(on_delete="cascade", db=db)
     print("\ncascade ポリシーで Carol を削除")
 
-    print(f"削除後の本の総数: {Book.query().count()}")
-    _carol_books_after = Book.query().filter(Book.ref("author").field("name") == "Carol").all()
+    print(f"削除後の本の総数: {Book.using(db).count()}")
+    _carol_books_after = Book.using(db).filter(Book.ref("author").field("name") == "Carol").all()
     print(f"Carol の残りの本: {len(_carol_books_after)}")
     return
 
@@ -405,7 +398,7 @@ def _(User, db):
 
     print("生 SQL の結果（40歳以上のユーザー）:")
     for row in result:
-        user = User.from_id(row[0])
+        user = User.from_id(row[0], db=db)
         print(f"  {user.name}, 年齢 {user.age}")
     return result, row, user
 
@@ -423,10 +416,10 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # 複雑なクエリを構築
     _query = (
-        User.query()
+        User.using(db)
         .filter(F("age") > 30)
         .filter(F("country") == "US")
         .order_by("age", desc=True)
@@ -453,9 +446,9 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # クエリのデバッグ情報を取得
-    _query = User.query().filter(F("email").contains("user1"))
+    _query = User.using(db).filter(F("email").contains("user1"))
     _sql, _params = _query.debug()
 
     print("デバッグ出力:")
@@ -477,10 +470,10 @@ def _(mo):
 
 
 @app.cell
-def _(F, User):
+def _(F, User, db):
     # US または UK のユーザーを検索
     results = (
-        User.query().filter(F("country") == "US").or_filter(F("country") == "UK").limit(10).all()
+        User.using(db).filter(F("country") == "US").or_filter(F("country") == "UK").limit(10).all()
     )
 
     print("US または UK のユーザー:")
@@ -502,13 +495,13 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # ユニークな国を取得
-    countries = User.query().distinct_values("country")
+    countries = User.using(db).distinct_values("country")
     print(f"ユニークな国: {countries}")
 
     # ユニークな年齢を取得（最初の10件）
-    ages = User.query().distinct_values("age")
+    ages = User.using(db).distinct_values("age")
     print(f"ユニークな年齢: {sorted(ages)[:10]}...")
     return ages, countries
 

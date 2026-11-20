@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
+
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.mixins import (
@@ -522,7 +523,9 @@ class TestAsyncMixinDbForwarding:
             assert len(logs) == 1
             assert logs[0]["user"] == "log_user"
             ts = datetime.fromisoformat(logs[0]["timestamp"])
-            assert abs((datetime.now(timezone.utc) - ts).total_seconds()) < MAX_DELTA.total_seconds()
+            assert (
+                abs((datetime.now(timezone.utc) - ts).total_seconds()) < MAX_DELTA.total_seconds()
+            )
             assert logs[0]["snapshot"]["name"] == "log_fields_test"
         finally:
             AsyncAuditMixin.set_current_user(None)

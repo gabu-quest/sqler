@@ -1,6 +1,7 @@
 import json
 
 import pytest
+
 from sqler import SQLerDB, SQLiteAdapter
 from sqler.adapter.abstract import AdapterABC
 

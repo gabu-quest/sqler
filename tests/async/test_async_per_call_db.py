@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
+
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import NotBoundError, StaleVersionError
 from sqler.models.async_model import AsyncSQLerModel

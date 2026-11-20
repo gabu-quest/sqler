@@ -63,7 +63,7 @@ from .mixins import (
 )
 
 # Msgspec models (optional - requires msgspec)
-from .msgspec import SQLerMsgspecModel, SQLerMsgspecModelBase
+from .msgspec import AsyncSQLerMsgspecModel, SQLerMsgspecModel, SQLerMsgspecModelBase
 from .utils import (
     DEFAULT_REBASE_CONFIG,
     NO_REBASE_CONFIG,
@@ -81,6 +81,7 @@ class BrokenRef:
     path: str
     target_table: str
     target_id: int
+
 
 # Conditionally import Pydantic-based models
 if PYDANTIC_AVAILABLE:
@@ -115,31 +116,31 @@ else:
         _Stub.__qualname__ = name
         return _Stub
 
-    SQLerModel = _pydantic_required_class("SQLerModel")  # type: ignore[misc]
-    SQLerSafeModel = _pydantic_required_class("SQLerSafeModel")  # type: ignore[misc]
-    AsyncSQLerModel = _pydantic_required_class("AsyncSQLerModel")  # type: ignore[misc]
-    AsyncSQLerSafeModel = _pydantic_required_class("AsyncSQLerSafeModel")  # type: ignore[misc]
+    SQLerModel = _pydantic_required_class("SQLerModel")  # type: ignore[misc]  # stub used when pydantic is not installed
+    SQLerSafeModel = _pydantic_required_class("SQLerSafeModel")  # type: ignore[misc]  # stub used when pydantic is not installed
+    AsyncSQLerModel = _pydantic_required_class("AsyncSQLerModel")  # type: ignore[misc]  # stub used when pydantic is not installed
+    AsyncSQLerSafeModel = _pydantic_required_class("AsyncSQLerSafeModel")  # type: ignore[misc]  # stub used when pydantic is not installed
 
     # QuerySets and helpers
-    SQLerQuerySet = _pydantic_required_class("SQLerQuerySet")  # type: ignore[misc]
-    AsyncSQLerQuerySet = _pydantic_required_class("AsyncSQLerQuerySet")  # type: ignore[misc]
-    SQLerModelField = _pydantic_required_class("SQLerModelField")  # type: ignore[misc]
-    SQLerRef = _pydantic_required_class("SQLerRef")  # type: ignore[misc]
+    SQLerQuerySet = _pydantic_required_class("SQLerQuerySet")  # type: ignore[misc]  # stub used when pydantic is not installed
+    AsyncSQLerQuerySet = _pydantic_required_class("AsyncSQLerQuerySet")  # type: ignore[misc]  # stub used when pydantic is not installed
+    SQLerModelField = _pydantic_required_class("SQLerModelField")  # type: ignore[misc]  # stub used when pydantic is not installed
+    SQLerRef = _pydantic_required_class("SQLerRef")  # type: ignore[misc]  # stub used when pydantic is not installed
 
-    def as_ref(*args, **kwargs):
+    def as_ref(*args, **kwargs):  # type: ignore[misc]  # stub used when pydantic is not installed
         require_pydantic("as_ref")
 
     # Async integrity helpers
-    async def async_find_referrers(*args, **kwargs):
+    async def async_find_referrers(*args, **kwargs):  # type: ignore[misc]  # stub used when pydantic is not installed
         require_pydantic("async_find_referrers")
 
-    async def async_set_null_referrers(*args, **kwargs):
+    async def async_set_null_referrers(*args, **kwargs):  # type: ignore[misc]  # stub used when pydantic is not installed
         require_pydantic("async_set_null_referrers")
 
-    async def async_cascade_delete(*args, **kwargs):
+    async def async_cascade_delete(*args, **kwargs):  # type: ignore[misc]  # stub used when pydantic is not installed
         require_pydantic("async_cascade_delete")
 
-    async def async_validate_references(*args, **kwargs):
+    async def async_validate_references(*args, **kwargs):  # type: ignore[misc]  # stub used when pydantic is not installed
         require_pydantic("async_validate_references")
 
 
@@ -155,16 +156,15 @@ except ImportError:
         class _Stub:
             def __init__(self, *args, **kwargs):
                 raise ImportError(
-                    f"{name} requires aiosqlite.\n"
-                    f"Install with: pip install aiosqlite"
+                    f"{name} requires aiosqlite.\nInstall with: pip install aiosqlite"
                 )
 
         _Stub.__name__ = name
         _Stub.__qualname__ = name
         return _Stub
 
-    AsyncSQLerLiteModel = _async_lite_required_class("AsyncSQLerLiteModel")  # type: ignore[misc]
-    AsyncSQLerLiteSafeModel = _async_lite_required_class("AsyncSQLerLiteSafeModel")  # type: ignore[misc]
+    AsyncSQLerLiteModel = _async_lite_required_class("AsyncSQLerLiteModel")  # type: ignore[misc]  # stub used when aiosqlite is not installed
+    AsyncSQLerLiteSafeModel = _async_lite_required_class("AsyncSQLerLiteSafeModel")  # type: ignore[misc]  # stub used when aiosqlite is not installed
 
 
 __all__ = [
@@ -187,6 +187,7 @@ __all__ = [
     # Msgspec models (optional - requires msgspec)
     "SQLerMsgspecModel",
     "SQLerMsgspecModelBase",
+    "AsyncSQLerMsgspecModel",
     # Exceptions
     "StaleVersionError",
     "ReferentialIntegrityError",

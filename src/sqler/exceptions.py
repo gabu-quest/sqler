@@ -308,7 +308,7 @@ def unique_violation_from(exc: BaseException) -> Optional[UniqueConstraintError]
     # requires 3.12; an error without it is left as the driver raised it.
     if getattr(exc, "sqlite_errorname", None) not in _UNIQUE_ERRORNAMES:
         return None
-    named = message[len(_UNIQUE_PREFIX):]
+    named = message[len(_UNIQUE_PREFIX) :]
     table: Optional[str] = None
     columns: list[str] = []
     index: Optional[str] = None
@@ -327,8 +327,8 @@ def unique_violation_from(exc: BaseException) -> Optional[UniqueConstraintError]
         columns=columns,
         index=index,
     )
-    err.sqlite_errorcode = getattr(exc, "sqlite_errorcode", None)
-    err.sqlite_errorname = getattr(exc, "sqlite_errorname", None)
+    err.sqlite_errorcode = getattr(exc, "sqlite_errorcode", None)  # type: ignore[assignment]  # None for an error made in Python, not by SQLite; stubs say int
+    err.sqlite_errorname = getattr(exc, "sqlite_errorname", None)  # type: ignore[assignment]  # None for an error made in Python, not by SQLite; stubs say str
     return err
 
 

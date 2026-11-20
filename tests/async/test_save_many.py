@@ -4,11 +4,13 @@ import sqlite3
 
 import pytest
 import pytest_asyncio
+
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.async_safe import AsyncSQLerSafeModel
 
 # ---- test models ----
+
 
 class AItem(AsyncSQLerModel):
     __tablename__ = "items"
@@ -47,6 +49,7 @@ class ASafePromotedItem(AsyncSQLerSafeModel):
 
 # ---- fixtures ----
 
+
 @pytest_asyncio.fixture
 async def db():
     db = AsyncSQLerDB.in_memory(shared=False)
@@ -58,6 +61,7 @@ async def db():
 
 
 # ---- AsyncSQLerModel.save_many tests ----
+
 
 @pytest.mark.asyncio
 async def test_save_many_basic(db):
@@ -201,6 +205,7 @@ async def test_save_many_chunking(db):
 
 
 # ---- AsyncSQLerSafeModel.save_many tests ----
+
 
 @pytest.mark.asyncio
 async def test_save_many_safe_model(db):

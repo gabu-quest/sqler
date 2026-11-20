@@ -18,9 +18,9 @@ PALETTE = [
 # Extended palette for scenarios needing more colors
 ACCENT_COLORS = {
     "highlight": "#FFD700",  # Gold
-    "danger": "#FF4444",     # Red
-    "success": "#00CC66",    # Green
-    "muted": "#666666",      # Dark grey
+    "danger": "#FF4444",  # Red
+    "success": "#00CC66",  # Green
+    "muted": "#666666",  # Dark grey
 }
 
 # Dark theme colors
@@ -45,61 +45,56 @@ def apply_dark_theme() -> None:
 
     plt.style.use("dark_background")
 
-    mpl.rcParams.update({
-        # Figure
-        "figure.facecolor": BG_DARK,
-        "figure.edgecolor": BG_DARK,
-        "figure.figsize": (12, 7),
-        "figure.dpi": 150,
-
-        # Axes
-        "axes.facecolor": BG_PANEL,
-        "axes.edgecolor": BORDER_COLOR,
-        "axes.labelcolor": TEXT_PRIMARY,
-        "axes.titlesize": 14,
-        "axes.titleweight": "bold",
-        "axes.titlepad": 16,
-        "axes.labelsize": 11,
-        "axes.labelpad": 8,
-        "axes.grid": True,
-        "axes.axisbelow": True,
-        "axes.prop_cycle": mpl.cycler(color=PALETTE),
-
-        # Grid
-        "grid.color": GRID_COLOR,
-        "grid.linewidth": 0.5,
-        "grid.alpha": 0.6,
-
-        # Ticks
-        "xtick.color": TEXT_SECONDARY,
-        "ytick.color": TEXT_SECONDARY,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-
-        # Legend
-        "legend.facecolor": BG_CARD,
-        "legend.edgecolor": BORDER_COLOR,
-        "legend.fontsize": 10,
-        "legend.framealpha": 0.9,
-
-        # Text
-        "text.color": TEXT_PRIMARY,
-        "font.family": "sans-serif",
-        "font.sans-serif": ["DejaVu Sans", "Inter", "Segoe UI", "Helvetica Neue", "Arial"],
-        "font.size": 11,
-
-        # Lines
-        "lines.linewidth": 2.5,
-        "lines.markersize": 7,
-        "lines.markeredgewidth": 0.5,
-        "lines.markeredgecolor": BG_DARK,
-
-        # Savefig
-        "savefig.facecolor": BG_DARK,
-        "savefig.edgecolor": BG_DARK,
-        "savefig.bbox": "tight",
-        "savefig.pad_inches": 0.3,
-    })
+    mpl.rcParams.update(
+        {
+            # Figure
+            "figure.facecolor": BG_DARK,
+            "figure.edgecolor": BG_DARK,
+            "figure.figsize": (12, 7),
+            "figure.dpi": 150,
+            # Axes
+            "axes.facecolor": BG_PANEL,
+            "axes.edgecolor": BORDER_COLOR,
+            "axes.labelcolor": TEXT_PRIMARY,
+            "axes.titlesize": 14,
+            "axes.titleweight": "bold",
+            "axes.titlepad": 16,
+            "axes.labelsize": 11,
+            "axes.labelpad": 8,
+            "axes.grid": True,
+            "axes.axisbelow": True,
+            "axes.prop_cycle": mpl.cycler(color=PALETTE),
+            # Grid
+            "grid.color": GRID_COLOR,
+            "grid.linewidth": 0.5,
+            "grid.alpha": 0.6,
+            # Ticks
+            "xtick.color": TEXT_SECONDARY,
+            "ytick.color": TEXT_SECONDARY,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            # Legend
+            "legend.facecolor": BG_CARD,
+            "legend.edgecolor": BORDER_COLOR,
+            "legend.fontsize": 10,
+            "legend.framealpha": 0.9,
+            # Text
+            "text.color": TEXT_PRIMARY,
+            "font.family": "sans-serif",
+            "font.sans-serif": ["DejaVu Sans", "Inter", "Segoe UI", "Helvetica Neue", "Arial"],
+            "font.size": 11,
+            # Lines
+            "lines.linewidth": 2.5,
+            "lines.markersize": 7,
+            "lines.markeredgewidth": 0.5,
+            "lines.markeredgecolor": BG_DARK,
+            # Savefig
+            "savefig.facecolor": BG_DARK,
+            "savefig.edgecolor": BG_DARK,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.3,
+        }
+    )
 
 
 def color(index: int) -> str:

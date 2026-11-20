@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
@@ -24,29 +24,157 @@ SQLER_TABLES: frozenset[str] = frozenset({"_sqler_migrations", "_sqler_promoted"
 
 # SQLite reserved words that produce invalid SQL when used as unquoted column names.
 # Source: https://www.sqlite.org/lang_keywords.html
-_SQL_RESERVED_WORDS: frozenset[str] = frozenset({
-    "abort", "action", "add", "after", "all", "alter", "always", "analyze",
-    "and", "as", "asc", "attach", "autoincrement", "before", "begin",
-    "between", "by", "cascade", "case", "cast", "check", "collate", "column",
-    "commit", "conflict", "constraint", "create", "cross", "current",
-    "current_date", "current_time", "current_timestamp", "database", "default",
-    "deferrable", "deferred", "delete", "desc", "detach", "distinct", "do",
-    "drop", "each", "else", "end", "escape", "except", "exclude", "exclusive",
-    "exists", "explain", "fail", "filter", "first", "following", "for",
-    "foreign", "from", "full", "generated", "glob", "group", "groups",
-    "having", "if", "ignore", "immediate", "in", "index", "indexed",
-    "initially", "inner", "insert", "instead", "intersect", "into", "is",
-    "isnull", "join", "key", "last", "left", "like", "limit", "match",
-    "materialized", "natural", "no", "not", "nothing", "notnull", "null",
-    "nulls", "of", "offset", "on", "or", "order", "others", "outer", "over",
-    "partition", "plan", "pragma", "preceding", "primary", "query", "raise",
-    "range", "recursive", "references", "regexp", "reindex", "release",
-    "rename", "replace", "restrict", "returning", "right", "rollback", "row",
-    "rows", "savepoint", "select", "set", "table", "temp", "temporary",
-    "then", "ties", "to", "transaction", "trigger", "unbounded", "union",
-    "unique", "update", "using", "vacuum", "values", "view", "virtual",
-    "when", "where", "window", "with", "without",
-})
+_SQL_RESERVED_WORDS: frozenset[str] = frozenset(
+    {
+        "abort",
+        "action",
+        "add",
+        "after",
+        "all",
+        "alter",
+        "always",
+        "analyze",
+        "and",
+        "as",
+        "asc",
+        "attach",
+        "autoincrement",
+        "before",
+        "begin",
+        "between",
+        "by",
+        "cascade",
+        "case",
+        "cast",
+        "check",
+        "collate",
+        "column",
+        "commit",
+        "conflict",
+        "constraint",
+        "create",
+        "cross",
+        "current",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "database",
+        "default",
+        "deferrable",
+        "deferred",
+        "delete",
+        "desc",
+        "detach",
+        "distinct",
+        "do",
+        "drop",
+        "each",
+        "else",
+        "end",
+        "escape",
+        "except",
+        "exclude",
+        "exclusive",
+        "exists",
+        "explain",
+        "fail",
+        "filter",
+        "first",
+        "following",
+        "for",
+        "foreign",
+        "from",
+        "full",
+        "generated",
+        "glob",
+        "group",
+        "groups",
+        "having",
+        "if",
+        "ignore",
+        "immediate",
+        "in",
+        "index",
+        "indexed",
+        "initially",
+        "inner",
+        "insert",
+        "instead",
+        "intersect",
+        "into",
+        "is",
+        "isnull",
+        "join",
+        "key",
+        "last",
+        "left",
+        "like",
+        "limit",
+        "match",
+        "materialized",
+        "natural",
+        "no",
+        "not",
+        "nothing",
+        "notnull",
+        "null",
+        "nulls",
+        "of",
+        "offset",
+        "on",
+        "or",
+        "order",
+        "others",
+        "outer",
+        "over",
+        "partition",
+        "plan",
+        "pragma",
+        "preceding",
+        "primary",
+        "query",
+        "raise",
+        "range",
+        "recursive",
+        "references",
+        "regexp",
+        "reindex",
+        "release",
+        "rename",
+        "replace",
+        "restrict",
+        "returning",
+        "right",
+        "rollback",
+        "row",
+        "rows",
+        "savepoint",
+        "select",
+        "set",
+        "table",
+        "temp",
+        "temporary",
+        "then",
+        "ties",
+        "to",
+        "transaction",
+        "trigger",
+        "unbounded",
+        "union",
+        "unique",
+        "update",
+        "using",
+        "vacuum",
+        "values",
+        "view",
+        "virtual",
+        "when",
+        "where",
+        "window",
+        "with",
+        "without",
+    }
+)
 
 logger = logging.getLogger("sqler.utils")
 
@@ -114,8 +242,7 @@ def validate_field_name(name: str) -> str:
     for segment in segments:
         if not _TABLE_NAME_PATTERN.fullmatch(segment):
             raise InvalidFieldNameError(
-                f"Invalid field name: {name!r}. "
-                f"Each segment must match [a-zA-Z_][a-zA-Z0-9_]*",
+                f"Invalid field name: {name!r}. Each segment must match [a-zA-Z_][a-zA-Z0-9_]*",
                 field=name,
             )
     return name
@@ -306,33 +433,3 @@ def is_ref_dict(value: object) -> bool:
         return False
     table, rid = value.get("_table"), value.get("_id")
     return isinstance(table, str) and isinstance(rid, int) and not isinstance(rid, bool)
-
-
-def format_model_context(
-    *,
-    model: Optional[str] = None,
-    table: Optional[str] = None,
-    id_: Optional[int] = None,
-    operation: Optional[str] = None,
-) -> str:
-    """Format context information for error messages.
-
-    Args:
-        model: Model class name.
-        table: Table name.
-        id_: Row ID.
-        operation: Operation being performed (e.g., "save", "delete").
-
-    Returns:
-        str: Formatted context string.
-    """
-    parts = []
-    if operation:
-        parts.append(f"during {operation}")
-    if model:
-        parts.append(f"model={model}")
-    if table:
-        parts.append(f"table={table}")
-    if id_ is not None:
-        parts.append(f"id={id_}")
-    return " ".join(parts) if parts else ""

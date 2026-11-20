@@ -28,6 +28,7 @@ import uuid
 
 import pytest
 from exception_points import LIBC_RAISE, needs_libc_raise, stop_once_and_interrupt
+
 from sqler import AsyncSQLerDB, SQLerDB
 from sqler.adapter import SQLiteAdapter
 from sqler.exceptions import TransactionStateError
@@ -72,7 +73,9 @@ class Traced:
     def steps(self) -> list[str]:
         """The transaction statements, each insert shown as ``INSERT <its value>``."""
         return [
-            "INSERT " + sql.split("VALUES", 1)[1].strip(" ();'") if sql.startswith("INSERT") else sql
+            "INSERT " + sql.split("VALUES", 1)[1].strip(" ();'")
+            if sql.startswith("INSERT")
+            else sql
             for sql in self.sent
             if not sql.startswith("SELECT")
         ]
@@ -231,7 +234,15 @@ def _send(t: Traced, kind: str) -> None:
         t.adapter.execute("SELECT v FROM t").fetchall()
 
 
-STATEMENTS = ["execute", "executemany", "executescript", "commit", "nested", "with-adapter", "select"]
+STATEMENTS = [
+    "execute",
+    "executemany",
+    "executescript",
+    "commit",
+    "nested",
+    "with-adapter",
+    "select",
+]
 
 
 @pytest.mark.parametrize("kind", STATEMENTS)
@@ -247,7 +258,9 @@ def test_a_statement_after_a_failed_nested_end_raises_and_sends_nothing(t, kind)
             with query_logger.capture() as logged:
                 with pytest.raises(TransactionStateError) as raised:
                     _send(t, kind)
-            refused.append((str(raised.value), str(raised.value.__cause__), t.sent[sent:], len(logged)))
+            refused.append(
+                (str(raised.value), str(raised.value.__cause__), t.sent[sent:], len(logged))
+            )
     assert refused == [(COMMITTED, NO_SP_1, [], 0)]
     assert (str(ended.value), str(ended.value.__cause__)) == (COMMITTED, NO_SP_1)
     assert t.steps()[-1] == "ROLLBACK"
@@ -333,7 +346,9 @@ INSERT = "INSERT INTO t VALUES (?)"
     ],
     ids=["commit", "end", "rollback", "lower-case", "comment-in-front", "trailing-semicolon"],
 )
-def test_a_raw_end_of_the_transaction_raises_at_the_statement_and_nothing_more_is_sent(t, raw, kept):
+def test_a_raw_end_of_the_transaction_raises_at_the_statement_and_nothing_more_is_sent(
+    t, raw, kept
+):
     """SQLite's state after the statement decides, so every spelling reads the same. What was
     written before it stays as the raw statement left it; a later statement in the block and
     the block's end raise the same error, and nothing more reaches SQLite."""
@@ -346,7 +361,9 @@ def test_a_raw_end_of_the_transaction_raises_at_the_statement_and_nothing_more_i
                 with pytest.raises(TransactionStateError) as later:
                     t.insert("b")
     assert [q.sql for q in logged] == [INSERT, raw]
-    assert [(str(e.value), e.value.__cause__) for e in (at_raw, later, ended)] == [(ENDED_BEHIND, None)] * 3
+    assert [(str(e.value), e.value.__cause__) for e in (at_raw, later, ended)] == [
+        (ENDED_BEHIND, None)
+    ] * 3
     _after_the_transaction(t)
     assert t.rows() == sorted(["after", "before", *kept])
 
@@ -367,13 +384,24 @@ def test_a_raw_end_inside_or_after_a_nested_block_raises_at_the_statement(t, raw
     assert (str(raised.value), raised.value.__cause__) == (ENDED_BEHIND, None)
     assert getattr(raised.value, "__notes__", []) == []
     released = [] if where == "nested" else ["RELEASE SAVEPOINT sp_1"]
-    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT outer", "SAVEPOINT sp_1", "INSERT nested", *released, raw]
+    assert t.steps() == [
+        "BEGIN IMMEDIATE",
+        "INSERT outer",
+        "SAVEPOINT sp_1",
+        "INSERT nested",
+        *released,
+        raw,
+    ]
     _after_the_transaction(t)
-    assert t.rows() == (["after", "before", "nested", "outer"] if raw == "COMMIT" else ["after", "before"])
+    assert t.rows() == (
+        ["after", "before", "nested", "outer"] if raw == "COMMIT" else ["after", "before"]
+    )
 
 
 @pytest.mark.parametrize("via", ["execute", "executemany"])
-def test_a_failure_sqlite_answers_with_a_rollback_breaks_the_transaction_with_its_error_as_cause(t, via):
+def test_a_failure_sqlite_answers_with_a_rollback_breaks_the_transaction_with_its_error_as_cause(
+    t, via
+):
     t.adapter.execute("CREATE TABLE u (x UNIQUE ON CONFLICT ROLLBACK)")
     t.adapter.auto_commit()
     with pytest.raises(TransactionStateError) as raised:
@@ -383,7 +411,10 @@ def test_a_failure_sqlite_answers_with_a_rollback_breaks_the_transaction_with_it
                 t.adapter.execute("INSERT INTO u VALUES (1), (1)")
             else:
                 t.adapter.executemany("INSERT INTO u VALUES (?)", [[1], [1]])
-    assert (str(raised.value), str(raised.value.__cause__)) == (ENDED_BEHIND, "UNIQUE constraint failed: u.x")
+    assert (str(raised.value), str(raised.value.__cause__)) == (
+        ENDED_BEHIND,
+        "UNIQUE constraint failed: u.x",
+    )
     assert type(raised.value.__cause__) is sqlite3.IntegrityError
     _after_the_transaction(t)
     assert t.rows() == ["after", "before"]
@@ -391,7 +422,10 @@ def test_a_failure_sqlite_answers_with_a_rollback_breaks_the_transaction_with_it
 
 @pytest.mark.parametrize(
     ("raw", "refused"),
-    [("ROLLBACK TO SAVEPOINT sp_1", None), ("BEGIN", "cannot start a transaction within a transaction")],
+    [
+        ("ROLLBACK TO SAVEPOINT sp_1", None),
+        ("BEGIN", "cannot start a transaction within a transaction"),
+    ],
     ids=["rollback-to", "begin"],
 )
 def test_a_raw_statement_that_leaves_the_transaction_open_raises_no_false_alarm(t, raw, refused):
@@ -407,7 +441,9 @@ def test_a_raw_statement_that_leaves_the_transaction_open_raises_no_false_alarm(
                 with pytest.raises(sqlite3.OperationalError, match=refused):
                     t.adapter.execute(raw)
             t.insert("last")
-    assert t.rows() == (["before", "last", "outer"] if refused is None else ["before", "last", "nested", "outer"])
+    assert t.rows() == (
+        ["before", "last", "outer"] if refused is None else ["before", "last", "nested", "outer"]
+    )
 
 
 # ---- the one ":memory:" connection: the other threads go on after the end ----
@@ -445,8 +481,12 @@ def test_a_thread_waiting_for_the_memory_connection_goes_on_after_the_rolled_bac
     t.db.close()
 
 
-@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="needs a real signal to the main thread")
-def test_an_interrupt_while_the_nested_end_waits_leaves_as_it_is_and_the_transaction_rolls_back(tmp_path):
+@pytest.mark.skipif(
+    not hasattr(signal, "pthread_kill"), reason="needs a real signal to the main thread"
+)
+def test_an_interrupt_while_the_nested_end_waits_leaves_as_it_is_and_the_transaction_rolls_back(
+    tmp_path,
+):
     """Ctrl-C while the nested end waits for the connection: the interrupt leaves the
     nested block; the savepoint is still open in SQLite, so its end can only roll back."""
     if threading.current_thread() is not threading.main_thread():
@@ -462,7 +502,9 @@ def test_an_interrupt_while_the_nested_end_waits_leaves_as_it_is_and_the_transac
         with turn:  # the nested end now waits to take the connection
             holding.set()
             deadline = time.monotonic() + 10
-            while sys._current_frames()[main].f_code.co_name != "end_transaction":  # blocked on the turn's lock
+            while (
+                sys._current_frames()[main].f_code.co_name != "end_transaction"
+            ):  # blocked on the turn's lock
                 assert time.monotonic() < deadline
                 time.sleep(0.001)
             signal.pthread_kill(main, signal.SIGINT)  # what Ctrl-C does
@@ -480,7 +522,13 @@ def test_an_interrupt_while_the_nested_end_waits_leaves_as_it_is_and_the_transac
             release.set()
             thread.join(10)
     assert (str(ended.value), type(ended.value.__cause__)) == (COMMITTED, KeyboardInterrupt)
-    assert t.steps() == ["BEGIN IMMEDIATE", "INSERT outer", "SAVEPOINT sp_1", "INSERT nested", "ROLLBACK"]
+    assert t.steps() == [
+        "BEGIN IMMEDIATE",
+        "INSERT outer",
+        "SAVEPOINT sp_1",
+        "INSERT nested",
+        "ROLLBACK",
+    ]
     _after_the_transaction(t)
     assert t.rows() == ["after", "before"]
     t.db.close()
@@ -653,13 +701,19 @@ LEFT = {
 
 @pytest.mark.parametrize("end", ENDS)
 @pytest.mark.parametrize("place", ["file", "named-memory"])
-def test_a_rollback_that_fails_twice_on_a_threads_own_connection_closes_it(tmp_path, caplog, place, end):
+def test_a_rollback_that_fails_twice_on_a_threads_own_connection_closes_it(
+    tmp_path, caplog, place, end
+):
     s = Scene(place, tmp_path)
     try:
         caplog.set_level(logging.WARNING, logger="sqler.adapter.synchronous")
         left = _left(_a_block_whose_rollback_fails(s, end))
         seen = s.committed()
-        assert (left, seen, [r.getMessage() for r in caplog.records]) == (LEFT["own", end], ["before"], [REPLACED])
+        assert (left, seen, [r.getMessage() for r in caplog.records]) == (
+            LEFT["own", end],
+            ["before"],
+            [REPLACED],
+        )
         assert (s.adapter._txn_depth, s.adapter._local.conn) == (0, None)
         with pytest.raises(sqlite3.ProgrammingError):  # closed, never used again
             s.conn.execute("SELECT 1")
@@ -671,7 +725,9 @@ def test_a_rollback_that_fails_twice_on_a_threads_own_connection_closes_it(tmp_p
 
 
 @pytest.mark.parametrize("end", ENDS)
-def test_a_rollback_that_fails_twice_on_the_memory_connection_keeps_it_until_one_succeeds(tmp_path, caplog, end):
+def test_a_rollback_that_fails_twice_on_the_memory_connection_keeps_it_until_one_succeeds(
+    tmp_path, caplog, end
+):
     s = Scene("memory", tmp_path)
     try:
         caplog.set_level(logging.WARNING, logger="sqler.adapter.synchronous")
@@ -679,12 +735,20 @@ def test_a_rollback_that_fails_twice_on_the_memory_connection_keeps_it_until_one
         with query_logger.capture() as logged:
             with pytest.raises(TransactionStateError) as raised:
                 s.insert("refused")
-        assert (str(raised.value), str(raised.value.__cause__), len(logged)) == (NOT_ROLLED_BACK, INTERRUPTED, 0)
+        assert (str(raised.value), str(raised.value.__cause__), len(logged)) == (
+            NOT_ROLLED_BACK,
+            INTERRUPTED,
+            0,
+        )
         assert (s.adapter._shared._holder, s.conn.in_transaction) == (s.adapter._local.me, True)
         s.let_statements_run()
         s.insert("after the block")
         s.adapter.auto_commit()
-        assert (s.committed(), s.adapter._conn() is s.conn, caplog.records) == (["after the block", "before"], True, [])
+        assert (s.committed(), s.adapter._conn() is s.conn, caplog.records) == (
+            ["after the block", "before"],
+            True,
+            [],
+        )
     finally:
         s.db.close()
 
@@ -704,11 +768,17 @@ def test_a_rollback_interrupted_once_succeeds_at_the_second_try(scene, caplog):
             raise ValueError(OWN_ERROR)
     scene.let_statements_run()
     assert getattr(raised.value, "__notes__", []) == []
-    assert (scene.adapter._conn() is scene.conn, scene.conn.in_transaction, caplog.records) == (True, False, [])
+    assert (scene.adapter._conn() is scene.conn, scene.conn.in_transaction, caplog.records) == (
+        True,
+        False,
+        [],
+    )
     assert scene.committed() == ["before"]
 
 
-REPLACED_AFTER_AN_INTERRUPT = "rollback of a reclaimed connection failed (KeyboardInterrupt: ); replacing it"
+REPLACED_AFTER_AN_INTERRUPT = (
+    "rollback of a reclaimed connection failed (KeyboardInterrupt: ); replacing it"
+)
 
 
 def _interrupts_in_the_first_try():
@@ -728,11 +798,15 @@ def _interrupts_in_the_second_try():
 # CPython 3.12 raises it as the failed try returns: the interrupt is what left the tries. From
 # 3.13 on it is raised later, after both tries failed, as the connection is closed: SQLite's
 # error is what left them.
-REPLACED_WITH_AN_INTERRUPT_PENDING = REPLACED_AFTER_AN_INTERRUPT if sys.version_info < (3, 13) else REPLACED
+REPLACED_WITH_AN_INTERRUPT_PENDING = (
+    REPLACED_AFTER_AN_INTERRUPT if sys.version_info < (3, 13) else REPLACED
+)
 
 
 @needs_libc_raise
-@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="needs a real signal to the main thread")
+@pytest.mark.skipif(
+    not hasattr(signal, "pthread_kill"), reason="needs a real signal to the main thread"
+)
 @pytest.mark.parametrize("sent_in", ["first try", "second try"])
 @pytest.mark.parametrize("end", ["with-db", "transaction", "adapter"])
 def test_an_interrupt_during_the_two_tries_of_a_rollback_is_raised_and_leaves_no_transaction_to_join(
@@ -752,7 +826,11 @@ def test_an_interrupt_during_the_two_tries_of_a_rollback_is_raised_and_leaves_no
     messages = [r.getMessage() for r in caplog.records]
     assert type(left) is KeyboardInterrupt
     if scene.place == "memory":
-        assert (messages, scene.adapter._shared._holder, scene.conn.in_transaction) == ([], scene.adapter._local.me, True)
+        assert (messages, scene.adapter._shared._holder, scene.conn.in_transaction) == (
+            [],
+            scene.adapter._local.me,
+            True,
+        )
         scene.let_statements_run()
     else:
         assert (messages, scene.adapter._local.conn) == ([REPLACED_WITH_AN_INTERRUPT_PENDING], None)
@@ -763,7 +841,9 @@ def test_an_interrupt_during_the_two_tries_of_a_rollback_is_raised_and_leaves_no
 
 
 @pytest.mark.parametrize("how", ["transaction", "adapter-commit"])
-def test_a_commit_that_fails_with_the_rollback_after_it_failing_raises_the_commits_error(scene, caplog, how):
+def test_a_commit_that_fails_with_the_rollback_after_it_failing_raises_the_commits_error(
+    scene, caplog, how
+):
     caplog.set_level(logging.WARNING, logger="sqler.adapter.synchronous")
     with pytest.raises(sqlite3.OperationalError) as raised:
         if how == "transaction":
@@ -799,7 +879,11 @@ def _the_rollback_failed_twice(s: Scene, caplog) -> None:
     does with it, then the next statement finds nothing of the transaction."""
     messages = [r.getMessage() for r in caplog.records]
     if s.place == "memory":
-        assert (messages, s.adapter._shared._holder, s.conn.in_transaction) == ([], s.adapter._local.me, True)
+        assert (messages, s.adapter._shared._holder, s.conn.in_transaction) == (
+            [],
+            s.adapter._local.me,
+            True,
+        )
         with pytest.raises(TransactionStateError) as raised:
             s.insert("refused")
         assert (str(raised.value), str(raised.value.__cause__)) == (NOT_ROLLED_BACK, INTERRUPTED)
@@ -812,7 +896,9 @@ def _the_rollback_failed_twice(s: Scene, caplog) -> None:
 
 
 @pytest.mark.parametrize("next_by", ["the-same-thread", "the-waiting-thread"])
-def test_another_thread_never_writes_into_the_memory_transaction_that_could_not_be_rolled_back(tmp_path, next_by):
+def test_another_thread_never_writes_into_the_memory_transaction_that_could_not_be_rolled_back(
+    tmp_path, next_by
+):
     s = Scene("memory", tmp_path)
     outcomes: list[str] = []
 
@@ -910,7 +996,10 @@ def test_a_half_read_cursor_keeps_no_lock_once_its_connection_is_closed_and_repl
         assert s.committed() == ["before"]
         with pytest.raises(sqlite3.OperationalError) as unread:
             cursor.fetchone()
-        assert str(unread.value) == "the transaction was rolled back before the rest of this cursor's rows were read"
+        assert (
+            str(unread.value)
+            == "the transaction was rolled back before the rest of this cursor's rows were read"
+        )
         s.adapter.auto_commit()
         assert s.committed() == ["before", "let in"]
     finally:
@@ -952,10 +1041,14 @@ def _refused_update_whose_rollback_fails(s: Scene) -> BaseException:
     """A versioned update that a trigger refuses (the transaction stays open), with every
     rollback after it stopped; returns what left it."""
     _id, _ = s.db.upsert_with_version("docs", None, {"k": 0}, None)
-    s.adapter.execute("CREATE TRIGGER refuse BEFORE UPDATE ON docs BEGIN SELECT RAISE(ABORT, 'refused'); END")
+    s.adapter.execute(
+        "CREATE TRIGGER refuse BEFORE UPDATE ON docs BEGIN SELECT RAISE(ABORT, 'refused'); END"
+    )
     s.adapter.auto_commit()
     rollbacks: list[str] = []
-    s.conn.set_trace_callback(lambda sql: rollbacks.append(sql) if sql.startswith("ROLLBACK") else None)
+    s.conn.set_trace_callback(
+        lambda sql: rollbacks.append(sql) if sql.startswith("ROLLBACK") else None
+    )
     s.conn.set_progress_handler(lambda: 1 if rollbacks else 0, 1)
     try:
         s.db.upsert_with_version("docs", _id, {"k": 1}, 0)
@@ -964,11 +1057,17 @@ def _refused_update_whose_rollback_fails(s: Scene) -> BaseException:
     raise AssertionError("the refused update raised nothing")
 
 
-def test_a_versioned_update_whose_rollback_fails_twice_on_the_memory_connection_raises_its_own_error(tmp_path):
+def test_a_versioned_update_whose_rollback_fails_twice_on_the_memory_connection_raises_its_own_error(
+    tmp_path,
+):
     s = Scene("memory", tmp_path)
     try:
         left = _refused_update_whose_rollback_fails(s)
-        assert (type(left).__name__, str(left), getattr(left, "__notes__", [])) == ("IntegrityError", "refused", [])
+        assert (type(left).__name__, str(left), getattr(left, "__notes__", [])) == (
+            "IntegrityError",
+            "refused",
+            [],
+        )
         assert (s.adapter._shared._holder, s.conn.in_transaction) == (s.adapter._local.me, True)
         s.let_statements_run()
         s.adapter.execute("DROP TRIGGER refuse")
@@ -979,13 +1078,20 @@ def test_a_versioned_update_whose_rollback_fails_twice_on_the_memory_connection_
 
 
 @pytest.mark.parametrize("place", ["file", "named-memory"])
-def test_a_versioned_update_whose_rollback_fails_twice_on_a_threads_own_connection_closes_it(tmp_path, caplog, place):
+def test_a_versioned_update_whose_rollback_fails_twice_on_a_threads_own_connection_closes_it(
+    tmp_path, caplog, place
+):
     s = Scene(place, tmp_path)
     try:
         caplog.set_level(logging.WARNING, logger="sqler.adapter.synchronous")
         left = _refused_update_whose_rollback_fails(s)
         messages = [r.getMessage() for r in caplog.records]
-        assert (type(left).__name__, str(left), messages, s.adapter._local.conn) == ("IntegrityError", "refused", [REPLACED], None)
+        assert (type(left).__name__, str(left), messages, s.adapter._local.conn) == (
+            "IntegrityError",
+            "refused",
+            [REPLACED],
+            None,
+        )
         s.adapter.execute("DROP TRIGGER refuse")
         s.adapter.auto_commit()
         assert s.db.find_document_with_version("docs", 1) == {"_id": 1, "_version": 0, "k": 0}
@@ -1001,7 +1107,9 @@ def test_a_refused_versioned_update_leaves_its_own_error_at_once_while_another_t
     db = SQLerDB(SQLiteAdapter(":memory:", timeout_ms=5000))
     _id, _ = db.upsert_with_version("docs", None, {"k": 0}, None)
     db.adapter.execute("CREATE TABLE t (v TEXT)")
-    db.adapter.execute("CREATE TRIGGER refuse BEFORE UPDATE ON docs BEGIN SELECT RAISE(ABORT, 'refused'); END")
+    db.adapter.execute(
+        "CREATE TRIGGER refuse BEFORE UPDATE ON docs BEGIN SELECT RAISE(ABORT, 'refused'); END"
+    )
     db.adapter.auto_commit()
     at_the_end, other_in, other_go = threading.Event(), threading.Event(), threading.Event()
 
@@ -1014,7 +1122,11 @@ def test_a_refused_versioned_update_leaves_its_own_error_at_once_while_another_t
         db.adapter.end_transaction(commit=True)
 
     def holds_the_end_until_the_other_is_in(frame, event, arg):
-        if event == "call" and frame.f_code.co_name == "__exit__" and frame.f_globals["__name__"] == ADAPTER:
+        if (
+            event == "call"
+            and frame.f_code.co_name == "__exit__"
+            and frame.f_globals["__name__"] == ADAPTER
+        ):
             at_the_end.set()
             assert other_in.wait(10)
         return None
@@ -1036,7 +1148,10 @@ def test_a_refused_versioned_update_leaves_its_own_error_at_once_while_another_t
         thread.join(10)
         assert (thread.is_alive(), raised) == (False, [])
         rows = [r[0] for r in db.adapter.execute("SELECT v FROM t").fetchall()]
-        assert (rows, db.find_document_with_version("docs", _id)) == (["of the other thread"], {"_id": 1, "_version": 0, "k": 0})
+        assert (rows, db.find_document_with_version("docs", _id)) == (
+            ["of the other thread"],
+            {"_id": 1, "_version": 0, "k": 0},
+        )
     finally:
         other_go.set()
         db.close()

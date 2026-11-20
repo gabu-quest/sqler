@@ -103,24 +103,24 @@ to the table is dropped, and every read through a database object or a model giv
 `_version` from the column. On a table without the column, a `_version` key is a field like
 any other.
 
-A document last written by an older sqler (1.2026.4.4, the released version) may still hold
+A document last written by sqler 1.2026.4.4 or earlier may still hold
 a `_version` key inside `data`, equal to the column when it was written. A database object
 and a model do not read it; a query built from the adapter alone gives each document as it
 is stored, that key included. The next write of the whole row drops it, a write of some
 fields leaves it. Such a file is
 used as it is, with no step and no change of its schema.
 
-The released version cannot share a file with this one. It reads the version from the
-column too, but it checks a save against the key in `data` as well
+sqler 1.2026.4.4 and earlier cannot share a file with 1.2026.11.1 and later. The older one
+reads the version from the column too, but it checks a save against the key in `data` as well
 (`_version = ? AND COALESCE(json_extract(data, '$._version'), ?) = ?`), and its own plain
 writes do not move the column. So, with both on one file:
 
-- The released version fails with an error: a row whose key this version left at an older
-  value (a write of some fields of a row the released version saved) is refused by every
-  save of the released version with `StaleVersionError`.
-- A write is lost with no error: a plain write the released version makes (a plain class's
+- The older version fails with an error: a row whose key the newer one left at an older
+  value (a write of some fields of a row the older version saved) is refused by every
+  save of the older version with `StaleVersionError`.
+- A write is lost with no error: a plain write the older version makes (a plain class's
   save, `upsert_document()`, a plain query's update) leaves the column as it was, so a save
-  by this version of an instance read before it goes through and overwrites it.
+  by the newer version of an instance read before it goes through and overwrites it.
 
 ## References
 

@@ -1,0 +1,51 @@
+name: Newest versions
+
+# Once a week, the suite on the newest releases of every dependency pyproject.toml allows,
+# so a new pydantic, msgspec or aiosqlite that breaks sqler shows up before a user meets it.
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  newest-versions:
+    name: Tests • newest allowed versions • py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Sync dependencies (main + dev)
+        run: uv sync --dev --frozen
+
+      - name: Install the newest versions pyproject.toml allows
+        run: |
+          uv pip compile pyproject.toml --extra pydantic --extra msgspec \
+            --upgrade --python-version ${{ matrix.python-version }} \
+            -o "${{ runner.temp }}/newest.txt"
+          uv pip install -r "${{ runner.temp }}/newest.txt"
+
+      - name: Show versions
+        run: |
+          uv run --no-sync python --version
+          uv run --no-sync python -c "import aiosqlite, msgspec, pydantic; print('aiosqlite', aiosqlite.__version__, 'msgspec', msgspec.__version__, 'pydantic', pydantic.VERSION)"
+
+      - name: Run unit tests (perf excluded)
+        env:
+          PYTHONUTF8: "1"
+        run: uv run --no-sync pytest -q -m "not perf" --disable-warnings

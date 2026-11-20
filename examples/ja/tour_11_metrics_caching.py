@@ -81,13 +81,11 @@ def _(SQLerModel, db):
         email: str
         active: bool = True
 
-    User.set_db(db)
-
     # サンプルユーザーを作成
     for _i in range(10):
-        User(name=f"User{_i}", email=f"user{_i}@example.com", active=_i % 2 == 0).save()
+        User(name=f"User{_i}", email=f"user{_i}@example.com", active=_i % 2 == 0).save(db=db)
 
-    print(f"{User.query().count()} ユーザーを作成しました")
+    print(f"{User.using(db).count()} ユーザーを作成しました")
     return (User,)
 
 
@@ -105,16 +103,16 @@ def _(mo):
 
 
 @app.cell
-def _(F, User, metrics):
+def _(F, User, db, metrics):
     # グローバルメトリクスコレクターを有効化
     metrics.reset()  # 以前のメトリクスをクリア
     metrics.enable(slow_threshold_ms=50)
 
     # クエリを実行
-    User.query().all()
-    User.query().filter(F("active") == True).all()
-    User.query().count()
-    User.query().filter(F("name") == "User1").first()
+    User.using(db).all()
+    User.using(db).filter(F("active") == True).all()
+    User.using(db).count()
+    User.using(db).filter(F("name") == "User1").first()
 
     print("メトリクスコレクター有効化！")
     print("  遅いクエリ閾値: 50ms")
@@ -188,13 +186,13 @@ def _(QueryCache):
 
 
 @app.cell
-def _(F, User, cache):
+def _(F, User, cache, db):
     # 手動キャッシング
     _key = "active_users"
 
     if not cache.has(_key):
         print("キャッシュ MISS - データベースから取得中...")
-        _users = User.query().filter(F("active") == True).all()
+        _users = User.using(db).filter(F("active") == True).all()
         cache.set(_key, _users, ttl_seconds=30, table="users")
     else:
         print("キャッシュ HIT！")
@@ -235,11 +233,11 @@ def _(mo):
 
 
 @app.cell
-def _(User, cache, cached_query):
+def _(User, cache, cached_query, db):
     @cached_query(ttl_seconds=60, table="users", cache=cache)
     def get_user_count():
         print("  (クエリ実行中...)")
-        return User.query().count()
+        return User.using(db).count()
 
     # 最初の呼び出し - データベースにアクセス
     print("最初の呼び出し：")
@@ -318,14 +316,12 @@ def _(CacheAwareModel, SQLerModel, db):
         class Meta:
             cache_table = "products"
 
-    Product.set_db(db)
-
     # グローバルキャッシュに商品データをキャッシュ
     _global_cache.set("all_products", "キャッシュされたデータ", table="products")
     print(f"'all_products' キャッシュ: {_global_cache.has('all_products')}")
 
     # save がグローバルキャッシュの無効化をトリガー
-    _prod = Product(name="Widget", price=29.99).save()
+    _prod = Product(name="Widget", price=29.99).save(db=db)
     print(f"save 後 - 'all_products' キャッシュ: {_global_cache.has('all_products')}")
     return (Product,)
 
@@ -348,13 +344,12 @@ def _(mo):
 
 
 @app.cell
-def _():
+def _(db):
     print("スレッドごと・タスクごとのコネクション：")
     print("")
     print("  # すべてのスレッドで 1 つの SQLerDB")
     print("  db = SQLerDB.on_disk('app.db')")
-    print("  User.set_db(db)")
-    print("  threads = [threading.Thread(target=lambda: User.query().all()) for _ in range(10)]")
+    print("  threads = [threading.Thread(target=lambda: User.using(db).all()) for _ in range(10)]")
     print("")
     print("  # 非同期：コネクションプールとその統計")
     print("  adb = AsyncSQLerDB.on_disk('app.db')")
@@ -383,15 +378,13 @@ def _(mo):
 
 
 @app.cell
-def _(MetricsCollector, User):
+def _(MetricsCollector, User, db):
     # カスタムラベル付きコレクターを作成
     _collector = MetricsCollector()
-    _collector.enable(
-        slow_threshold_ms=100, labels={"service": "api", "environment": "production"}
-    )
+    _collector.enable(slow_threshold_ms=100, labels={"service": "api", "environment": "production"})
 
     # クエリを実行
-    User.query().count()
+    User.using(db).count()
 
     # エクスポートにラベルが表示される
     _prom = _collector.prometheus_export()

@@ -1,14 +1,18 @@
+import contextlib
 import functools
 import json
+import operator
 import re
 import sqlite3
-from typing import Any, Iterator, NoReturn, Optional, Self
+from typing import TYPE_CHECKING, Any, Iterator, NoReturn, Optional, Self
 
 from sqler._stored import column_arg, json_arg
-from sqler.adapter.abstract import AdapterABC
 from sqler.exceptions import NoAdapterError
 from sqler.query import SQLerExpression
-from sqler.utils import validate_field_name
+from sqler.utils import validate_field_name, validate_table_name
+
+if TYPE_CHECKING:
+    from sqler.adapter.synchronous import SQLiteAdapter
 
 
 def _rewrite_promoted_refs(sql: str, promoted_fields: Any) -> str:
@@ -29,13 +33,47 @@ def _rewritten(sql: str, promoted_fields: tuple[str, ...]) -> str:
     return sql
 
 
-
-
 @functools.lru_cache(maxsize=1024)
 def _squeezed(sql: str, guard: str) -> str:
-    """:meth:`_WriteStatements._squeezed` of ``sql`` with ``guard``, done once per text."""
+    """:meth:`_Statements._squeezed` of ``sql`` with ``guard``, done once per text."""
     head, guard, tail = sql.partition(guard) if guard else (sql, "", "")
     return " ".join([*head.split(), guard, *tail.split()] if guard else head.split())
+
+
+# A read of a document as a statement on its own table writes it: what the rewrite of promoted
+# columns (:func:`_rewrite_promoted_refs`) reads as the row of the statement's table.
+_OWN_DATA = re.compile(r"json_extract\(data,", re.IGNORECASE)
+
+# What stands for a related table that does not exist: no rows, read with the same condition.
+_NO_ROWS = "(SELECT NULL AS _id, NULL AS data WHERE 0)"
+
+
+def related_rows(table: str, where: str, *, missing: bool = False) -> str:
+    """The ids of the rows of ``table`` a filter through a reference reads, as a subquery
+    ``(SELECT _id AS rid FROM <table> rt <where>)``: ``where`` is the ``WHERE`` a query on
+    ``table`` builds (``_Statements._where``), laid out as its database remembers the table
+    or as a query with none behind it builds it. Each ``json_extract`` of ``data`` in it is
+    written as one of ``rt.data``, so a rewrite of the outer statement by the promoted
+    columns of its own table leaves it alone; a promoted column it reads by its name is
+    found in ``rt`` first. ``missing``: ``table`` does not exist, and no row is read."""
+    return f"(SELECT _id AS rid FROM {_NO_ROWS if missing else table} rt {_OWN_DATA.sub('json_extract(rt.data,', where)})"
+
+
+def related_tables(expression: Optional[SQLerExpression]) -> tuple[str, ...]:
+    """The tables, once each, whose rows the filter ``expression`` reads through a reference."""
+    related = getattr(
+        expression, "related", ()
+    )  # a filter may be any object with ``sql`` and ``params``
+    return tuple(dict.fromkeys(r.table for r in related)) if related else ()
+
+
+def with_related(expression: SQLerExpression, laid: dict[Any, tuple[str, bool]]) -> SQLerExpression:
+    """``expression`` with each of its related parts (:class:`sqler.query.expression.Related`)
+    read as ``laid`` gives it: ``{part: (where, missing)}`` (:func:`related_rows`)."""
+    sql = expression.sql
+    for part, (where, missing) in laid.items():
+        sql = sql.replace(part.text, related_rows(part.table, where, missing=missing))
+    return SQLerExpression(sql, expression.params)
 
 
 # Built-in columns that live on the SQLite row, not inside the JSON blob.
@@ -92,6 +130,24 @@ async def aend_failed(adapter: Any, exc: Exception, table: str, sql: str) -> NoR
     raise exc
 
 
+def whole_number(n: Any, method: str) -> int:
+    """``n`` as a plain ``int``, the one check of what :meth:`SQLerQuery.limit`,
+    :meth:`SQLerQuery.offset` and their async twins take: a whole number
+    (``operator.index(n)`` works: an ``int``, a numpy int, an ``IntEnum``), not negative.
+    Anything else is refused before any SQL exists, since the value is written into the
+    statement's text: ``TypeError`` for a ``bool``, a ``str`` (``"5"`` too), a ``float``,
+    ``None`` or any other type, ``ValueError`` for a negative number."""
+    if isinstance(n, bool):
+        raise TypeError(f"{method}() takes a whole number, not bool")
+    try:
+        value = operator.index(n)
+    except TypeError:
+        raise TypeError(f"{method}() takes a whole number, not {type(n).__name__}") from None
+    if value < 0:
+        raise ValueError(f"{method} must be >= 0")
+    return value
+
+
 class QueryError(Exception):
     """Base exception for query errors."""
 
@@ -102,9 +158,11 @@ class InvariantViolationError(RuntimeError):
     """Raised when reading rows that violate expected invariants (e.g., NULL JSON)."""
 
 
-class _WriteStatements:
-    """The statements of a query's writing methods, sync and async: ``update``, ``update_one``,
-    ``update_n`` and ``delete`` take their SET, WHERE and picked rows from here.
+class _Statements:
+    """The statements both query classes send, sync and async, built once: the SELECT and the
+    aggregates (``_build_query``, ``_build_aggregate_query``, ``_build_grouped_aggregate_query``,
+    with ``sql``, ``params`` and ``debug``), and the SET, WHERE and picked rows of ``update``,
+    ``update_one``, ``update_n`` and ``delete``.
 
     On a versioned query (one whose table has the ``_version`` column) every update moves
     ``_version`` by one, in the same statement, and ``_version`` cannot be set: it is the
@@ -116,17 +174,39 @@ class _WriteStatements:
     ``_guard``.
     """
 
+    # set by the __init__ of each query class
+    _table: str
+    _adapter: object
+    _expression: Optional[SQLerExpression]
+    _order: Optional[str]
+    _desc: bool
+    _include_version: bool
+    _order_fields: Optional[list[tuple[str, bool]]]
+    _promoted_fields: list[str]
+    _limit: Optional[int]
+    _offset: Optional[int]
+    _distinct: bool
+    _group_by_fields: list[str]
+    _having: Optional[SQLerExpression]
+    _select_fields: Optional[list[str]]
+
     _db: Any = None
     _use = ""
     _guard = ""
     _names: Optional[tuple[str, ...]] = None
-    _laid: Optional[tuple[Any, Any]] = None  # the last query :meth:`_laid_out` made, by what it was made from
+    _laid: Optional[tuple[Any, Any]] = (
+        None  # the last query :meth:`_laid_out` made, by what it was made from
+    )
+    # the related tables a statement built from this query reads, with the names each was laid out from
+    _others: tuple[tuple[str, Optional[tuple[str, ...]]], ...] = ()
 
     def _filter_sql(self) -> str:
         """The ``WHERE`` of a statement on the query's rows: its filter, and the guard of a
         query built from its database's memory of the table (a term that is always 1); empty
         with neither."""
-        terms = ([self._expression.sql] if self._expression else []) + ([self._guard] if self._guard else [])
+        terms = ([self._expression.sql] if self._expression else []) + (
+            [self._guard] if self._guard else []
+        )
         return f"WHERE {' AND '.join(terms)}" if terms else ""
 
     def _squeezed(self, sql: str) -> str:
@@ -150,17 +230,196 @@ class _WriteStatements:
             sql = _rewrite_promoted_refs(sql, self._promoted_fields)
         return sql
 
-    def _write_checks(self, fields: dict, n: Optional[int] = None) -> None:
-        """The refusals of an update, before any statement is sent."""
+    def _field_expr(self, field: str) -> str:
+        """Return the SQL expression for a field (promoted or json_extract)."""
+        if field == "_id":
+            return "_id"
+        if field == "_version":
+            return "_version"
+        if self._promoted_fields and field in self._promoted_fields:
+            return field
+        return f"json_extract(data, '$.{field}')"
+
+    def _build_grouped_aggregate_query(
+        self, func: str, field: Optional[str] = None
+    ) -> tuple[str, list[Any]]:
+        """Build a grouped aggregate query.
+
+        Returns:
+            tuple[str, list[Any]]: SQL string and parameter list.
+        """
+        group_exprs = [self._field_expr(f) for f in self._group_by_fields]
+
+        if field is None:
+            agg = f"{func}(*)"
+        else:
+            if field != "_id":
+                validate_field_name(field)
+            agg = f"{func}({self._field_expr(field)})"
+
+        select_parts = group_exprs + [agg]
+        where = self._filter_sql()
+        group_by = "GROUP BY " + ", ".join(group_exprs)
+
+        having_clause = ""
+        if self._having:
+            having_sql = self._having.sql
+            # Replace pseudo-fields like _count, _sum etc with aggregate expressions
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._count'\)",
+                "COUNT(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._sum'\)",
+                agg if func == "SUM" else "SUM(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._avg'\)",
+                agg if func == "AVG" else "AVG(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._min'\)",
+                agg if func == "MIN" else "MIN(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_sql = re.sub(
+                r"json_extract\(data,\s*'\$\._max'\)",
+                agg if func == "MAX" else "MAX(*)",
+                having_sql,
+                flags=re.IGNORECASE,
+            )
+            having_clause = f"HAVING {having_sql}"
+
+        sql = f"SELECT {', '.join(select_parts)} FROM {self._table} {where} {group_by} {having_clause}".strip()
+        sql = self._squeezed(sql)
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
+
+        params = list(self._expression.params) if self._expression else []
+        if self._having:
+            params.extend(self._having.params)
+        return sql, params
+
+    def _build_query(self, *, include_id: bool = False) -> tuple[str, list[Any]]:
+        """Build the SELECT statement and parameters.
+
+        Args:
+            include_id: When True, select ``_id, data`` instead of only
+                ``data``.
+
+        Returns:
+            tuple[str, list[Any]]: SQL string and parameter list.
+        """
+        where = self._filter_sql()
+        order = ""
+        if self._order_fields:
+            parts = []
+            for field_name, is_desc in self._order_fields:
+                part = f"json_extract(data, '$.{field_name}')"
+                if is_desc:
+                    part += " DESC"
+                parts.append(part)
+            order = "ORDER BY " + ", ".join(parts)
+        elif self._order:
+            order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
+                " DESC" if self._desc else ""
+            )
+        limit_offset = ""
+        if self._limit is not None:
+            limit_offset = f"LIMIT {self._limit}"
+            if self._offset is not None:
+                limit_offset += f" OFFSET {self._offset}"
+        elif self._offset is not None:
+            # SQLite requires LIMIT with OFFSET, use -1 for unlimited
+            limit_offset = f"LIMIT -1 OFFSET {self._offset}"
+
+        distinct_kw = "DISTINCT " if self._distinct else ""
+        if include_id:
+            select = "_id, data" + (", _version" if self._include_version else "")
+            if self._promoted_fields:
+                select += ", " + ", ".join(self._promoted_fields)
+        else:
+            select = "data"
+        sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
+        sql = self._squeezed(sql)
+        # Rewrite meta columns (_id, _version) from json_extract to direct column
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
+        params = self._expression.params if self._expression else []
+        return sql, params
+
+    def _build_aggregate_query(
+        self, func: str, field: Optional[str] = None
+    ) -> tuple[str, list[Any]]:
+        """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX).
+
+        Args:
+            func: Aggregate function name.
+            field: Optional field to aggregate on.
+
+        Returns:
+            tuple[str, list[Any]]: SQL string and parameter list.
+        """
+        if field is not None and field != "_id":
+            validate_field_name(field)
+        where = self._filter_sql()
+        if field is None:
+            select = f"{func}(*)"
+        elif field == "_id":
+            select = f"{func}(_id)"
+        elif self._promoted_fields and field in self._promoted_fields:
+            select = f"{func}({field})"
+        else:
+            select = f"{func}(json_extract(data, '$.{field}'))"
+        sql = f"SELECT {select} FROM {self._table} {where}".strip()
+        sql = self._squeezed(sql)
+        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
+        if self._promoted_fields:
+            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
+        params = self._expression.params if self._expression else []
+        return sql, params
+
+    @property
+    def sql(self) -> str:
+        """Return the current SELECT SQL string."""
+        return self._build_query()[0]
+
+    @property
+    def params(self) -> list[Any]:
+        """Return the current parameter list."""
+        return self._build_query()[1]
+
+    def debug(self) -> tuple[str, list[Any]]:
+        """Return (sql, params) for debugging."""
+        return self._build_query()
+
+    def _write_checks(self, fields: dict, n: Optional[int] = None) -> Optional[int]:
+        """The refusals of an update, before any statement is sent; ``n`` (``update_n()``'s,
+        written into the statement's text) as the plain ``int`` the statement takes
+        (:func:`whole_number`: ``TypeError`` for a ``str``, a ``float``, a ``bool``)."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
         if not fields:
             raise ValueError("No fields to update")
-        if n is not None and n < 1:
-            raise ValueError("n must be >= 1")
+        if n is not None:
+            n = whole_number(n, "update_n")
+            if n < 1:
+                raise ValueError("n must be >= 1")
         for key in fields:
             validate_field_name(key)
-        self._refuse_version(fields)  # a query that is versioned whatever its table has: before the table is touched
+        self._refuse_version(
+            fields
+        )  # a query that is versioned whatever its table has: before the table is touched
+        return n
 
     def _refuse_version(self, fields: dict) -> None:
         """An update of a versioned row moves its version and takes no value for it."""
@@ -172,7 +431,9 @@ class _WriteStatements:
         columns, then the version; each value in stored form."""
         from sqler.query.field import SQLerUpdateExpression
 
-        self._refuse_version(fields)  # a query that learned from its table that the rows are versioned
+        self._refuse_version(
+            fields
+        )  # a query that learned from its table that the rows are versioned
         json_parts: list[str] = []
         json_params: list[Any] = []
         columns: list[str] = []
@@ -199,7 +460,9 @@ class _WriteStatements:
         return ", ".join(columns), json_params + column_params
 
     def _where(self) -> tuple[str, list[Any]]:
-        return self._on_columns(self._filter_sql()), self._expression.params if self._expression else []
+        return self._on_columns(
+            self._filter_sql()
+        ), self._expression.params if self._expression else []
 
     def _order_clause(self) -> str:
         if self._order_fields:
@@ -209,21 +472,52 @@ class _WriteStatements:
             ]
             return self._on_columns("ORDER BY " + ", ".join(parts))
         if self._order:
-            order = f"ORDER BY json_extract(data, '$.{self._order}')" + (" DESC" if self._desc else "")
+            order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
+                " DESC" if self._desc else ""
+            )
             return self._on_columns(order)
         return ""
 
+    def _windowed(self) -> bool:
+        """Whether the query has a limit or an offset: then its rows are not every row its
+        filter matches (an order alone changes which come first, not which come)."""
+        return self._limit is not None or self._offset is not None
+
     def _picked(self, n: Optional[int], columns: str = "_id") -> tuple[str, list[Any]]:
-        """The SELECT of the rows an update changes: the first ``n`` in the query's order, or,
-        with no ``n``, every row the query matches."""
+        """The SELECT of the rows of a query with no limit and no offset (every match), with
+        ``n`` the first ``n`` of them in the query's order (``update_n()``, ``update_one()``).
+        A query with a limit or an offset has its rows picked by its read's own statement
+        instead (``_picked_rows`` of each query class)."""
+        self._unwindowed()
         where, params = self._where()
-        tail = "" if n is None else f"{self._order_clause()} LIMIT {int(n)}"
+        tail = "" if n is None else f"{self._order_clause()} LIMIT {n}"
         return self._squeezed(f"SELECT {columns} FROM {self._table} {where} {tail}"), params
+
+    def _unwindowed(self) -> None:
+        """Refuse a statement that names the rows by the filter alone on a query with a limit
+        or an offset: it would write every row the filter matches, not the rows :meth:`all`
+        returns."""
+        if self._windowed():
+            raise AssertionError("a query with a limit or an offset writes the ids its read picked")
+
+    def _touched(self, ids: Optional[list] = None) -> tuple[str, list[Any]]:
+        """The WHERE of an ``UPDATE``, a ``DELETE`` or a copy: the rows :meth:`all` returns.
+        A query with a limit or an offset names them by id: ``ids``, the ids its read's own
+        statement returned in the same transaction (``_picked_rows`` of each query class),
+        bound as one JSON array (no limit on the number of SQL variables is met). Any other
+        query keeps its own WHERE, the statement it always sent."""
+        if ids is None:
+            self._unwindowed()
+            return self._where()
+        guard = f" AND {self._guard}" if self._guard else ""
+        return f"WHERE _id IN (SELECT value FROM json_each(?)){guard}", [json.dumps(ids)]
 
     def _returning(self) -> str:
         """The columns a written row is read back with."""
         return ", ".join(
-            ["_id", "data"] + (["_version"] if self._include_version else []) + self._promoted_fields
+            ["_id", "data"]
+            + (["_version"] if self._include_version else [])
+            + self._promoted_fields
         )
 
     def _returned(self, row) -> dict[str, Any]:
@@ -256,20 +550,48 @@ class _WriteStatements:
 
     def _update_ids_sql(self, fields: dict, ids: list) -> tuple[str, list[Any]]:
         """``UPDATE`` of exactly the rows ``ids``, returning them."""
-        guard = f" AND {self._guard}" if self._guard else ""
-        return self._update_sql(
-            fields, f"WHERE _id IN (SELECT value FROM json_each(?)){guard}", [json.dumps(ids)], True
-        )
+        return self._update_sql(fields, *self._touched(ids), returning=True)
 
-    def _delete_sql(self, returning: bool = False) -> tuple[str, list[Any]]:
-        where, params = self._where()
+    def _delete_sql(
+        self, returning: bool = False, ids: Optional[list] = None
+    ) -> tuple[str, list[Any]]:
+        """``DELETE`` of the rows :meth:`all` returns (:meth:`_touched`, ``ids`` as it takes them)."""
+        where, params = self._touched(ids)
         sql = f"DELETE FROM {self._table} {where}"
         if returning:
             sql += f" RETURNING {self._returning()}"
         return self._squeezed(sql), params
 
+    def _copy_target(self, table: str) -> str:
+        """The checked target of :meth:`_copy_sql`, refused before any statement: a name
+        sqler does not take for a table, the query's own table, and a query whose rows are not
+        whole rows."""
+        target = validate_table_name(table)
+        if target.lower() == self._table.lower():
+            raise ValueError(
+                f"copy_to: {target} is the table the query reads; copy to another table"
+            )
+        for name, used in (
+            ("select()", self._select_fields),
+            ("group_by()", self._group_by_fields or self._having),
+        ):
+            if used:
+                raise ValueError(f"copy_to: a query with {name} is refused: it copies whole rows")
+        return target
 
-class SQLerQuery(_WriteStatements):
+    def _copy_sql(self, target: str, ids: Optional[list] = None) -> tuple[str, list[Any]]:
+        """The one ``INSERT ... SELECT`` that copies the rows :meth:`all` returns
+        (:meth:`_touched`, ``ids`` as it takes them) into the checked ``target`` as they are
+        stored: ``_id``, ``data``, ``_version`` where the table has it, and every promoted
+        column (:meth:`_returning`)."""
+        where, params = self._touched(ids)
+        columns = self._returning()
+        return self._squeezed(
+            f"INSERT INTO {target} ({columns}) SELECT {columns} FROM {self._table} {where}"
+        ), params
+
+
+class SQLerQuery(_Statements):
     """Build and execute chainable queries against a table.
 
     Queries are immutable; chaining methods returns new query instances. By
@@ -277,10 +599,12 @@ class SQLerQuery(_WriteStatements):
     ``all_dicts()`` and ``first_dict()`` to get parsed dicts with ``_id``.
     """
 
+    _adapter: Optional["SQLiteAdapter"]
+
     def __init__(
         self,
         table: str,
-        adapter: Optional[AdapterABC] = None,
+        adapter: Optional["SQLiteAdapter"] = None,
         expression: Optional[SQLerExpression] = None,
         order: Optional[str] = None,
         desc: bool = False,
@@ -299,8 +623,9 @@ class SQLerQuery(_WriteStatements):
         self._expression = expression
         self._order = order
         self._desc = desc
-        self._limit = limit
-        self._offset = offset
+        # written into the SQL text: checked as limit() and offset() check them (whole_number)
+        self._limit = None if limit is None else whole_number(limit, "limit")
+        self._offset = None if offset is None else whole_number(offset, "offset")
         self._include_version = include_version
         self._select_fields = select_fields
         self._distinct = distinct
@@ -339,24 +664,61 @@ class SQLerQuery(_WriteStatements):
         (``SQLerDB._shape_of``), whatever class reads or writes it; a versioned query
         (``with_version()``) for ``_use`` ``"update"`` gives the table the column first. Each
         statement built from it carries the guard of the remembered names
-        (``sqler.db.sqler_db._guard``). Made once for each memory of the table, and kept.
+        (``sqler.db._guard._guard``). A filter through a reference reads each related
+        table as a query of that table is laid out (:meth:`_related_laid_out`), with its
+        guard. Made once for each memory of the table and of each related table, and kept.
 
         Raises:
             SchemaError: A document still holds the key of a promoted column.
         """
         db, table = self._db, self._table
         promoted, names, version = db._shape_of(table)
-        if not version and self._include_version and self._use == "update" and db._has_version_column(table) is False:
+        if (
+            not version
+            and self._include_version
+            and self._use == "update"
+            and db._has_version_column(table) is False
+        ):
             db._ensure_versioned_table(table)
             promoted, names, version = db._shape_of(table)
-        key = (names, promoted, version)
+        key: Any = (names, promoted, version)
+        others = related_tables(self._expression)
+        if others:  # the filter reads other tables: each is laid out as it is remembered too
+            key = (key, tuple(db._shape_of(other)[:2] for other in others))
         laid = self._laid
         if laid is None or laid[0] != key:
             made = self._clone(
-                promoted_fields=promoted, include_version=version, db=None, guard=db._guard_of(table, names), names=names
+                promoted_fields=promoted,
+                include_version=version,
+                db=None,
+                guard=db._guard_of(table, names),
+                names=names,
             )
+            if others:
+                made._expression, made._others = self._related_laid_out()
             laid = self._laid = (key, made)
         return laid[1]
+
+    def _related_laid_out(self) -> tuple[SQLerExpression, tuple]:
+        """The query's filter with the rows of each related table it reads read as a query
+        of that table on this database is laid out (:meth:`_laid_out`, the one owner of
+        which fields are columns, and of the guard), and the names each table was laid out
+        from, for the database to send the statement again once one has moved."""
+        expression, db = self._expression, self._db
+        assert expression is not None  # only a filter reads other tables
+        laid: dict[Any, tuple[str, bool]] = {}
+        names: dict[str, Any] = {}
+        for part in dict.fromkeys(expression.related):
+            used = SQLerQuery(part.table, expression=SQLerExpression(part.where))
+            used._db = db
+            used = used._laid_out()
+            if part.table not in names:  # a table not remembered may be missing: it is read once
+                names[part.table] = (
+                    used._names,
+                    used._names is None and not db._names(part.table)[0],
+                )
+            laid[part] = (used._where()[0], names[part.table][1])
+        return with_related(expression, laid), tuple((table, n) for table, (n, _) in names.items())
 
     def _execute(self, build) -> tuple[Self, Any]:
         """Send the statement ``build(query)`` makes; return the query it was built from and
@@ -372,13 +734,16 @@ class SQLerQuery(_WriteStatements):
         def make() -> tuple[str, list[Any], Any]:
             nonlocal used
             used = self._laid_out()
-            return (*build(used), used._names)
+            return (*build(used), used._names, used._others)
 
         try:
             if self._db is not None:
                 cursor = self._db._sent(self._table, make)
                 return used, cursor
             sql, params = build(self)
+            assert (
+                self._adapter is not None
+            )  # with no database behind the query its caller refused a query with no adapter
             try:
                 return self, self._adapter._execute_judged(sql, params)
             except Exception as exc:
@@ -394,21 +759,63 @@ class SQLerQuery(_WriteStatements):
         table has the column (:func:`_has_version`), whoever made that column and when."""
         if self._db is not None or self._include_version:
             return self
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         names = tuple(row[0] for row in self._adapter.execute(_NAMES_SQL, [self._table]).fetchall())
         return self._clone(include_version=True) if _has_version(names) else self
+
+    @contextlib.contextmanager
+    def _held(self) -> Iterator[None]:
+        """One unit that holds the write lock from its start, for a write that picks its rows
+        with one statement and writes them with another: the database's own
+        ``transaction()`` where one is behind the query, else the adapter's
+        (``begin_transaction``). Each begins with ``BEGIN IMMEDIATE``, which waits for the
+        lock (busy_timeout); inside a transaction already open it is a savepoint, and the lock
+        is held since that transaction's ``BEGIN``. So no other connection writes a row
+        between the pick and the write."""
+        if self._db is not None:
+            with self._db.transaction():
+                yield
+            return
+        from sqler.db.sqler_db import _end_transaction
+
+        adapter = self._adapter
+        assert adapter is not None  # each caller refused a query with no adapter
+        adapter.begin_transaction()
+        try:
+            yield
+        except BaseException as exc:
+            _end_transaction(adapter, False, exc)
+            raise
+        adapter.end_transaction(commit=True)
+
+    def _picked_rows(self, n: Optional[int] = None) -> tuple[Self, Optional[list[tuple]]]:
+        """The rows :meth:`all` returns (the first ``n`` with ``n``), read by sending the read's
+        own statement, ``_build_query(include_id=True)`` (the one ``all_dicts()``, iteration and
+        a queryset's ``all()`` send): the same text, parameters and data, so the same plan and
+        the same rows, ties under an ``order_by`` too, with no tie-breaker added; with the
+        query they were read by (its columns are :meth:`_returning`'s). ``None`` when the
+        table is missing. Run it inside :meth:`_held` or the caller's transaction, so the
+        write lock is held before the pick."""
+        query, cur = self._execute(lambda q: q._build_query(include_id=True))
+        if cur is None:
+            return query, None
+        try:
+            return query, cur.fetchall() if n is None else cur.fetchmany(n)
+        finally:
+            cur.close()
 
     def _rows(self, *, include_id: bool = False) -> list[tuple]:
         """Run this query's own SELECT and return every row; ``[]`` when its table is missing."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        _, cur = self._execute(lambda q: q._build_query(include_id=include_id, include_version=False))
+        _, cur = self._execute(lambda q: q._build_query(include_id=include_id))
         return [] if cur is None else cur.fetchall()
 
     def _iter_rows(self, *, include_id: bool = False) -> Iterator[tuple]:
         """Yield this query's rows one at a time; nothing when its table is missing."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        _, cur = self._execute(lambda q: q._build_query(include_id=include_id, include_version=False))
+        _, cur = self._execute(lambda q: q._build_query(include_id=include_id))
         if cur is None:
             return
         try:
@@ -502,23 +909,31 @@ class SQLerQuery(_WriteStatements):
         """Return a new query with a LIMIT clause.
 
         Args:
-            n: Maximum number of rows to return.
+            n: Maximum number of rows to return: a whole number, ``0`` or more.
 
         Returns:
             SQLerQuery: New query instance.
+
+        Raises:
+            TypeError: ``n`` is not a whole number (a ``bool``, ``str``, ``float``, ``None``).
+            ValueError: ``n`` is negative.
         """
-        return self._clone(limit=n)
+        return self._clone(limit=whole_number(n, "limit"))
 
     def offset(self, n: int) -> Self:
         """Return a new query with an OFFSET clause.
 
         Args:
-            n: Number of rows to skip.
+            n: Number of rows to skip: a whole number, ``0`` or more.
 
         Returns:
             SQLerQuery: New query instance.
+
+        Raises:
+            TypeError: ``n`` is not a whole number (a ``bool``, ``str``, ``float``, ``None``).
+            ValueError: ``n`` is negative.
         """
-        return self._clone(offset=n)
+        return self._clone(offset=whole_number(n, "offset"))
 
     def select(self, *fields: str) -> Self:
         """Return a new query that only retrieves specified fields.
@@ -568,84 +983,6 @@ class SQLerQuery(_WriteStatements):
         """
         return self._clone(having=expression)
 
-    def _field_expr(self, field: str) -> str:
-        """Return the SQL expression for a field (promoted or json_extract)."""
-        if field == "_id":
-            return "_id"
-        if field == "_version":
-            return "_version"
-        if self._promoted_fields and field in self._promoted_fields:
-            return field
-        return f"json_extract(data, '$.{field}')"
-
-    def _build_grouped_aggregate_query(
-        self, func: str, field: Optional[str] = None
-    ) -> tuple[str, list[Any]]:
-        """Build a grouped aggregate query.
-
-        Returns:
-            tuple[str, list[Any]]: SQL string and parameter list.
-        """
-        group_exprs = [self._field_expr(f) for f in self._group_by_fields]
-
-        if field is None:
-            agg = f"{func}(*)"
-        else:
-            if field != "_id":
-                validate_field_name(field)
-            agg = f"{func}({self._field_expr(field)})"
-
-        select_parts = group_exprs + [agg]
-        where = self._filter_sql()
-        group_by = "GROUP BY " + ", ".join(group_exprs)
-
-        having_clause = ""
-        if self._having:
-            having_sql = self._having.sql
-            # Replace pseudo-fields like _count, _sum etc with aggregate expressions
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._count'\)",
-                "COUNT(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._sum'\)",
-                agg if func == "SUM" else "SUM(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._avg'\)",
-                agg if func == "AVG" else "AVG(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._min'\)",
-                agg if func == "MIN" else "MIN(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_sql = re.sub(
-                r"json_extract\(data,\s*'\$\._max'\)",
-                agg if func == "MAX" else "MAX(*)",
-                having_sql,
-                flags=re.IGNORECASE,
-            )
-            having_clause = f"HAVING {having_sql}"
-
-        sql = f"SELECT {', '.join(select_parts)} FROM {self._table} {where} {group_by} {having_clause}".strip()
-        sql = self._squeezed(sql)
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-
-        params = list(self._expression.params) if self._expression else []
-        if self._having:
-            params.extend(self._having.params)
-        return sql, params
-
     def _execute_grouped_aggregate(
         self, func: str, field: Optional[str] = None
     ) -> list[dict[str, Any]]:
@@ -663,104 +1000,6 @@ class SQLerQuery(_WriteStatements):
             d[agg_key] = row[len(self._group_by_fields)]
             results.append(d)
         return results
-
-    def _build_query(
-        self, *, include_id: bool = False, include_version: bool = False
-    ) -> tuple[str, list[Any]]:
-        """Build the SELECT statement and parameters.
-
-        Args:
-            include_id: When True, select ``_id, data`` instead of only
-                ``data``.
-
-        Returns:
-            tuple[str, list[Any]]: SQL string and parameter list.
-        """
-        where = self._filter_sql()
-        order = ""
-        if self._order_fields:
-            parts = []
-            for field_name, is_desc in self._order_fields:
-                part = f"json_extract(data, '$.{field_name}')"
-                if is_desc:
-                    part += " DESC"
-                parts.append(part)
-            order = "ORDER BY " + ", ".join(parts)
-        elif self._order:
-            order = f"ORDER BY json_extract(data, '$.{self._order}')" + (
-                " DESC" if self._desc else ""
-            )
-        limit_offset = ""
-        if self._limit is not None:
-            limit_offset = f"LIMIT {self._limit}"
-            if self._offset is not None:
-                limit_offset += f" OFFSET {self._offset}"
-        elif self._offset is not None:
-            # SQLite requires LIMIT with OFFSET, use -1 for unlimited
-            limit_offset = f"LIMIT -1 OFFSET {self._offset}"
-
-        distinct_kw = "DISTINCT " if self._distinct else ""
-        if include_id:
-            select = "_id, data" + (
-                ", _version" if (include_version or self._include_version) else ""
-            )
-            if self._promoted_fields:
-                select += ", " + ", ".join(self._promoted_fields)
-        else:
-            select = "data"
-        sql = f"SELECT {distinct_kw}{select} FROM {self._table} {where} {order} {limit_offset}".strip()
-        sql = self._squeezed(sql)
-        # Rewrite meta columns (_id, _version) from json_extract to direct column
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-        params = self._expression.params if self._expression else []
-        return sql, params
-
-    def _build_aggregate_query(
-        self, func: str, field: Optional[str] = None
-    ) -> tuple[str, list[Any]]:
-        """Build an aggregate query (COUNT, SUM, AVG, MIN, MAX).
-
-        Args:
-            func: Aggregate function name.
-            field: Optional field to aggregate on.
-
-        Returns:
-            tuple[str, list[Any]]: SQL string and parameter list.
-        """
-        if field is not None and field != "_id":
-            validate_field_name(field)
-        where = self._filter_sql()
-        if field is None:
-            select = f"{func}(*)"
-        elif field == "_id":
-            select = f"{func}(_id)"
-        elif self._promoted_fields and field in self._promoted_fields:
-            select = f"{func}({field})"
-        else:
-            select = f"{func}(json_extract(data, '$.{field}'))"
-        sql = f"SELECT {select} FROM {self._table} {where}".strip()
-        sql = self._squeezed(sql)
-        sql = _rewrite_promoted_refs(sql, _META_COLUMNS)
-        if self._promoted_fields:
-            sql = _rewrite_promoted_refs(sql, self._promoted_fields)
-        params = self._expression.params if self._expression else []
-        return sql, params
-
-    @property
-    def sql(self) -> str:
-        """Return the current SELECT SQL string."""
-        return self._build_query()[0]
-
-    @property
-    def params(self) -> list[Any]:
-        """Return the current parameter list."""
-        return self._build_query()[1]
-
-    def debug(self) -> tuple[str, list[Any]]:
-        """Return (sql, params) for debugging."""
-        return self._build_query()
 
     def explain(self, adapter) -> list[tuple]:
         """Run EXPLAIN <sql> using the provided adapter; return raw rows."""
@@ -989,7 +1228,7 @@ class SQLerQuery(_WriteStatements):
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        query, cur = self._execute(lambda q: q._build_query(include_id=True, include_version=False))
+        query, cur = self._execute(lambda q: q._build_query(include_id=True))
         if cur is None:
             return []
         return query._documents(cur.fetchall())
@@ -1065,7 +1304,7 @@ class SQLerQuery(_WriteStatements):
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        query, cur = self._execute(lambda q: q._build_query(include_id=True, include_version=False))
+        query, cur = self._execute(lambda q: q._build_query(include_id=True))
         if cur is None:
             return
         try:
@@ -1075,7 +1314,10 @@ class SQLerQuery(_WriteStatements):
             cur.close()
 
     def update(self, **fields) -> int:
-        """Update matching rows with the given field values.
+        """Update the rows :meth:`all` returns with the given field values: every match,
+        or, on a query with a limit or an offset, the rows the read's own statement returns,
+        read in one transaction with the write after the write lock is taken, then written
+        by id (``UPDATE ... WHERE _id IN (SELECT value FROM json_each(?))``).
 
         Supports F-expressions for atomic operations::
 
@@ -1095,9 +1337,21 @@ class SQLerQuery(_WriteStatements):
             int: Number of rows updated.
         """
         self._write_checks(fields)
-        _, cur = self._updating()._execute(lambda q: q._update_sql(fields, *q._where(), returning=False))
+        if self._windowed():
+            with self._held():
+                ids = self._picked_ids()
+                if not ids:
+                    return 0
+                _, cur = self._updating()._execute(
+                    lambda q: q._update_sql(fields, *q._touched(ids), returning=False)
+                )
+                return 0 if cur is None else cur.rowcount
+        _, cur = self._updating()._execute(
+            lambda q: q._update_sql(fields, *q._touched(), returning=False)
+        )
         if cur is None:
             return 0
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         self._adapter.auto_commit()
         return getattr(cur, "rowcount", 0)
 
@@ -1121,7 +1375,7 @@ class SQLerQuery(_WriteStatements):
         return rows[0] if rows else None
 
     def update_n(self, n: int, **fields) -> list[dict[str, Any]]:
-        """Atomically update up to *n* matching rows and return them.
+        """Atomically update the first *n* of the rows :meth:`all` returns and return them.
 
         Uses ``UPDATE ... WHERE _id IN (SELECT _id ... LIMIT n) RETURNING ...``
         for race-free batch claiming.
@@ -1136,11 +1390,21 @@ class SQLerQuery(_WriteStatements):
         return self._update_picked(fields, n, "IN")
 
     def _update_picked(self, fields: dict, n: int, op: str) -> list[dict[str, Any]]:
-        self._write_checks(fields, n)
+        checked = self._write_checks(fields, n)
+        assert checked is not None  # n was given
+        n = checked
+        if self._windowed():
+            with self._held():
+                ids = self._picked_ids(n)
+                if not ids:
+                    return []
+                query, cur = self._updating()._execute(lambda q: q._update_ids_sql(fields, ids))
+                return [] if cur is None else [query._returned(row) for row in cur.fetchall()]
         query, cur = self._updating()._execute(lambda q: q._update_picked_sql(fields, n, op))
         if cur is None:
             return []
         rows = cur.fetchall()
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         self._adapter.auto_commit()
         return [query._returned(row) for row in rows]
 
@@ -1151,19 +1415,27 @@ class SQLerQuery(_WriteStatements):
         The rows are read, then exactly those are written: run it inside a transaction, so
         that no other connection writes a row between its read and its write.
         """
-        self._write_checks(fields, n)
-        query, cur = self._updating()._execute(lambda q: q._picked(n, q._returning()))
-        if cur is None:
+        n = self._write_checks(fields, n)
+        if self._windowed():  # the caller's transaction holds the write lock
+            query, rows = self._updating()._picked_rows(n)
+        else:
+            query, cur = self._updating()._execute(lambda q: q._picked(n, q._returning()))
+            rows = None if cur is None else cur.fetchall()
+        if rows is None:
             return []
-        before = {doc["_id"]: doc for doc in map(query._returned, cur.fetchall())}
+        before = {doc["_id"]: doc for doc in map(query._returned, rows)}
         if not before:
             return []
+        assert self._adapter is not None  # _write_checks refused a query with no adapter
         cur = self._adapter.execute(*query._update_ids_sql(fields, list(before)))
         after = {doc["_id"]: doc for doc in map(query._returned, cur.fetchall())}
         return [(doc, after[_id]) for _id, doc in before.items()]
 
     def delete(self) -> int:
-        """Delete all matching rows.
+        """Delete the rows :meth:`all` returns: every match, or, on a query with a limit or
+        an offset, the rows the read's own statement returns, read in one transaction with
+        the delete after the write lock is taken, then deleted by id (``DELETE ... WHERE _id
+        IN (SELECT value FROM json_each(?))``).
 
         Raises:
             NoAdapterError: If the query has no adapter.
@@ -1173,6 +1445,13 @@ class SQLerQuery(_WriteStatements):
         """
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
+        if self._windowed():
+            with self._held():
+                ids = self._picked_ids()
+                if not ids:
+                    return 0
+                _, cur = self._execute(lambda q: q._delete_sql(ids=ids))
+                return 0 if cur is None else cur.rowcount
         _, cur = self._execute(lambda q: q._delete_sql())
         if cur is None:
             return 0
@@ -1184,8 +1463,33 @@ class SQLerQuery(_WriteStatements):
         transaction)."""
         if self._adapter is None:
             raise NoAdapterError("No adapter set for query")
-        query, cur = self._execute(lambda q: q._delete_sql(returning=True))
+        ids = self._picked_ids()
+        if ids == []:
+            return []
+        query, cur = self._execute(lambda q: q._delete_sql(returning=True, ids=ids))
         return [] if cur is None else [query._returned(row) for row in cur.fetchall()]
+
+    def _copied(self, target: str) -> int:
+        """Copy the matching rows into the checked ``target`` (:meth:`_copy_sql`) and return
+        how many; 0 when the query's table is missing. It commits nothing: run it inside a
+        transaction."""
+        if self._adapter is None:
+            raise NoAdapterError("No adapter set for query")
+        ids = self._picked_ids()
+        if ids == []:
+            return 0
+        _, cur = self._execute(lambda q: q._copy_sql(target, ids))
+        return 0 if cur is None else cur.rowcount
+
+    def _picked_ids(self, n: Optional[int] = None) -> Optional[list]:
+        """For a write inside the caller's transaction (which holds the write lock): the ids
+        of the rows :meth:`all` returns (the first ``n``) on a query with a limit or an offset
+        (:meth:`_picked_rows`), ``[]`` for none or a missing table; ``None`` for any other
+        query, whose write names its rows by its own WHERE."""
+        if not self._windowed():
+            return None
+        _, rows = self._picked_rows(n)
+        return [row[0] for row in rows or []]
 
 
 class PaginatedResult:

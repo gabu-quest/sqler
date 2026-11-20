@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.query import SQLerField as F
 
@@ -41,9 +42,7 @@ def test_tour_notebook_executes(notebook_path):
         timeout=60,
     )
     assert result.returncode == 0, (
-        f"Notebook {notebook_path.name} failed:\n"
-        f"STDOUT:\n{result.stdout}\n"
-        f"STDERR:\n{result.stderr}"
+        f"Notebook {notebook_path.name} failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     )
 
 
@@ -153,12 +152,7 @@ class TestTour01FundamentalsOutput:
 
     def test_combined_active_and_young(self, tour_db):
         """Active AND under 30: Bob (25), Diana (28)."""
-        result = (
-            TourUser.query()
-            .filter(F("is_active") == True)
-            .filter(F("age") < 30)
-            .all()
-        )
+        result = TourUser.query().filter(F("is_active") == True).filter(F("age") < 30).all()
         names = sorted([u.name for u in result])
         assert names == ["Bob", "Diana"]
 

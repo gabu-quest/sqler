@@ -88,8 +88,6 @@ def _(SQLerModel, db):
         email: str
         age: int
 
-    User.set_db(db)
-
     # サンプルユーザーを作成
     _users = [
         ("Alice", "alice@example.com", 30),
@@ -99,9 +97,9 @@ def _(SQLerModel, db):
         ("Eve", "eve@example.com", 32),
     ]
     for _name, _email, _age in _users:
-        User(name=_name, email=_email, age=_age).save()
+        User(name=_name, email=_email, age=_age).save(db=db)
 
-    print(f"{User.query().count()} ユーザーを作成しました")
+    print(f"{User.using(db).count()} ユーザーを作成しました")
     return (User,)
 
 
@@ -118,9 +116,9 @@ def _(mo):
 
 
 @app.cell
-def _(User, export_csv_string):
+def _(User, db, export_csv_string):
     # クエリ結果を CSV にエクスポート
-    _csv_data = export_csv_string(User.query())
+    _csv_data = export_csv_string(User.using(db))
 
     print("CSV 出力：")
     print(_csv_data)
@@ -128,11 +126,11 @@ def _(User, export_csv_string):
 
 
 @app.cell
-def _(User, export_csv_string):
+def _(User, db, export_csv_string):
     from sqler.query import SQLerField as F
 
     # フィルターを適用してエクスポート
-    _filtered_csv = export_csv_string(User.query().filter(F("age") >= 30))
+    _filtered_csv = export_csv_string(User.using(db).filter(F("age") >= 30))
 
     print("30歳以上のユーザー（CSV）：")
     print(_filtered_csv)
@@ -152,9 +150,9 @@ def _(mo):
 
 
 @app.cell
-def _(User, export_json_string):
+def _(User, db, export_json_string):
     # クエリ結果を JSON にエクスポート
-    _json_data = export_json_string(User.query(), indent=2)
+    _json_data = export_json_string(User.using(db), indent=2)
 
     print("JSON 出力：")
     print(_json_data)
@@ -174,9 +172,9 @@ def _(mo):
 
 
 @app.cell
-def _(User, export_jsonl_string):
+def _(User, db, export_jsonl_string):
     # クエリ結果を JSONL にエクスポート
-    _jsonl_data = export_jsonl_string(User.query())
+    _jsonl_data = export_jsonl_string(User.using(db))
 
     print("JSONL 出力（1行1オブジェクト）：")
     print(_jsonl_data)
@@ -203,21 +201,19 @@ def _(SQLerModel, db, import_csv_string):
         email: str
         age: int
 
-    Customer.set_db(db)
-
     _csv_input = """name,email,age
 John,john@example.com,45
 Jane,jane@example.com,38
 Jim,jim@example.com,52"""
 
-    _result = import_csv_string(Customer, _csv_input)
+    _result = import_csv_string(Customer, _csv_input, db=db)
 
     print("インポート結果：")
     print(f"  成功: {_result.success_count}")
     print(f"  失敗: {_result.error_count}")
 
     print("\nインポートされた顧客：")
-    for _c in Customer.query().all():
+    for _c in Customer.using(db).all():
         print(f"  {_c.name} ({_c.email}), {_c.age}歳")
     return (Customer,)
 
@@ -241,20 +237,18 @@ def _(SQLerModel, db, import_json_string):
         name: str
         price: float
 
-    Product.set_db(db)
-
     _json_input = """[
         {"name": "Widget", "price": 29.99},
         {"name": "Gadget", "price": 49.99},
         {"name": "Gizmo", "price": 19.99}
     ]"""
 
-    _result = import_json_string(Product, _json_input)
+    _result = import_json_string(Product, _json_input, db=db)
 
     print(f"インポート結果：成功 {_result.success_count} 件")
 
     print("\nインポートされた商品：")
-    for _p in Product.query().all():
+    for _p in Product.using(db).all():
         print(f"  {_p.name}: ${_p.price}")
     return (Product,)
 
@@ -278,19 +272,17 @@ def _(SQLerModel, db, import_jsonl_string):
         level: str
         message: str
 
-    LogEntry.set_db(db)
-
     _jsonl_input = """{"level": "INFO", "message": "Application started"}
 {"level": "DEBUG", "message": "Processing request"}
 {"level": "ERROR", "message": "Connection failed"}
 {"level": "INFO", "message": "Retrying connection"}"""
 
-    _result = import_jsonl_string(LogEntry, _jsonl_input)
+    _result = import_jsonl_string(LogEntry, _jsonl_input, db=db)
 
     print(f"インポート結果：成功 {_result.success_count} 件")
 
     print("\nインポートされたログ：")
-    for _log in LogEntry.query().all():
+    for _log in LogEntry.using(db).all():
         print(f"  [{_log.level}] {_log.message}")
     return (LogEntry,)
 
@@ -310,7 +302,7 @@ def _(mo):
 @app.cell
 def _(SQLerModel, User, db, export_jsonl_string, import_jsonl_string):
     # ユーザーをエクスポート
-    _exported = export_jsonl_string(User.query())
+    _exported = export_jsonl_string(User.using(db))
     print("エクスポートされた JSONL：")
     print(_exported)
 
@@ -321,14 +313,12 @@ def _(SQLerModel, User, db, export_jsonl_string, import_jsonl_string):
         email: str
         age: int
 
-    UserBackup.set_db(db)
-
-    _result = import_jsonl_string(UserBackup, _exported)
+    _result = import_jsonl_string(UserBackup, _exported, db=db)
     print(f"\nバックアップにインポート：{_result.success_count} 件")
 
     # 確認
-    print(f"元のユーザー数: {User.query().count()}")
-    print(f"バックアップ数: {UserBackup.query().count()}")
+    print(f"元のユーザー数: {User.using(db).count()}")
+    print(f"バックアップ数: {UserBackup.using(db).count()}")
     return (UserBackup,)
 
 
@@ -345,8 +335,8 @@ def _(mo):
 
 
 @app.cell
-def _(User, export_jsonl_string):
-    _jsonl = export_jsonl_string(User.query())
+def _(User, db, export_jsonl_string):
+    _jsonl = export_jsonl_string(User.using(db))
 
     print("JSONL 形式の利点：")
     for _line in _jsonl.strip().split("\n"):

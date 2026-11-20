@@ -16,8 +16,6 @@ import gc
 import os
 import tempfile
 
-from sqler import F, SQLerDB
-
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.sqlite_baseline import (
@@ -36,6 +34,7 @@ from benchmarks.core.sqlite_baseline import (
 )
 from benchmarks.core.timer import PrecisionTimer
 from benchmarks.generators.documents import DocumentGenerator
+from sqler import F, SQLerDB
 
 SUITE_NAME = "query"
 
@@ -67,8 +66,7 @@ def _setup_sqler_db(docs: list[dict], mode: str, tmpdir: str | None = None) -> S
     return db
 
 
-def _setup_sqlite_mirror(docs: list[dict], mode: str = "memory",
-                          tmpdir: str | None = None):
+def _setup_sqlite_mirror(docs: list[dict], mode: str = "memory", tmpdir: str | None = None):
     """Create a sqlite3 conn with matched PRAGMAs and same data for baseline."""
     if mode == "memory":
         conn = create_conn()
@@ -144,7 +142,9 @@ class EqualityFilter:
                     def measure_sqlite():
                         # Without index
                         conn_no_idx = _setup_sqlite_mirror(
-                            docs, mode, tmpdir if mode == "disk" else None,
+                            docs,
+                            mode,
+                            tmpdir if mode == "disk" else None,
                         )
 
                         def sqlite_no_idx(conn=conn_no_idx, v=target_value):
@@ -184,12 +184,17 @@ class EqualityFilter:
                         (f"sqlite_{prefix}_no_index_{size}", "sqlite_no_index", "sqlite"),
                         (f"sqlite_{prefix}_indexed_{size}", "sqlite_indexed", "sqlite"),
                     ]:
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="rows", value=label,
-                            timing=arm_results[stats_key], rows=size,
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="rows",
+                                value=label,
+                                timing=arm_results[stats_key],
+                                rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
         return results
 
@@ -225,9 +230,11 @@ class RangeQueries:
                 mid = max_val // 2
                 verify_lo = mid - int(max_val * 0.10) // 2
                 verify_hi = mid + int(max_val * 0.10) // 2
-                sqler_verify = db.query("bench").filter(
-                    (F("value") > verify_lo) & (F("value") < verify_hi)
-                ).all()
+                sqler_verify = (
+                    db.query("bench")
+                    .filter((F("value") > verify_lo) & (F("value") < verify_hi))
+                    .all()
+                )
                 sqlite_verify = query_range(conn, "bench", "value", verify_lo, verify_hi)
                 _verify_counts(sqler_verify, sqlite_verify, f"range_queries_{prefix}")
 
@@ -240,14 +247,18 @@ class RangeQueries:
 
                     def measure_sqler(db=db, lo=lo, hi=hi):
                         def do_query():
-                            return db.query("bench").filter(
-                                (F("value") > lo) & (F("value") < hi)
-                            ).all()
+                            return (
+                                db.query("bench")
+                                .filter((F("value") > lo) & (F("value") < hi))
+                                .all()
+                            )
+
                         arm_results["sqler"] = timer.measure(do_query)
 
                     def measure_sqlite(conn=conn, lo=lo, hi=hi):
                         def do_sqlite():
                             return query_range(conn, "bench", "value", lo, hi)
+
                         arm_results["sqlite"] = timer.measure(do_sqlite)
 
                     arms = _alternate_arms(
@@ -259,12 +270,17 @@ class RangeQueries:
                         gc.collect()
 
                     for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="selectivity", value=f"{arm_label}_{prefix}_{sel_label}",
-                            timing=arm_results[arm_label], rows=size,
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="selectivity",
+                                value=f"{arm_label}_{prefix}_{sel_label}",
+                                timing=arm_results[arm_label],
+                                rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
                 conn.close()
 
@@ -301,11 +317,12 @@ class ComplexFilterChains:
                 conn = _setup_sqlite_mirror(docs, mode, tmpdir if mode == "disk" else None)
 
                 # Result count verification (LOW-3)
-                sqler_verify = db.query("bench").filter(
-                    (F("value") > 5000) & (F("category") == "tech")
-                ).all()
+                sqler_verify = (
+                    db.query("bench").filter((F("value") > 5000) & (F("category") == "tech")).all()
+                )
                 sqlite_verify = query_complex_filter(
-                    conn, "bench",
+                    conn,
+                    "bench",
                     "json_extract(data, '$.value') > ? AND json_extract(data, '$.category') = ?",
                     (5000, "tech"),
                 )
@@ -316,13 +333,16 @@ class ComplexFilterChains:
 
                 # 2 predicates
                 def q2_sqler(db=db):
-                    return db.query("bench").filter(
-                        (F("value") > 5000) & (F("category") == "tech")
-                    ).all()
+                    return (
+                        db.query("bench")
+                        .filter((F("value") > 5000) & (F("category") == "tech"))
+                        .all()
+                    )
 
                 def q2_sqlite(conn=conn):
                     return query_complex_filter(
-                        conn, "bench",
+                        conn,
+                        "bench",
                         "json_extract(data, '$.value') > ? AND json_extract(data, '$.category') = ?",
                         (5000, "tech"),
                     )
@@ -331,13 +351,16 @@ class ComplexFilterChains:
 
                 # 3 predicates
                 def q3_sqler(db=db):
-                    return db.query("bench").filter(
-                        (F("value") > 3000) & (F("category") == "tech") & (F("score") > 50)
-                    ).all()
+                    return (
+                        db.query("bench")
+                        .filter((F("value") > 3000) & (F("category") == "tech") & (F("score") > 50))
+                        .all()
+                    )
 
                 def q3_sqlite(conn=conn):
                     return query_complex_filter(
-                        conn, "bench",
+                        conn,
+                        "bench",
                         "json_extract(data, '$.value') > ? AND "
                         "json_extract(data, '$.category') = ? AND "
                         "json_extract(data, '$.score') > ?",
@@ -348,16 +371,22 @@ class ComplexFilterChains:
 
                 # 5 predicates
                 def q5_sqler(db=db):
-                    return db.query("bench").filter(
-                        (F("value") > 3000)
-                        & (F("category") == "tech")
-                        & (F("score") > 50)
-                        & (F("status") == "active")
-                    ).filter(F("name").like("alpha%")).all()
+                    return (
+                        db.query("bench")
+                        .filter(
+                            (F("value") > 3000)
+                            & (F("category") == "tech")
+                            & (F("score") > 50)
+                            & (F("status") == "active")
+                        )
+                        .filter(F("name").like("alpha%"))
+                        .all()
+                    )
 
                 def q5_sqlite(conn=conn):
                     return query_complex_filter(
-                        conn, "bench",
+                        conn,
+                        "bench",
                         "json_extract(data, '$.value') > ? AND "
                         "json_extract(data, '$.category') = ? AND "
                         "json_extract(data, '$.score') > ? AND "
@@ -386,12 +415,17 @@ class ComplexFilterChains:
                         gc.collect()
 
                     for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="predicates", value=f"{arm_label}_{prefix}_{pred_label}",
-                            timing=arm_results[arm_label], rows=size,
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="predicates",
+                                value=f"{arm_label}_{prefix}_{pred_label}",
+                                timing=arm_results[arm_label],
+                                rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
                 conn.close()
 
@@ -435,11 +469,13 @@ class TopN:
                     def measure_sqler(db=db, n=n):
                         def do_query():
                             return db.query("bench").order_by("value").limit(n).all()
+
                         arm_results["sqler"] = timer.measure(do_query)
 
                     def measure_sqlite(conn=conn, n=n):
                         def do_sqlite():
                             return query_top_n(conn, "bench", "value", n)
+
                         arm_results["sqlite"] = timer.measure(do_sqlite)
 
                     arms = _alternate_arms(
@@ -451,12 +487,17 @@ class TopN:
                         gc.collect()
 
                     for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="limit", value=f"{arm_label}_{prefix}_{n}",
-                            timing=arm_results[arm_label], rows=size,
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="limit",
+                                value=f"{arm_label}_{prefix}_{n}",
+                                timing=arm_results[arm_label],
+                                rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
                 conn.close()
 
@@ -498,12 +539,16 @@ class PaginationDepth:
 
                     def measure_sqler(db=db, page=page):
                         def do_query():
-                            return db.query("bench").order_by("value").paginate(page=page, per_page=20)
+                            return (
+                                db.query("bench").order_by("value").paginate(page=page, per_page=20)
+                            )
+
                         arm_results["sqler"] = timer.measure(do_query)
 
                     def measure_sqlite(conn=conn, page=page):
                         def do_sqlite():
                             return query_paginate(conn, "bench", "value", page, 20)
+
                         arm_results["sqlite"] = timer.measure(do_sqlite)
 
                     arms = _alternate_arms(
@@ -515,12 +560,17 @@ class PaginationDepth:
                         gc.collect()
 
                     for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="page", value=f"{arm_label}_{prefix}_{page}",
-                            timing=arm_results[arm_label], rows=size,
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="page",
+                                value=f"{arm_label}_{prefix}_{page}",
+                                timing=arm_results[arm_label],
+                                rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
                 conn.close()
 
@@ -595,10 +645,12 @@ class CountVsMaterialize:
                         return exists_filter(conn, "bench", "value", ">", 5000)
 
                     def do_sqlite_limit1(conn=conn):
-                        return bool(conn.execute(
-                            "SELECT 1 FROM [bench] WHERE json_extract(data, '$.value') > ? LIMIT 1",
-                            (5000,),
-                        ).fetchone())
+                        return bool(
+                            conn.execute(
+                                "SELECT 1 FROM [bench] WHERE json_extract(data, '$.value') > ? LIMIT 1",
+                                (5000,),
+                            ).fetchone()
+                        )
 
                     arm_results["sqlite_COUNT(*)"] = timer.measure(do_sqlite_count)
                     gc.collect()
@@ -628,12 +680,17 @@ class CountVsMaterialize:
                 }
                 for label, key in label_to_key.items():
                     baseline = "sqler" if label.startswith("sqler") else "sqlite"
-                    results.append(BenchmarkResult(
-                        scenario=self.name, suite=self.suite,
-                        parameter="method", value=label,
-                        timing=arm_results[key], rows=size,
-                        metadata={"storage_mode": mode, "baseline": baseline},
-                    ))
+                    results.append(
+                        BenchmarkResult(
+                            scenario=self.name,
+                            suite=self.suite,
+                            parameter="method",
+                            value=label,
+                            timing=arm_results[key],
+                            rows=size,
+                            metadata={"storage_mode": mode, "baseline": baseline},
+                        )
+                    )
 
                 conn.close()
 

@@ -5,6 +5,7 @@ import json
 import sqlite3
 
 import pytest
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel, F, SQLerDB
 from sqler.logging import query_logger
 
@@ -28,7 +29,10 @@ SCENES = {
     ),
     "rename a column": (
         {"status": "TEXT"},
-        lambda b: (b.adapter.execute("ALTER TABLE t RENAME COLUMN status TO prio;"), b.adapter.auto_commit()),
+        lambda b: (
+            b.adapter.execute("ALTER TABLE t RENAME COLUMN status TO prio;"),
+            b.adapter.auto_commit(),
+        ),
         "prio",
     ),
     "drop a column": (
@@ -41,14 +45,20 @@ SCENES = {
         {"status": "TEXT"},
         lambda b: (
             b.adapter.execute("DROP TABLE t;"),
-            b.adapter.execute("CREATE TABLE t (status TEXT, _id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL);"),
+            b.adapter.execute(
+                "CREATE TABLE t (status TEXT, _id INTEGER PRIMARY KEY AUTOINCREMENT, data JSON NOT NULL);"
+            ),
             b.adapter.auto_commit(),
         ),
         "status",
     ),
 }
 # a scene of a change SQLite itself makes runs on one writer and one reader
-ONE_WAY = {"rename a column": "insert_document", "drop a column": "find_document", "same columns in another order": "insert_document"}
+ONE_WAY = {
+    "rename a column": "insert_document",
+    "drop a column": "find_document",
+    "same columns in another order": "insert_document",
+}
 
 
 class PromotingRow(AsyncSQLerModel):
@@ -91,7 +101,8 @@ CELLS = [
     (scene, way)
     for scene in SCENES
     for way in WAYS
-    if ONE_WAY.get(scene, way) == way and not (scene == "drop and make again" and way.startswith("promoting"))
+    if ONE_WAY.get(scene, way) == way
+    and not (scene == "drop and make again" and way.startswith("promoting"))
 ]
 
 
@@ -131,7 +142,9 @@ def _change(path, scene):
     change(b)
     if scene in ("drop and make again", "same columns in another order"):
         b.insert_document("t", {"name": "x"})
-    b.adapter.execute(f"UPDATE t SET {key} = {7 if key == '_version' else repr('old')} WHERE _id = 1;")
+    b.adapter.execute(
+        f"UPDATE t SET {key} = {7 if key == '_version' else repr('old')} WHERE _id = 1;"
+    )
     b.adapter.auto_commit()
     b.close()
 
@@ -151,7 +164,9 @@ async def _read(a, way, key):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("scene", "way"), CELLS)
-async def test_a_unit_after_another_object_changed_the_table_acts_on_it_as_it_is(tmp_path, scene, way):
+async def test_a_unit_after_another_object_changed_the_table_acts_on_it_as_it_is(
+    tmp_path, scene, way
+):
     first, _, key = SCENES[scene]
     path = str(tmp_path / "scene.db")
     setup = SQLerDB.on_disk(path)
@@ -178,7 +193,11 @@ async def test_a_unit_after_another_object_changed_the_table_acts_on_it_as_it_is
     if key == "_version":
         assert ("_version" in data, type(value)) == (False, int)
     else:  # a model's document holds its other fields, as None
-        assert ({k: v for k, v in data.items() if v is not None}, key in data, value) == ({"name": "y"}, False, "v")
+        assert ({k: v for k, v in data.items() if v is not None}, key in data, value) == (
+            {"name": "y"},
+            False,
+            "v",
+        )
 
 
 @pytest.mark.asyncio
@@ -218,14 +237,18 @@ async def test_a_cancelled_statement_is_not_caught_and_not_sent_again(tmp_path):
     try:
         await a.insert_document("t", {"name": "x"})
         with query_logger.capture() as sent:
-            task = asyncio.ensure_future(SceneRow.using(a).filter(SQLerExpression(slow, [])).count())
+            task = asyncio.ensure_future(
+                SceneRow.using(a).filter(SQLerExpression(slow, [])).count()
+            )
             await asyncio.sleep(0.05)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
     finally:
         await a.close()
-    assert [(q.sql.split()[0], q.error) for q in sent] == [("SELECT", "CancelledError")]  # sent once, nothing learned
+    assert [(q.sql.split()[0], q.error) for q in sent] == [
+        ("SELECT", "CancelledError")
+    ]  # sent once, nothing learned
 
 
 @pytest.mark.asyncio
@@ -288,7 +311,9 @@ async def test_a_cancellation_after_the_check_of_a_bulk_run_writes_nothing(tmp_p
         await a.insert_document("t", {"name": "x"})
         query_logger.add_callback(cancel)
         with query_logger.capture():
-            task = asyncio.ensure_future(a.insert_many("t", [{"name": f"r{i}"} for i in range(2500)]))
+            task = asyncio.ensure_future(
+                a.insert_many("t", [{"name": f"r{i}"} for i in range(2500)])
+            )
             with pytest.raises(asyncio.CancelledError):
                 await task
         depth = a.adapter._depth()
@@ -318,7 +343,9 @@ async def _learned(path, *changes):
 
 
 @pytest.mark.asyncio
-async def test_statements_at_once_after_another_object_promoted_each_return_with_the_column(tmp_path):
+async def test_statements_at_once_after_another_object_promoted_each_return_with_the_column(
+    tmp_path,
+):
     """Each refused statement is built again when the names it was built from are not the
     table's, also when another task has learned the table by the time it looks."""
     import asyncio
@@ -352,7 +379,9 @@ async def test_ten_tasks_after_two_changes_each_return_and_the_table_is_read_onc
     )
     try:
         with query_logger.capture() as sent:
-            got = await asyncio.gather(*[a.find_document("t", 1) for _ in range(10)], return_exceptions=True)
+            got = await asyncio.gather(
+                *[a.find_document("t", 1) for _ in range(10)], return_exceptions=True
+            )
     finally:
         await a.close()
     assert got == [{"name": "x", "status": "old", "prio": None, "_id": 1}] * 10
@@ -380,7 +409,9 @@ async def test_a_cancellation_in_a_statement_sent_again_is_not_caught(tmp_path):
             task = asyncio.ensure_future(a.insert_document("t", {"name": "y", "status": "v"}))
             with pytest.raises(asyncio.CancelledError):
                 await task
-        if a.adapter._reclaims:  # a connection left by an ended task is given back in the background
+        if (
+            a.adapter._reclaims
+        ):  # a connection left by an ended task is given back in the background
             await asyncio.wait_for(asyncio.gather(*a.adapter._reclaims), 5)
         in_use = a.pool_stats().in_use_connections
         await a.insert_document("beside", {"name": "the next write"})
@@ -388,12 +419,21 @@ async def test_a_cancellation_in_a_statement_sent_again_is_not_caught(tmp_path):
         query_logger.remove_callback(cancel)
         await a.close()
     # sent twice, never a third time; the cancellation leaves the pool whole
-    assert (len(inserts), inserts[0], inserts[1], in_use) == (2, "sub-select returns 3 columns - expected 2", None, 0)
+    assert (len(inserts), inserts[0], inserts[1], in_use) == (
+        2,
+        "sub-select returns 3 columns - expected 2",
+        None,
+        0,
+    )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("way, n, refused", [("insert_many", 1, "INSERT"), ("bulk_upsert", 3, "SELECT")])
-async def test_a_bulk_run_in_the_callers_unit_after_a_promotion_lands_every_row_in_the_column(tmp_path, way, n, refused):
+@pytest.mark.parametrize(
+    "way, n, refused", [("insert_many", 1, "INSERT"), ("bulk_upsert", 3, "SELECT")]
+)
+async def test_a_bulk_run_in_the_callers_unit_after_a_promotion_lands_every_row_in_the_column(
+    tmp_path, way, n, refused
+):
     """Async twin of the sync test of that name: the run's guarded statement is refused, ``a``
     learns ``t`` again and builds the run again; the caller's earlier write is kept."""
     path = str(tmp_path / "unit.db")
@@ -402,16 +442,22 @@ async def test_a_bulk_run_in_the_callers_unit_after_a_promotion_lands_every_row_
         with query_logger.capture() as sent:
             async with a.transaction():
                 await a.insert_document("beside", {"name": "the caller's own row"})
-                ids = await getattr(a, way)("t", [{"name": f"r{i}", "status": "v"} for i in range(n)])
+                ids = await getattr(a, way)(
+                    "t", [{"name": f"r{i}", "status": "v"} for i in range(n)]
+                )
         beside = await a.find_document("beside", 1)
     finally:
         await a.close()
     conn = sqlite3.connect(path)
     try:
-        rows = conn.execute(f"SELECT data, status FROM t WHERE _id IN ({','.join('?' * len(ids))})", ids).fetchall()
+        rows = conn.execute(
+            f"SELECT data, status FROM t WHERE _id IN ({','.join('?' * len(ids))})", ids
+        ).fetchall()
     finally:
         conn.close()
-    assert [(q.sql.split()[0], q.error) for q in sent if q.error] == [(refused, "sub-select returns 3 columns - expected 2")]
+    assert [(q.sql.split()[0], q.error) for q in sent if q.error] == [
+        (refused, "sub-select returns 3 columns - expected 2")
+    ]
     assert rows == [(f'{{"name":"r{i}"}}', "v") for i in range(n)]
     assert beside == {"name": "the caller's own row", "_id": 1}
 
@@ -440,7 +486,7 @@ async def test_the_callers_own_mistake_after_a_pending_statement_ends_the_unit(t
     path = str(tmp_path / "mistake.db")
     a = await _learned(path)
     try:
-        cur = await a.adapter.execute("INSERT INTO t (data) VALUES ('{\"name\": \"pending\"}');")
+        cur = await a.adapter.execute('INSERT INTO t (data) VALUES (\'{"name": "pending"}\');')
         await cur.close()
         with query_logger.capture() as sent:
             with pytest.raises(sqlite3.OperationalError, match="^no such column: nocolumn$"):
@@ -463,15 +509,22 @@ async def test_a_new_row_in_a_remembered_table_sends_its_insert_alone(tmp_path):
     finally:
         await a.close()
     assert [q.sql.split()[0] for q in sent] == ["INSERT", "INSERT"]
-    assert (_stored(path, 2, "data")[0], _stored(path, 3, "data")[0]["name"]) == ({"name": "y"}, "z")
+    assert (_stored(path, 2, "data")[0], _stored(path, 3, "data")[0]["name"]) == (
+        {"name": "y"},
+        "z",
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_new_row_in_a_remembered_table_another_object_dropped_makes_the_table_again(tmp_path):
+async def test_a_new_row_in_a_remembered_table_another_object_dropped_makes_the_table_again(
+    tmp_path,
+):
     """The insert is sent with no ``CREATE TABLE`` before it and SQLite refuses it; the table
     is found gone and forgotten, and the insert built again makes it."""
     path = str(tmp_path / "gone.db")
-    a = await _learned(path, lambda b: (b.adapter.execute("DROP TABLE t;"), b.adapter.auto_commit()))
+    a = await _learned(
+        path, lambda b: (b.adapter.execute("DROP TABLE t;"), b.adapter.auto_commit())
+    )
     try:
         with query_logger.capture() as sent:
             _id = await a.insert_document("t", {"name": "y"})

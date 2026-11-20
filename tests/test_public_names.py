@@ -13,7 +13,9 @@ import textwrap
 from datetime import datetime
 
 import pytest
+
 import sqler
+from sqler import SQLerError
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.db.async_db import AsyncSQLerDB
 
@@ -110,12 +112,15 @@ TWINS = [
     ("SQLerSafeModel", "AsyncSQLerSafeModel"),
     ("SQLerLiteModel", "AsyncSQLerLiteModel"),
     ("SQLerLiteSafeModel", "AsyncSQLerLiteSafeModel"),
+    ("SQLerMsgspecModel", "AsyncSQLerMsgspecModel"),
     ("MigrationRunner", "AsyncMigrationRunner"),
     ("Migration", "AsyncMigration"),
     ("TrackedModel", "AsyncTrackedModel"),
     ("PartialUpdateMixin", "AsyncPartialUpdateMixin"),
     ("HooksMixin", "AsyncHooksMixin"),
     ("AuditLogMixin", "AsyncAuditLogMixin"),
+    ("FTSIndex", "AsyncFTSIndex"),
+    ("SearchableMixin", "AsyncSearchableMixin"),
 ]
 
 
@@ -125,6 +130,19 @@ def test_an_async_class_has_every_public_name_of_its_sync_twin(sync_name, async_
     sync_cls, async_cls = getattr(sqler, sync_name), getattr(sqler, async_name)
     theirs = {n for n in dir(async_cls) if not n.startswith("_")}
     missing = sorted(
-        n for n in dir(sync_cls) if not n.startswith("_") and n not in theirs and "a" + n not in theirs
+        n
+        for n in dir(sync_cls)
+        if not n.startswith("_") and n not in theirs and "a" + n not in theirs
     )
     assert missing == []
+
+
+class TestExceptionHierarchy:
+    """Tests for the exception hierarchy."""
+
+    def test_sqler_error_base(self):
+        """Test SQLerError base class."""
+        error = SQLerError("Test error", details={"key": "value"})
+
+        assert error.message == "Test error"
+        assert error.details == {"key": "value"}

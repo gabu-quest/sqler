@@ -12,10 +12,12 @@ from typing import Optional, Union
 
 import pytest
 import pytest_asyncio
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     FTSIndex,
     SQLerDB,
     SQLerLiteModel,
@@ -77,6 +79,15 @@ class UrALiteUser(AsyncSQLerLiteModel):
     address: Optional[UrALiteAddress] = None
 
 
+class UrAMsAddress(AsyncSQLerMsgspecModel):
+    city: str = ""
+
+
+class UrAMsUser(AsyncSQLerMsgspecModel):
+    name: str = ""
+    address: Optional[UrAMsAddress] = None
+
+
 class UrArticle(SQLerModel):
     title: str = ""
     body: str = ""
@@ -110,7 +121,9 @@ async def adb():
     ],
     ids=["pydantic", "lite", "msgspec"],
 )
-def test_unbound_model_holding_another_round_trips_through_using(db, user_cls, addr_cls, addr_table):
+def test_unbound_model_holding_another_round_trips_through_using(
+    db, user_cls, addr_cls, addr_table
+):
     addr = addr_cls(city="Kyoto").save(db=db)
     user_cls(name="Alice", address=addr).save(db=db)
 
@@ -131,8 +144,9 @@ def test_unbound_model_holding_another_round_trips_through_using(db, user_cls, a
     [
         (UrAsUser, UrAsAddress, "urasaddress"),
         (UrALiteUser, UrALiteAddress, "uraliteaddress"),
+        (UrAMsUser, UrAMsAddress, "uramsaddress"),
     ],
-    ids=["async-pydantic", "async-lite"],
+    ids=["async-pydantic", "async-lite", "async-msgspec"],
 )
 async def test_async_unbound_model_holding_another_round_trips_through_using(
     adb, user_cls, addr_cls, addr_table
@@ -187,18 +201,6 @@ def test_a_synced_index_on_a_class_whose_table_does_not_exist_yet_creates_it(db)
     assert fts.rebuild() == 0
     assert fts.search("anything") == []
     assert fts.count("anything") == 0
-
-
-def test_a_manual_index_on_a_class_whose_table_does_not_exist_leaves_it_missing(db):
-    class UrNeverSavedManual(SQLerModel):
-        title: str = ""
-
-    fts = FTSIndex(UrNeverSavedManual, ["title"], db=db, content_sync=False)
-    fts.create()
-    assert fts.rebuild() == 0
-    assert fts.search("anything") == []
-    assert fts.count("anything") == 0
-    assert _exists(db, "urneversavedmanuals") is False
 
 
 def test_from_ids_with_a_database_on_an_unbound_class(db):
@@ -259,7 +261,9 @@ class UmLitePart(SQLerLiteModel):
 @dataclass
 class UmLiteBox(SQLerLiteModel):
     name: str = ""
-    part: Union[dict, UmLitePart, None] = None  # a typed position that also takes a stored reference
+    part: Union[dict, UmLitePart, None] = (
+        None  # a typed position that also takes a stored reference
+    )
 
 
 class UmAsPart(AsyncSQLerModel):
@@ -279,7 +283,9 @@ class UmALitePart(AsyncSQLerLiteModel):
 @dataclass
 class UmALiteBox(AsyncSQLerLiteModel):
     name: str = ""
-    part: Union[dict, UmALitePart, None] = None  # a typed position that also takes a stored reference
+    part: Union[dict, UmALitePart, None] = (
+        None  # a typed position that also takes a stored reference
+    )
 
 
 def _exists(db, table):
@@ -324,7 +330,9 @@ def test_reference_whose_row_does_not_fit_its_class_raises(db, box_cls, part_cls
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "box_cls,part_cls", [(UmAsBox, UmAsPart), (UmALiteBox, UmALitePart)], ids=["async-pydantic", "async-lite"]
+    "box_cls,part_cls",
+    [(UmAsBox, UmAsPart), (UmALiteBox, UmALitePart)],
+    ids=["async-pydantic", "async-lite"],
 )
 async def test_async_reference_to_a_missing_table_reads_as_none(adb, box_cls, part_cls):
     _bind(box_cls, adb)
@@ -349,12 +357,16 @@ async def test_async_reference_to_a_missing_table_reads_as_none(adb, box_cls, pa
     [(UmAsBox, UmAsPart, ValueError), (UmALiteBox, UmALitePart, TypeError)],
     ids=["async-pydantic", "async-lite"],
 )
-async def test_async_reference_whose_row_does_not_fit_its_class_raises(adb, box_cls, part_cls, error):
+async def test_async_reference_whose_row_does_not_fit_its_class_raises(
+    adb, box_cls, part_cls, error
+):
     _bind(box_cls, adb)
     part = await part_cls(label="p").save(db=adb)
     part_table = part_cls._resolve_binding(adb)[1]
     box = await box_cls(name="b", part=part).save()
-    await adb.adapter.execute(f"UPDATE {part_table} SET data = json('{{}}') WHERE _id = ?", [part._id])
+    await adb.adapter.execute(
+        f"UPDATE {part_table} SET data = json('{{}}') WHERE _id = ?", [part._id]
+    )
     await adb.adapter.auto_commit()
 
     with pytest.raises(error, match="label"):
@@ -380,7 +392,9 @@ def test_every_search_on_an_unbound_class_returns_the_saved_row(db, method):
 
     found = getattr(fts, method)("python")
     models = found if method == "search" else [r.model for r in found]
-    assert [(type(m), m._id, m.title) for m in models] == [(UsArticle, saved._id, "python tutorial")]
+    assert [(type(m), m._id, m.title) for m in models] == [
+        (UsArticle, saved._id, "python tutorial")
+    ]
 
 
 @pytest.mark.parametrize("method", ["search", "search_with_highlights", "search_ranked"])
@@ -388,10 +402,11 @@ def test_every_search_on_a_missing_source_table_is_empty(db, method):
     class UsNever(SQLerModel):
         title: str = ""
 
-    # an index without triggers: one with them creates the table it follows
-    fts = FTSIndex(UsNever, ["title"], db=db, content_sync=False)
+    fts = FTSIndex(UsNever, ["title"], db=db)
     fts.create()
-    # an index row whose source row (and table) does not exist
+    # the table is dropped (its triggers go with it), leaving an index row whose source row
+    # (and table) does not exist
+    db.adapter.execute("DROP TABLE usnevers")
     db.adapter.execute(f"INSERT INTO {fts.index_table}(rowid, title) VALUES (1, 'python')")
     db.adapter.commit()
 
@@ -408,7 +423,9 @@ def test_search_on_a_missing_index_table_still_raises(db):
 # ----- what docs/API.md says about a row read from a named table ------------------------
 
 
-@pytest.mark.parametrize("cls", [UrPyAddress, UrLiteAddress, UrMsAddress], ids=["pydantic", "lite", "msgspec"])
+@pytest.mark.parametrize(
+    "cls", [UrPyAddress, UrLiteAddress, UrMsAddress], ids=["pydantic", "lite", "msgspec"]
+)
 def test_row_read_from_archive_names_archive_in_as_ref_and_in_a_holders_reference(db, cls):
     arch_id = db.insert_document("ur_archive", {"city": "Nara"})
     row = cls.using(db, "ur_archive").first()
@@ -423,7 +440,9 @@ def test_holder_of_an_archive_row_stores_a_reference_to_archive(db):
     assert raw["address"] == {"_table": "ur_archive", "_id": arch_id}
 
 
-@pytest.mark.parametrize("cls", [UrPyAddress, UrLiteAddress, UrMsAddress], ids=["pydantic", "lite", "msgspec"])
+@pytest.mark.parametrize(
+    "cls", [UrPyAddress, UrLiteAddress, UrMsAddress], ids=["pydantic", "lite", "msgspec"]
+)
 def test_row_read_from_archive_saved_to_another_db_writes_to_archive_there(db, cls):
     """save(db=other) updates the row with the same id in ``ur_archive`` of ``other``."""
     arch_id = db.insert_document("ur_archive", {"city": "Nara"})

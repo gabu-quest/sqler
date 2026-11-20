@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -76,13 +77,12 @@ def _():
 
 
 @app.cell
-def _(SQLerSafeModel, db):
+def _(SQLerSafeModel):
     class Account(SQLerSafeModel):
         _table = "accounts"
         owner: str
         balance: int
 
-    Account.set_db(db)
     print("Account model registered!")
     print("Note: SQLerSafeModel automatically tracks _version")
     return (Account,)
@@ -99,20 +99,20 @@ def _(mo):
 
 
 @app.cell
-def _(Account):
+def _(Account, db):
     # Create a new account
     acc = Account(owner="Alice", balance=100)
     print(f"Before save: _version = {acc._version}")
 
-    acc.save()
+    acc.save(db=db)
     print(f"After first save: _version = {acc._version}")
 
     acc.balance = 150
-    acc.save()
+    acc.save(db=db)
     print(f"After second save: _version = {acc._version}")
 
     acc.balance = 200
-    acc.save()
+    acc.save(db=db)
     print(f"After third save: _version = {acc._version}")
     return
 
@@ -129,27 +129,27 @@ def _(mo):
 
 
 @app.cell
-def _(Account, StaleVersionError):
+def _(Account, StaleVersionError, db):
     # Create a fresh account
-    original = Account(owner="Bob", balance=500).save()
+    original = Account(owner="Bob", balance=500).save(db=db)
     print(f"Created account: balance={original.balance}, version={original._version}")
 
     # Simulate two users loading the same record
-    user_a = Account.from_id(original._id)
-    user_b = Account.from_id(original._id)
+    user_a = Account.from_id(original._id, db=db)
+    user_b = Account.from_id(original._id, db=db)
 
     print(f"\nUser A loaded: balance={user_a.balance}, version={user_a._version}")
     print(f"User B loaded: balance={user_b.balance}, version={user_b._version}")
 
     # User A makes a change and saves successfully
     user_a.balance = 600
-    user_a.save()
+    user_a.save(db=db)
     print(f"\nUser A saved: balance={user_a.balance}, version={user_a._version}")
 
     # User B tries to save with stale version
     user_b.balance = 400
     try:
-        user_b.save()
+        user_b.save(db=db)
         print("User B saved successfully (unexpected!)")
     except StaleVersionError as _e:
         print("\nUser B got StaleVersionError!")
@@ -173,36 +173,36 @@ def _(mo):
 
 
 @app.cell
-def _(Account, StaleVersionError):
+def _(Account, StaleVersionError, db):
     # Create account
-    account = Account(owner="Charlie", balance=1000).save()
+    account = Account(owner="Charlie", balance=1000).save(db=db)
 
     # Two concurrent "sessions"
-    session1 = Account.from_id(account._id)
-    session2 = Account.from_id(account._id)
+    session1 = Account.from_id(account._id, db=db)
+    session2 = Account.from_id(account._id, db=db)
 
     # Session 1 adds 100
     session1.balance += 100
-    session1.save()
+    session1.save(db=db)
     print(f"Session 1: Added 100, new balance = {session1.balance}")
 
     # Session 2 tries to add 50 (has stale data)
     session2.balance += 50
     try:
-        session2.save()
+        session2.save(db=db)
     except StaleVersionError:
         print(f"\nSession 2: Conflict! My balance was {session2.balance - 50}")
 
         # Refresh and re-apply the logic
-        session2.refresh()
+        session2.refresh(db=db)
         print(f"Session 2: After refresh, balance = {session2.balance}")
 
         session2.balance += 50  # Re-apply our change
-        session2.save()
+        session2.save(db=db)
         print(f"Session 2: Now added 50, new balance = {session2.balance}")
 
     # Final result: both changes were applied!
-    final_account = Account.from_id(account._id)
+    final_account = Account.from_id(account._id, db=db)
     print(f"\nFinal balance: {final_account.balance} (started at 1000, added 100 + 50)")
     return
 
@@ -226,7 +226,7 @@ def _(mo):
 
 
 @app.cell
-def _(SQLerSafeModel, db):
+def _(SQLerSafeModel):
     from sqler.models.utils import PERMISSIVE_REBASE_CONFIG, RebaseConfig
 
     class Counter(SQLerSafeModel):
@@ -237,34 +237,33 @@ def _(SQLerSafeModel, db):
         # Allow rebasing numeric fields with deltas up to ±100
         _rebase_config = PERMISSIVE_REBASE_CONFIG
 
-    Counter.set_db(db)
     print("Counter model with rebasing enabled!")
     return Counter, RebaseConfig
 
 
 @app.cell
-def _(Counter):
+def _(Counter, db):
     # Create a counter
-    _counter = Counter(name="page_views", value=0).save()
+    _counter = Counter(name="page_views", value=0).save(db=db)
 
     # Two concurrent increments (simulating two users)
-    _view1 = Counter.from_id(_counter._id)
-    _view2 = Counter.from_id(_counter._id)
+    _view1 = Counter.from_id(_counter._id, db=db)
+    _view2 = Counter.from_id(_counter._id, db=db)
 
     print(f"Initial value: {_counter.value}")
 
     # First increment
     _view1.value += 1
-    _view1.save()
+    _view1.save(db=db)
     print(f"After view1 increment: {_view1.value}")
 
     # Second increment - would normally conflict, but rebasing auto-resolves it
     _view2.value += 1
-    _view2.save()  # No try/except - rebasing just works!
+    _view2.save(db=db)  # No try/except - rebasing just works!
     print(f"After view2 increment: {_view2.value} (rebased automatically)")
 
     # Verify both increments were applied
-    _final = Counter.from_id(_counter._id)
+    _final = Counter.from_id(_counter._id, db=db)
     print(f"\nFinal value: {_final.value}")
     assert _final.value == 2, f"Expected 2, got {_final.value}"
     return
@@ -291,32 +290,30 @@ def _(RebaseConfig, SQLerSafeModel, StaleVersionError, db):
         # Only allow rebasing 'overdraft_count' with small deltas
         _rebase_config = RebaseConfig(allowed_fields={"overdraft_count"}, max_delta=5)
 
-    BankAccount.set_db(db)
-
     # Create account
-    acct = BankAccount(owner="Dana", balance=1000, overdraft_count=0).save()
+    acct = BankAccount(owner="Dana", balance=1000, overdraft_count=0).save(db=db)
 
     # Two concurrent operations
-    op1 = BankAccount.from_id(acct._id)
-    op2 = BankAccount.from_id(acct._id)
+    op1 = BankAccount.from_id(acct._id, db=db)
+    op2 = BankAccount.from_id(acct._id, db=db)
 
     # op1 changes balance (not rebaseable)
     op1.balance = 900
-    op1.save()
+    op1.save(db=db)
     print(f"op1: Changed balance to {op1.balance}")
 
     # op2 tries to change balance - will fail (not in allowed_fields)
     op2.balance = 800
     try:
-        op2.save()
+        op2.save(db=db)
         print("op2: Saved (unexpected)")
     except StaleVersionError:
         print("op2: StaleVersionError for balance change (expected - not rebaseable)")
 
     # But overdraft_count changes ARE rebased
-    op2.refresh()
+    op2.refresh(db=db)
     op2.overdraft_count += 1
-    op2.save()
+    op2.save(db=db)
     print(f"op2: Incremented overdraft_count to {op2.overdraft_count}")
     return
 
@@ -343,19 +340,17 @@ def _(SQLerSafeModel, StaleVersionError, db):
         # No rebasing - all conflicts raise errors
         _rebase_config = NO_REBASE_CONFIG
 
-    StrictRecord.set_db(db)
+    record = StrictRecord(data="original", revision=1).save(db=db)
 
-    record = StrictRecord(data="original", revision=1).save()
-
-    r1 = StrictRecord.from_id(record._id)
-    r2 = StrictRecord.from_id(record._id)
+    r1 = StrictRecord.from_id(record._id, db=db)
+    r2 = StrictRecord.from_id(record._id, db=db)
 
     r1.revision = 2
-    r1.save()
+    r1.save(db=db)
 
     r2.revision = 3
     try:
-        r2.save()
+        r2.save(db=db)
     except StaleVersionError:
         print("StaleVersionError raised (as expected with NO_REBASE_CONFIG)")
     return
@@ -372,21 +367,21 @@ def _(mo):
 
 
 @app.cell
-def _(Account):
+def _(Account, db):
     # Create and load
-    check_acc = Account(owner="Eve", balance=500).save()
-    loaded = Account.from_id(check_acc._id)
+    check_acc = Account(owner="Eve", balance=500).save(db=db)
+    loaded = Account.from_id(check_acc._id, db=db)
 
     # Someone else modifies it
     check_acc.balance = 600
-    check_acc.save()
+    check_acc.save(db=db)
 
     # Check the version
     print(f"Loaded version: {loaded._version}")
-    print(f"Current DB version: {Account.from_id(loaded._id)._version}")
+    print(f"Current DB version: {Account.from_id(loaded._id, db=db)._version}")
 
     # You can compare before saving
-    current = Account.from_id(loaded._id)
+    current = Account.from_id(loaded._id, db=db)
     if loaded._version != current._version:
         print("Warning: Record has been modified since you loaded it!")
     return

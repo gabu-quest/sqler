@@ -28,9 +28,14 @@ import inspect
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional, Set, Tuple, TypeVar
+from typing import TYPE_CHECKING, Any, Optional, Self, Set, Tuple, TypeVar
 
 T = TypeVar("T", bound="TrackedModel")
+
+if TYPE_CHECKING:
+    from sqler.models._host import ModelHost as _ModelHost
+else:
+    _ModelHost = object
 
 
 @dataclass
@@ -108,7 +113,7 @@ class ChangeTracker:
         return len(self._changes) > 0
 
 
-class _ChangeTracking:
+class _ChangeTracking(_ModelHost):
     """The tracker of a model and its answers, for :class:`TrackedModel` and
     :class:`AsyncTrackedModel`.
 
@@ -123,14 +128,19 @@ class _ChangeTracking:
         self._init_tracker()
 
     def __post_init__(self) -> None:
-        # a lite model: its dataclass ``__init__`` replaces the one above
-        super().__post_init__()  # type: ignore[misc]
+        # a lite model: its dataclass ``__init__`` replaces the one above, and calls this; a
+        # msgspec model calls it from its own ``__init__`` too, and has no ``__post_init__``
+        # of its base to call
+        later = getattr(super(), "__post_init__", None)
+        if later is not None:
+            later()
         self._init_tracker()
 
     def _init_tracker(self) -> None:
         """Initialize the change tracker."""
-        object.__setattr__(self, "_tracker", ChangeTracker())
-        self._tracker.snapshot(self._get_trackable_data())
+        tracker = ChangeTracker()
+        _set_state(self, "_tracker", tracker)
+        tracker.snapshot(self._get_trackable_data())
 
     def _get_trackable_data(self) -> dict[str, Any]:
         """Get current field values for tracking."""
@@ -150,11 +160,23 @@ class _ChangeTracking:
             and name in type(self).model_fields
         ):
             old_value = getattr(self, name, None)
-            super().__setattr__(name, value)
+            self._assign(name, value)
             if old_value != value:
                 self._tracker.record_change(name, old_value, value)
         else:
+            self._assign(name, value)
+
+    def _assign(self, name: str, value: Any) -> None:
+        """``name = value`` as the model's base does it: a pydantic model validates it, a
+        dataclass sets it, a msgspec model, whose ``__setattr__`` this mixin's replaces, takes
+        it unless it is frozen."""
+        cls = type(self)
+        if getattr(cls, "__struct_fields__", None) is None:
             super().__setattr__(name, value)
+        elif cls.__struct_config__.frozen:  # type: ignore[attr-defined]
+            raise AttributeError(f"immutable type: '{cls.__name__}'")
+        else:
+            _set_state(self, name, value)
 
     @property
     def is_dirty(self) -> bool:
@@ -196,14 +218,28 @@ class _ChangeTracking:
         if self._tracker is None:
             return
         for field, original_value in self._tracker._original.items():
-            object.__setattr__(self, field, original_value)
+            _set_state(self, field, original_value)
         self._tracker._changes = []
 
     def revert_field(self, field: str) -> None:
         """Revert a specific field to its original value."""
         if self._tracker is None or field not in self._tracker._original:
             return
-        object.__setattr__(self, field, self._tracker._original[field])
+        _set_state(self, field, self._tracker._original[field])
+
+
+def _set_state(inst: Any, name: str, value: Any) -> None:
+    """``object.__setattr__(inst, name, value)``, which a msgspec model refuses: it takes a
+    field through msgspec's ``force_setattr``, and other state in its ``__dict__``."""
+    fields = getattr(type(inst), "__struct_fields__", None)
+    if fields is None:
+        object.__setattr__(inst, name, value)
+    elif name in fields:
+        from msgspec.structs import force_setattr  # only a msgspec model gets here
+
+        force_setattr(inst, name, value)
+    else:
+        vars(inst)[name] = value
 
 
 class TrackedModel(_ChangeTracking):
@@ -268,7 +304,7 @@ class AsyncTrackedModel(_ChangeTracking):
         return result
 
 
-class PartialUpdateMixin:
+class PartialUpdateMixin(_ModelHost):
     """Mixin that saves only the changed fields of a :class:`TrackedModel`.
 
     Usage::
@@ -309,7 +345,7 @@ class PartialUpdateMixin:
         return self.save(db=db, _partial=True)
 
 
-class AsyncPartialUpdateMixin:
+class AsyncPartialUpdateMixin(_ModelHost):
     """Async twin of :class:`PartialUpdateMixin`, with :class:`AsyncTrackedModel`."""
 
     async def save_partial(self, *, db=None) -> "AsyncPartialUpdateMixin":
@@ -328,7 +364,7 @@ def _changed(model: Any) -> Set[str]:
         raise TypeError("PartialUpdateMixin requires TrackedModel") from None
 
 
-class DiffMixin:
+class DiffMixin(_ModelHost):
     """Mixin for comparing model instances.
 
     Usage::
@@ -390,7 +426,7 @@ class DiffMixin:
 
         return True
 
-    def clone(self: T, **overrides) -> T:
+    def clone(self, **overrides) -> Self:
         """Create a copy of this instance with optional overrides.
 
         Args:

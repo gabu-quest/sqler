@@ -85,10 +85,8 @@ def _(SQLerModel, TrackedModel, db):
         email: str
         age: int
 
-    User.set_db(db)
-
     # ユーザーを作成
-    _user = User(name="Alice", email="alice@example.com", age=30).save()
+    _user = User(name="Alice", email="alice@example.com", age=30).save(db=db)
     print(f"作成: {_user.name}, {_user.email}, {_user.age}歳")
     print(f"is_dirty: {_user.is_dirty}")  # False - save() でクリーンにマーク
     return (User,)
@@ -107,9 +105,9 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # ユーザーをロード
-    _user = User.from_id(1)
+    _user = User.from_id(1, db=db)
     print(f"ロード: {_user.name}, is_dirty: {_user.is_dirty}")
 
     # 変更を行う
@@ -141,10 +139,10 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     import time
 
-    _user = User.from_id(1)
+    _user = User.from_id(1, db=db)
 
     # 複数の変更を行う
     _user.age = 32
@@ -173,8 +171,8 @@ def _(mo):
 
 
 @app.cell
-def _(User):
-    _user = User.from_id(1)
+def _(User, db):
+    _user = User.from_id(1, db=db)
     _original_name = _user.name
     print(f"元の名前: {_original_name}")
 
@@ -203,8 +201,8 @@ def _(mo):
 
 
 @app.cell
-def _(User):
-    _user = User.from_id(1)
+def _(User, db):
+    _user = User.from_id(1, db=db)
     print(f"元: name={_user.name}, age={_user.age}")
 
     # 両方のフィールドを変更
@@ -241,11 +239,9 @@ def _(DiffMixin, SQLerModel, db):
         price: float
         stock: int
 
-    Product.set_db(db)
-
     # 比較用に2つの商品を作成
-    _prod1 = Product(name="Widget", price=29.99, stock=100).save()
-    _prod2 = Product(name="Widget", price=24.99, stock=85).save()
+    _prod1 = Product(name="Widget", price=29.99, stock=100).save(db=db)
+    _prod2 = Product(name="Widget", price=24.99, stock=85).save(db=db)
 
     print(f"商品1: name={_prod1.name}, price={_prod1.price}, stock={_prod1.stock}")
     print(f"商品2: name={_prod2.name}, price={_prod2.price}, stock={_prod2.stock}")
@@ -259,16 +255,16 @@ def _(DiffMixin, SQLerModel, db):
 
 
 @app.cell
-def _(Product):
+def _(Product, db):
     # 等価性チェック
-    _prod3 = Product(name="Gadget", price=49.99, stock=50).save()
-    _prod4 = Product(name="Gadget", price=49.99, stock=50).save()
+    _prod3 = Product(name="Gadget", price=49.99, stock=50).save(db=db)
+    _prod4 = Product(name="Gadget", price=49.99, stock=50).save(db=db)
 
     print(f"prod3 と prod4 は等しい: {_prod3.is_equal(_prod4)}")
 
     # 1つを変更
     _prod4.stock = 45
-    _prod4.save()
+    _prod4.save(db=db)
 
     print(f"stock 変更後: {_prod3.is_equal(_prod4)}")
     return
@@ -294,9 +290,7 @@ def _(PartialUpdateMixin, SQLerModel, TrackedModel, db):
         value: str
         description: str = ""
 
-    Config.set_db(db)
-
-    _config = Config(key="theme", value="dark", description="UI テーマ設定").save()
+    _config = Config(key="theme", value="dark", description="UI テーマ設定").save(db=db)
     print(f"作成: {_config.key}={_config.value}")
 
     # 1つのフィールドのみ変更
@@ -305,10 +299,10 @@ def _(PartialUpdateMixin, SQLerModel, TrackedModel, db):
     print(f"changed_fields: {_config.changed_fields}")
 
     # save_partial() は変更された列のみ更新
-    _config.save_partial()
+    _config.save_partial(db=db)
     print("save_partial() を呼び出し - 'value' のみ DB に送信")
 
-    _reloaded = Config.from_id(_config._id)
+    _reloaded = Config.from_id(_config._id, db=db)
     print(f"再ロード: value={_reloaded.value}, description={_reloaded.description}")
     return (Config,)
 

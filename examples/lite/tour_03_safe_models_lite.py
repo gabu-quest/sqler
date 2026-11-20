@@ -122,13 +122,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import importlib
     from dataclasses import dataclass
@@ -145,14 +141,13 @@ def _(pyodide_sqlite3_ready, sqler_ready):
 
 
 @app.cell
-def _(SQLerLiteSafeModel, dataclass, db):
+def _(SQLerLiteSafeModel, dataclass):
     @dataclass
     class Account(SQLerLiteSafeModel):
         __tablename__ = "accounts"
         owner: str
         balance: int
 
-    Account.set_db(db)
     print("Account model registered!")
     print("Note: SQLerLiteSafeModel automatically tracks _version")
     return (Account,)
@@ -171,20 +166,20 @@ def _(mo):
 
 
 @app.cell
-def _(Account):
+def _(Account, db):
     # Create a new account
     acc = Account(owner="Alice", balance=100)
     print(f"Before save: _version = {acc._version}")
 
-    acc.save()
+    acc.save(db=db)
     print(f"After first save: _version = {acc._version}")
 
     acc.balance = 150
-    acc.save()
+    acc.save(db=db)
     print(f"After second save: _version = {acc._version}")
 
     acc.balance = 200
-    acc.save()
+    acc.save(db=db)
     print(f"After third save: _version = {acc._version}")
     return (acc,)
 
@@ -203,28 +198,28 @@ def _(mo):
 
 
 @app.cell
-def _(Account, StaleVersionError):
+def _(Account, StaleVersionError, db):
     # Create a fresh account
     original = Account(owner="Bob", balance=500)
-    original.save()
+    original.save(db=db)
     print(f"Created account: balance={original.balance}, version={original._version}")
 
     # Simulate two users loading the same record
-    user_a = Account.from_id(original._id)
-    user_b = Account.from_id(original._id)
+    user_a = Account.from_id(original._id, db=db)
+    user_b = Account.from_id(original._id, db=db)
 
     print(f"\nUser A loaded: balance={user_a.balance}, version={user_a._version}")
     print(f"User B loaded: balance={user_b.balance}, version={user_b._version}")
 
     # User A makes a change and saves successfully
     user_a.balance = 600
-    user_a.save()
+    user_a.save(db=db)
     print(f"\nUser A saved: balance={user_a.balance}, version={user_a._version}")
 
     # User B tries to save with stale version
     user_b.balance = 400
     try:
-        user_b.save()
+        user_b.save(db=db)
         print("User B saved successfully (unexpected!)")
     except StaleVersionError as _e:
         print("\nUser B got StaleVersionError!")
@@ -250,37 +245,37 @@ def _(mo):
 
 
 @app.cell
-def _(Account, StaleVersionError):
+def _(Account, StaleVersionError, db):
     # Create account
     account = Account(owner="Charlie", balance=1000)
-    account.save()
+    account.save(db=db)
 
     # Two concurrent "sessions"
-    session1 = Account.from_id(account._id)
-    session2 = Account.from_id(account._id)
+    session1 = Account.from_id(account._id, db=db)
+    session2 = Account.from_id(account._id, db=db)
 
     # Session 1 adds 100
     session1.balance += 100
-    session1.save()
+    session1.save(db=db)
     print(f"Session 1: Added 100, new balance = {session1.balance}")
 
     # Session 2 tries to add 50 (has stale data)
     session2.balance += 50
     try:
-        session2.save()
+        session2.save(db=db)
     except StaleVersionError:
         print(f"\nSession 2: Conflict! My balance was {session2.balance - 50}")
 
         # Refresh and re-apply the logic
-        session2.refresh()
+        session2.refresh(db=db)
         print(f"Session 2: After refresh, balance = {session2.balance}")
 
         session2.balance += 50  # Re-apply our change
-        session2.save()
+        session2.save(db=db)
         print(f"Session 2: Now added 50, new balance = {session2.balance}")
 
     # Final result: both changes were applied!
-    final_account = Account.from_id(account._id)
+    final_account = Account.from_id(account._id, db=db)
     print(f"\nFinal balance: {final_account.balance} (started at 1000, added 100 + 50)")
     return account, final_account, session1, session2
 
@@ -298,22 +293,22 @@ def _(mo):
 
 
 @app.cell
-def _(Account):
+def _(Account, db):
     # Create and load
     check_acc = Account(owner="Eve", balance=500)
-    check_acc.save()
-    loaded = Account.from_id(check_acc._id)
+    check_acc.save(db=db)
+    loaded = Account.from_id(check_acc._id, db=db)
 
     # Someone else modifies it
     check_acc.balance = 600
-    check_acc.save()
+    check_acc.save(db=db)
 
     # Check the version
     print(f"Loaded version: {loaded._version}")
-    print(f"Current DB version: {Account.from_id(loaded._id)._version}")
+    print(f"Current DB version: {Account.from_id(loaded._id, db=db)._version}")
 
     # You can compare before saving
-    current = Account.from_id(loaded._id)
+    current = Account.from_id(loaded._id, db=db)
     if loaded._version != current._version:
         print("Warning: Record has been modified since you loaded it!")
     return check_acc, current, loaded

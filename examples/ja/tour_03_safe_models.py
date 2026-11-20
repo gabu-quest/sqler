@@ -12,6 +12,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -83,13 +84,12 @@ def _():
 
 
 @app.cell
-def _(SQLerSafeModel, db):
+def _(SQLerSafeModel):
     class Account(SQLerSafeModel):
         _table = "accounts"
         owner: str
         balance: int
 
-    Account.set_db(db)
     print("Account モデルを登録しました！")
     print("注意: SQLerSafeModel は自動的に _version を追跡します")
     return (Account,)
@@ -108,20 +108,20 @@ def _(mo):
 
 
 @app.cell
-def _(Account):
+def _(Account, db):
     # 新しいアカウントを作成
     acc = Account(owner="Alice", balance=100)
     print(f"保存前: _version = {acc._version}")
 
-    acc.save()
+    acc.save(db=db)
     print(f"1回目の保存後: _version = {acc._version}")
 
     acc.balance = 150
-    acc.save()
+    acc.save(db=db)
     print(f"2回目の保存後: _version = {acc._version}")
 
     acc.balance = 200
-    acc.save()
+    acc.save(db=db)
     print(f"3回目の保存後: _version = {acc._version}")
     return (acc,)
 
@@ -140,27 +140,27 @@ def _(mo):
 
 
 @app.cell
-def _(Account, StaleVersionError):
+def _(Account, StaleVersionError, db):
     # 新しいアカウントを作成
-    original = Account(owner="Bob", balance=500).save()
+    original = Account(owner="Bob", balance=500).save(db=db)
     print(f"アカウントを作成: balance={original.balance}, version={original._version}")
 
     # 同じレコードを読み込む2人のユーザーをシミュレート
-    user_a = Account.from_id(original._id)
-    user_b = Account.from_id(original._id)
+    user_a = Account.from_id(original._id, db=db)
+    user_b = Account.from_id(original._id, db=db)
 
     print(f"\nユーザー A が読み込み: balance={user_a.balance}, version={user_a._version}")
     print(f"ユーザー B が読み込み: balance={user_b.balance}, version={user_b._version}")
 
     # ユーザー A が変更を加えて正常に保存
     user_a.balance = 600
-    user_a.save()
+    user_a.save(db=db)
     print(f"\nユーザー A が保存: balance={user_a.balance}, version={user_a._version}")
 
     # ユーザー B が古いバージョンで保存を試みる
     user_b.balance = 400
     try:
-        user_b.save()
+        user_b.save(db=db)
         print("ユーザー B が正常に保存（予期しない！）")
     except StaleVersionError as _e:
         print("\nユーザー B が StaleVersionError を受け取りました！")
@@ -186,36 +186,36 @@ def _(mo):
 
 
 @app.cell
-def _(Account, StaleVersionError):
+def _(Account, StaleVersionError, db):
     # アカウントを作成
-    account = Account(owner="Charlie", balance=1000).save()
+    account = Account(owner="Charlie", balance=1000).save(db=db)
 
     # 2つの並行「セッション」
-    session1 = Account.from_id(account._id)
-    session2 = Account.from_id(account._id)
+    session1 = Account.from_id(account._id, db=db)
+    session2 = Account.from_id(account._id, db=db)
 
     # セッション 1 が 100 を追加
     session1.balance += 100
-    session1.save()
+    session1.save(db=db)
     print(f"セッション 1: 100 を追加、新しい残高 = {session1.balance}")
 
     # セッション 2 が 50 を追加しようとする（古いデータを持っている）
     session2.balance += 50
     try:
-        session2.save()
+        session2.save(db=db)
     except StaleVersionError:
         print(f"\nセッション 2: 競合！私の残高は {session2.balance - 50} でした")
 
         # リフレッシュしてロジックを再適用
-        session2.refresh()
+        session2.refresh(db=db)
         print(f"セッション 2: リフレッシュ後、残高 = {session2.balance}")
 
         session2.balance += 50  # 変更を再適用
-        session2.save()
+        session2.save(db=db)
         print(f"セッション 2: 50 を追加、新しい残高 = {session2.balance}")
 
     # 最終結果：両方の変更が適用された！
-    final_account = Account.from_id(account._id)
+    final_account = Account.from_id(account._id, db=db)
     print(f"\n最終残高: {final_account.balance}（1000 から始まり、100 + 50 を追加）")
     return ()
 
@@ -241,7 +241,7 @@ def _(mo):
 
 
 @app.cell
-def _(SQLerSafeModel, db):
+def _(SQLerSafeModel):
     from sqler.models.utils import PERMISSIVE_REBASE_CONFIG, RebaseConfig
 
     class Counter(SQLerSafeModel):
@@ -252,34 +252,33 @@ def _(SQLerSafeModel, db):
         # 数値フィールドのリベーシングを ±100 のデルタまで許可
         _rebase_config = PERMISSIVE_REBASE_CONFIG
 
-    Counter.set_db(db)
     print("リベーシング有効の Counter モデル！")
     return Counter, PERMISSIVE_REBASE_CONFIG, RebaseConfig
 
 
 @app.cell
-def _(Counter):
+def _(Counter, db):
     # カウンターを作成
-    _counter = Counter(name="page_views", value=0).save()
+    _counter = Counter(name="page_views", value=0).save(db=db)
 
     # 2つの並行インクリメント（2人のユーザーをシミュレート）
-    _view1 = Counter.from_id(_counter._id)
-    _view2 = Counter.from_id(_counter._id)
+    _view1 = Counter.from_id(_counter._id, db=db)
+    _view2 = Counter.from_id(_counter._id, db=db)
 
     print(f"初期値: {_counter.value}")
 
     # 1つ目のインクリメント
     _view1.value += 1
-    _view1.save()
+    _view1.save(db=db)
     print(f"view1 インクリメント後: {_view1.value}")
 
     # 2つ目のインクリメント - 通常は競合するが、リベーシングで自動解決
     _view2.value += 1
-    _view2.save()  # try/except不要 - リベーシングが自動で動作！
+    _view2.save(db=db)  # try/except不要 - リベーシングが自動で動作！
     print(f"view2 インクリメント後: {_view2.value}（自動リベース）")
 
     # 両方のインクリメントが適用されたことを確認
-    _final = Counter.from_id(_counter._id)
+    _final = Counter.from_id(_counter._id, db=db)
     print(f"\n最終値: {_final.value}")
     assert _final.value == 2, f"期待値 2、実際 {_final.value}"
     return
@@ -306,37 +305,32 @@ def _(RebaseConfig, SQLerSafeModel, StaleVersionError, db):
         overdraft_count: int = 0
 
         # 'overdraft_count' のみ小さいデルタでリベーシングを許可
-        _rebase_config = RebaseConfig(
-            allowed_fields={"overdraft_count"},
-            max_delta=5
-        )
-
-    BankAccount.set_db(db)
+        _rebase_config = RebaseConfig(allowed_fields={"overdraft_count"}, max_delta=5)
 
     # アカウントを作成
-    acct = BankAccount(owner="Dana", balance=1000, overdraft_count=0).save()
+    acct = BankAccount(owner="Dana", balance=1000, overdraft_count=0).save(db=db)
 
     # 2つの並行操作
-    op1 = BankAccount.from_id(acct._id)
-    op2 = BankAccount.from_id(acct._id)
+    op1 = BankAccount.from_id(acct._id, db=db)
+    op2 = BankAccount.from_id(acct._id, db=db)
 
     # op1 が残高を変更（リベース不可）
     op1.balance = 900
-    op1.save()
+    op1.save(db=db)
     print(f"op1: 残高を {op1.balance} に変更")
 
     # op2 が残高を変更しようとする - 失敗する（allowed_fields に含まれない）
     op2.balance = 800
     try:
-        op2.save()
+        op2.save(db=db)
         print("op2: 保存された（予期しない）")
     except StaleVersionError:
         print("op2: 残高変更で StaleVersionError（予想通り - リベース不可）")
 
     # しかし overdraft_count の変更はリベースされる
-    op2.refresh()
+    op2.refresh(db=db)
     op2.overdraft_count += 1
-    op2.save()
+    op2.save(db=db)
     print(f"op2: overdraft_count を {op2.overdraft_count} にインクリメント")
     return
 
@@ -365,19 +359,17 @@ def _(SQLerSafeModel, StaleVersionError, db):
         # リベーシングなし - すべての競合でエラーを発生
         _rebase_config = NO_REBASE_CONFIG
 
-    StrictRecord.set_db(db)
+    record = StrictRecord(data="original", revision=1).save(db=db)
 
-    record = StrictRecord(data="original", revision=1).save()
-
-    r1 = StrictRecord.from_id(record._id)
-    r2 = StrictRecord.from_id(record._id)
+    r1 = StrictRecord.from_id(record._id, db=db)
+    r2 = StrictRecord.from_id(record._id, db=db)
 
     r1.revision = 2
-    r1.save()
+    r1.save(db=db)
 
     r2.revision = 3
     try:
-        r2.save()
+        r2.save(db=db)
     except StaleVersionError:
         print("StaleVersionError が発生（NO_REBASE_CONFIG の予想通り）")
     return NO_REBASE_CONFIG, StrictRecord, r1, r2, record
@@ -396,21 +388,21 @@ def _(mo):
 
 
 @app.cell
-def _(Account):
+def _(Account, db):
     # 作成して読み込み
-    check_acc = Account(owner="Eve", balance=500).save()
-    loaded = Account.from_id(check_acc._id)
+    check_acc = Account(owner="Eve", balance=500).save(db=db)
+    loaded = Account.from_id(check_acc._id, db=db)
 
     # 他の誰かが変更
     check_acc.balance = 600
-    check_acc.save()
+    check_acc.save(db=db)
 
     # バージョンをチェック
     print(f"読み込んだバージョン: {loaded._version}")
-    print(f"現在の DB バージョン: {Account.from_id(loaded._id)._version}")
+    print(f"現在の DB バージョン: {Account.from_id(loaded._id, db=db)._version}")
 
     # 保存前に比較可能
-    current = Account.from_id(loaded._id)
+    current = Account.from_id(loaded._id, db=db)
     if loaded._version != current._version:
         print("警告: レコードは読み込んでから変更されています！")
     return check_acc, current, loaded

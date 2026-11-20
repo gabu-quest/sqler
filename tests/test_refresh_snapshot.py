@@ -9,8 +9,8 @@ The Lite and Msgspec backends already do this correctly; this test locks in
 parity for the Pydantic backend.
 """
 
-
 import pytest
+
 from sqler import SQLerModel
 from sqler.db.sqler_db import SQLerDB
 

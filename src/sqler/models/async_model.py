@@ -3,12 +3,13 @@ from __future__ import annotations
 import os
 import reprlib
 import warnings
-from typing import ClassVar, Optional, Type, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, Type, TypeVar
 
 from pydantic import BaseModel, PrivateAttr
 
 from sqler import registry
 from sqler._stored import stored
+from sqler.db._statements import IndexFields
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.exceptions import UniqueConstraintError
 from sqler.models import _dirty, _refs, _table_names, _write_rules
@@ -49,8 +50,8 @@ class AsyncSQLerModel(BaseModel):
         users = await User.using(db).filter(F("age") > 30).all()
 
     .. note::
-        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and
-        ``await .save(db=db)`` / ``await .delete(db=db)`` for writes.
+        ``set_db()`` is deprecated. Prefer ``.using(db)`` for queries and ``db=`` for
+        every other call (``await .save(db=db)``, ``Model.from_id(id, db=db)``).
     """
 
     # internal id stored outside the JSON blob
@@ -60,9 +61,14 @@ class AsyncSQLerModel(BaseModel):
 
     # class-bound db + table metadata
     _db: ClassVar[Optional[AsyncSQLerDB]] = None
+    # the database this class takes; every way one comes in checks it (``_check_database``)
+    _takes_db: ClassVar[type[AsyncSQLerDB]] = AsyncSQLerDB
     _table: ClassVar[Optional[str]] = None
     # whether ``from_ids`` reads each row with its ``_version`` column (the safe bases)
     _versioned_rows: ClassVar[bool] = False
+    if TYPE_CHECKING:
+        # a model's table: its own, or the one ``set_db()`` gives it
+        __tablename__: ClassVar[str]
 
     # ----- class config -----
     model_config = {
@@ -82,18 +88,22 @@ class AsyncSQLerModel(BaseModel):
 
     @classmethod
     def set_db(cls, db: AsyncSQLerDB, table: Optional[str] = None) -> None:
+        """Bind this model class to ``db`` (deprecated: see :meth:`SQLerModel.set_db`).
+
+        Raises:
+            TypeError: ``db`` is neither ``None`` nor an ``AsyncSQLerDB``; the class is left as it was.
+        """
+        _table_names._check_given(cls, db)
         warnings.warn(
             f"{cls.__name__}.set_db() is deprecated. "
-            "Use .using(db) for queries and .save(db=db)/.delete(db=db) for writes. "
+            f"{_table_names.DATABASE_RULE} "
             "set_db() will be removed in a future version.",
             DeprecationWarning,
             skip_file_prefixes=_SQLER_PREFIXES,
         )
         cls._db = db
         explicit = getattr(cls, "__tablename__", None)
-        chosen = validate_table_name(
-            table or explicit or _default_table_name(cls.__name__)
-        )
+        chosen = validate_table_name(table or explicit or _default_table_name(cls.__name__))
         cls._table = chosen
         cls.__tablename__ = chosen
         # Note: promoted table creation is deferred to first use since we can't await here.
@@ -136,6 +146,7 @@ class AsyncSQLerModel(BaseModel):
             Missing ids are silently omitted from result.
         """
         if not ids:
+            _table_names._check_given(cls, db)
             return []
         db, table = cls._resolve_binding(db)
         read = _refs.aread_versioned if cls._versioned_rows else _aread_documents
@@ -166,12 +177,12 @@ class AsyncSQLerModel(BaseModel):
         return await cls.query().first()
 
     @classmethod
-    async def validate_references(cls):
-        """The broken references of every table of the bound database, as
+    async def validate_references(cls, *, db=None):
+        """The broken references of every table of ``db``, else of the bound database, as
         :func:`sqler.models.async_validate_references` gives them."""
         from .async_integrity import async_validate_references
 
-        db, _ = cls._require_binding()
+        db, _ = cls._resolve_binding(db)
         return await async_validate_references(db)
 
     @classmethod
@@ -190,6 +201,7 @@ class AsyncSQLerModel(BaseModel):
         A read creates no table: on a table nobody created, ``all()`` is empty,
         ``first()`` is ``None`` and ``count()`` is 0, and the table is still missing.
         """
+        _table_names._check_database(cls, db)
         table = validate_table_name(table) if table is not None else _model_table_name(cls)
         return cls._queryset(db, table)
 
@@ -242,12 +254,8 @@ class AsyncSQLerModel(BaseModel):
         inst = cls(**merged)
         try:
             await inst.save(db=db)
-        except UniqueConstraintError:
-            # another caller inserted the same lookup between the read and the insert
-            existing = await qs.first()
-            if existing is None:
-                raise  # refused by a unique index on a field outside the lookup
-            return existing, False
+        except UniqueConstraintError as error:
+            return _write_rules.found_after_race(await qs.first(), error)
         return inst, True  # type: ignore[return-value]
 
     # ergonomic relation field builder
@@ -260,9 +268,10 @@ class AsyncSQLerModel(BaseModel):
         from .model_field import SQLerModelField
 
         class _RefBuilder:
-            def __init__(self, model_cls, base: str):
+            def __init__(self, model_cls, base: str | list[str]):
                 self.model_cls = model_cls
-                self.path = [base]
+                # a key, or the one-key path ``any()`` passes, which ``SQLerModelField`` reads by its ``str()``
+                self.path: list[Any] = [base]
 
             def field(self, *parts: str) -> SQLerModelField:
                 return SQLerModelField(self.model_cls, self.path + list(parts))
@@ -279,34 +288,39 @@ class AsyncSQLerModel(BaseModel):
     @classmethod
     async def add_index(
         cls,
-        field: str,
+        field: IndexFields,
         *,
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
+        db=None,
     ) -> None:
-        """Create an index on a JSON field via the model class.
+        """Create an index on one field or several via the model class.
 
         Args:
-            field: Dotted JSON path or literal column.
+            field: A field, or a list of fields each a name or ``(name, "asc" | "desc")``,
+                as ``create_index`` takes it.
             unique: Enforce uniqueness.
             name: Optional index name.
             where: Optional partial-index WHERE clause.
+            db: Optional database (overrides class-level binding).
         """
-        db, table = cls._require_binding()
+        db, table = cls._resolve_binding(db)
         await db.create_index(table, field, unique=unique, name=name, where=where)
 
     @classmethod
     async def ensure_index(
         cls,
-        field: str,
+        field: IndexFields,
         *,
         unique: bool = False,
         name: Optional[str] = None,
         where: Optional[str] = None,
+        db=None,
     ) -> None:
-        """Ensure an index on a JSON path or literal column exists (idempotent)."""
-        await cls.add_index(field, unique=unique, name=name, where=where)
+        """Ensure an index on one field or several exists (idempotent), in ``db``
+        when given, else the class's database."""
+        await cls.add_index(field, unique=unique, name=name, where=where, db=db)
 
     @classmethod
     async def _ensure_schema(cls) -> None:
@@ -326,8 +340,8 @@ class AsyncSQLerModel(BaseModel):
         Uses multi-row INSERT for significantly better throughput than
         calling ``save()`` in a loop. Only supports new (unsaved) instances.
         Each instance meets the rules of its class as ``save()`` does: hooks,
-        timestamps and audit rows (see the mixins); with an audit log the batch
-        and its audit rows are one transaction.
+        timestamps and audit rows (see the mixins); with an audit log the batch and
+        its audit rows are one transaction.
 
         Args:
             instances: List of model instances with ``_id is None``.
@@ -356,18 +370,11 @@ class AsyncSQLerModel(BaseModel):
     async def _insert_rows(cls, db, table: str, instances: list) -> None:
         """Write new instances in one batch; each takes its ``_id`` and snapshot."""
         promoted = getattr(cls, "__promoted__", None)
-
         if promoted:
-            checks = getattr(cls, "__checks__", None)
-            await db._ensure_promoted(table, promoted, checks, model=cls)
-
+            await _write_rules.ensure_columns(cls, db, table, promoted)
         payloads = [await inst._adump_with_relations() for inst in instances]
-
-        if promoted:
-            promoted_fields = list(promoted.keys())
-            ids = await db.insert_many_promoted(table, payloads, promoted_fields)
-        else:
-            ids = await db.insert_many(table, payloads)
+        insert, args = _write_rules.rows_insert(db, table, payloads, promoted)
+        ids = await insert(*args)
 
         for inst, id_, payload in zip(instances, ids, payloads):
             inst._id = id_
@@ -395,18 +402,10 @@ class AsyncSQLerModel(BaseModel):
         cls = self.__class__
         promoted = getattr(cls, "__promoted__", None)
         if promoted:
-            checks = getattr(cls, "__checks__", None)
-            await db._ensure_promoted(table, promoted, checks, model=cls)
+            await _write_rules.ensure_columns(cls, db, table, promoted)
         payload = await self._adump_with_relations()
-        if _partial:
-            new_id = self._id
-            changed = _dirty.changed_fields(self._snapshot or {}, payload)
-            await db._update_fields(table, new_id, payload, changed, promoted or ())
-        elif promoted:
-            promoted_fields = list(promoted.keys())
-            new_id = await db.upsert_document_promoted(table, self._id, payload, promoted_fields)
-        else:
-            new_id = await db.upsert_document(table, self._id, payload)
+        written = await _write_rules.row_write(db, table, self, payload, _partial, promoted)
+        new_id = self._id if _partial else written
         self._id = new_id
         self._snapshot = _dirty.snapshot(payload)
         return self
@@ -443,9 +442,9 @@ class AsyncSQLerModel(BaseModel):
         db, table = _instance_binding(self, db)
         if self._id is None:
             raise ValueError("Cannot refresh unsaved model (missing _id)")
-        doc = await _aread_document(db, table, self._id, cls._versioned_rows)
-        if doc is None:
-            raise LookupError(f"Row {self._id} not found for refresh")
+        doc = _write_rules.refresh_row(
+            await _aread_document(db, table, self._id, cls._versioned_rows), self._id
+        )
         own = {(table, self._id): self}
         return (await _refs.arun(_refs.load(cls, [doc], db, table, self._refreshed, own)))[0]
 

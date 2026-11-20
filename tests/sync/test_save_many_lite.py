@@ -4,11 +4,13 @@ import sqlite3
 from dataclasses import dataclass
 
 import pytest
+
 from sqler import SQLerDB
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
 
 # ---- test models ----
+
 
 @dataclass
 class LItem(SQLerLiteModel):
@@ -51,6 +53,7 @@ class LSafePromotedItem(SQLerLiteSafeModel):
 
 # ---- fixtures ----
 
+
 @pytest.fixture
 def db():
     db = SQLerDB.in_memory(shared=False)
@@ -59,6 +62,7 @@ def db():
 
 
 # ---- SQLerLiteModel.save_many tests ----
+
 
 def test_save_many_basic(db):
     LItem.set_db(db)
@@ -219,6 +223,7 @@ def test_save_many_chunking(db):
 
 
 # ---- SQLerLiteSafeModel.save_many tests ----
+
 
 def test_save_many_safe_model(db):
     LSafeItem.set_db(db)

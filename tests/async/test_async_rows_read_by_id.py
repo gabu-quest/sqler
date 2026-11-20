@@ -11,6 +11,7 @@ from typing import Optional, Union
 
 import pytest
 import pytest_asyncio
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
@@ -131,9 +132,19 @@ async def db(path):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         for cls in (
-            ArbiJob, ArbiHolder, ArbiSafeJob, ArbiSafeHolder, ArbiLiteJob, ArbiLiteHolder,
-            ArbiLiteSafeJob, ArbiLiteSafeHolder, ArbiPlain, ArbiSafe, ArbiLiteSafe,
-            ArbiLate, ArbiLateHolder,
+            ArbiJob,
+            ArbiHolder,
+            ArbiSafeJob,
+            ArbiSafeHolder,
+            ArbiLiteJob,
+            ArbiLiteHolder,
+            ArbiLiteSafeJob,
+            ArbiLiteSafeHolder,
+            ArbiPlain,
+            ArbiSafe,
+            ArbiLiteSafe,
+            ArbiLate,
+            ArbiLateHolder,
         ):
             cls.set_db(d)
     try:
@@ -237,7 +248,9 @@ async def test_from_ids_holds_the_version_and_save_moves_it_by_one(db, path, cls
     got[0].name = "d"
     await got[0].save()
     with sqlite3.connect(path) as conn:
-        assert conn.execute(f"SELECT _version FROM {cls.__tablename__} WHERE _id = 1").fetchone() == (3,)
+        assert conn.execute(
+            f"SELECT _version FROM {cls.__tablename__} WHERE _id = 1"
+        ).fetchone() == (3,)
 
 
 async def test_from_ids_of_the_safe_base_sets_what_it_set_before_and_its_snapshot(db):
@@ -317,10 +330,14 @@ def _reads(captured):
 async def test_a_fresh_database_object_reads_the_promoted_column_of_a_row(db, fresh):
     await _with_ready_job()
     assert await fresh.find_document("arbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready"}
-    assert await fresh.find_documents("arbi_jobs", [1]) == [{"name": "j", "_id": 1, "status": "ready"}]
+    assert await fresh.find_documents("arbi_jobs", [1]) == [
+        {"name": "j", "_id": 1, "status": "ready"}
+    ]
 
 
-async def test_from_ids_through_a_fresh_database_object_gives_the_column_and_save_keeps_it(db, fresh, path):
+async def test_from_ids_through_a_fresh_database_object_gives_the_column_and_save_keeps_it(
+    db, fresh, path
+):
     await _with_ready_job()
     got = await ArbiJob.from_ids([1], db=fresh)
     assert [g.status for g in got] == ["ready"]
@@ -363,7 +380,9 @@ async def test_a_table_is_learned_once_and_a_known_table_asks_nothing(db, fresh)
         "SELECT col FROM _sqler_promoted WHERE tbl = ?;",  # its record of settled columns, read once
         "SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";",
     ]
-    assert _reads(second) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";"]
+    assert _reads(second) == [
+        "SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";"
+    ]
 
 
 async def test_what_is_learned_inside_a_transaction_that_rolls_back_is_dropped(db, fresh, path):
@@ -372,13 +391,21 @@ async def test_what_is_learned_inside_a_transaction_that_rolls_back_is_dropped(d
             await fresh.adapter.execute(
                 "CREATE TABLE arbi_txn (_id INTEGER PRIMARY KEY, data JSON NOT NULL, status TEXT)"
             )
-            await fresh.adapter.execute("""INSERT INTO arbi_txn (data, status) VALUES ('{"name": "t"}', 'in')""")
-            assert await fresh.find_document("arbi_txn", 1) == {"name": "t", "_id": 1, "status": "in"}
+            await fresh.adapter.execute(
+                """INSERT INTO arbi_txn (data, status) VALUES ('{"name": "t"}', 'in')"""
+            )
+            assert await fresh.find_document("arbi_txn", 1) == {
+                "name": "t",
+                "_id": 1,
+                "status": "in",
+            }
             raise RuntimeError("undo")
     assert await fresh.find_document("arbi_txn", 1) is None
     assert "arbi_txn" not in _tables(path)
     with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE arbi_txn (_id INTEGER PRIMARY KEY, data JSON NOT NULL, note TEXT)")
+        conn.execute(
+            "CREATE TABLE arbi_txn (_id INTEGER PRIMARY KEY, data JSON NOT NULL, note TEXT)"
+        )
         conn.execute("""INSERT INTO arbi_txn (data, note) VALUES ('{"name": "u"}', 'after')""")
     assert await fresh.find_document("arbi_txn", 1) == {"name": "u", "_id": 1, "note": "after"}
 
@@ -389,10 +416,14 @@ async def test_what_is_learned_inside_a_transaction_that_commits_is_kept(db, fre
         assert (await fresh.find_document("arbi_jobs", 1))["status"] == "ready"
     with query_logger.capture() as captured:
         await fresh.find_document("arbi_jobs", 1)
-    assert _reads(captured) == ["SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";"]
+    assert _reads(captured) == [
+        "SELECT _id, data, status FROM arbi_jobs WHERE _id IN (?) AND " + _G_JOBS + ";"
+    ]
 
 
-async def test_a_child_of_a_bound_class_is_read_from_its_class_database_through_any_queryset(db, tmp_path):
+async def test_a_child_of_a_bound_class_is_read_from_its_class_database_through_any_queryset(
+    db, tmp_path
+):
     """The parent rows are read from the queryset's database; a referenced row of a class
     bound to a database is read from that one, where its ``save()`` writes it back."""
     await _with_ready_job(status="here")
@@ -445,7 +476,17 @@ CHAINS = {
     "having": lambda qs: qs.group_by("name").having(_name_is("h")),
     "resolve": lambda qs: qs.resolve(qs._resolve),
 }
-ROWS = {"filter", "exclude", "or_filter", "distinct", "select", "order_by", "limit", "offset", "resolve"}
+ROWS = {
+    "filter",
+    "exclude",
+    "or_filter",
+    "distinct",
+    "select",
+    "order_by",
+    "limit",
+    "offset",
+    "resolve",
+}
 
 
 @pytest.mark.parametrize("method", list(CHAINS))
@@ -474,12 +515,15 @@ async def test_every_chaining_method_keeps_the_database_of_using(db, fresh, meth
 
 
 async def test_a_null_column_and_a_json_key_of_its_name_read_as_find_document_reads_them(db):
-    await db.ensure_table("arbi_jobs", promoted={"status": "TEXT"})  # the async set_db makes no table
+    await db.ensure_table(
+        "arbi_jobs", promoted={"status": "TEXT"}
+    )  # the async set_db makes no table
     await db.adapter.execute(
         "INSERT INTO arbi_jobs (data, status) VALUES (?, NULL)", ['{"name": "n", "status": "json"}']
     )
     await db.adapter.execute(
-        "INSERT INTO arbi_jobs (data, status) VALUES (?, ?)", ['{"name": "m", "status": "json"}', "col"]
+        "INSERT INTO arbi_jobs (data, status) VALUES (?, ?)",
+        ['{"name": "m", "status": "json"}', "col"],
     )
     await db.adapter.commit()
     one = [await db.find_document("arbi_jobs", 1), await db.find_document("arbi_jobs", 2)]
@@ -518,7 +562,9 @@ class ArbiBareHolder(AsyncSQLerModel):
 
 async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_none(db):
     await db.ensure_table("arbi_bares", promoted={"status": "TEXT"})
-    await db.upsert_document_promoted("arbi_bares", None, {"name": "b", "status": "ready"}, ["status"])
+    await db.upsert_document_promoted(
+        "arbi_bares", None, {"name": "b", "status": "ready"}, ["status"]
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         ArbiBare.set_db(db)
@@ -543,7 +589,11 @@ async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_
             "CREATE TABLE arbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, "
             "_version INTEGER NOT NULL DEFAULT 0)",
             ("""'{"name": "a"}'""",),
-            {"name": "a", "_id": 1, "_version": 0},  # the column is the row's version: every read gives it
+            {
+                "name": "a",
+                "_id": 1,
+                "_version": 0,
+            },  # the column is the row's version: every read gives it
         ),
         (
             "CREATE TABLE arbi_shape (_id INTEGER PRIMARY KEY, data JSON NOT NULL, extra TEXT)",
@@ -562,7 +612,11 @@ async def test_a_table_with_promoted_columns_read_through_a_class_that_declares_
 async def test_which_columns_of_a_table_count(db, fresh, path, ddl, row, expected):
     with sqlite3.connect(path) as conn:
         conn.execute(ddl)
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(arbi_shape)") if r[1] not in ("_id", "_version")]
+        cols = [
+            r[1]
+            for r in conn.execute("PRAGMA table_info(arbi_shape)")
+            if r[1] not in ("_id", "_version")
+        ]
         names = ", ".join(f'"{c}"' for c in cols)
         conn.execute(f"INSERT INTO arbi_shape ({names}) VALUES ({', '.join(row)})")
     assert await fresh.find_document("arbi_shape", 1) == expected
@@ -587,7 +641,12 @@ async def test_a_column_promoted_later_on_the_same_object_is_read_next(db, fresh
     await fresh.ensure_table("arbi_jobs", promoted={"note": "TEXT"})
     await fresh.adapter.execute("UPDATE arbi_jobs SET note = 'n' WHERE _id = 1")
     await fresh.adapter.commit()
-    assert await fresh.find_document("arbi_jobs", 1) == {"name": "j", "_id": 1, "status": "ready", "note": "n"}
+    assert await fresh.find_document("arbi_jobs", 1) == {
+        "name": "j",
+        "_id": 1,
+        "status": "ready",
+        "note": "n",
+    }
 
 
 async def test_a_missing_table_is_not_remembered_and_not_created(db, fresh, path):
@@ -595,7 +654,9 @@ async def test_a_missing_table_is_not_remembered_and_not_created(db, fresh, path
     assert await fresh.find_document("arbi_later", 1) is None
     assert "arbi_later" not in _tables(path)
     with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE arbi_later (_id INTEGER PRIMARY KEY, data JSON NOT NULL, kind TEXT)")
+        conn.execute(
+            "CREATE TABLE arbi_later (_id INTEGER PRIMARY KEY, data JSON NOT NULL, kind TEXT)"
+        )
         conn.execute("""INSERT INTO arbi_later (data, kind) VALUES ('{"name": "l"}', 'k')""")
     assert await fresh.find_document("arbi_later", 1) == {"name": "l", "_id": 1, "kind": "k"}
 
@@ -615,7 +676,9 @@ async def _save_many(cls, instances):
     await cls.save_many(instances)
 
 
-@pytest.mark.parametrize("cls", [ArbiPlain, ArbiSafe, ArbiLitePlain, ArbiLiteSafe], ids=lambda c: c.__name__)
+@pytest.mark.parametrize(
+    "cls", [ArbiPlain, ArbiSafe, ArbiLitePlain, ArbiLiteSafe], ids=lambda c: c.__name__
+)
 async def test_from_ids_and_find_documents_of_40000_ids(db, cls):
     """More ids than SQLite takes as variables in one statement: read in groups, order and
     repeats as asked."""
@@ -641,7 +704,11 @@ async def test_ids_up_to_the_bound_are_one_variable_each_and_past_it_one_json_ar
     with query_logger.capture() as over:
         await db.find_documents("arbi_plains", list(range(1, 1001)))
     assert [s.count("?") for s in _reads(under)] == [999]
-    assert _reads(over) == ["SELECT _id, data FROM arbi_plains WHERE _id IN (SELECT value FROM json_each(?)) AND " + _G_PLAINS + ";"]
+    assert _reads(over) == [
+        "SELECT _id, data FROM arbi_plains WHERE _id IN (SELECT value FROM json_each(?)) AND "
+        + _G_PLAINS
+        + ";"
+    ]
 
 
 # --- a save inside a transaction that rolls back ------------------------------------------
@@ -666,7 +733,11 @@ async def test_a_save_in_a_transaction_that_rolls_back_then_a_read_and_a_save_th
     assert await fresh.find_document("arbi_undones", 1) is None
     await ArbiUndone(name="b", status="ready").save(db=fresh)
     assert _stored(path, "arbi_undones", 1) == "ready"
-    assert await fresh.find_document("arbi_undones", 1) == {"name": "b", "_id": 1, "status": "ready"}
+    assert await fresh.find_document("arbi_undones", 1) == {
+        "name": "b",
+        "_id": 1,
+        "status": "ready",
+    }
     got = await ArbiUndone.from_ids([1], db=fresh)
     assert [(g.name, g.status) for g in got] == [("b", "ready")]
     got[0].name = "c"

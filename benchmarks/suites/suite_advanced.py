@@ -18,14 +18,6 @@ import tempfile
 import threading
 import time
 
-from sqler import (
-    F,
-    FTSIndex,
-    SQLerDB,
-    StaleVersionError,
-    cached_query,
-)
-
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.sqlite_baseline import (
@@ -38,6 +30,13 @@ from benchmarks.core.sqlite_baseline import (
 from benchmarks.core.timer import PrecisionTimer, timing_stats_from_list
 from benchmarks.generators.documents import DocumentGenerator
 from benchmarks.generators.models import BenchmarkArticle, BenchmarkCounter
+from sqler import (
+    F,
+    FTSIndex,
+    SQLerDB,
+    StaleVersionError,
+    cached_query,
+)
 
 SUITE_NAME = "advanced"
 
@@ -123,11 +122,9 @@ class FullTextSearch:
                             )
                             article.save()
 
-                        # no triggers and an empty index after create(), as the
-                        # baseline's: both arms then time the same rebuild and searches
-                        fts = FTSIndex(
-                            BenchmarkArticle, fields=["title", "content"], content_sync=False
-                        )
+                        # create() adds the triggers and fills the index; the timed
+                        # rebuild() clears and fills it again, as the baseline's does
+                        fts = FTSIndex(BenchmarkArticle, fields=["title", "content"])
                         fts.create()
 
                         def do_rebuild(fts=fts):
@@ -216,13 +213,17 @@ class FullTextSearch:
                     for op in ["rebuild", "search", "ranked", "highlights"]:
                         for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
                             stats_key = f"{arm_label}_{op}"
-                            results.append(BenchmarkResult(
-                                scenario=self.name, suite=self.suite,
-                                parameter="operation",
-                                value=f"{arm_label}_{prefix}_{op}_{size}",
-                                timing=arm_results[stats_key], rows=size,
-                                metadata={"storage_mode": mode, "baseline": baseline},
-                            ))
+                            results.append(
+                                BenchmarkResult(
+                                    scenario=self.name,
+                                    suite=self.suite,
+                                    parameter="operation",
+                                    value=f"{arm_label}_{prefix}_{op}_{size}",
+                                    timing=arm_results[stats_key],
+                                    rows=size,
+                                    metadata={"storage_mode": mode, "baseline": baseline},
+                                )
+                            )
 
         return results
 
@@ -359,13 +360,22 @@ class OptimisticLockingContention:
             for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
                 stats = arm_results[arm_label]
                 tp = total_ops / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                results.append(BenchmarkResult(
-                    scenario=self.name, suite=self.suite,
-                    parameter="threads", value=f"{arm_label}_disk_{n_threads}",
-                    timing=stats, rows=total_ops,
-                    throughput=round(tp, 1),
-                    metadata={"total_ops": total_ops, "storage_mode": "disk", "baseline": baseline},
-                ))
+                results.append(
+                    BenchmarkResult(
+                        scenario=self.name,
+                        suite=self.suite,
+                        parameter="threads",
+                        value=f"{arm_label}_disk_{n_threads}",
+                        timing=stats,
+                        rows=total_ops,
+                        throughput=round(tp, 1),
+                        metadata={
+                            "total_ops": total_ops,
+                            "storage_mode": "disk",
+                            "baseline": baseline,
+                        },
+                    )
+                )
 
         return results
 
@@ -412,6 +422,7 @@ class QueryCacheImpact:
                     # Uncached query
                     def do_uncached(db=db):
                         return db.query("bench").filter(F("value") > 5000).all()
+
                     arm_results["sqler_uncached"] = timer.measure(do_uncached)
 
                     gc.collect()
@@ -419,9 +430,11 @@ class QueryCacheImpact:
                     # Cached cold (TTL=0 forces cold on every call)
                     cold_times: list[float] = []
                     for _ in range(config.iterations):
+
                         @cached_query(ttl_seconds=0)
                         def cached_cold():
                             return db.query("bench").filter(F("value") > 5000).all()
+
                         start = time.perf_counter()
                         cached_cold()
                         cold_times.append((time.perf_counter() - start) * 1000)
@@ -433,6 +446,7 @@ class QueryCacheImpact:
                     @cached_query(ttl_seconds=60)
                     def cached_hit():
                         return db.query("bench").filter(F("value") > 5000).all()
+
                     cached_hit()  # Prime
 
                     hit_times: list[float] = []
@@ -450,6 +464,7 @@ class QueryCacheImpact:
                             (5000,),
                         )
                         return fetch_as_strings(cursor)
+
                     arm_results["sqlite_uncached"] = timer.measure(do_sqlite_uncached)
 
                     gc.collect()
@@ -460,6 +475,7 @@ class QueryCacheImpact:
 
                     def do_sqlite_cache_hit():
                         return cache_store["key"]
+
                     arm_results["sqlite_cache_hit"] = timer.measure(do_sqlite_cache_hit)
 
                 arms = _alternate_arms(
@@ -477,12 +493,17 @@ class QueryCacheImpact:
                     (f"sqlite_{prefix}_uncached", "sqlite_uncached", "sqlite"),
                     (f"sqlite_{prefix}_cache_hit", "sqlite_cache_hit", "sqlite"),
                 ]:
-                    results.append(BenchmarkResult(
-                        scenario=self.name, suite=self.suite,
-                        parameter="cache_state", value=label,
-                        timing=arm_results[stats_key], rows=size,
-                        metadata={"storage_mode": mode, "baseline": baseline},
-                    ))
+                    results.append(
+                        BenchmarkResult(
+                            scenario=self.name,
+                            suite=self.suite,
+                            parameter="cache_state",
+                            value=label,
+                            timing=arm_results[stats_key],
+                            rows=size,
+                            metadata={"storage_mode": mode, "baseline": baseline},
+                        )
+                    )
 
                 conn.close()
 
@@ -566,9 +587,7 @@ class ConnectionPoolThroughput:
                         for _ in range(queries_per_thread):
                             shared_db.query("bench").filter(F("value") > 5000).limit(10).all()
 
-                    shared_wall_times.append(
-                        _timed_together(n_threads, shared_open, shared_worker)
-                    )
+                    shared_wall_times.append(_timed_together(n_threads, shared_open, shared_worker))
 
                     shared_db.close()
                     os.unlink(shared_path)
@@ -606,9 +625,7 @@ class ConnectionPoolThroughput:
                             )
                             fetch_as_strings(cursor)
 
-                    sqlite_wall_times.append(
-                        _timed_together(n_threads, sqlite_open, sqlite_worker)
-                    )
+                    sqlite_wall_times.append(_timed_together(n_threads, sqlite_open, sqlite_worker))
 
                     for c in pre_conns:
                         c.close()
@@ -623,8 +640,10 @@ class ConnectionPoolThroughput:
             # Alternate sqler group vs sqlite (M-1)
             arms = _alternate_arms(
                 f"{self.name}_{n_threads}",
-                [("sqler_group", lambda: (measure_plain(), gc.collect(), measure_shared())),
-                 ("sqlite", measure_sqlite)],
+                [
+                    ("sqler_group", lambda: (measure_plain(), gc.collect(), measure_shared())),
+                    ("sqlite", measure_sqlite),
+                ],
             )
             for label, fn in arms:
                 fn()
@@ -638,13 +657,18 @@ class ConnectionPoolThroughput:
             ]:
                 stats = arm_results[stats_key]
                 tp = total_queries / (stats.median_ms / 1000) if stats.median_ms > 0 else 0
-                results.append(BenchmarkResult(
-                    scenario=self.name, suite=self.suite,
-                    parameter="backend", value=label,
-                    timing=stats, rows=total_queries,
-                    throughput=round(tp, 1),
-                    metadata={"storage_mode": "disk", "baseline": baseline},
-                ))
+                results.append(
+                    BenchmarkResult(
+                        scenario=self.name,
+                        suite=self.suite,
+                        parameter="backend",
+                        value=label,
+                        timing=stats,
+                        rows=total_queries,
+                        throughput=round(tp, 1),
+                        metadata={"storage_mode": "disk", "baseline": baseline},
+                    )
+                )
 
         return results
 

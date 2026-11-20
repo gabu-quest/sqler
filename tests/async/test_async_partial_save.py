@@ -10,6 +10,7 @@ from typing import Optional
 import pytest
 import pytest_asyncio
 from pydantic import create_model
+
 from sqler import (
     AsyncPartialUpdateMixin,
     AsyncSQLerDB,
@@ -162,7 +163,9 @@ async def test_bytes_in_a_json_field_is_refused_naming_the_field(db):
     assert m.changed_fields == {"blob"}
 
 
-@pytest.mark.parametrize("change", [{"title": "t2"}, {"title": "t2", "body": "b2"}], ids=["alone", "with plain"])
+@pytest.mark.parametrize(
+    "change", [{"title": "t2"}, {"title": "t2", "body": "b2"}], ids=["alone", "with plain"]
+)
 async def test_an_async_promoted_field_is_written_to_its_column(db, change):
     partial = await APsPromo(title="t1", body="b1").save(db=db)
     full = await APsPromo(title="t1", body="b1").save(db=db)
@@ -267,7 +270,9 @@ async def test_from_id_is_awaited_and_gives_a_tracked_model(db):
         APsBound._table = None
 
 
-class APsStamped(TimestampMixin, AsyncAuditLogMixin, AsyncPartialUpdateMixin, AsyncTrackedModel, AsyncSQLerModel):
+class APsStamped(
+    TimestampMixin, AsyncAuditLogMixin, AsyncPartialUpdateMixin, AsyncTrackedModel, AsyncSQLerModel
+):
     __tablename__ = "aps_stamped"
     __promoted__ = {"title": "TEXT"}
     title: str = ""

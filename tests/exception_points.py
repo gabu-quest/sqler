@@ -53,7 +53,9 @@ def _raise_from_another_thread() -> None:
     sent = threading.Event()
 
     def send() -> None:
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(target), ctypes.py_object(Skipped))
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(target), ctypes.py_object(Skipped)
+        )
         sent.set()
 
     sender = threading.Thread(target=send)
@@ -127,7 +129,10 @@ def set_skipped_once_it_waits_in(ident: int, name: str) -> None:
         assert time.monotonic() < deadline, f"the thread never came to wait in {name}"
         time.sleep(0.001)
     del frame
-    assert ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), ctypes.py_object(Skipped)) == 1
+    assert (
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), ctypes.py_object(Skipped))
+        == 1
+    )
 
 
 def trace_raising_at_line(name: str, n: int, fired: list[int]) -> Callable:

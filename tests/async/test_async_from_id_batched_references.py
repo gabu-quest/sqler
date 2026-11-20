@@ -10,6 +10,7 @@ from typing import Optional, Union
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB
 from sqler.models import AsyncSQLerModel
 from sqler.models.lite.async_model import AsyncSQLerLiteModel

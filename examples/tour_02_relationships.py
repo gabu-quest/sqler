@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -68,7 +69,7 @@ def _(mo):
 
 
 @app.cell
-def _(SQLerModel, db):
+def _(SQLerModel):
     class Author(SQLerModel):
         _table = "authors"
         name: str
@@ -81,8 +82,6 @@ def _(SQLerModel, db):
         author: Author | None = None  # Relationship to Author
 
     # Register both models
-    Author.set_db(db)
-    Book.set_db(db)
     print("Models registered!")
     return Author, Book
 
@@ -99,25 +98,25 @@ def _(mo):
 
 
 @app.cell
-def _(Author, Book):
+def _(Author, Book, db):
     # Create and save authors first
     alice = Author(name="Alice Smith", country="USA")
-    alice.save()
+    alice.save(db=db)
 
     bob = Author(name="Bob Jones", country="UK")
-    bob.save()
+    bob.save(db=db)
 
     print(f"Created authors: Alice (id={alice._id}), Bob (id={bob._id})")
 
     # Now create books with author relationships
     book1 = Book(title="Python Mastery", year=2023, author=alice)
-    book1.save()
+    book1.save(db=db)
 
     book2 = Book(title="Web Development", year=2024, author=alice)
-    book2.save()
+    book2.save(db=db)
 
     book3 = Book(title="Database Design", year=2022, author=bob)
-    book3.save()
+    book3.save(db=db)
 
     print("\nCreated books:")
     print(f"  - {book1.title} by {book1.author.name}")
@@ -138,9 +137,9 @@ def _(mo):
 
 
 @app.cell
-def _(Book):
+def _(Book, db):
     # Query all books - relationships are automatically hydrated
-    all_books = Book.query().all()
+    all_books = Book.using(db).all()
 
     print("All books with hydrated authors:")
     for _b in all_books:
@@ -194,9 +193,9 @@ def _(mo):
 
 
 @app.cell
-def _(Book):
+def _(Book, db):
     # Find books by authors from a specific country
-    usa_books = Book.query().filter(Book.ref("author").field("country") == "USA").all()
+    usa_books = Book.using(db).filter(Book.ref("author").field("country") == "USA").all()
 
     print("Books by USA authors:")
     for _b in usa_books:
@@ -205,9 +204,9 @@ def _(Book):
 
 
 @app.cell
-def _(Book):
+def _(Book, db):
     # Find books by a specific author name
-    alice_books = Book.query().filter(Book.ref("author").field("name") == "Alice Smith").all()
+    alice_books = Book.using(db).filter(Book.ref("author").field("name") == "Alice Smith").all()
 
     print("Books by Alice Smith:")
     for _b in alice_books:
@@ -244,9 +243,9 @@ def _(mo):
 
 
 @app.cell
-def _(Book):
+def _(Book, db):
     # The field holds the stored reference, whatever its type hint says
-    raw_books = Book.query().resolve(False).all()
+    raw_books = Book.using(db).resolve(False).all()
     print(f"book.author = {raw_books[0].author}")
     print(f"type = {type(raw_books[0].author).__name__}")
     return
@@ -271,19 +270,17 @@ def _(Author, SQLerModel, db):
         # Flexible typing: accepts Author object OR raw ref dict
         author: Author | dict | None = None
 
-    Article.set_db(db)
-
     # Create an article
-    writer = Author.from_id(1)  # Get existing author
-    Article(title="Understanding resolve(False)", author=writer).save()
+    writer = Author.from_id(1, db=db)  # Get existing author
+    Article(title="Understanding resolve(False)", author=writer).save(db=db)
 
-    raw_articles = Article.query().resolve(False).all()
+    raw_articles = Article.using(db).resolve(False).all()
     print("Without hydration:")
     print(f"   article.author = {raw_articles[0].author}")
     print(f"   type = {type(raw_articles[0].author).__name__}")
 
     # And normal hydration still works too
-    hydrated = Article.query().all()
+    hydrated = Article.using(db).all()
     print(f"\n   With hydration: author.name = {hydrated[0].author.name}")
     return (Article,)
 
@@ -316,18 +313,18 @@ def _(mo):
 
 
 @app.cell
-def _(alice, book1):
+def _(alice, book1, db):
     print(f"Before: {book1.author.name}")
 
     # Update the author
     alice.name = "Alice Smith-Johnson"
-    alice.save()
+    alice.save(db=db)
 
     # The book still has the old data in memory
     print(f"Book still shows: {book1.author.name}")
 
     # Refresh the book to get updated data
-    book1.refresh()
+    book1.refresh(db=db)
     print(f"After refresh: {book1.author.name}")
     return
 
@@ -356,17 +353,14 @@ def _(Author, SQLerModel, db):
         editor: Author | None = None
         publisher: Publisher | None = None
 
-    Publisher.set_db(db)
-    Magazine.set_db(db)
-
     # Create data
-    pub = Publisher(name="TechMedia", location="San Francisco").save()
+    pub = Publisher(name="TechMedia", location="San Francisco").save(db=db)
 
     # Reuse existing author as editor
-    editor = Author.from_id(1)  # Alice
+    editor = Author.from_id(1, db=db)  # Alice
 
     mag = Magazine(title="Code Weekly", issue=42, editor=editor, publisher=pub)
-    mag.save()
+    mag.save(db=db)
 
     print(f"Created magazine: {mag.title} #{mag.issue}")
     print(f"  Editor: {mag.editor.name}")
@@ -393,12 +387,10 @@ def _(SQLerModel, db):
         name: str
         parent: Optional["Category"] = None
 
-    Category.set_db(db)
-
     # Create a category tree
-    root = Category(name="Electronics").save()
-    computers = Category(name="Computers", parent=root).save()
-    laptops = Category(name="Laptops", parent=computers).save()
+    root = Category(name="Electronics").save(db=db)
+    computers = Category(name="Computers", parent=root).save(db=db)
+    laptops = Category(name="Laptops", parent=computers).save(db=db)
 
     print("Category hierarchy:")
     print(f"  {root.name}")
@@ -406,7 +398,7 @@ def _(SQLerModel, db):
     print(f"        └── {laptops.name}")
 
     # Verify relationships work
-    fetched = Category.from_id(laptops._id)
+    fetched = Category.from_id(laptops._id, db=db)
     print(f"\nFetched '{fetched.name}', parent is '{fetched.parent.name}'")
     return
 

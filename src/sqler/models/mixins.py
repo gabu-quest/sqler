@@ -7,13 +7,18 @@ and lifecycle hooks.
 import json
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
-from typing import Any, ClassVar, Optional, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from sqler import _stored
 from sqler.models import _dirty
 from sqler.models._table_names import _instance_binding
 from sqler.models._write_rules import WriteRules, deletable, new_only
 from sqler.utils import validate_table_name
+
+if TYPE_CHECKING:
+    from sqler.models._host import ModelHost as _ModelHost
+else:
+    _ModelHost = object
 
 # Context variables for thread/async-safe user tracking
 _current_user_var: ContextVar[Optional[str]] = ContextVar("audit_current_user", default=None)
@@ -25,7 +30,9 @@ _async_current_user_var: ContextVar[Optional[str]] = ContextVar(
 _ONE_MICROSECOND = timedelta(microseconds=1)
 
 
-def _stamp_times(created_at: Optional[datetime], updated_at: Optional[datetime]) -> tuple[datetime, datetime]:
+def _stamp_times(
+    created_at: Optional[datetime], updated_at: Optional[datetime]
+) -> tuple[datetime, datetime]:
     """The one timestamp rule: return the ``(created_at, updated_at)`` to store on save.
 
     * First save of a new object (no ``created_at``): both are the same ``now``.
@@ -64,7 +71,7 @@ class TimestampMixin(WriteRules):
 
     def _set_timestamps(self) -> None:
         """Set timestamp fields before save."""
-        self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
+        self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)
 
     def _stamp(self) -> None:
         self._set_timestamps()
@@ -75,7 +82,13 @@ class TimestampMixin(WriteRules):
         return {**super()._update_stamps(), "updated_at": datetime.now(timezone.utc)}
 
 
-class SoftDeleteMixin:
+def _rows(cls, db):
+    """The queryset of every row of ``cls`` that the soft-delete querysets narrow: on ``db``
+    through ``cls.using(db)`` when it is given, else ``cls.query()`` on the class binding."""
+    return cls.query() if db is None else cls.using(db)
+
+
+class SoftDeleteMixin(_ModelHost):
     """Mixin that provides soft delete functionality.
 
     Instead of actually deleting records, this marks them with a
@@ -106,7 +119,7 @@ class SoftDeleteMixin:
     @property
     def is_deleted(self) -> bool:
         """Return True if this record has been soft-deleted."""
-        return self.deleted_at is not None  # type: ignore[attr-defined]
+        return self.deleted_at is not None
 
     def soft_delete(self, *, db=None) -> Self:
         """Mark this record as deleted without removing from database.
@@ -114,8 +127,8 @@ class SoftDeleteMixin:
         Returns:
             Self: The soft-deleted instance.
         """
-        self.deleted_at = datetime.now(timezone.utc)  # type: ignore[attr-defined]
-        return self.save(db=db)  # type: ignore[attr-defined]
+        self.deleted_at = datetime.now(timezone.utc)
+        return self.save(db=db)
 
     def restore(self, *, db=None) -> Self:
         """Restore a soft-deleted record.
@@ -123,15 +136,15 @@ class SoftDeleteMixin:
         Returns:
             Self: The restored instance.
         """
-        self.deleted_at = None  # type: ignore[attr-defined]
-        return self.save(db=db)  # type: ignore[attr-defined]
+        self.deleted_at = None
+        return self.save(db=db)
 
     def hard_delete(self, *, db=None) -> None:
         """Permanently delete this record from the database."""
-        self.delete(db=db)  # type: ignore[attr-defined]
+        self.delete(db=db)
 
     @classmethod
-    def active(cls):
+    def active(cls, *, db=None):
         """Return a queryset that excludes soft-deleted records.
 
         This is the recommended way to query for active (non-deleted) records.
@@ -144,15 +157,19 @@ class SoftDeleteMixin:
             # Filter active users
             admins = User.active().filter(F("role") == "admin").all()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             SQLerQuerySet: Queryset filtered to non-deleted records.
         """
         from sqler.query import F
 
-        return cls.query().filter(F("deleted_at") == None)  # noqa: E711
+        return _rows(cls, db).filter(F("deleted_at") == None)  # noqa: E711
 
     @classmethod
-    def with_deleted(cls):
+    def with_deleted(cls, *, db=None):
         """Return a queryset that includes soft-deleted records.
 
         Use this when you need to access all records regardless of deletion status.
@@ -162,13 +179,17 @@ class SoftDeleteMixin:
             # Get all users including deleted
             all_users = User.with_deleted().all()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             SQLerQuerySet: Queryset including all records.
         """
-        return cls.query()  # type: ignore[attr-defined]
+        return _rows(cls, db)
 
     @classmethod
-    def only_deleted(cls):
+    def only_deleted(cls, *, db=None):
         """Return a queryset containing only soft-deleted records.
 
         Use this to find and potentially restore deleted records.
@@ -183,15 +204,19 @@ class SoftDeleteMixin:
             if user:
                 user.restore()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             SQLerQuerySet: Queryset filtered to only deleted records.
         """
         from sqler.query import F
 
-        return cls.query().filter(F("deleted_at") != None)  # noqa: E711
+        return _rows(cls, db).filter(F("deleted_at") != None)  # noqa: E711
 
 
-class AsyncSoftDeleteMixin:
+class AsyncSoftDeleteMixin(_ModelHost):
     """Async version of SoftDeleteMixin for async models.
 
     Provides soft delete functionality with async save/delete methods.
@@ -219,7 +244,7 @@ class AsyncSoftDeleteMixin:
     @property
     def is_deleted(self) -> bool:
         """Return True if this record has been soft-deleted."""
-        return self.deleted_at is not None  # type: ignore[attr-defined]
+        return self.deleted_at is not None
 
     async def soft_delete(self, *, db=None) -> Self:
         """Mark this record as deleted without removing from database (async).
@@ -227,8 +252,8 @@ class AsyncSoftDeleteMixin:
         Returns:
             Self: The soft-deleted instance.
         """
-        self.deleted_at = datetime.now(timezone.utc)  # type: ignore[attr-defined]
-        return await self.save(db=db)  # type: ignore[attr-defined]
+        self.deleted_at = datetime.now(timezone.utc)
+        return await self.save(db=db)
 
     async def restore(self, *, db=None) -> Self:
         """Restore a soft-deleted record (async).
@@ -236,15 +261,15 @@ class AsyncSoftDeleteMixin:
         Returns:
             Self: The restored instance.
         """
-        self.deleted_at = None  # type: ignore[attr-defined]
-        return await self.save(db=db)  # type: ignore[attr-defined]
+        self.deleted_at = None
+        return await self.save(db=db)
 
     async def hard_delete(self, *, db=None) -> None:
         """Permanently delete this record from the database (async)."""
-        await self.delete(db=db)  # type: ignore[attr-defined]
+        await self.delete(db=db)
 
     @classmethod
-    def active(cls):
+    def active(cls, *, db=None):
         """Return an async queryset that excludes soft-deleted records.
 
         Usage::
@@ -255,15 +280,19 @@ class AsyncSoftDeleteMixin:
             # Filter active users
             admins = await User.active().filter(F("role") == "admin").all()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             AsyncSQLerQuerySet: Queryset filtered to non-deleted records.
         """
         from sqler.query import F
 
-        return cls.query().filter(F("deleted_at") == None)  # noqa: E711
+        return _rows(cls, db).filter(F("deleted_at") == None)  # noqa: E711
 
     @classmethod
-    def with_deleted(cls):
+    def with_deleted(cls, *, db=None):
         """Return an async queryset that includes soft-deleted records.
 
         Usage::
@@ -271,13 +300,17 @@ class AsyncSoftDeleteMixin:
             # Get all users including deleted
             all_users = await User.with_deleted().all()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             AsyncSQLerQuerySet: Queryset including all records.
         """
-        return cls.query()  # type: ignore[attr-defined]
+        return _rows(cls, db)
 
     @classmethod
-    def only_deleted(cls):
+    def only_deleted(cls, *, db=None):
         """Return an async queryset containing only soft-deleted records.
 
         Usage::
@@ -290,12 +323,16 @@ class AsyncSoftDeleteMixin:
             if user:
                 await user.restore()
 
+        Args:
+            db: Optional database: its rows, read through ``using(db)``; without it the
+                rows of the class binding.
+
         Returns:
             AsyncSQLerQuerySet: Queryset filtered to only deleted records.
         """
         from sqler.query import F
 
-        return cls.query().filter(F("deleted_at") != None)  # noqa: E711
+        return _rows(cls, db).filter(F("deleted_at") != None)  # noqa: E711
 
 
 class HooksMixin:
@@ -643,10 +680,10 @@ class AuditMixin(WriteRules):
         """Set audit fields before save."""
         user = self.get_current_user()
 
-        if self.created_at is None:  # type: ignore[attr-defined]
-            self.created_by = user  # type: ignore[attr-defined]
-        self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
-        self.updated_by = user  # type: ignore[attr-defined]
+        if self.created_at is None:
+            self.created_by = user
+        self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)
+        self.updated_by = user
 
     def _stamp(self) -> None:
         self._set_audit_fields()
@@ -705,10 +742,10 @@ class AsyncAuditMixin(WriteRules):
         """Set audit fields before save."""
         user = self.get_current_user()
 
-        if self.created_at is None:  # type: ignore[attr-defined]
-            self.created_by = user  # type: ignore[attr-defined]
-        self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)  # type: ignore[attr-defined]
-        self.updated_by = user  # type: ignore[attr-defined]
+        if self.created_at is None:
+            self.created_by = user
+        self.created_at, self.updated_at = _stamp_times(self.created_at, self.updated_at)
+        self.updated_by = user
 
     def _stamp(self) -> None:
         self._set_audit_fields()

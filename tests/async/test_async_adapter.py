@@ -14,6 +14,7 @@ from typing import Optional
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel
 from sqler.adapter import AsyncSQLiteAdapter
 from sqler.exceptions import TransactionStateError
@@ -211,7 +212,9 @@ async def test_a_look_for_referrers_that_reads_a_failed_row_keeps_raw_work_pendi
     is an answer to it, so it must not roll back what was pending before it."""
     adapter = db.adapter
     item_id = await holder_and_unreadable_row(db, unreadable)
-    await raw(adapter, "UPDATE raw_items SET data = json_set(data, '$.name', 'raw')")  # not committed
+    await raw(
+        adapter, "UPDATE raw_items SET data = json_set(data, '$.name', 'raw')"
+    )  # not committed
     found = await async_integrity.async_find_referrers(db, "raw_items", item_id)
     assert [(table, paths) for table, _, paths in found] == [("raw_holders", {"paths": ["target"]})]
     assert await name(adapter) == "raw"
@@ -226,7 +229,9 @@ async def test_a_look_whose_second_statement_fails_too_raises_and_ends_the_unit(
     sent before the look is rolled back with it."""
     adapter = db.adapter
     item_id = await holder_and_unreadable_row(db, "first")
-    await raw(adapter, "UPDATE raw_items SET data = json_set(data, '$.name', 'raw')")  # not committed
+    await raw(
+        adapter, "UPDATE raw_items SET data = json_set(data, '$.name', 'raw')"
+    )  # not committed
     conn = adapter._pinned()
     armed: list[str] = []
 
@@ -237,7 +242,9 @@ async def test_a_look_whose_second_statement_fails_too_raises_and_ends_the_unit(
         return 0
 
     await conn.set_trace_callback(
-        lambda sql: armed.append(sql) if sql.startswith("SELECT _id, data FROM raw_holders") and "json_" not in sql else None
+        lambda sql: armed.append(sql)
+        if sql.startswith("SELECT _id, data FROM raw_holders") and "json_" not in sql
+        else None
     )
     await conn.set_progress_handler(stop_once, 1)
     try:
@@ -299,7 +306,11 @@ async def test_a_judged_failure_ends_nothing_and_the_second_call_ends_the_unit_a
     assert await pending(adapter) == (True, ["before", "first"])
     with pytest.raises(sqlite3.OperationalError) as ended:
         await adapter._end_failed_statement(refused.value)
-    assert (ended.value is refused.value, adapter._pinned(), conn.in_transaction) == (True, None, False)
+    assert (ended.value is refused.value, adapter._pinned(), conn.in_transaction) == (
+        True,
+        None,
+        False,
+    )
     assert adapter.pool_stats().available_connections == adapter._pool_size
     assert await pending(adapter) == (False, ["before"])
     await adapter.auto_commit()
@@ -326,7 +337,12 @@ async def test_a_judged_failure_and_the_second_call_inside_a_transaction_end_not
         with pytest.raises(sqlite3.OperationalError):
             await adapter._end_failed_statement(refused.value)
         # the transaction keeps its connection, and the next statement has its turn at once
-        assert (adapter._pinned() is conn, lease.returned, lease.broken, lease.turns) == (True, False, None, [])
+        assert (adapter._pinned() is conn, lease.returned, lease.broken, lease.turns) == (
+            True,
+            False,
+            None,
+            [],
+        )
         assert adapter._turn(lease, adapter._txn_savepoints.get()) is True
         await raw(adapter, "INSERT INTO t VALUES ('b')")
     assert await pending(adapter) == (False, ["before", "a", "b"])

@@ -69,14 +69,20 @@ def main() -> None:
 
     # run
     run_p = sub.add_parser("run", help="Run benchmark scenarios")
-    run_p.add_argument("--scale", choices=["small", "medium", "large", "xlarge", "xxlarge"], default="small")
+    run_p.add_argument(
+        "--scale", choices=["small", "medium", "large", "xlarge", "xxlarge"], default="small"
+    )
     run_p.add_argument("--suite", action="append", help="Run specific suite(s)")
     run_p.add_argument("--warmup", type=int, default=3)
     run_p.add_argument("--iterations", type=int, default=20)
     run_p.add_argument("--output", default="benchmarks/results")
     run_p.add_argument("--tag", help="Tag for output filename")
-    run_p.add_argument("--storage", choices=["memory", "disk", "both"], default="memory",
-                       help="Storage mode: memory, disk, or both (default: memory)")
+    run_p.add_argument(
+        "--storage",
+        choices=["memory", "disk", "both"],
+        default="memory",
+        help="Storage mode: memory, disk, or both (default: memory)",
+    )
     run_p.add_argument("--verbose", "-v", action="store_true")
     run_p.set_defaults(func=cmd_run)
 

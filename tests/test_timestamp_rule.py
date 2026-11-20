@@ -4,6 +4,8 @@ gives a strictly later updated_at, even when the clock has not advanced or moved
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+from sqler import SQLerDB, SQLerModel
 from sqler.models import mixins
 from sqler.models.mixins import AsyncAuditMixin, AuditMixin, TimestampMixin
 
@@ -143,3 +145,54 @@ def test_naive_created_at_today(clock, kind):
     obj.created_at = datetime(2020, 1, 1)
     with pytest.raises(TypeError):
         _stamp(obj)
+
+
+@pytest.fixture
+def db():
+    """Create an in-memory database for testing."""
+    return SQLerDB.in_memory()
+
+
+class TestTimestampMixin:
+    """Tests for TimestampMixin functionality."""
+
+    def test_timestamps_set_on_save(self, db):
+        """Test that timestamps are set automatically on save()."""
+
+        class User(TimestampMixin, SQLerModel):
+            name: str
+
+        User.set_db(db)
+
+        # save() should automatically set timestamps
+        user = User(name="Alice").save()
+
+        assert user.created_at is not None
+        assert user.updated_at is not None
+        assert user.created_at == user.updated_at
+
+        # Verify persisted to database
+        reloaded = User.from_id(user._id)
+        assert reloaded.created_at is not None
+        assert reloaded.updated_at is not None
+
+    def test_updated_at_changes_on_update(self, db):
+        """Test that updated_at changes on subsequent saves."""
+        import time
+
+        class User(TimestampMixin, SQLerModel):
+            name: str
+
+        User.set_db(db)
+
+        user = User(name="Alice").save()
+        first_created = user.created_at
+        first_updated = user.updated_at
+
+        time.sleep(0.01)  # Small delay
+
+        user.name = "Alice Updated"
+        user.save()
+
+        assert user.updated_at > first_updated
+        assert user.created_at == first_created  # created_at unchanged

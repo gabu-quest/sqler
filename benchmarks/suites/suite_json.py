@@ -15,8 +15,6 @@ import gc
 import os
 import tempfile
 
-from sqler import F, SQLerDB
-
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.sqlite_baseline import (
@@ -31,6 +29,7 @@ from benchmarks.core.sqlite_baseline import (
 )
 from benchmarks.core.timer import PrecisionTimer
 from benchmarks.generators.documents import DocumentGenerator
+from sqler import F, SQLerDB
 
 SUITE_NAME = "json"
 
@@ -61,8 +60,7 @@ def _setup_sqler_db(docs: list[dict], mode: str, tmpdir: str | None = None) -> S
     return db
 
 
-def _setup_sqlite_mirror(docs: list[dict], mode: str = "memory",
-                          tmpdir: str | None = None):
+def _setup_sqlite_mirror(docs: list[dict], mode: str = "memory", tmpdir: str | None = None):
     if mode == "memory":
         conn = create_conn()
     else:
@@ -100,22 +98,30 @@ class NestedFieldAccess:
 
                     # Build consistent predicate: all depths query target > 5000
                     if depth == 1:
+
                         def do_query(db=db):
-                            return db.query("bench").filter(
-                                F("level_0")["target"] > 5000
-                            ).all()
+                            return db.query("bench").filter(F("level_0")["target"] > 5000).all()
+
                         json_path = "$.level_0.target"
                     elif depth == 2:
+
                         def do_query(db=db):
-                            return db.query("bench").filter(
-                                F("level_0")["level_1"]["target"] > 5000
-                            ).all()
+                            return (
+                                db.query("bench")
+                                .filter(F("level_0")["level_1"]["target"] > 5000)
+                                .all()
+                            )
+
                         json_path = "$.level_0.level_1.target"
                     else:
+
                         def do_query(db=db):
-                            return db.query("bench").filter(
-                                F("level_0")["level_1"]["level_2"]["target"] > 5000
-                            ).all()
+                            return (
+                                db.query("bench")
+                                .filter(F("level_0")["level_1"]["level_2"]["target"] > 5000)
+                                .all()
+                            )
+
                         json_path = "$.level_0.level_1.level_2.target"
 
                     def do_sqlite(conn=conn, jp=json_path):
@@ -147,12 +153,17 @@ class NestedFieldAccess:
                         gc.collect()
 
                     for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="depth", value=f"{arm_label}_{prefix}_{depth}",
-                            timing=arm_results[arm_label], rows=size,
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="depth",
+                                value=f"{arm_label}_{prefix}_{depth}",
+                                timing=arm_results[arm_label],
+                                rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
                     conn.close()
 
@@ -194,25 +205,31 @@ class ArrayContainsIsin:
                     def measure_sqler(db=db):
                         def do_contains():
                             return db.query("bench").filter(F("tags").contains("alpha")).all()
+
                         arm_results["sqler_contains"] = timer.measure(do_contains)
 
                         gc.collect()
 
                         def do_isin():
-                            return db.query("bench").filter(
-                                F("tags").isin(["alpha", "bravo", "charlie"])
-                            ).all()
+                            return (
+                                db.query("bench")
+                                .filter(F("tags").isin(["alpha", "bravo", "charlie"]))
+                                .all()
+                            )
+
                         arm_results["sqler_isin"] = timer.measure(do_isin)
 
                     def measure_sqlite(conn=conn):
                         def do_sqlite_contains():
                             return array_contains(conn, "bench", "tags", "alpha")
+
                         arm_results["sqlite_contains"] = timer.measure(do_sqlite_contains)
 
                         gc.collect()
 
                         def do_sqlite_isin():
                             return array_isin(conn, "bench", "tags", ["alpha", "bravo", "charlie"])
+
                         arm_results["sqlite_isin"] = timer.measure(do_sqlite_isin)
 
                     arms = _alternate_arms(
@@ -229,12 +246,17 @@ class ArrayContainsIsin:
                         (f"sqlite_{prefix}_contains_{size}", "sqlite_contains", "sqlite"),
                         (f"sqlite_{prefix}_isin_{size}", "sqlite_isin", "sqlite"),
                     ]:
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="op", value=label,
-                            timing=arm_results[stats_key], rows=size,
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="op",
+                                value=label,
+                                timing=arm_results[stats_key],
+                                rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
                     conn.close()
 
@@ -275,28 +297,36 @@ class AnyWhere:
 
                     def measure_sqler(db=db):
                         def do_any_eq():
-                            return db.query("bench").filter(
-                                F(["events"]).any().where(F("type") == "purchase")
-                            ).all()
+                            return (
+                                db.query("bench")
+                                .filter(F(["events"]).any().where(F("type") == "purchase"))
+                                .all()
+                            )
+
                         arm_results["sqler_eq"] = timer.measure(do_any_eq)
 
                         gc.collect()
 
                         def do_any_gt():
-                            return db.query("bench").filter(
-                                F(["events"]).any().where(F("amount") > 250)
-                            ).all()
+                            return (
+                                db.query("bench")
+                                .filter(F(["events"]).any().where(F("amount") > 250))
+                                .all()
+                            )
+
                         arm_results["sqler_gt"] = timer.measure(do_any_gt)
 
                     def measure_sqlite(conn=conn):
                         def do_sqlite_eq():
                             return any_where_eq(conn, "bench", "events", "type", "purchase")
+
                         arm_results["sqlite_eq"] = timer.measure(do_sqlite_eq)
 
                         gc.collect()
 
                         def do_sqlite_gt():
                             return any_where_gt(conn, "bench", "events", "amount", 250)
+
                         arm_results["sqlite_gt"] = timer.measure(do_sqlite_gt)
 
                     arms = _alternate_arms(
@@ -313,12 +343,17 @@ class AnyWhere:
                         (f"sqlite_{prefix}_eq_{size}", "sqlite_eq", "sqlite"),
                         (f"sqlite_{prefix}_gt_{size}", "sqlite_gt", "sqlite"),
                     ]:
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="table_size", value=label,
-                            timing=arm_results[stats_key], rows=size,
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="table_size",
+                                value=label,
+                                timing=arm_results[stats_key],
+                                rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
                     conn.close()
 

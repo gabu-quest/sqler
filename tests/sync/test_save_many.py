@@ -3,9 +3,11 @@
 import sqlite3
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 
 # ---- test models ----
+
 
 class SItem(SQLerModel):
     __tablename__ = "items"
@@ -44,6 +46,7 @@ class SSafePromotedItem(SQLerSafeModel):
 
 # ---- fixtures ----
 
+
 @pytest.fixture
 def db():
     db = SQLerDB.in_memory(shared=False)
@@ -52,6 +55,7 @@ def db():
 
 
 # ---- SQLerModel.save_many tests ----
+
 
 def test_save_many_basic(db):
     SItem.set_db(db)
@@ -188,6 +192,7 @@ def test_save_many_chunking(db):
 
 
 # ---- SQLerSafeModel.save_many tests ----
+
 
 def test_save_many_safe_model(db):
     SSafeItem.set_db(db)

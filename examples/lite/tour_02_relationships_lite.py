@@ -98,13 +98,9 @@ def _(mo):
 @app.cell
 def _(pyodide_sqlite3_ready, sqler_ready):
     if not pyodide_sqlite3_ready:
-        raise RuntimeError(
-            "sqlite3 is required in Pyodide; failed to load package 'sqlite3'."
-        )
+        raise RuntimeError("sqlite3 is required in Pyodide; failed to load package 'sqlite3'.")
     if not sqler_ready:
-        raise RuntimeError(
-            "sqler is required in Pyodide; failed to install sqler wheel."
-        )
+        raise RuntimeError("sqler is required in Pyodide; failed to install sqler wheel.")
 
     import importlib
     from dataclasses import dataclass
@@ -135,7 +131,7 @@ def _(mo):
 
 
 @app.cell
-def _(Optional, SQLerLiteModel, dataclass, db):
+def _(Optional, SQLerLiteModel, dataclass):
     @dataclass
     class Author(SQLerLiteModel):
         __tablename__ = "authors"
@@ -150,8 +146,6 @@ def _(Optional, SQLerLiteModel, dataclass, db):
         author: Optional[Author] = None  # Relationship to Author
 
     # Register both models
-    Author.set_db(db)
-    Book.set_db(db)
     print("Models registered!")
     return Author, Book
 
@@ -170,25 +164,25 @@ def _(mo):
 
 
 @app.cell
-def _(Author, Book):
+def _(Author, Book, db):
     # Create and save authors first
     alice = Author(name="Alice Smith", country="USA")
-    alice.save()
+    alice.save(db=db)
 
     bob = Author(name="Bob Jones", country="UK")
-    bob.save()
+    bob.save(db=db)
 
     print(f"Created authors: Alice (id={alice._id}), Bob (id={bob._id})")
 
     # Now create books with author relationships
     book1 = Book(title="Python Mastery", year=2023, author=alice)
-    book1.save()
+    book1.save(db=db)
 
     book2 = Book(title="Web Development", year=2024, author=alice)
-    book2.save()
+    book2.save(db=db)
 
     book3 = Book(title="Database Design", year=2022, author=bob)
-    book3.save()
+    book3.save(db=db)
 
     print("\nCreated books:")
     print(f"  - {book1.title} by {book1.author.name}")
@@ -211,9 +205,9 @@ def _(mo):
 
 
 @app.cell
-def _(Book):
+def _(Book, db):
     # Query all books - relationships are automatically hydrated
-    all_books = Book.all()
+    all_books = Book.using(db).all()
 
     print("All books with hydrated authors:")
     for _b in all_books:
@@ -273,9 +267,9 @@ def _(mo):
 
 
 @app.cell
-def _(Book, book1):
+def _(Book, book1, db):
     # Load a book by ID
-    loaded_book = Book.from_id(book1._id)
+    loaded_book = Book.from_id(book1._id, db=db)
     print(f"Loaded book: {loaded_book.title}")
     print(f"  Author: {loaded_book.author.name}")
     print(f"  Author's country: {loaded_book.author.country}")
@@ -296,18 +290,18 @@ def _(mo):
 
 
 @app.cell
-def _(Book, alice, book1):
+def _(Book, alice, book1, db):
     print(f"Before: {book1.author.name}")
 
     # Update the author
     alice.name = "Alice Smith-Johnson"
-    alice.save()
+    alice.save(db=db)
 
     # The book still has the old data in memory
     print(f"Book still shows: {book1.author.name}")
 
     # Refresh the book to get updated data
-    book1.refresh()
+    book1.refresh(db=db)
     print(f"After refresh: {book1.author.name}")
     return
 
@@ -340,18 +334,15 @@ def _(Author, Optional, SQLerLiteModel, dataclass, db):
         editor: Optional[Author] = None
         publisher: Optional[Publisher] = None
 
-    Publisher.set_db(db)
-    Magazine.set_db(db)
-
     # Create data
     pub = Publisher(name="TechMedia", location="San Francisco")
-    pub.save()
+    pub.save(db=db)
 
     # Reuse existing author as editor
-    editor = Author.from_id(1)  # Alice
+    editor = Author.from_id(1, db=db)  # Alice
 
     mag = Magazine(title="Code Weekly", issue=42, editor=editor, publisher=pub)
-    mag.save()
+    mag.save(db=db)
 
     print(f"Created magazine: {mag.title} #{mag.issue}")
     print(f"  Editor: {mag.editor.name}")
@@ -379,17 +370,15 @@ def _(Optional, SQLerLiteModel, dataclass, db):
         name: str
         parent: Optional["Category"] = None
 
-    Category.set_db(db)
-
     # Create a category tree
     root = Category(name="Electronics")
-    root.save()
+    root.save(db=db)
 
     computers = Category(name="Computers", parent=root)
-    computers.save()
+    computers.save(db=db)
 
     laptops = Category(name="Laptops", parent=computers)
-    laptops.save()
+    laptops.save(db=db)
 
     print("Category hierarchy:")
     print(f"  {root.name}")
@@ -397,7 +386,7 @@ def _(Optional, SQLerLiteModel, dataclass, db):
     print(f"        - {laptops.name}")
 
     # Verify relationships work
-    fetched = Category.from_id(laptops._id)
+    fetched = Category.from_id(laptops._id, db=db)
     print(f"\nFetched '{fetched.name}', parent is '{fetched.parent.name}'")
     return Category, computers, fetched, laptops, root
 

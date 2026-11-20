@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel, SQLiteAdapter
 from sqler.logging import query_logger
 from sqler.models.lite.model import SQLerLiteModel
@@ -72,7 +73,9 @@ def _statuses(db) -> list[str]:
     return sorted(p.status for p in MemPromo.using(db).all())
 
 
-def test_tables_first_made_in_a_rolled_back_transaction_save_again_and_the_rollback_sends_only_rollback(db):
+def test_tables_first_made_in_a_rolled_back_transaction_save_again_and_the_rollback_sends_only_rollback(
+    db,
+):
     with db.transaction() as tx:
         MemPromo(name="gone").save(db=db)
         db.ensure_table("mem_vers", versioned=True)
@@ -269,12 +272,16 @@ def test_save_many_of_a_promoted_class_looks_the_table_up_once_for_two_calls(db)
     with query_logger.capture() as second:
         MemPromo.save_many([MemPromo(name="b")], db=db)
     # the first reads the table's columns, then again under the write lock that creates it
-    assert [q.sql for q in first if "table_xinfo" in q.sql] == ['PRAGMA table_xinfo("mem_promos");'] * 2
+    assert [q.sql for q in first if "table_xinfo" in q.sql] == [
+        'PRAGMA table_xinfo("mem_promos");'
+    ] * 2
     assert [q.sql for q in second if "table_xinfo" in q.sql or "sqlite_master" in q.sql] == []
     assert MemPromo.using(db).count() == 2
 
 
-def test_a_promoted_table_made_in_an_adapter_savepoint_rolled_back_inside_a_level_saves_afterwards(db):
+def test_a_promoted_table_made_in_an_adapter_savepoint_rolled_back_inside_a_level_saves_afterwards(
+    db,
+):
     with db:
         db.adapter.begin_transaction()
         db.ensure_table("mem_promos", promoted=MemPromo.__promoted__)
@@ -283,7 +290,9 @@ def test_a_promoted_table_made_in_an_adapter_savepoint_rolled_back_inside_a_leve
     assert _statuses(db) == ["x"]
 
 
-def test_a_versioned_table_made_in_an_adapter_savepoint_rolled_back_inside_a_level_saves_afterwards(db):
+def test_a_versioned_table_made_in_an_adapter_savepoint_rolled_back_inside_a_level_saves_afterwards(
+    db,
+):
     with db:
         db.adapter.begin_transaction()
         MemVersioned(name="gone").save(db=db)

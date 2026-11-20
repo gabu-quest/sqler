@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import pytest
 from pydantic import BaseModel, create_model
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.cache import CacheAwareModel, cached_query, get_cache
 from sqler.exceptions import (
@@ -198,7 +199,9 @@ def test_two_fields_changed_together_are_one_statement(db, cls):
     with query_logger.capture() as sent:
         partial.save_partial(db=db)
     full.save(db=db)
-    assert [q.sql.split()[0] for q in sent if q.sql.lstrip().upper().startswith("UPDATE")] == ["UPDATE"]
+    assert [q.sql.split()[0] for q in sent if q.sql.lstrip().upper().startswith("UPDATE")] == [
+        "UPDATE"
+    ]
     _assert_twins_equal(cls, db, partial, full)
 
 
@@ -342,7 +345,9 @@ def test_a_field_whatever_its_name_is_written_as_save_writes_it(db, name):
 def test_a_field_name_with_a_double_quote_or_a_backslash_is_refused_before_any_statement(db, name):
     # no JSON path every supported SQLite reads the same way names such a key
     Odd = create_model(
-        "PsOdder", __base__=(PartialUpdateMixin, TrackedModel, SQLerModel), **{name: (str, ""), "plain": (str, "")}
+        "PsOdder",
+        __base__=(PartialUpdateMixin, TrackedModel, SQLerModel),
+        **{name: (str, ""), "plain": (str, "")},
     )
     m = Odd(**{name: "x"}).save(db=db)
     before = _row(db, "psodders", m._id)
@@ -373,10 +378,18 @@ def test_a_key_the_model_has_no_field_for_is_left_by_a_partial_save(db):
     m = _load(PsLegacy, db, rid)
     m.name = "b"
     m.save_partial(db=db)
-    assert json.loads(_row(db, "ps_legacies", rid)["data"]) == {"name": "b", "legacy": 1, "added": ""}
+    assert json.loads(_row(db, "ps_legacies", rid)["data"]) == {
+        "name": "b",
+        "legacy": 1,
+        "added": "",
+    }
     m.added = "x"
     m.save_partial(db=db)
-    assert json.loads(_row(db, "ps_legacies", rid)["data"]) == {"name": "b", "legacy": 1, "added": "x"}
+    assert json.loads(_row(db, "ps_legacies", rid)["data"]) == {
+        "name": "b",
+        "legacy": 1,
+        "added": "x",
+    }
     m.name = "c"
     m.save(db=db)
     assert json.loads(_row(db, "ps_legacies", rid)["data"]) == {"name": "c", "added": "x"}
@@ -521,7 +534,9 @@ def test_a_full_save_of_a_row_that_is_gone_raises_and_stays_dirty(db, cls):
     if cls._versioned_rows:
         refused = pytest.raises(StaleVersionError, match="Stale version: update rejected")
     else:
-        refused = pytest.raises(NotFoundError, match=f"Row {m._id} of {cls.__tablename__} is not there")
+        refused = pytest.raises(
+            NotFoundError, match=f"Row {m._id} of {cls.__tablename__} is not there"
+        )
     with refused:
         m.save(db=db)
     assert _row(db, cls.__tablename__, m._id) is None
@@ -557,7 +572,9 @@ def test_after_a_partial_save_the_model_is_clean_by_both_answers(db, cls):
     with query_logger.capture() as after_full:
         full.save(db=db)
     assert len(after_partial) == len(after_full) >= 1
-    assert [(q.sql, q.params[:1]) for q in after_partial] == [(q.sql, q.params[:1]) for q in after_full]
+    assert [(q.sql, q.params[:1]) for q in after_partial] == [
+        (q.sql, q.params[:1]) for q in after_full
+    ]
 
 
 @pytest.mark.parametrize("cls", BASES, ids=lambda c: c.__name__)
@@ -594,7 +611,10 @@ def test_a_partial_save_rolled_back_leaves_the_model_as_save_leaves_it(db):
                 raise RuntimeError("undo")
     assert _row(db, "ps_docs", partial._id) == before
     assert _row(db, "ps_docs", full._id) == before
-    assert (partial.is_dirty, SQLerModel.is_dirty(partial)) == (full.is_dirty, SQLerModel.is_dirty(full))
+    assert (partial.is_dirty, SQLerModel.is_dirty(partial)) == (
+        full.is_dirty,
+        SQLerModel.is_dirty(full),
+    )
     assert (partial.is_dirty, SQLerModel.is_dirty(partial)) == (False, False)
 
 
@@ -624,7 +644,9 @@ def test_two_threads_that_each_change_another_field_both_land(tmp_path):
     for t in threads:
         t.join(30)
     assert not any(t.is_alive() for t in threads), "a thread was still running after 30 s"
-    assert errors == [], "a thread failed (a BrokenBarrierError means the barrier timed out after 30 s)"
+    assert errors == [], (
+        "a thread failed (a BrokenBarrierError means the barrier timed out after 30 s)"
+    )
     check = SQLerDB.on_disk(path)
     loaded_row = _load(PsDoc, check, rid)
     assert (loaded_row.value, loaded_row.flag) == ("t1", True)
@@ -732,21 +754,15 @@ def test_a_cached_read_after_a_partial_save_returns_the_new_value(db):
     assert read() == "new"
 
 
-class PsManualArticle(SearchableMixin, PartialUpdateMixin, TrackedModel, SQLerModel):
-    __tablename__ = "ps_manual_articles"
-    title: str = ""
-    body: str = ""
-
-
 class PsSyncedArticle(SearchableMixin, PartialUpdateMixin, TrackedModel, SQLerModel):
     __tablename__ = "ps_synced_articles"
     title: str = ""
     body: str = ""
 
 
-@pytest.mark.parametrize("cls,content_sync", [(PsManualArticle, False), (PsSyncedArticle, True)])
-def test_the_search_index_finds_the_text_of_a_partial_save(db, cls, content_sync):
-    cls._fts_index = FTSIndex(cls, ["title", "body"], db=db, content_sync=content_sync)
+def test_the_search_index_finds_the_text_of_a_partial_save(db):
+    cls = PsSyncedArticle
+    cls._fts_index = FTSIndex(cls, ["title", "body"], db=db)
     cls._fts_index.create(db)
     try:
         m = cls(title="t", body="apple").save(db=db)

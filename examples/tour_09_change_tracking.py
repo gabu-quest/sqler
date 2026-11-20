@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 def _():
     # --- marimo scaffolding (please ignore) ---
     import marimo as mo
+
     return (mo,)
 
 
@@ -79,10 +80,8 @@ def _(SQLerModel, TrackedModel, db):
         email: str
         age: int
 
-    User.set_db(db)
-
     # Create a user
-    _user = User(name="Alice", email="alice@example.com", age=30).save()
+    _user = User(name="Alice", email="alice@example.com", age=30).save(db=db)
     print(f"Created: {_user.name}, {_user.email}, age {_user.age}")
     print(f"is_dirty: {_user.is_dirty}")  # False - save() marks as clean
     return (User,)
@@ -99,9 +98,9 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     # Load user
-    _user = User.from_id(1)
+    _user = User.from_id(1, db=db)
     print(f"Loaded: {_user.name}, is_dirty: {_user.is_dirty}")
 
     # Make changes
@@ -131,10 +130,10 @@ def _(mo):
 
 
 @app.cell
-def _(User):
+def _(User, db):
     import time
 
-    _user = User.from_id(1)
+    _user = User.from_id(1, db=db)
 
     # Make several changes
     _user.age = 32
@@ -161,8 +160,8 @@ def _(mo):
 
 
 @app.cell
-def _(User):
-    _user = User.from_id(1)
+def _(User, db):
+    _user = User.from_id(1, db=db)
     _original_name = _user.name
     print(f"Original name: {_original_name}")
 
@@ -189,8 +188,8 @@ def _(mo):
 
 
 @app.cell
-def _(User):
-    _user = User.from_id(1)
+def _(User, db):
+    _user = User.from_id(1, db=db)
     print(f"Original: name={_user.name}, age={_user.age}")
 
     # Change both fields
@@ -225,11 +224,9 @@ def _(DiffMixin, SQLerModel, db):
         price: float
         stock: int
 
-    Product.set_db(db)
-
     # Create two products to compare
-    _prod1 = Product(name="Widget", price=29.99, stock=100).save()
-    _prod2 = Product(name="Widget", price=24.99, stock=85).save()
+    _prod1 = Product(name="Widget", price=29.99, stock=100).save(db=db)
+    _prod2 = Product(name="Widget", price=24.99, stock=85).save(db=db)
 
     print(f"Product 1: name={_prod1.name}, price={_prod1.price}, stock={_prod1.stock}")
     print(f"Product 2: name={_prod2.name}, price={_prod2.price}, stock={_prod2.stock}")
@@ -243,16 +240,16 @@ def _(DiffMixin, SQLerModel, db):
 
 
 @app.cell
-def _(Product):
+def _(Product, db):
     # Check equality
-    _prod3 = Product(name="Gadget", price=49.99, stock=50).save()
-    _prod4 = Product(name="Gadget", price=49.99, stock=50).save()
+    _prod3 = Product(name="Gadget", price=49.99, stock=50).save(db=db)
+    _prod4 = Product(name="Gadget", price=49.99, stock=50).save(db=db)
 
     print(f"prod3 equals prod4: {_prod3.is_equal(_prod4)}")
 
     # Change one
     _prod4.stock = 45
-    _prod4.save()
+    _prod4.save(db=db)
 
     print(f"After changing stock: {_prod3.is_equal(_prod4)}")
     return
@@ -276,9 +273,7 @@ def _(PartialUpdateMixin, SQLerModel, TrackedModel, db):
         value: str
         description: str = ""
 
-    Config.set_db(db)
-
-    _config = Config(key="theme", value="dark", description="UI theme setting").save()
+    _config = Config(key="theme", value="dark", description="UI theme setting").save(db=db)
     print(f"Created: {_config.key}={_config.value}")
 
     # Modify only one field
@@ -287,10 +282,10 @@ def _(PartialUpdateMixin, SQLerModel, TrackedModel, db):
     print(f"changed_fields: {_config.changed_fields}")
 
     # save_partial() only updates changed columns
-    _config.save_partial()
+    _config.save_partial(db=db)
     print("Called save_partial() - only 'value' was sent to DB")
 
-    _reloaded = Config.from_id(_config._id)
+    _reloaded = Config.from_id(_config._id, db=db)
     print(f"Reloaded: value={_reloaded.value}, description={_reloaded.description}")
     return
 

@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, "src")
 
+import asyncio
 import concurrent.futures
 import gc
 import random
@@ -20,12 +21,17 @@ import sqlite3
 import string
 import threading
 import time
+from contextlib import closing
 from typing import Optional
 
 import pytest
 from pydantic import Field
+
 from sqler import (
     PERMISSIVE_REBASE_CONFIG,
+    AsyncSQLerDB,
+    AsyncSQLerModel,
+    AsyncSQLerSafeModel,
     F,
     RebaseConfig,
     SoftDeleteMixin,
@@ -53,11 +59,10 @@ def disk_db(tmp_path):
 class TestConcurrencyStress:
     """Tests for concurrent access patterns."""
 
-    def test_100_concurrent_inserts_with_retry(self, db):
-        """Stress test: 100 concurrent inserts with retry logic.
+    def test_100_concurrent_inserts_all_saved(self, db):
+        """100 inserts from 10 threads on an in-memory DB: every one is saved.
 
-        SQLite in-memory databases serialize writes, so we add retry logic
-        to handle lock contention gracefully.
+        The adapter waits for a lock, so no insert fails and none is retried here.
         """
 
         class Item(SQLerModel):
@@ -70,30 +75,24 @@ class TestConcurrencyStress:
         lock = threading.Lock()
 
         def insert_item(i):
-            # Retry with exponential backoff for lock contention
-            for attempt in range(5):
-                try:
-                    Item(name=f"item_{i}", value=i).save()
-                    with lock:
-                        success_count[0] += 1
-                    return
-                except Exception as e:
-                    if "locked" in str(e).lower() and attempt < 4:
-                        time.sleep(0.01 * (2**attempt))
-                        continue
-                    with lock:
-                        errors.append((i, str(e)))
-                    return
+            try:
+                Item(name=f"item_{i}", value=i).save()
+            except Exception as e:
+                with lock:
+                    errors.append((i, str(e)))
+                return
+            with lock:
+                success_count[0] += 1
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             list(executor.map(insert_item, range(100)))
 
-        # With retries, most should succeed
-        assert success_count[0] >= 80, f"Only {success_count[0]} succeeded, errors: {errors[:5]}"
-        assert Item.query().count() == success_count[0]
+        assert errors == []
+        assert success_count[0] == 100
+        assert Item.query().count() == 100
 
-    def test_100_concurrent_inserts_disk_db(self, disk_db):
-        """Stress test: 100 concurrent inserts on disk-based DB with WAL mode."""
+    def test_100_concurrent_inserts_disk_db_all_saved(self, disk_db):
+        """100 inserts from 10 threads on a WAL disk DB: every one is saved."""
 
         class Item(SQLerModel):
             name: str
@@ -105,27 +104,23 @@ class TestConcurrencyStress:
         lock = threading.Lock()
 
         def insert_item(i):
-            for attempt in range(3):
-                try:
-                    Item(name=f"item_{i}", value=i).save()
-                    with lock:
-                        success_count[0] += 1
-                    return
-                except Exception as e:
-                    if "locked" in str(e).lower() and attempt < 2:
-                        time.sleep(0.02 * (attempt + 1))
-                        continue
-                    with lock:
-                        errors.append((i, str(e)))
-                    return
+            try:
+                Item(name=f"item_{i}", value=i).save()
+            except Exception as e:
+                with lock:
+                    errors.append((i, str(e)))
+                return
+            with lock:
+                success_count[0] += 1
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             list(executor.map(insert_item, range(100)))
 
-        # Disk-based DB with WAL should handle this better
-        assert success_count[0] >= 90, f"Only {success_count[0]} succeeded, errors: {errors[:5]}"
+        assert errors == []
+        assert success_count[0] == 100
+        assert Item.query().count() == 100
 
-    def test_concurrent_reads_and_writes(self, disk_db):
+    def test_concurrent_reads_and_writes_lose_nothing(self, disk_db):
         """Stress test: concurrent reads while writing on WAL-mode disk DB."""
 
         class Counter(SQLerModel):
@@ -140,41 +135,33 @@ class TestConcurrencyStress:
 
         read_results = []
         write_count = [0]
-        unexpected_errors = []
+        errors = []
         lock = threading.Lock()
-        max_retries = 5
 
         def reader():
             for _ in range(50):
                 try:
                     counters = Counter.query().all()
+                except Exception as e:
                     with lock:
-                        read_results.append(len(counters))
-                except sqlite3.OperationalError as e:
-                    msg = str(e).lower()
-                    if "locked" not in msg and "transaction" not in msg:
-                        with lock:
-                            unexpected_errors.append(("read", str(e)))
+                        errors.append(("read", str(e)))
+                    continue
+                with lock:
+                    read_results.append(len(counters))
                 time.sleep(0.001)
 
         def writer():
             for i in range(20):
-                for attempt in range(max_retries):
-                    try:
-                        Counter(
-                            name=f"new_counter_{threading.current_thread().name}_{i}", value=i
-                        ).save()
-                        with lock:
-                            write_count[0] += 1
-                        break
-                    except sqlite3.OperationalError as e:
-                        msg = str(e).lower()
-                        if "locked" not in msg and "transaction" not in msg:
-                            with lock:
-                                unexpected_errors.append(("write", str(e)))
-                            break
-                        if attempt < max_retries - 1:
-                            time.sleep(0.01 * (attempt + 1))
+                try:
+                    Counter(
+                        name=f"new_counter_{threading.current_thread().name}_{i}", value=i
+                    ).save()
+                except Exception as e:
+                    with lock:
+                        errors.append(("write", str(e)))
+                    continue
+                with lock:
+                    write_count[0] += 1
                 time.sleep(0.001)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -186,20 +173,21 @@ class TestConcurrencyStress:
             for f in futures:
                 f.result()
 
-        assert len(unexpected_errors) == 0, f"Unexpected errors: {unexpected_errors}"
-        # WAL mode + retries: most writes should succeed (5 writers × 20 = 100 total)
-        assert write_count[0] >= 80, f"Expected >= 80 writes, got {write_count[0]}"
-        assert len(read_results) >= 100, f"Expected >= 100 reads, got {len(read_results)}"
-        # All reads should see at least the initial 10 counters
-        assert all(r >= 10 for r in read_results), f"All reads should see >= 10 counters: {read_results}"
-        # Final count must be consistent: 10 initial + successful writes
-        final_count = Counter.query().count()
-        assert final_count == 10 + write_count[0], (
-            f"Final count {final_count} != 10 + {write_count[0]} writes"
-        )
+        assert errors == []
+        # 5 writers x 20 writes, 5 readers x 50 reads: none lost, none failed
+        assert write_count[0] == 100
+        assert len(read_results) == 250
+        # Every read sees the 10 initial counters, and no more than all 110
+        assert min(read_results) >= 10
+        assert max(read_results) <= 110
+        assert Counter.query().count() == 110
 
-    def test_optimistic_locking_contention(self, db):
-        """Stress test: many threads fighting over the same counter."""
+    def test_optimistic_locking_contention_every_increment_lands(self, db):
+        """10 threads x 5 increments of one safe counter with rebasing: all 50 land.
+
+        No increment raises a stale-version or lock-timeout error, and the stored
+        count equals the number of saves.
+        """
 
         class Counter(SQLerSafeModel):
             name: str
@@ -209,62 +197,46 @@ class TestConcurrencyStress:
 
         Counter.set_db(db)
 
-        # Create the counter
         counter = Counter(name="contended").save()
         counter_id = counter._id
 
         success_count = [0]
         stale_errors = [0]
         lock_failures = [0]
-        lock = threading.Lock()
-
         unexpected_errors = []
+        lock = threading.Lock()
 
         def increment():
             for _ in range(5):
                 try:
                     c = Counter.from_id(counter_id)
-                except sqlite3.OperationalError as e:
-                    # The read before a save (from_id, not a save) can find the
-                    # table locked by a writer; that is not the save's error.
-                    if "locked" not in str(e).lower():
-                        with lock:
-                            unexpected_errors.append(f"read: {e}")
-                    continue
-                try:
-                    if c:
-                        c.count += 1
-                        c.save()
-                        with lock:
-                            success_count[0] += 1
+                    c.count += 1
+                    c.save()
                 except StaleVersionError:
                     with lock:
                         stale_errors[0] += 1
                 except LockTimeoutError:
-                    # The save waited its lock_timeout and gave up: a lock failure.
                     with lock:
                         lock_failures[0] += 1
-                except sqlite3.OperationalError as e:
-                    # A save waits out every lock (also on its re-read) and ends in
-                    # LockTimeoutError, so no raw SQLite error may leave it.
+                except Exception as e:
                     with lock:
-                        unexpected_errors.append(f"save: {e}")
+                        unexpected_errors.append(repr(e))
+                else:
+                    with lock:
+                        success_count[0] += 1
 
-        # 10 threads each trying to increment 5 times; a hang fails instead of waiting.
+        # a hang fails instead of waiting
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(increment) for _ in range(10)]
             for f in futures:
-                f.result(timeout=10)
+                f.result(timeout=30)
 
-        assert len(unexpected_errors) == 0, f"Unexpected errors: {unexpected_errors}"
-        # Check that some increments succeeded
+        assert unexpected_errors == []
+        assert stale_errors[0] == 0
+        assert lock_failures[0] == 0
+        assert success_count[0] == 50
         final = Counter.from_id(counter_id)
-        assert final is not None
-        # With rebasing, most should succeed; final.count == success_count[0]
-        assert final.count > 0
-        assert final.count == success_count[0], (
-            f"count mismatch: final.count={final.count}, success_count={success_count[0]}"
-        )
+        assert final.count == 50
 
 
 class TestDeepNestingAndCircularReferences:
@@ -356,6 +328,7 @@ class TestDeepNestingAndCircularReferences:
         # Query should not hang or crash
         nodes = Node.query().all()
         assert len(nodes) == 3
+
 
 class TestLargeScaleOperations:
     """Tests for operations on large datasets."""
@@ -785,7 +758,6 @@ class TestMemoryAndResourceStress:
             assert TempModel.query().count() == 1
 
             db.close()
-            gc.collect()
 
     def test_query_without_fetching(self, db):
         """Test that unfetched queries don't leak resources."""
@@ -1080,6 +1052,218 @@ class TestRandomizedStress:
         # Verify counts are consistent: inserts - deletes == current count
         count = Item.query().count()
         assert count == op_counts["insert"] - op_counts["delete"]
+
+
+# ----- first saves that start together ------------------------------------------------------
+#
+# The first save of a safe model looks at its table and adds the ``_version`` column when the
+# table lacks it. The tests that force the order hold the first writer that is about to add
+# the column until a second writer is about to add it too (or ``HOLD`` seconds pass): a second
+# writer that could look at the table between the first one's look and its change reaches
+# its own change while the first is held, and its ``ALTER`` fails with "duplicate column name".
+
+HOLD = 1.0  # seconds the first writer is held at its change of the table
+ADD_VERSION = 'ADD COLUMN "_version"'
+
+
+class _AsyncHold:
+    """Holds the first task that sends ``ADD_VERSION`` (on any of the wrapped adapters) until a
+    second task sends it, or ``HOLD`` seconds pass."""
+
+    def __init__(self):
+        self.arrived = 0
+        self.second = asyncio.Event()
+
+    def wrap(self, adapter):
+        for name in ("execute", "_execute_judged"):
+            send = getattr(adapter, name)
+
+            async def held(sql, *args, _send=send, **kwargs):
+                if ADD_VERSION in sql:
+                    self.arrived += 1
+                    if self.arrived == 1:
+                        try:
+                            await asyncio.wait_for(self.second.wait(), HOLD)
+                        except TimeoutError:
+                            pass
+                    else:
+                        self.second.set()
+                return await _send(sql, *args, **kwargs)
+
+            setattr(adapter, name, held)
+
+
+class _ThreadHold:
+    """The thread twin of ``_AsyncHold``."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.arrived = 0
+        self.second = threading.Event()
+
+    def wrap(self, adapter):
+        for name in ("execute", "_execute_judged"):
+            send = getattr(adapter, name)
+
+            def held(sql, *args, _send=send, **kwargs):
+                if ADD_VERSION in sql:
+                    with self.lock:
+                        self.arrived += 1
+                        first = self.arrived == 1
+                    if first:
+                        self.second.wait(HOLD)
+                    else:
+                        self.second.set()
+                return _send(sql, *args, **kwargs)
+
+            setattr(adapter, name, held)
+
+
+def _stored(path, table="things"):
+    """The rows of ``table`` in the file at ``path`` as ``(name, _version)``, sorted, and the
+    number of its ``_version`` columns, read with the standard ``sqlite3`` module."""
+    with closing(sqlite3.connect(path)) as conn:
+        rows = sorted(
+            conn.execute(f"SELECT json_extract(data, '$.name'), _version FROM {table}").fetchall()
+        )
+        versions = [r for r in conn.execute(f'PRAGMA table_xinfo("{table}")') if r[1] == "_version"]
+    return rows, len(versions)
+
+
+class _ASafe(AsyncSQLerSafeModel):
+    __tablename__ = "things"
+    name: str
+
+
+class _APlain(AsyncSQLerModel):
+    __tablename__ = "things"
+    name: str
+
+
+class _ASafeOther(AsyncSQLerSafeModel):
+    __tablename__ = "others"
+    name: str
+
+
+class _ASafePromoted(AsyncSQLerSafeModel):
+    __tablename__ = "things"
+    __promoted__ = {"status": "TEXT DEFAULT 'new'"}
+    name: str
+    status: str = "new"
+
+
+class _SSafe(SQLerSafeModel):
+    __tablename__ = "things"
+    name: str
+
+
+async def _saves(path, models, *, objects=1, hold=True, plain_first=False):
+    """Save ``models`` (each an unsaved instance) at once, each through the database object
+    ``i % objects`` of ``objects`` objects on the file ``path``; returns what each save gave,
+    as the type of its result or ``type: message`` of its error."""
+    dbs = [AsyncSQLerDB.on_disk(str(path)) for _ in range(objects)]
+    holder = _AsyncHold()
+    try:
+        for db in dbs:
+            await db.connect()
+            if hold:
+                holder.wrap(db.adapter)
+        if plain_first:
+            await _APlain(name="plain").save(db=dbs[0])
+        got = await asyncio.gather(
+            *(m.save(db=dbs[i % objects]) for i, m in enumerate(models)), return_exceptions=True
+        )
+    finally:
+        for db in dbs:
+            await db.close()
+    return [
+        f"{type(r).__name__}: {r}" if isinstance(r, BaseException) else type(r).__name__
+        for r in got
+    ]
+
+
+def _thread_saves(path, n, *, objects):
+    """``n`` threads each save one ``_SSafe`` at once, thread ``i`` through database object
+    ``i % objects`` on the file ``path``, with the first one held at its change of the table."""
+    dbs = [SQLerDB.on_disk(str(path)) for _ in range(objects)]
+    holder = _ThreadHold()
+    for db in dbs:
+        holder.wrap(db.adapter)
+    gate = threading.Barrier(n)
+    got = [None] * n
+
+    def save(i):
+        gate.wait()
+        try:
+            got[i] = type(_SSafe(name=f"s{i}").save(db=dbs[i % objects])).__name__
+        except Exception as exc:
+            got[i] = f"{type(exc).__name__}: {exc}"
+
+    threads = [threading.Thread(target=save, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    for db in dbs:
+        db.close()
+    return got
+
+
+class TestFirstSavesTogether:
+    """First saves of a safe model that start together all succeed, and the table gets one
+    ``_version`` column: tasks on one async database, threads on one sync database, and
+    several database objects on one new file (as several processes have)."""
+
+    def test_two_tasks_on_one_new_async_database_both_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name="s0"), _ASafe(name="s1")]))
+        assert got == ["_ASafe", "_ASafe"]
+        assert _stored(path) == ([("s0", 0), ("s1", 0)], 1)
+
+    def test_two_tasks_after_a_plain_model_made_the_table_both_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name="s0"), _ASafe(name="s1")], plain_first=True))
+        assert got == ["_ASafe", "_ASafe"]
+        assert _stored(path) == ([("plain", 0), ("s0", 0), ("s1", 0)], 1)
+
+    def test_eight_tasks_on_one_new_async_database_all_save(self, tmp_path):
+        """The plain case: eight tasks started together, nothing held."""
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name=f"s{i}") for i in range(8)], hold=False))
+        assert got == ["_ASafe"] * 8
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(8)], 1)
+
+    def test_four_async_database_objects_on_one_new_file_all_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name=f"s{i}") for i in range(4)], objects=4))
+        assert got == ["_ASafe"] * 4
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(4)], 1)
+
+    def test_two_safe_models_with_two_new_tables_on_one_async_database_both_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafe(name="s0"), _ASafeOther(name="o0")]))
+        assert got == ["_ASafe", "_ASafeOther"]
+        assert (_stored(path), _stored(path, "others")) == (([("s0", 0)], 1), ([("o0", 0)], 1))
+
+    def test_a_safe_model_with_promoted_columns_saved_first_by_four_tasks_all_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        got = asyncio.run(_saves(path, [_ASafePromoted(name=f"s{i}") for i in range(4)]))
+        assert got == ["_ASafePromoted"] * 4
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(4)], 1)
+        with closing(sqlite3.connect(path)) as conn:
+            assert conn.execute("SELECT status, COUNT(*) FROM things GROUP BY 1").fetchall() == [
+                ("new", 4)
+            ]
+
+    def test_eight_threads_on_one_new_sync_database_all_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        assert _thread_saves(path, 8, objects=1) == ["_SSafe"] * 8
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(8)], 1)
+
+    def test_four_sync_database_objects_on_one_new_file_all_save(self, tmp_path):
+        path = tmp_path / "t.db"
+        assert _thread_saves(path, 4, objects=4) == ["_SSafe"] * 4
+        assert _stored(path) == ([(f"s{i}", 0) for i in range(4)], 1)
 
 
 if __name__ == "__main__":

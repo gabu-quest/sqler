@@ -6,6 +6,7 @@ again and work; a table that still exists keeps what is remembered about it.
 """
 
 import pytest
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel, SQLerDB, SQLerModel
 
 

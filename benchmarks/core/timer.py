@@ -22,8 +22,14 @@ def timing_stats_from_list(sorted_times: list[float]) -> TimingStats:
     if n == 0:
         return TimingStats(
             iterations=0,
-            min_ms=0, max_ms=0, mean_ms=0, median_ms=0,
-            p95_ms=0, p99_ms=0, stddev_ms=0, total_ms=0,
+            min_ms=0,
+            max_ms=0,
+            mean_ms=0,
+            median_ms=0,
+            p95_ms=0,
+            p99_ms=0,
+            stddev_ms=0,
+            total_ms=0,
             reliable_p95=False,
         )
 
@@ -60,9 +66,7 @@ class PrecisionTimer:
         self.warmup = warmup
         self.iterations = iterations
 
-    def measure(
-        self, fn: Callable[[], object], *, gc_isolate: bool = True
-    ) -> TimingStats:
+    def measure(self, fn: Callable[[], object], *, gc_isolate: bool = True) -> TimingStats:
         """Run fn with warmup + measured iterations, return stats.
 
         Args:
@@ -112,8 +116,14 @@ class PrecisionTimer:
         if n == 0:
             return TimingStats(
                 iterations=0,
-                min_ms=0, max_ms=0, mean_ms=0, median_ms=0,
-                p95_ms=0, p99_ms=0, stddev_ms=0, total_ms=0,
+                min_ms=0,
+                max_ms=0,
+                mean_ms=0,
+                median_ms=0,
+                p95_ms=0,
+                p99_ms=0,
+                stddev_ms=0,
+                total_ms=0,
                 reliable_p95=False,
             )
 

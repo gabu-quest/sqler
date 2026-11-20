@@ -7,6 +7,7 @@ msgspec Struct backend.
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 from sqler import SQLerDB
 from sqler.models._compat import MSGSPEC_AVAILABLE
 from sqler.models.mixins import (
@@ -19,9 +20,7 @@ from sqler.models.mixins import (
 )
 from sqler.query import F
 
-pytestmark = pytest.mark.skipif(
-    not MSGSPEC_AVAILABLE, reason="msgspec not installed"
-)
+pytestmark = pytest.mark.skipif(not MSGSPEC_AVAILABLE, reason="msgspec not installed")
 
 if MSGSPEC_AVAILABLE:
     from sqler.models.msgspec import SQLerMsgspecModel

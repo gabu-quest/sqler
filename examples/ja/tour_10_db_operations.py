@@ -91,13 +91,11 @@ def _(SQLerModel, db):
         name: str
         email: str
 
-    User.set_db(db)
-
     # データを作成
     for _i in range(10):
-        User(name=f"User{_i}", email=f"user{_i}@example.com").save()
+        User(name=f"User{_i}", email=f"user{_i}@example.com").save(db=db)
 
-    print(f"{User.query().count()} ユーザーを作成しました")
+    print(f"{User.using(db).count()} ユーザーを作成しました")
     return (User,)
 
 
@@ -215,11 +213,11 @@ def _(User, db, get_stats, vacuum):
 
     # いくつかのレコードを削除
     for _i in range(5):
-        _user = User.from_id(_i + 1)
+        _user = User.from_id(_i + 1, db=db)
         if _user:
-            _user.delete()
+            _user.delete(db=db)
 
-    print(f"5ユーザー削除、残り {User.query().count()} ユーザー")
+    print(f"5ユーザー削除、残り {User.using(db).count()} ユーザー")
 
     # Vacuum でスペース回収
     _duration = vacuum(db)
@@ -249,33 +247,31 @@ def _(SQLerModel, db):
         name: str
         price: float
 
-    Product.set_db(db)
-
     # 多数の商品を作成
     for _i in range(25):
-        Product(name=f"Product {_i}", price=_i * 10.0).save()
+        Product(name=f"Product {_i}", price=_i * 10.0).save(db=db)
 
-    print(f"{Product.query().count()} 商品を作成しました")
+    print(f"{Product.using(db).count()} 商品を作成しました")
     return (Product,)
 
 
 @app.cell
-def _(Product):
+def _(Product, db):
     # limit/offset による手動ページネーション
     _page_size = 5
 
     print("手動ページネーション（limit/offset）：")
     for _page in range(3):
         _offset = _page * _page_size
-        _results = Product.query().limit(_page_size).offset(_offset).all()
+        _results = Product.using(db).limit(_page_size).offset(_offset).all()
         print(f"  ページ {_page + 1}: {[p.name for p in _results]}")
     return
 
 
 @app.cell
-def _(Product):
+def _(Product, db):
     # paginate() を使用（辞書を返す）
-    _page = Product.query().paginate(page=1, per_page=5)
+    _page = Product.using(db).paginate(page=1, per_page=5)
 
     print("\npaginate() を使用：")
     print(f"  総アイテム数: {_page.total}")
@@ -286,7 +282,7 @@ def _(Product):
 
     # 次のページを取得
     if _page.has_next:
-        _page2 = Product.query().paginate(page=2, per_page=5)
+        _page2 = Product.using(db).paginate(page=2, per_page=5)
         print(f"\nページ 2: {[p['name'] for p in _page2.items]}")
     return
 
@@ -304,7 +300,7 @@ def _(mo):
 
 
 @app.cell
-def _(Product):
+def _(Product, db):
     from sqler.logging import query_logger
     from sqler.query import SQLerField as F
 
@@ -313,8 +309,8 @@ def _(Product):
     query_logger.clear()  # 以前のログをクリア
 
     # クエリを実行 - 自動的にログされる
-    Product.query().filter(F("price") > 100).all()
-    Product.query().count()
+    Product.using(db).filter(F("price") > 100).all()
+    Product.using(db).count()
 
     # ログされたクエリを取得
     print("最近のクエリ：")

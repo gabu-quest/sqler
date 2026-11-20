@@ -22,7 +22,7 @@ from .theme import (
 )
 
 # Fixed colors for sqler vs sqlite grouped bars
-SQLER_COLOR = "#E69F00"   # Orange (Okabe-Ito)
+SQLER_COLOR = "#E69F00"  # Orange (Okabe-Ito)
 SQLITE_COLOR = "#56B4E9"  # Sky blue (Okabe-Ito)
 
 
@@ -33,9 +33,15 @@ def _ensure_theme():
 def _subtitle(ax, text: str):
     """Add a subtle system info subtitle below the title."""
     ax.text(
-        0.5, 1.02, text,
-        transform=ax.transAxes, ha="center", va="bottom",
-        fontsize=8, color=TEXT_MUTED, style="italic",
+        0.5,
+        1.02,
+        text,
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=8,
+        color=TEXT_MUTED,
+        style="italic",
     )
 
 
@@ -45,10 +51,14 @@ def _add_value_labels(ax, bars, fmt="{:.1f}", fontsize=8):
         height = bar.get_height()
         if height > 0:
             ax.text(
-                bar.get_x() + bar.get_width() / 2, height,
+                bar.get_x() + bar.get_width() / 2,
+                height,
                 fmt.format(height),
-                ha="center", va="bottom",
-                fontsize=fontsize, color=TEXT_PRIMARY, fontweight="bold",
+                ha="center",
+                va="bottom",
+                fontsize=fontsize,
+                color=TEXT_PRIMARY,
+                fontweight="bold",
             )
 
 
@@ -87,8 +97,14 @@ def _detect_paired_results(results: list[dict]) -> bool:
     return bool(sqler_suffixes & sqlite_suffixes)
 
 
-def plot_scaling_lines(results: list[dict], title: str, system_info: str,
-                       output: Path, xlabel: str = "Rows", ylabel: str = "Time (ms)") -> Path:
+def plot_scaling_lines(
+    results: list[dict],
+    title: str,
+    system_info: str,
+    output: Path,
+    xlabel: str = "Rows",
+    ylabel: str = "Time (ms)",
+) -> Path:
     """Line chart showing how a metric scales with parameter value.
 
     Groups results by scenario name. Each line = one scenario variant.
@@ -168,9 +184,14 @@ def plot_scaling_lines(results: list[dict], title: str, system_info: str,
 
     # p95 band footnote
     fig.text(
-        0.99, 0.01,
+        0.99,
+        0.01,
         "Solid line = median  |  Shaded band = p95 (95% of runs finish within this range)",
-        ha="right", va="bottom", fontsize=7.5, color=TEXT_MUTED, style="italic",
+        ha="right",
+        va="bottom",
+        fontsize=7.5,
+        color=TEXT_MUTED,
+        style="italic",
     )
 
     svg_path = output.with_suffix(".svg")
@@ -182,9 +203,14 @@ def plot_scaling_lines(results: list[dict], title: str, system_info: str,
     return svg_path
 
 
-def plot_comparison_bars(results: list[dict], title: str, system_info: str,
-                         output: Path, ylabel: str = "Time (ms)",
-                         show_throughput: bool = False) -> Path:
+def plot_comparison_bars(
+    results: list[dict],
+    title: str,
+    system_info: str,
+    output: Path,
+    ylabel: str = "Time (ms)",
+    show_throughput: bool = False,
+) -> Path:
     """Grouped bar chart comparing different methods/approaches.
 
     Detects sqler_/sqlite_ prefix pairs and renders grouped bars when found.
@@ -255,10 +281,26 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
             sqler_hatches.append("//" if "disk_" in suffix or suffix.startswith("disk") else "")
             sqlite_hatches.append("//" if "disk_" in suffix or suffix.startswith("disk") else "")
 
-        bars1 = ax.bar(x - width / 2, sqler_medians, width, color=SQLER_COLOR,
-                        edgecolor=SQLER_COLOR + "88", linewidth=1.5, zorder=3, label="sqler")
-        bars2 = ax.bar(x + width / 2, sqlite_medians, width, color=SQLITE_COLOR,
-                        edgecolor=SQLITE_COLOR + "88", linewidth=1.5, zorder=3, label="sqlite")
+        bars1 = ax.bar(
+            x - width / 2,
+            sqler_medians,
+            width,
+            color=SQLER_COLOR,
+            edgecolor=SQLER_COLOR + "88",
+            linewidth=1.5,
+            zorder=3,
+            label="sqler",
+        )
+        bars2 = ax.bar(
+            x + width / 2,
+            sqlite_medians,
+            width,
+            color=SQLITE_COLOR,
+            edgecolor=SQLITE_COLOR + "88",
+            linewidth=1.5,
+            zorder=3,
+            label="sqlite",
+        )
 
         # Apply hatching for disk bars
         for bar, hatch in zip(bars1, sqler_hatches):
@@ -270,12 +312,26 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
         sq_errors = [max(0, p - m) for p, m in zip(sqler_p95s, sqler_medians)]
         sl_errors = [max(0, p - m) for p, m in zip(sqlite_p95s, sqlite_medians)]
 
-        ax.errorbar(x - width / 2, sqler_medians,
-                     yerr=[[0] * len(sq_errors), sq_errors], fmt="none",
-                     ecolor=TEXT_SECONDARY, capsize=4, capthick=1.5, zorder=4)
-        ax.errorbar(x + width / 2, sqlite_medians,
-                     yerr=[[0] * len(sl_errors), sl_errors], fmt="none",
-                     ecolor=TEXT_SECONDARY, capsize=4, capthick=1.5, zorder=4)
+        ax.errorbar(
+            x - width / 2,
+            sqler_medians,
+            yerr=[[0] * len(sq_errors), sq_errors],
+            fmt="none",
+            ecolor=TEXT_SECONDARY,
+            capsize=4,
+            capthick=1.5,
+            zorder=4,
+        )
+        ax.errorbar(
+            x + width / 2,
+            sqlite_medians,
+            yerr=[[0] * len(sl_errors), sl_errors],
+            fmt="none",
+            ecolor=TEXT_SECONDARY,
+            capsize=4,
+            capthick=1.5,
+            zorder=4,
+        )
 
         _add_value_labels(ax, bars1, fmt="{:.1f}ms")
         _add_value_labels(ax, bars2, fmt="{:.1f}ms")
@@ -283,14 +339,28 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
         if show_throughput:
             for bar, tp in zip(bars1, sqler_tps):
                 if tp > 0:
-                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 0.5,
-                            f"{tp:,.0f}/s", ha="center", va="center",
-                            fontsize=7, color=BG_DARK, fontweight="bold")
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() * 0.5,
+                        f"{tp:,.0f}/s",
+                        ha="center",
+                        va="center",
+                        fontsize=7,
+                        color=BG_DARK,
+                        fontweight="bold",
+                    )
             for bar, tp in zip(bars2, sqlite_tps):
                 if tp > 0:
-                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 0.5,
-                            f"{tp:,.0f}/s", ha="center", va="center",
-                            fontsize=7, color=BG_DARK, fontweight="bold")
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() * 0.5,
+                        f"{tp:,.0f}/s",
+                        ha="center",
+                        va="center",
+                        fontsize=7,
+                        color=BG_DARK,
+                        fontweight="bold",
+                    )
 
         labels = [s.replace("_", "\n") for s in suffixes]
         ax.set_xticks(x)
@@ -321,22 +391,43 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
         x = np.arange(len(labels))
         width = 0.55
 
-        bars = ax.bar(x, medians, width, color=colors,
-                       edgecolor=[c + "88" for c in colors],
-                       linewidth=1.5, zorder=3)
+        bars = ax.bar(
+            x,
+            medians,
+            width,
+            color=colors,
+            edgecolor=[c + "88" for c in colors],
+            linewidth=1.5,
+            zorder=3,
+        )
 
         errors = [max(0, p - m) for p, m in zip(p95s, medians)]
-        ax.errorbar(x, medians, yerr=[([0] * len(errors)), errors], fmt="none",
-                     ecolor=TEXT_SECONDARY, capsize=6, capthick=1.5, zorder=4)
+        ax.errorbar(
+            x,
+            medians,
+            yerr=[([0] * len(errors)), errors],
+            fmt="none",
+            ecolor=TEXT_SECONDARY,
+            capsize=6,
+            capthick=1.5,
+            zorder=4,
+        )
 
         _add_value_labels(ax, bars, fmt="{:.1f}ms")
 
         if show_throughput and any(t > 0 for t in throughputs):
             for bar, tp in zip(bars, throughputs):
                 if tp > 0:
-                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 0.5,
-                            f"{tp:,.0f}/s", ha="center", va="center",
-                            fontsize=8, color=BG_DARK, fontweight="bold")
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() * 0.5,
+                        f"{tp:,.0f}/s",
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color=BG_DARK,
+                        fontweight="bold",
+                    )
 
         ax.set_xticks(x)
         ax.set_xticklabels(labels, fontsize=9)
@@ -358,9 +449,15 @@ def plot_comparison_bars(results: list[dict], title: str, system_info: str,
     return svg_path
 
 
-def plot_heatmap(data: list[list[float]], row_labels: list[str], col_labels: list[str],
-                 title: str, system_info: str, output: Path,
-                 value_fmt: str = "{:.1f}ms") -> Path:
+def plot_heatmap(
+    data: list[list[float]],
+    row_labels: list[str],
+    col_labels: list[str],
+    title: str,
+    system_info: str,
+    output: Path,
+    value_fmt: str = "{:.1f}ms",
+) -> Path:
     """Heatmap grid (e.g., aggregates x table sizes)."""
     import matplotlib.pyplot as plt
     import numpy as np
@@ -372,6 +469,7 @@ def plot_heatmap(data: list[list[float]], row_labels: list[str], col_labels: lis
 
     # Custom colormap: dark blue -> orange -> gold
     from matplotlib.colors import LinearSegmentedColormap
+
     cmap = LinearSegmentedColormap.from_list(
         "sqler_heat",
         [BG_PANEL, "#0072B2", "#E69F00", "#FFD700"],
@@ -390,9 +488,16 @@ def plot_heatmap(data: list[list[float]], row_labels: list[str], col_labels: lis
         for j in range(len(col_labels)):
             val = arr[i, j]
             text_color = BG_DARK if val > arr.mean() else TEXT_PRIMARY
-            ax.text(j, i, value_fmt.format(val),
-                    ha="center", va="center", fontsize=9,
-                    color=text_color, fontweight="bold")
+            ax.text(
+                j,
+                i,
+                value_fmt.format(val),
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=text_color,
+                fontweight="bold",
+            )
 
     ax.set_title(title, pad=20)
     _subtitle(ax, system_info)
@@ -411,8 +516,9 @@ def plot_heatmap(data: list[list[float]], row_labels: list[str], col_labels: lis
     return svg_path
 
 
-def plot_throughput_comparison(results: list[dict], title: str, system_info: str,
-                               output: Path) -> Path:
+def plot_throughput_comparison(
+    results: list[dict], title: str, system_info: str, output: Path
+) -> Path:
     """Horizontal bar chart showing throughput (rows/sec) — great for insert comparisons."""
     import matplotlib.pyplot as plt
     import numpy as np
@@ -432,8 +538,15 @@ def plot_throughput_comparison(results: list[dict], title: str, system_info: str
         colors_list.append(c if c else color(i))
 
     y = np.arange(len(labels))
-    bars = ax.barh(y, throughputs, height=0.6, color=colors_list,
-                   edgecolor=[c + "88" for c in colors_list], linewidth=1.5, zorder=3)
+    bars = ax.barh(
+        y,
+        throughputs,
+        height=0.6,
+        color=colors_list,
+        edgecolor=[c + "88" for c in colors_list],
+        linewidth=1.5,
+        zorder=3,
+    )
 
     # Value labels
     for bar, tp in zip(bars, throughputs):
@@ -442,8 +555,11 @@ def plot_throughput_comparison(results: list[dict], title: str, system_info: str
                 bar.get_width() + max(throughputs) * 0.02,
                 bar.get_y() + bar.get_height() / 2,
                 f"{tp:,.0f} rows/s",
-                ha="left", va="center",
-                fontsize=9, color=TEXT_PRIMARY, fontweight="bold",
+                ha="left",
+                va="center",
+                fontsize=9,
+                color=TEXT_PRIMARY,
+                fontweight="bold",
             )
 
     ax.set_yticks(y)

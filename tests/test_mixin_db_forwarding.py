@@ -7,6 +7,7 @@ accepts and forwards the db= parameter for per-call DB routing.
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.models.mixins import (
     AuditLogMixin,
@@ -496,7 +497,9 @@ class TestMixinDbForwarding:
             assert len(logs) == 1
             assert logs[0]["user"] == "log_user"
             ts = datetime.fromisoformat(logs[0]["timestamp"])
-            assert abs((datetime.now(timezone.utc) - ts).total_seconds()) < MAX_DELTA.total_seconds()
+            assert (
+                abs((datetime.now(timezone.utc) - ts).total_seconds()) < MAX_DELTA.total_seconds()
+            )
             assert logs[0]["snapshot"]["name"] == "log_fields_test"
         finally:
             AuditMixin.set_current_user(None)

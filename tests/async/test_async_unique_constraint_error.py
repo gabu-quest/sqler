@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel, AsyncSQLerSafeModel, UniqueConstraintError
 
 
@@ -134,8 +135,16 @@ async def test_except_driver_error_still_catches(emails):
 @pytest.mark.parametrize(
     "ddl,insert,message",
     [
-        ("CREATE TABLE t (v TEXT NOT NULL)", "INSERT INTO t VALUES (NULL)", "NOT NULL constraint failed: t.v"),
-        ("CREATE TABLE t (v INTEGER CHECK (v > 0))", "INSERT INTO t VALUES (-1)", "CHECK constraint failed: v > 0"),
+        (
+            "CREATE TABLE t (v TEXT NOT NULL)",
+            "INSERT INTO t VALUES (NULL)",
+            "NOT NULL constraint failed: t.v",
+        ),
+        (
+            "CREATE TABLE t (v INTEGER CHECK (v > 0))",
+            "INSERT INTO t VALUES (-1)",
+            "CHECK constraint failed: v > 0",
+        ),
     ],
     ids=["not_null", "check"],
 )
@@ -177,7 +186,9 @@ async def test_violation_outside_transaction_returns_the_connection(emails):
         await emails.insert_document("users", {"email": "a@x"})
     stats = emails.pool_stats()
     assert (stats.available_connections, stats.in_use_connections) == (1, 0)
-    assert await emails.insert_document("users", {"email": "z@x"}) == 2  # the failed row was rolled back
+    assert (
+        await emails.insert_document("users", {"email": "z@x"}) == 2
+    )  # the failed row was rolled back
 
 
 async def _trigger(db, table, text, when=""):
@@ -188,7 +199,9 @@ async def _trigger(db, table, text, when=""):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["UNIQUE constraint failed: audit", "UNIQUE constraint failed: a.b"])
+@pytest.mark.parametrize(
+    "text", ["UNIQUE constraint failed: audit", "UNIQUE constraint failed: a.b"]
+)
 async def test_trigger_text_is_not_a_violation_insert_document(adb, text):
     await adb.create_index("audit_src", "k")
     await adb.insert_document("audit_src", {"k": 0})
@@ -226,7 +239,10 @@ async def test_real_violation_on_a_table_with_the_trigger_is_converted(adb):
     await adb.create_index("u", "email", unique=True)
     await adb.insert_document("u", {"email": "a@x"})
     await _trigger(
-        adb, "u", "UNIQUE constraint failed: audit", "WHEN json_extract(NEW.data, '$.email') = 'deny'"
+        adb,
+        "u",
+        "UNIQUE constraint failed: audit",
+        "WHEN json_extract(NEW.data, '$.email') = 'deny'",
     )
     with pytest.raises(UniqueConstraintError):
         await adb.insert_document("u", {"email": "a@x"})

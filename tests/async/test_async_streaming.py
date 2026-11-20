@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import aiosqlite
 import pytest
 from pairwise import all_pairs
+
 from sqler import AsyncSQLerDB, AsyncSQLerModel, AsyncSQLerSafeModel, F, SQLerDB
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import NoAdapterError, NotConnectedError
@@ -69,7 +70,9 @@ async def _database(kind: str, tmp_path, gate: Gate = None) -> AsyncSQLerDB:
     else:
         size = 4 if kind.endswith("4") else 1
         adapter = AsyncSQLiteAdapter(
-            str(tmp_path / f"s{next(_tables)}.db"), pragmas=["PRAGMA journal_mode = WAL"], pool_size=size,
+            str(tmp_path / f"s{next(_tables)}.db"),
+            pragmas=["PRAGMA journal_mode = WAL"],
+            pool_size=size,
             acquire_timeout=10,
         )
         db = AsyncSQLerDB(adapter)
@@ -114,7 +117,14 @@ def _committed(db, table) -> int:
 
 def _seen(models) -> list:
     return [
-        (type(m), m._id, m.n, getattr(m, "_version", None), m.__dict__["_home"].db, m.__dict__["_home"].table)
+        (
+            type(m),
+            m._id,
+            m.n,
+            getattr(m, "_version", None),
+            m.__dict__["_home"].db,
+            m.__dict__["_home"].table,
+        )
         for m in models
     ]
 
@@ -198,13 +208,19 @@ WAYS = {
 }
 
 
-@pytest.mark.parametrize(*all_pairs(("base", list(BASES)), ("way", list(WAYS)), ("kind", DATABASES)))
-async def test_an_iteration_gives_the_loaders_models_and_its_end_leaves_the_pool_whole(base, way, kind, tmp_path, caplog):
+@pytest.mark.parametrize(
+    *all_pairs(("base", list(BASES)), ("way", list(WAYS)), ("kind", DATABASES))
+)
+async def test_an_iteration_gives_the_loaders_models_and_its_end_leaves_the_pool_whole(
+    base, way, kind, tmp_path, caplog
+):
     gate = Gate()
     db = await _database(kind, tmp_path, gate)
     try:
         cls = await _seeded(db, BASES[base])
-        qs = cls.using(db).filter(SQLerExpression("gate(_id)"))  # rows in rowid order, stepped as fetched
+        qs = cls.using(db).filter(
+            SQLerExpression("gate(_id)")
+        )  # rows in rowid order, stepped as fetched
         expected = qs._models(await qs.as_dicts())
         end, given = WAYS[way]
         gc.collect()  # what earlier tests left to collect warns here, not in the iteration's own block
@@ -218,8 +234,16 @@ async def test_an_iteration_gives_the_loaders_models_and_its_end_leaves_the_pool
             count = await asyncio.wait_for(asyncio.create_task(qs.count()), 5)
     finally:
         await db.close()
-    assert (len(got), got == expected[: len(got)], _seen(got)) == (given, True, _seen(expected[:given]))
-    assert (at_once, whole, count) == (True if way in ("rows run out", "aclose()") else None, True, ROWS)
+    assert (len(got), got == expected[: len(got)], _seen(got)) == (
+        given,
+        True,
+        _seen(expected[:given]),
+    )
+    assert (at_once, whole, count) == (
+        True if way in ("rows run out", "aclose()") else None,
+        True,
+        ROWS,
+    )
     leaks = [w for w in warned if issubclass(w.category, (RuntimeWarning, ResourceWarning))]
     assert [(w.category.__name__, str(w.message)) for w in leaks] == []
     assert [r.getMessage() for r in caplog.records if r.name == "asyncio"] == []
@@ -236,7 +260,9 @@ SHAPES = {
 
 
 @pytest.mark.parametrize("shape", list(SHAPES))
-async def test_iter_dicts_gives_what_all_dicts_gives_one_at_a_time_with_the_same_statement(shape, tmp_path):
+async def test_iter_dicts_gives_what_all_dicts_gives_one_at_a_time_with_the_same_statement(
+    shape, tmp_path
+):
     rows, made = SHAPES[shape]
     db = await _database("file, pool of 4", tmp_path)
     try:
@@ -254,7 +280,10 @@ async def test_iter_dicts_gives_what_all_dicts_gives_one_at_a_time_with_the_same
     finally:
         await db.close()
     assert (inspect.isasyncgen(it), streamed, [s.sql for s in sent], whole) == (
-        True, eager, [s.sql for s in sent_eager], True,
+        True,
+        eager,
+        [s.sql for s in sent_eager],
+        True,
     )
     if shape == "5,000 rows":
         assert (len(streamed), streamed[0]["_id"], streamed[-1]["_id"]) == (5000, 1, 5000)
@@ -271,7 +300,9 @@ async def test_iter_dicts_without_an_adapter_raises_at_its_first_step():
 
 @pytest.mark.parametrize("kind", ["file, pool of 4", "memory"])
 @pytest.mark.parametrize("unit", ["no transaction", "transaction"])
-async def test_a_loop_that_saves_each_model_gets_each_row_once_as_its_statement_saw_it(kind, unit, tmp_path):
+async def test_a_loop_that_saves_each_model_gets_each_row_once_as_its_statement_saw_it(
+    kind, unit, tmp_path
+):
     db = await _database(kind, tmp_path)
     try:
         cls = await _seeded(db, rows=2000)
@@ -345,11 +376,18 @@ async def test_two_iterators_of_one_task_read_in_turn_each_give_their_rows(table
         whole = _free(db)
     finally:
         await db.close()
-    assert (got_a, got_b, after, whole) == (list(range(ROWS)), list(range(ROWS - 1, -1, -1)), (None, None), True)
+    assert (got_a, got_b, after, whole) == (
+        list(range(ROWS)),
+        list(range(ROWS - 1, -1, -1)),
+        (None, None),
+        True,
+    )
 
 
 @pytest.mark.parametrize("end", ["rows run out", "dropped"])
-async def test_an_iterator_another_task_ends_ends_its_own_statements_hold_and_not_that_tasks(end, tmp_path):
+async def test_an_iterator_another_task_ends_ends_its_own_statements_hold_and_not_that_tasks(
+    end, tmp_path
+):
     db = await _database("file, pool of 4", tmp_path)
     try:
         cls = await _seeded(db)
@@ -357,7 +395,9 @@ async def test_an_iterator_another_task_ends_ends_its_own_statements_hold_and_no
         held, handed = [], asyncio.Event()
 
         async def other():  # started before this task pins a connection: it has a pin of its own
-            await db.adapter.execute("INSERT INTO other (data) VALUES ('{}')")  # its own unit, not committed
+            await db.adapter.execute(
+                "INSERT INTO other (data) VALUES ('{}')"
+            )  # its own unit, not committed
             await handed.wait()
             rest = [m.n async for m in held[0]] if end == "rows run out" else held.clear()
             await _settle(db)
@@ -375,16 +415,24 @@ async def test_an_iterator_another_task_ends_ends_its_own_statements_hold_and_no
     finally:
         await db.close()
     assert (first.n, rest, during, committed, whole) == (
-        0, list(range(1, ROWS)) if end == "rows run out" else None, (0, True), 1, True,
+        0,
+        list(range(1, ROWS)) if end == "rows run out" else None,
+        (0, True),
+        1,
+        True,
     )
 
 
-async def test_a_child_task_that_iterates_on_its_parents_pin_leaves_the_parents_unit_to_the_parent(tmp_path):
+async def test_a_child_task_that_iterates_on_its_parents_pin_leaves_the_parents_unit_to_the_parent(
+    tmp_path,
+):
     db = await _database("file, pool of 1", tmp_path)
     try:
         cls = await _seeded(db)
         await db.ensure_table("other")
-        await db.adapter.execute("INSERT INTO other (data) VALUES ('{}')")  # the parent's unit, not committed
+        await db.adapter.execute(
+            "INSERT INTO other (data) VALUES ('{}')"
+        )  # the parent's unit, not committed
 
         async def child():
             return [m.n async for m in cls.using(db).iter()]
@@ -398,7 +446,9 @@ async def test_a_child_task_that_iterates_on_its_parents_pin_leaves_the_parents_
     assert (got, during, committed, whole) == (list(range(ROWS)), (0, True), 1, True)
 
 
-async def test_a_write_the_loop_sends_and_leaves_uncommitted_is_committed_by_its_own_commit(tmp_path):
+async def test_a_write_the_loop_sends_and_leaves_uncommitted_is_committed_by_its_own_commit(
+    tmp_path,
+):
     db = await _database("file, pool of 4", tmp_path)
     try:
         cls = await _seeded(db)
@@ -416,7 +466,9 @@ async def test_a_write_the_loop_sends_and_leaves_uncommitted_is_committed_by_its
     assert (committed, whole) == (1, True)
 
 
-async def test_a_write_on_the_raw_connection_before_the_loop_stops_keeps_the_connection_until_its_commit(tmp_path):
+async def test_a_write_on_the_raw_connection_before_the_loop_stops_keeps_the_connection_until_its_commit(
+    tmp_path,
+):
     db = await _database("file, pool of 1", tmp_path)
     try:
         cls = await _seeded(db)
@@ -476,7 +528,9 @@ async def test_rows_another_task_deletes_after_the_first_row_are_still_given(tmp
     assert ([first._id] + rest, left, whole) == (list(range(1, ROWS + 1)), 0, True)
 
 
-async def test_closing_the_database_after_the_first_row_ends_the_iteration_with_not_connected(tmp_path):
+async def test_closing_the_database_after_the_first_row_ends_the_iteration_with_not_connected(
+    tmp_path,
+):
     db = await _database("file, pool of 4", tmp_path)
     cls = await _seeded(db)
     it = cls.using(db).iter()
@@ -492,14 +546,18 @@ class Doc(AsyncSQLerModel):
     status: str = ""
 
 
-async def test_a_statement_sent_again_after_another_object_changed_the_table_gives_each_row_once(tmp_path):
+async def test_a_statement_sent_again_after_another_object_changed_the_table_gives_each_row_once(
+    tmp_path,
+):
     db = await _database("file, pool of 4", tmp_path)
     try:
         await Doc.save_many([Doc(status=f"s{i}") for i in range(3)], db=db)
         qs = Doc.using(db)
         await qs.all()  # the database object learns the table
         other = SQLerDB.on_disk(db.adapter.path)
-        other.ensure_table(Doc.__tablename__, promoted={"status": "TEXT"})  # moves every status into a column
+        other.ensure_table(
+            Doc.__tablename__, promoted={"status": "TEXT"}
+        )  # moves every status into a column
         other.close()
         with query_logger.capture() as sent:
             got = [(m._id, m.status) async for m in qs.iter()]
@@ -526,7 +584,9 @@ def trips(monkeypatch):
     return names
 
 
-async def test_all_all_dicts_and_first_send_and_await_what_they_did_and_iter_reads_only(tmp_path, trips):
+async def test_all_all_dicts_and_first_send_and_await_what_they_did_and_iter_reads_only(
+    tmp_path, trips
+):
     db = await _database("file, pool of 4", tmp_path)
     try:
         cls = await _seeded(db, rows=3)
@@ -544,6 +604,13 @@ async def test_all_all_dicts_and_first_send_and_await_what_they_did_and_iter_rea
         lazy = list(trips)
     finally:
         await db.close()
-    assert ([s.sql.split()[0] for s in sent], eager) == (["SELECT"] * 3, ["execute", "fetch", "close", "commit"] * 3)
+    assert ([s.sql.split()[0] for s in sent], eager) == (
+        ["SELECT"] * 3,
+        ["execute", "fetch", "close", "commit"] * 3,
+    )
     # the statement and its reads, as aiosqlite's own iteration makes them (the last finds no row)
-    assert (got, [s.sql.split()[0] for s in streamed], lazy) == ([0, 1, 2], ["SELECT"], ["execute", "fetch", "fetch"])
+    assert (got, [s.sql.split()[0] for s in streamed], lazy) == (
+        [0, 1, 2],
+        ["SELECT"],
+        ["execute", "fetch", "fetch"],
+    )

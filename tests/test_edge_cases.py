@@ -5,8 +5,10 @@ and other edge cases to ensure robustness.
 """
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel, StaleVersionError
 from sqler.models import ReferentialIntegrityError
+from sqler.models.integrity import find_referrers
 from sqler.query import SQLerField as F
 
 # --- Table Name Validation Tests ---
@@ -108,7 +110,7 @@ def test_referential_integrity_with_malformed_json():
     db.adapter.commit()
 
     # Should not crash when finding referrers (malformed rows are skipped)
-    referrers = author._find_referrers(db, "authors", author._id)
+    referrers = find_referrers(db, "authors", author._id)
     # The corrupted book should be skipped
     assert all(table != "books" or row_id != book._id for table, row_id, _ in referrers)
 
@@ -276,7 +278,7 @@ def test_a_reference_nested_in_an_untyped_list_is_data():
         ],
     ).save()
 
-    assert tag._find_referrers(db, "tags", tag._id) == []
+    assert find_referrers(db, "tags", tag._id) == []
     assert Article.from_id(article._id).metadata[0]["value"] == {"_table": "tags", "_id": tag._id}
 
 

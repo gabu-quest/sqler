@@ -9,6 +9,7 @@ import warnings
 from dataclasses import dataclass
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel, SQLerSafeModel
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.async_model import AsyncSQLerModel
@@ -17,6 +18,7 @@ from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
+from sqler.models.msgspec.async_model import AsyncSQLerMsgspecModel
 from sqler.models.msgspec.model import SQLerMsgspecModel
 
 
@@ -78,7 +80,14 @@ class WALiteSafe(AsyncSQLerLiteSafeModel):
 
 
 SYNC = [WPyd, WPydSafe, WPydSafeChild, WPydSafeGrandchild, WLite, WLiteSafe, WMsg]
-ASYNC = [WAPyd, WAPydSafe, WALite, WALiteSafe]
+
+
+class WAMsg(AsyncSQLerMsgspecModel):
+    __tablename__ = "wl_amsg"
+    n: int = 0
+
+
+ASYNC = [WAPyd, WAPydSafe, WALite, WALiteSafe, WAMsg]
 
 
 def _call_and_record(cls, db):

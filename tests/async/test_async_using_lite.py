@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
+
 from sqler.db.async_db import AsyncSQLerDB
 from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
@@ -68,10 +69,14 @@ class TestAsyncLiteUsingAll:
     """using(db).all() returns correct results."""
 
     async def test_all_returns_seeded_items(self, adb):
-        await seed_async(adb, "async_widgets", [
-            {"name": "bolt", "color": "silver"},
-            {"name": "nut", "color": "brass"},
-        ])
+        await seed_async(
+            adb,
+            "async_widgets",
+            [
+                {"name": "bolt", "color": "silver"},
+                {"name": "nut", "color": "brass"},
+            ],
+        )
 
         results = await AsyncWidget.using(adb).all()
 
@@ -89,11 +94,15 @@ class TestAsyncLiteUsingFilter:
     """using(db).filter(...) works correctly."""
 
     async def test_filter_by_field(self, adb):
-        await seed_async(adb, "async_widgets", [
-            {"name": "a", "color": "red"},
-            {"name": "b", "color": "blue"},
-            {"name": "c", "color": "red"},
-        ])
+        await seed_async(
+            adb,
+            "async_widgets",
+            [
+                {"name": "a", "color": "red"},
+                {"name": "b", "color": "blue"},
+                {"name": "c", "color": "red"},
+            ],
+        )
 
         reds = await AsyncWidget.using(adb).filter(F("color") == "red").all()
 
@@ -112,10 +121,14 @@ class TestAsyncLiteUsingSafe:
     """AsyncSafeModel inherits using() from parent and it works."""
 
     async def test_safe_using_all(self, adb):
-        await seed_async(adb, "async_safe_widgets", [
-            {"name": "sw1", "color": "blue"},
-            {"name": "sw2", "color": "green"},
-        ])
+        await seed_async(
+            adb,
+            "async_safe_widgets",
+            [
+                {"name": "sw1", "color": "blue"},
+                {"name": "sw2", "color": "green"},
+            ],
+        )
 
         results = await AsyncSafeWidget.using(adb).all()
 
@@ -130,6 +143,7 @@ class TestAsyncLiteUsingNoClassMutation:
 
     async def test_class_db_unchanged_after_using(self, adb, adb2):
         import warnings
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             AsyncWidget.set_db(adb)
@@ -147,13 +161,21 @@ class TestAsyncLiteUsingCrossDbIsolation:
     """Items in db1 are not visible via using(db2)."""
 
     async def test_items_isolated_between_dbs(self, adb, adb2):
-        await seed_async(adb, "async_widgets", [
-            {"name": "only_in_db1", "color": "red"},
-        ])
-        await seed_async(adb2, "async_widgets", [
-            {"name": "only_in_db2", "color": "blue"},
-            {"name": "also_in_db2", "color": "green"},
-        ])
+        await seed_async(
+            adb,
+            "async_widgets",
+            [
+                {"name": "only_in_db1", "color": "red"},
+            ],
+        )
+        await seed_async(
+            adb2,
+            "async_widgets",
+            [
+                {"name": "only_in_db2", "color": "blue"},
+                {"name": "also_in_db2", "color": "green"},
+            ],
+        )
 
         r1 = await AsyncWidget.using(adb).all()
         r2 = await AsyncWidget.using(adb2).all()
@@ -176,11 +198,15 @@ class TestAsyncLiteUsingChaining:
     """Queryset chaining works with using()."""
 
     async def test_order_by(self, adb):
-        await seed_async(adb, "async_widgets", [
-            {"name": "c_widget", "color": "red"},
-            {"name": "a_widget", "color": "blue"},
-            {"name": "b_widget", "color": "green"},
-        ])
+        await seed_async(
+            adb,
+            "async_widgets",
+            [
+                {"name": "c_widget", "color": "red"},
+                {"name": "a_widget", "color": "blue"},
+                {"name": "b_widget", "color": "green"},
+            ],
+        )
 
         results = await AsyncWidget.using(adb).order_by("name").all()
 
@@ -188,17 +214,17 @@ class TestAsyncLiteUsingChaining:
         assert [w.name for w in results] == ["a_widget", "b_widget", "c_widget"]
 
     async def test_limit(self, adb):
-        await seed_async(adb, "async_widgets", [
-            {"name": f"w{i}", "color": "red"} for i in range(10)
-        ])
+        await seed_async(
+            adb, "async_widgets", [{"name": f"w{i}", "color": "red"} for i in range(10)]
+        )
 
         results = await AsyncWidget.using(adb).limit(3).all()
         assert len(results) == 3
 
     async def test_count(self, adb):
-        await seed_async(adb, "async_widgets", [
-            {"name": f"w{i}", "color": "red"} for i in range(7)
-        ])
+        await seed_async(
+            adb, "async_widgets", [{"name": f"w{i}", "color": "red"} for i in range(7)]
+        )
 
         assert await AsyncWidget.using(adb).count() == 7
 

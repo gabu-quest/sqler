@@ -239,7 +239,9 @@ async def search_articles(
             ]
         else:
             results = Article.search(q, limit=limit, offset=offset)
-            return [{"article": _article_to_out(a), "score": None, "highlights": None} for a in results]
+            return [
+                {"article": _article_to_out(a), "score": None, "highlights": None} for a in results
+            ]
 
     return await db_call(_search)
 

@@ -5,6 +5,7 @@ and real-world scenarios to ensure the new functionality is robust.
 """
 
 import pytest
+
 from sqler import SQLerDB, SQLerModel
 from sqler.query import SQLerField as F
 

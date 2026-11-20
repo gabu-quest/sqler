@@ -8,9 +8,9 @@ to pluralization or reserved-word handling lands in one place.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
 from sqler.exceptions import NotBoundError
-from sqler.query.query import is_missing_table
 
 
 def _pluralize(word: str) -> str:
@@ -117,7 +117,15 @@ def _register_defined_class(cls: type) -> None:
     registry.register(table, cls)
 
 
-def _require_binding(cls) -> tuple:
+# How every class call names its database without ``set_db()``: the deprecation warning of
+# ``set_db()`` and ``bind()`` on every base and the error of an unbound class all say it.
+DATABASE_RULE = (
+    "Use .using(db) for queries and db= for every other call "
+    "(.save(db=db), .delete(db=db), Model.from_id(id, db=db), Model.add_index(field, db=db))."
+)
+
+
+def _require_binding(cls) -> tuple[Any, str]:
     """The database and table bound to ``cls`` with ``set_db()``.
 
     Raises:
@@ -125,16 +133,56 @@ def _require_binding(cls) -> tuple:
     """
     if cls._db is None or cls._table is None:
         raise NotBoundError(
-            f"Model {cls.__name__} is not bound. "
-            "Use .using(db) for queries or .save(db=db) for writes.",
+            f"Model {cls.__name__} is not bound. {DATABASE_RULE}",
             details={"model": cls.__name__},
         )
     return cls._db, cls._table
 
 
-def _resolve_binding(cls, db=None) -> tuple:
-    """``(db, the class's table)`` when ``db`` is given, else the class binding."""
+def _check_database(cls, db) -> None:
+    """Refuse ``db`` unless it is a database of the kind ``cls`` takes.
+
+    A sync model takes a ``SQLerDB``, an async one an ``AsyncSQLerDB`` (a subclass of either
+    is taken as its parent is): each base names its kind in ``_takes_db``. Every way a
+    database reaches a model makes this check before anything else runs: the resolvers
+    below, ``using()``, and ``set_db()`` through :func:`_check_given`. A database the class
+    is bound to, or an instance's home, was checked when it came in, so a call that uses
+    one checks nothing.
+
+    Raises:
+        TypeError: ``db`` is not a ``cls._takes_db``.
+    """
+    takes = cls._takes_db
+    if isinstance(db, takes):
+        return
+    article = "an" if takes.__name__[0] in "AEIOU" else "a"
+    raise TypeError(
+        f"{cls.__name__} takes {article} {takes.__name__} as its database, not an object of type "
+        f"{type(db).__name__}: a sync model reads and writes through a SQLerDB, an async "
+        "model through an AsyncSQLerDB."
+    )
+
+
+def _check_given(cls, db) -> None:
+    """:func:`_check_database` of ``db`` unless it is ``None``: for a call that returns before
+    it resolves a database (``from_ids([])``, ``save_many([])``), and for ``set_db()``, where
+    ``None`` leaves the class unbound."""
     if db is not None:
+        _check_database(cls, db)
+
+
+def _resolve_binding(cls, db=None) -> tuple[Any, str]:
+    """``(db, the class's table)`` when ``db`` is given, else the class binding.
+
+    The one resolver of every class call that takes ``db=`` and is not a query:
+    ``from_id``, ``from_ids``, ``save_many``, ``add_index``, ``ensure_index``,
+    ``validate_references`` and the batched CSV import (the other imports pass ``db`` to
+    ``from_id`` and ``save``). A query goes through ``using(db)``; the search calls give
+    ``db`` to their ``FTSIndex``. A given ``db`` is the only database the call touches, with
+    the class's table (``_model_table_name``); a database bound with ``set_db()`` is not
+    used. A given ``db`` of the wrong kind raises ``TypeError`` (:func:`_check_database`)."""
+    if db is not None:
+        _check_database(cls, db)
         return db, _model_table_name(cls)
     return _require_binding(cls)
 
@@ -179,23 +227,22 @@ def _ref_table(inst: object) -> str:
     return home.table if home is not None else _model_table_name(type(inst))
 
 
-def _instance_binding(inst: object, db=None):
+def _instance_binding(inst: object, db=None) -> tuple[Any, str]:
     """Return ``(db, table)`` for writing or re-reading the row of ``inst``.
 
-    The database is ``db`` when given, else the instance's home, else the class binding
-    (``NotBoundError`` when there is none). The table is the home's: a row is never written
-    to another table than the one it was read from.
+    The database is ``db`` when given (``TypeError`` when it is of the wrong kind), else the
+    instance's home, else the class binding (``NotBoundError`` when there is none). The
+    table is the home's: a row is never written to another table than the one it was read
+    from.
     """
     home = _home_of(inst)
     if home is None:
         return _resolve_binding(type(inst), db)
     if db is None:
         db = home.db if home.db is not None else _require_binding(type(inst))[0]
+    else:
+        _check_database(type(inst), db)
     return db, home.table
-
-
-# the one check, in the query layer; the old name stays for its callers here
-_is_missing_table = is_missing_table
 
 
 def _read_document(db, table: str, rid, versioned: bool = False):

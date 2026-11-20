@@ -20,6 +20,7 @@ import time
 import aiosqlite
 import pytest
 import pytest_asyncio
+
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.exceptions import QueryError
 
@@ -648,21 +649,34 @@ async def _begin_insert_end(adapter: AsyncSQLiteAdapter) -> None:
 IN_FLIGHT = {
     "execute": (
         lambda a: a.execute("INSERT INTO t (v) VALUES ('lost')"),
-        "execute", "write", "WAL", ["dup"],
+        "execute",
+        "write",
+        "WAL",
+        ["dup"],
     ),
     "begin_immediate": (lambda a: a.begin_transaction(), "execute", "write", "WAL", ["dup"]),
     "executemany": (
         lambda a: a.executemany("INSERT INTO t (v) VALUES (?)", [["m1"], ["m2"]]),
-        "executemany", "write", "WAL", ["dup"],
+        "executemany",
+        "write",
+        "WAL",
+        ["dup"],
     ),
     "executescript": (
         lambda a: a.executescript(
             "INSERT INTO t (v) VALUES ('s1'); INSERT INTO t (v) VALUES ('s2');"
         ),
-        "executescript", "write", "WAL", ["dup", "s1", "s2"],
+        "executescript",
+        "write",
+        "WAL",
+        ["dup", "s1", "s2"],
     ),
     "auto_commit": (
-        lambda a: _write(a, "late"), "commit", "read", "DELETE", ["dup", "late"],
+        lambda a: _write(a, "late"),
+        "commit",
+        "read",
+        "DELETE",
+        ["dup", "late"],
     ),
     "end_transaction": (_begin_insert_end, "commit", "read", "DELETE", ["dup", "late"]),
 }
@@ -703,7 +717,10 @@ async def test_second_cancellation_while_the_connection_is_on_its_way_back(
     holder = lock_holder(adapter.path)
 
     elapsed, _ = await _cancel_in_flight(
-        adapter, sent, "execute", lambda: adapter.execute("INSERT INTO t (v) VALUES ('lost')"),
+        adapter,
+        sent,
+        "execute",
+        lambda: adapter.execute("INSERT INTO t (v) VALUES ('lost')"),
         "timeout",
     )
     # a second task now waits for the one connection, which the SQLite thread still has
@@ -767,7 +784,10 @@ async def test_close_while_a_cancelled_statements_connection_is_on_its_way_back(
     holder = lock_holder(adapter.path)
 
     elapsed, _ = await _cancel_in_flight(
-        adapter, sent, "execute", lambda: adapter.execute("INSERT INTO t (v) VALUES ('lost')"),
+        adapter,
+        sent,
+        "execute",
+        lambda: adapter.execute("INSERT INTO t (v) VALUES ('lost')"),
         "cancel",
     )
     closing = asyncio.ensure_future(adapter.close())

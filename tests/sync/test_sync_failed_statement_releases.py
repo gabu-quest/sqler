@@ -22,6 +22,7 @@ import sqlite3
 import threading
 
 import pytest
+
 from sqler import SQLerDB
 from sqler.adapter.synchronous import SQLiteAdapter
 from sqler.exceptions import QueryError, StaleVersionError
@@ -99,8 +100,12 @@ def test_failed_insert_document_then_another_thread_writes_at_once(tmp_path):
 
     new_id = _in_thread(db.insert_document, "users", {"email": "b@x"})
     assert new_id == 2  # the failed insert's id was rolled back with it
-    emails = [r[0] for r in db.adapter.execute(
-        "SELECT json_extract(data, '$.email') FROM users ORDER BY _id").fetchall()]
+    emails = [
+        r[0]
+        for r in db.adapter.execute(
+            "SELECT json_extract(data, '$.email') FROM users ORDER BY _id"
+        ).fetchall()
+    ]
     assert emails == ["a@x", "b@x"]
     db.close()
 
@@ -150,7 +155,9 @@ def test_executemany_whose_third_row_fails_stores_nothing_and_leaves_no_transact
 
 def test_executescript_that_fails_outside_a_transaction_leaves_no_transaction(adapter):
     with pytest.raises(sqlite3.IntegrityError):
-        adapter.executescript("BEGIN; INSERT INTO t (v) VALUES ('a'); INSERT INTO t (v) VALUES ('dup');")
+        adapter.executescript(
+            "BEGIN; INSERT INTO t (v) VALUES ('a'); INSERT INTO t (v) VALUES ('dup');"
+        )
     assert adapter._conn().in_transaction is False
     assert _values(adapter) == ["dup"]
 
@@ -183,8 +190,12 @@ def test_failed_statement_inside_a_transaction_keeps_it_usable(tmp_path):
         db.insert_document("users", {"email": "b@x"})
     assert db.adapter._conn().in_transaction is False
     emails = _in_thread(
-        lambda: [r[0] for r in db.adapter.execute(
-            "SELECT json_extract(data, '$.email') FROM users ORDER BY _id").fetchall()]
+        lambda: [
+            r[0]
+            for r in db.adapter.execute(
+                "SELECT json_extract(data, '$.email') FROM users ORDER BY _id"
+            ).fetchall()
+        ]
     )
     assert emails == ["a@x", "b@x"]
     db.close()
@@ -279,7 +290,9 @@ def _reader_holding(db: SQLerDB, table: str) -> tuple[sqlite3.Connection, sqlite
     """
     reader = sqlite3.connect(db.adapter.path, uri=True, check_same_thread=False)
     cur = reader.execute(f"SELECT _id FROM {table}")
-    assert cur.fetchone() == (1,)  # row 2 remains: the statement stays open, holding a table read lock
+    assert cur.fetchone() == (
+        1,
+    )  # row 2 remains: the statement stays open, holding a table read lock
     return reader, cur
 
 
@@ -290,7 +303,9 @@ def _seed_versioned(db: SQLerDB, table: str, promoted: bool) -> int:
             f"_version INTEGER NOT NULL DEFAULT 0, name TEXT)"
         )
         db.adapter.auto_commit()
-        first, _ = db.upsert_with_version_promoted(table, None, {"name": "n0", "k": 0}, None, ["name"])
+        first, _ = db.upsert_with_version_promoted(
+            table, None, {"name": "n0", "k": 0}, None, ["name"]
+        )
         db.upsert_with_version_promoted(table, None, {"name": "n1", "k": 0}, None, ["name"])
     else:
         first, _ = db.upsert_with_version(table, None, {"k": 0}, None)
@@ -300,7 +315,8 @@ def _seed_versioned(db: SQLerDB, table: str, promoted: bool) -> int:
 
 @pytest.mark.parametrize("promoted", [False, True], ids=["plain", "promoted"])
 def test_versioned_write_blocked_by_a_table_lock_ends_its_transaction(promoted):
-    db = SQLerDB.in_memory()
+    # the write waits timeout_ms for the reader's table lock, then raises
+    db = SQLerDB.in_memory(timeout_ms=100)
     table = "vers"
     _id = _seed_versioned(db, table, promoted)
     reader, held = _reader_holding(db, table)

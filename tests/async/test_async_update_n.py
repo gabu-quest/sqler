@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+
 from sqler import AsyncSQLerDB, F
 from sqler.models.async_model import AsyncSQLerModel
 from sqler.models.async_safe import AsyncSQLerSafeModel
@@ -104,18 +105,14 @@ class TestAsyncUpdateNBasic:
 
     async def test_empty_match_returns_empty_list(self, async_db_items):
         results = await (
-            AsyncItem.query()
-            .filter(F("status") == "nonexistent")
-            .update_n(5, status="running")
+            AsyncItem.query().filter(F("status") == "nonexistent").update_n(5, status="running")
         )
         assert results == []
 
     async def test_n_exceeds_available(self, async_db_items):
         """n=100 but only 4 pending -> returns 4."""
         results = await (
-            AsyncItem.query()
-            .filter(F("status") == "pending")
-            .update_n(100, status="running")
+            AsyncItem.query().filter(F("status") == "pending").update_n(100, status="running")
         )
         assert len(results) == 4
 
@@ -185,8 +182,7 @@ class TestAsyncUpdateNPromoted:
             .update_n(2, priority=F("priority") + 100)
         )
         assert len(results) == 2
-        for r in results:
-            assert r.priority >= 105  # was 5 or 10, now +100
+        assert sorted(r.priority for r in results) == [105, 110]  # was 5 and 10, now +100
 
     async def test_filters_on_promoted_column(self, async_db_promoted_items):
         """WHERE clause uses promoted column directly."""
@@ -196,9 +192,9 @@ class TestAsyncUpdateNPromoted:
             .update_n(10, status="claimed")
         )
         assert len(results) == 2
+        assert sorted(r.priority for r in results) == [5, 10]
         for r in results:
             assert r.status == "claimed"
-            assert r.priority >= 5
 
 
 @pytest.mark.asyncio
@@ -233,9 +229,7 @@ class TestAsyncUpdateNConcurrency:
         )
         ids_a = {r._id for r in claimed_a}
         ids_b = {r._id for r in claimed_b}
-        assert ids_a.isdisjoint(ids_b), (
-            f"Overlap detected: {ids_a & ids_b}"
-        )
+        assert ids_a.isdisjoint(ids_b), f"Overlap detected: {ids_a & ids_b}"
         assert len(ids_a) + len(ids_b) == 4  # all 4 pending claimed
 
 

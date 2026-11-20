@@ -17,8 +17,9 @@ a rule derives from :class:`WriteRules` and adds its part cooperatively:
   ``after`` the one written (``None`` for a delete).
 
 The set-based ways (a queryset's ``update()``, ``update_one()``, ``update_n()`` and
-``delete_all()``) and the rows a delete's policy nulls or deletes come here too: they stamp and
-are told of their rows as an instance write is, and they call no hook (no instance exists).
+``delete_all()``) come here too: they stamp and are told of their rows as an
+instance write is. The rows a delete's policy nulls or deletes stamp and are told of their
+rows.
 
 A class with no such mixin pays one ``isinstance`` test per write and no statement.
 """
@@ -31,7 +32,7 @@ from sqler import registry
 from sqler._stored import stored
 from sqler.exceptions import ReferentialIntegrityError
 from sqler.models import _dirty, _refs, async_integrity, integrity
-from sqler.models._table_names import _Home, _home_of, _set_home
+from sqler.models._table_names import _check_given, _Home, _home_of, _model_table_name, _set_home
 
 Row = tuple[str, Any, Optional[dict], Optional[dict]]
 
@@ -98,16 +99,12 @@ def known_policy(on_delete: str) -> None:
 # put back to match.
 
 
-_NO_VALUE = object()
-
-
 def _remember_identity(obj) -> dict:
     """What a failed write must put back: ``_id``, ``_snapshot``, the home and, where the
     model has one, ``_version``."""
     kept = {"_id": obj._id, "_snapshot": obj._snapshot}
-    version = getattr(obj, "_version", _NO_VALUE)
-    if version is not _NO_VALUE:
-        kept["_version"] = version
+    if type(obj)._versioned_rows:  # every base says whether its instances have ``_version``
+        kept["_version"] = obj._version
     kept["_home"] = _home_of(obj)
     return kept
 
@@ -161,14 +158,15 @@ def save(inst, db, table: str, partial: bool, write: Callable[[], Any]):
     kept = _remember_identity(inst)
     try:
         with db.transaction():
-            row_id = inst._id
+            row_id = kept["_id"]
             before = None if row_id is None else db.find_document(table, row_id)
             result = write()
             inst._table_written(db, table)
             _written_to([inst], db, table)
+            written_id = inst._id
             action = "create" if row_id is None else "update"
             after = _written(db, table, inst, partial)
-            inst._rows_written(db, table, [(action, inst._id, before, after)])
+            inst._rows_written(db, table, [(action, written_id, before, after)])
             return result
     except BaseException:
         _restore_identity(inst, kept)
@@ -191,14 +189,15 @@ async def asave(inst, db, table: str, partial: bool, write):
     kept = _remember_identity(inst)
     try:
         async with db.transaction():
-            row_id = inst._id
+            row_id = kept["_id"]
             before = None if row_id is None else await db.find_document(table, row_id)
             result = await write()
             inst._table_written(db, table)
             _written_to([inst], db, table)
+            written_id = inst._id
             action = "create" if row_id is None else "update"
             after = await _awritten(db, table, inst, partial)
-            await inst._arows_written(db, table, [(action, inst._id, before, after)])
+            await inst._arows_written(db, table, [(action, written_id, before, after)])
             return result
     except BaseException:
         _restore_identity(inst, kept)
@@ -207,9 +206,9 @@ async def asave(inst, db, table: str, partial: bool, write):
 
 def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]) -> list:
     """``save_many()``: stamp each instance, then ``insert(db, table, instances)`` them in
-    one batch; with row rules, in one transaction with them, and a failure puts every
-    instance's identity back."""
+    one batch; with row rules, in one transaction with them, and a failure puts every instance's identity back."""
     if not instances:
+        _check_given(cls, db)
         return instances
     new_only(instances)
     db, table = cls._resolve_binding(db)
@@ -244,6 +243,7 @@ def save_many(cls, instances: list, db, insert: Callable[[Any, str, list], None]
 async def asave_many(cls, instances: list, db, insert) -> list:
     """Async twin of :func:`save_many`; ``insert(db, table, instances)`` returns an awaitable."""
     if not instances:
+        _check_given(cls, db)
         return instances
     new_only(instances)
     db, table = cls._resolve_binding(db)
@@ -273,6 +273,91 @@ async def asave_many(cls, instances: list, db, insert) -> list:
             _restore_identity(inst, k)
         raise
     return instances
+
+
+# ----- the database calls of a row write: decided here, for every base -------------------
+#
+# A save is the hottest call of the package: the body of each base tests ``if promoted:``
+# itself (a class with no promoted columns makes no call for them), and :func:`row_write`
+# makes the database call and returns what it returned, which a sync base uses and an async
+# one awaits. The ones that return a call instead (``fn(*args)``, awaited on an async
+# database) serve a batch or the steps of a safe save.
+
+#: One database call: ``fn(*args)`` (awaited on an async database).
+Call = tuple[Callable[..., Any], tuple[Any, ...]]
+
+
+def ensure_columns(cls, db, table: str, promoted: Any) -> Any:
+    """Ensure the promoted columns ``promoted`` (``cls.__promoted__``, not empty) in
+    ``table`` before a write; what ``db._ensure_promoted`` returns (an awaitable on an async
+    database)."""
+    return db._ensure_promoted(table, promoted, getattr(cls, "__checks__", None), model=cls)
+
+
+def row_write(db, table: str, inst: Any, payload: dict, partial: bool, promoted: Any) -> Any:
+    """Write the row ``payload`` of ``inst``, whose class's ``__promoted__`` is ``promoted``,
+    as ``inst._id``, and return what the database call returned (an awaitable on an async
+    database): with ``partial``, only the fields changed since ``inst._snapshot``
+    (``db._update_fields``, whose result is not the id: the row keeps ``_id``); else the
+    whole row, with its promoted columns where the class has any
+    (``db.upsert_document_promoted``) or without (``db.upsert_document``)."""
+    if partial:
+        changed = _dirty.changed_fields(inst._snapshot or {}, payload)
+        return db._update_fields(table, inst._id, payload, changed, promoted or ())
+    if promoted:
+        return db.upsert_document_promoted(table, inst._id, payload, list(promoted.keys()))
+    return db.upsert_document(table, inst._id, payload)
+
+
+def versioned_write(
+    db, table: str, _id: Any, payload: dict, base: Any, partial: bool, promoted: Any, version: Any
+) -> Call:
+    """The call that writes the row ``payload`` of a safe model as ``_id`` only at row
+    version ``version``, as :func:`row_write` decides it (``base`` the snapshot a partial
+    write compares with); the whole-row ones return ``(id, new version)``."""
+    if partial:
+        changed = _dirty.changed_fields(base or {}, payload)
+        return db._update_fields, (table, _id, payload, changed, promoted or (), version)
+    if promoted:
+        return db.upsert_with_version_promoted, (
+            table,
+            _id,
+            payload,
+            version,
+            list(promoted.keys()),
+        )
+    return db.upsert_with_version, (table, _id, payload, version)
+
+
+def rows_insert(db, table: str, payloads: list, promoted: Any, versioned: bool = False) -> Call:
+    """The call that inserts the new rows ``payloads`` of a class whose ``__promoted__`` is
+    ``promoted`` in one batch, with the promoted columns where it has any; it returns their
+    ids, or with ``versioned`` (a safe model) ``(id, version)`` pairs."""
+    if promoted:
+        fn = db.insert_many_with_version_promoted if versioned else db.insert_many_promoted
+        return fn, (table, payloads, list(promoted.keys()))
+    return (db.insert_many_with_version if versioned else db.insert_many), (table, payloads)
+
+
+def found_after_race(existing: Any, error: BaseException) -> tuple[Any, bool]:
+    """``first_or_create()`` whose insert raised ``error`` (a unique index refused it), with
+    ``existing`` the second read of the lookup: another caller inserted the same lookup
+    between the read and the insert, and its row is returned as found; ``None`` means a
+    unique index on a field outside the lookup refused it, and ``error`` is raised."""
+    if existing is None:
+        raise error
+    return existing, False
+
+
+def refresh_row(doc: Optional[dict], _id: Any) -> dict:
+    """The row ``doc`` that ``refresh()`` read for ``_id``.
+
+    Raises:
+        LookupError: The row no longer exists (``doc`` is ``None``).
+    """
+    if doc is None:
+        raise LookupError(f"Row {_id} not found for refresh")
+    return doc
 
 
 def delete(inst, db, table: str, on_delete: str) -> None:
@@ -372,7 +457,9 @@ def _referrer_change(on_delete: str, table: str, ids: list, referrers: list):
         return None
     if on_delete == "restrict":
         rows = f"{table}:{ids[0]}" if len(ids) == 1 else f"{len(ids)} rows of {table}"
-        raise ReferentialIntegrityError(f"Cannot delete {rows}; referenced by {len(referrers)} row(s)")
+        raise ReferentialIntegrityError(
+            f"Cannot delete {rows}; referenced by {len(referrers)} row(s)"
+        )
     return _CHANGES[on_delete]
 
 
@@ -389,6 +476,8 @@ def stamped(cls, fields: dict) -> dict:
 
 
 def row_rules(cls) -> bool:
+    """Whether a set-based write of ``cls``'s rows needs each row it writes (:func:`set_write`):
+    it has row rules; else the write is its one statement."""
     return issubclass(cls, WriteRules) and cls._row_rules
 
 
@@ -404,16 +493,15 @@ def _set_rows(pairs) -> list[Row]:
 def _unit_db(cls, db):
     if db is None:
         raise RuntimeError(
-            f"{cls.__name__} has row rules or rows that may be referred to: a set-based write "
-            "needs the queryset's database"
+            f"{cls.__name__} has row rules or rows that may be referred "
+            "to: a set-based write needs the queryset's database"
         )
     return db
 
 
 def set_delete(cls, table: str, on_delete: str) -> bool:
-    """Whether a ``delete_all()`` of ``cls``'s rows in ``table`` is a unit (row rules, or a
-    class that can refer to the table) rather than its one statement; an unknown policy is
-    refused first."""
+    """Whether a ``delete_all()`` of ``cls``'s rows in ``table`` is a unit (row rules, or a class that can refer to the table) rather than its one statement; an unknown
+    policy is refused first."""
     known_policy(on_delete)
     return row_rules(cls) or integrity.referable(table)
 
@@ -430,7 +518,56 @@ def told(cls, db, table: str, result):
     return result
 
 
-def set_write(cls, db, table: str, write: Callable[[], list], on_delete: Optional[str] = None) -> list:
+def refuse_self_copy(cls, source: str) -> None:
+    """Refuse, before any statement, a ``copy_to()`` of rows of ``cls`` from ``source`` when a
+    field of ``cls`` can refer to rows of ``source``: a class admitted at any position of the
+    field (:func:`sqler.models._refs.typed_fields`: the field, an ``Optional``, each entry of
+    a list, each value of a dict) is stored in ``source``, or the class that owns ``source``
+    is one of them or a subclass. A copied row keeps its references, so its copies would
+    still refer to the rows of ``source``, and a delete of those rows would count the copies
+    as referrers.
+
+    Raises:
+        ValueError: Such a field, the first one found.
+    """
+    for field, at in _refs.typed_fields(cls).items():
+        admits = _admitted(at)
+        if admits and (
+            any(_model_table_name(c) == source for c in admits) or _refs._admits(source, admits)
+        ):
+            raise ValueError(
+                f"copy_to: {cls.__name__}.{field} can refer to rows of {source}: its copies would "
+                f"still refer to the rows of {source}, and a delete of those rows would count the "
+                "copies as referrers"
+            )
+
+
+def _admitted(at: Any) -> tuple:
+    """Every class a :class:`sqler.models._refs.Position` admits, at it or anywhere in it."""
+    found = tuple(at.admits)
+    for inner in (at.item, at.value):
+        if inner is not None:
+            found += _admitted(inner)
+    return found
+
+
+def copied(cls, db, table: str, count: int) -> int:
+    """``count``, the rows of ``cls`` a queryset's ``copy_to()`` copied into ``table``, once
+    the class and the class registered for ``table`` have been told that it was written (a
+    cache drops its entries). It writes no audit row and calls no hook: the copy is one
+    statement inside the database, and no row passes through Python. Rows of ``cls`` are
+    now kept in ``table`` (``registry.note``)."""
+    told(cls, db, table, None)
+    other = _class_of(table)
+    if other is not None and other is not cls:
+        other._table_written(db, table)
+    registry.note(table, cls)
+    return count
+
+
+def set_write(
+    cls, db, table: str, write: Callable[[], list], on_delete: Optional[str] = None
+) -> list:
     """A set-based write: ``write()`` writes the rows and returns each as
     ``(before, after)`` (``after`` ``None`` for a delete); it, what ``on_delete`` does about
     the rows that refer to the deleted ones (:func:`deleted`) and the class's row rules are

@@ -15,10 +15,12 @@ from typing import Optional
 import msgspec  # noqa: F401  (the msgspec base needs it installed)
 import pytest
 import pytest_asyncio
+
 from sqler import (
     AsyncSQLerDB,
     AsyncSQLerLiteModel,
     AsyncSQLerModel,
+    AsyncSQLerMsgspecModel,
     FTSIndex,
     SQLerDB,
     SQLerLiteModel,
@@ -90,6 +92,16 @@ class TrMsHolder(SQLerMsgspecModel):
     item: Optional[TrMsItem] = None
 
 
+class TrAMsItem(AsyncSQLerMsgspecModel):
+    __tablename__ = "tr_ams_items"
+    name: str = ""
+
+
+class TrAMsHolder(AsyncSQLerMsgspecModel):
+    name: str = ""
+    item: Optional[TrAMsItem] = None
+
+
 @pytest.fixture
 def db():
     d = SQLerDB.in_memory(shared=False)
@@ -154,10 +166,13 @@ def test_unbound_default_name_is_the_plural_on_every_route(db):
     [
         (TrAsItem, TrAsHolder, "tr_as_items"),
         (TrALiteItem, TrALiteHolder, "tr_alite_items"),
+        (TrAMsItem, TrAMsHolder, "tr_ams_items"),
     ],
-    ids=["async-pydantic", "async-lite"],
+    ids=["async-pydantic", "async-lite", "async-msgspec"],
 )
-async def test_unbound_async_class_has_one_table_on_every_route(adb, item_cls, holder_cls, expected):
+async def test_unbound_async_class_has_one_table_on_every_route(
+    adb, item_cls, holder_cls, expected
+):
     item = item_cls(name="it")
     await item.save(db=adb)
     holder = holder_cls(name="h", item=item)

@@ -1,10 +1,12 @@
 # sqler API Reference
 
-> Every code block is tested in CI via `tests/test_readme.py`.
+> The examples `[C01]` to `[C37]` have a hand-written test each in `tests/test_readme.py`; the
+> blocks of the [Database](#database) section are run as written by `tests/test_ensure_table.py`.
 
 ## Table of Contents
 
 - [Core — Models, Save, Query](#core--models-save-query)
+- [Model Backends](#model-backends)
 - [Query Builder](#query-builder)
 - [Relationships](#relationships)
 - [Safe Models & Concurrency](#safe-models--concurrency)
@@ -21,10 +23,11 @@
 
 ## Core — Models, Save, Query
 
-> **Deprecation notice:** `set_db()` is soft-deprecated. Prefer `using()` for class-level
-> binding and `save(db=)` / `delete(db=)` for per-call DB targeting. `set_db()` still
-> works but emits a `DeprecationWarning`. Examples below use `set_db()` for brevity;
-> see [Per-Call DB Binding](#per-call-db-binding) for the recommended pattern.
+> **Nothing is bound to a class.** A query goes through `Model.using(db)`; every other class
+> call takes `db=` (`save(db=)`, `delete(db=)`, `Model.from_id(id, db=)`,
+> `Model.add_index(field, db=)`, ...). Every example below passes the database that way; see
+> [Per-Call DB Binding](#per-call-db-binding). Binding a class to a database is deprecated:
+> see [`set_db()` and `bind()` (deprecated)](#set_db-and-bind-deprecated).
 
 ### [C01] Sync quickstart: models, save, query
 
@@ -44,18 +47,16 @@ class City(SQLerModel):
     prefecture: Prefecture | None = None
 
 db = SQLerDB.in_memory()
-Prefecture.set_db(db)
-City.set_db(db)
 
-kyoto = Prefecture(name="Kyoto", region="Kansai", population=2_585_000, foods=["matcha","yudofu"]).save()
-osaka = Prefecture(name="Osaka", region="Kansai", population=8_839_000, foods=["takoyaki"]).save()
-shiga = Prefecture(name="Shiga", region="Kansai", population=1_413_000, foods=["funazushi"]).save()
+kyoto = Prefecture(name="Kyoto", region="Kansai", population=2_585_000, foods=["matcha","yudofu"]).save(db=db)
+osaka = Prefecture(name="Osaka", region="Kansai", population=8_839_000, foods=["takoyaki"]).save(db=db)
+shiga = Prefecture(name="Shiga", region="Kansai", population=1_413_000, foods=["funazushi"]).save(db=db)
 
-City(name="Kyoto City", population=1_469_000, prefecture=kyoto).save()
-City(name="Osaka City", population=2_750_000, prefecture=osaka).save()
-City(name="Otsu", population=343_000, prefecture=shiga).save()
+City(name="Kyoto City", population=1_469_000, prefecture=kyoto).save(db=db)
+City(name="Osaka City", population=2_750_000, prefecture=osaka).save(db=db)
+City(name="Otsu", population=343_000, prefecture=shiga).save(db=db)
 
-big = Prefecture.query().filter(F("population") > 1_000_000).order_by("population", desc=True).all()
+big = Prefecture.using(db).filter(F("population") > 1_000_000).order_by("population", desc=True).all()
 assert [p.name for p in big][:2] == ["Osaka", "Kyoto"]
 ```
 
@@ -73,9 +74,8 @@ class AUser(AsyncSQLerModel):
 async def main():
     db = AsyncSQLerDB.in_memory()
     await db.connect()
-    AUser.set_db(db)
-    await AUser(name="Ada", age=36).save()
-    adults = await AUser.query().filter(F("age") >= 18).order_by("age").all()
+    await AUser(name="Ada", age=36).save(db=db)
+    adults = await AUser.using(db).filter(F("age") >= 18).order_by("age").all()
     assert any(u.name == "Ada" for u in adults)
     await db.close()
 
@@ -93,15 +93,14 @@ class User(SQLerModel):
     age: int
 
 db = SQLerDB.on_disk("app.db")
-User.set_db(db)  # binds model to table "users" (override with table="...")
 
-# Create / save
+# Create / save: the table is "users" (set `__tablename__` on the class to name another)
 u = User(name="Alice", age=30)
-u.save()
+u.save(db=db)
 print(u._id)  # assigned _id
 
 # Query
-adults = User.query().filter(F("age") >= 18).order_by("age").all()
+adults = User.using(db).filter(F("age") >= 18).order_by("age").all()
 print([a.name for a in adults])
 
 db.close()
@@ -121,12 +120,11 @@ class AUser(AsyncSQLerModel):
 async def main():
     db = AsyncSQLerDB.in_memory()
     await db.connect()
-    AUser.set_db(db)
 
     u = AUser(name="Ada", age=36)
-    await u.save()
+    await u.save(db=db)
 
-    adults = await AUser.query().filter(F("age") >= 18).order_by("age").all()
+    adults = await AUser.using(db).filter(F("age") >= 18).order_by("age").all()
     print([a.name for a in adults])
 
     await db.close()
@@ -136,7 +134,7 @@ asyncio.run(main())
 
 ### Per-Call DB Binding
 
-The recommended way to bind models is `using()` (class-level) and `save(db=)` / `delete(db=)` (instance-level):
+A class is not bound to a database: the call names it, with `using()` (queries) and `save(db=)` / `delete(db=)` (instance writes):
 
 ```python
 # Class-level: using() returns a queryset on db (no global mutation)
@@ -152,11 +150,71 @@ user = User(name="Alice", age=30)
 user.save(db=db1)       # writes to db1
 user.delete(db=db2)     # deletes from db2
 
+# Every other class call takes db= too
+User.add_index("email", unique=True, db=db)
+broken = User.validate_references(db=db)
+live = Document.active(db=db).all()       # SoftDeleteMixin
+hits = Post.search("python", db=db)       # SearchableMixin
+import_jsonl(User, "users.jsonl", db=db)  # every import that takes a model class
+
 # Works with all model variants: SQLerModel, AsyncSQLerModel,
-# SQLerLiteModel, AsyncSQLerLiteModel, SQLerMsgspecModel, SafeModel, AsyncSafeModel
+# SQLerLiteModel, AsyncSQLerLiteModel, SQLerMsgspecModel, AsyncSQLerMsgspecModel,
+# SafeModel, AsyncSafeModel
 ```
 
-Both patterns avoid global `set_db()` state and are safe for multi-DB scenarios.
+Both patterns keep the database in the call, so they are safe for multi-DB scenarios.
+
+**Every class call names its database.** A query goes through `using(db)` (`query()`,
+`all()`, `first()`, `count()` and `filter()` are its bound forms). Every other class call
+takes `db=None`, keyword-only, after its other parameters:
+
+- every base: `from_id(id_, *, db=None)`, `from_ids(ids, *, db=None)`,
+  `save_many(instances, *, db=None)`, `first_or_create(lookup, defaults=None, *, db=None)`,
+  `add_index(field, *, unique=False, name=None, where=None, db=None)`,
+  `ensure_index(field, *, unique=False, name=None, where=None, db=None)`;
+- the pydantic bases: `validate_references(*, db=None)`;
+- `SoftDeleteMixin` and `AsyncSoftDeleteMixin`: `active(*, db=None)`,
+  `with_deleted(*, db=None)`, `only_deleted(*, db=None)`, each the queryset of
+  `using(db)` narrowed;
+- `SearchableMixin` and `AsyncSearchableMixin`: `search(query, *, limit=100, offset=0, plain=False, db=None)`,
+  `search_ranked(query, *, limit=100, offset=0, plain=False, db=None)`,
+  `search_count(query, *, plain=False, db=None)`, `rebuild_search_index(*, db=None)`,
+  `drop_search_index(*, db=None)`; `create_search_index(db=None)` takes it positionally too;
+- `sqler.export`: `import_csv`, `import_json`, `import_jsonl`, `import_csv_string`,
+  `import_json_string`, `import_jsonl_string` and `async_import_jsonl`, each `..., db=None)`.
+
+Given `db`, a call reads and writes the class's table (the rule below) in that database,
+also on a class bound to another one, whose database it leaves as it was. The one thing
+read from elsewhere is a referenced row: it is read from the database its own class is
+bound to when it has one, else from `db` (see [C47]). Without `db`, the call uses the
+class's `set_db()` binding as before; with neither it raises `NotBoundError`, whose
+message says this rule (the search calls raise `ValueError`, as `FTSIndex` does). An async
+class given anything but an `AsyncSQLerDB`, and a sync class given anything but a `SQLerDB`
+(a subclass of either is taken as its parent is), raise `TypeError` naming the class, the
+type given and the database the class takes, before any statement runs and with the
+instance and the class as they were: on every call above but the search calls (which
+raise as `FTSIndex` does), and on `save()`, `delete()`, `refresh()`, `using()`, `set_db()`
+and `bind()` (these two let `None` through, as before).
+
+The search calls given `db` use an index of the class's definition (the class's index's
+fields, name and tokenizer, else its `FTS` configuration) on that database,
+and never create it: `create_search_index(db)` does. On a database that does not have the
+index they raise what a search of a missing index raises, `sqlite3.OperationalError`
+("no such table"); the class's own index, made on another database, is not used.
+`rebuild_search_index(db=)` on a database that has no table of the class indexes nothing
+and returns 0, as `FTSIndex.rebuild()` does. `drop_search_index(db=)` drops the index of `db` and forgets the class's index when that
+index is the one of `db`.
+
+**What "the async classes match the sync ones" means.** One test holds it:
+`tests/test_public_names.py::test_an_async_class_has_every_public_name_of_its_sync_twin`. It
+takes 16 pairs of sync and async classes (`SQLerDB`/`AsyncSQLerDB`,
+`SQLiteAdapter`/`AsyncSQLiteAdapter`, `SQLerQuery`/`AsyncSQLerQuery`,
+`SQLerQuerySet`/`AsyncSQLerQuerySet`, the four pydantic and lite model bases with their async
+twins, `MigrationRunner`, `Migration`, `TrackedModel`, `PartialUpdateMixin`, `HooksMixin`,
+`AuditLogMixin`, `FTSIndex` and `SearchableMixin` with their async twins) and checks that every public name (one with no
+leading underscore) of the sync class is on the async class, under the same name or with an
+`a` in front. It checks names only: not signatures, not behaviour, not private names, not
+names that only the async class has, and not classes or functions outside those pairs.
 
 **An instance belongs to the database it was read from or written to.** Every way of
 loading a row (`from_id()`, `from_ids()`, a queryset's `all()`, `first()`, `iter()`,
@@ -170,7 +228,7 @@ table and the id (a safe model raises `StaleVersionError`); the instance keeps i
 its changes and its home. To put a copy of a row into another database, save a new
 instance without the `_id` there (`Model(**fields).save(db=other)`). `save()`, `refresh()`, `delete()`
 and `get_audit_log()` use, in this order: the `db=` given, else the instance's home,
-else the class's `set_db()` database, else they raise `NotBoundError`. So a class bound
+else the class's bound database, else they raise `NotBoundError`. So a class bound
 to one database never writes a row read from another into its own, and a class bound to
 none needs `db=` only on the call that first reads or saves an instance. `refresh(db=)`
 reads from that database and moves the home there. A deleted instance has no `_id` and
@@ -182,9 +240,10 @@ with no `_id`; `msgspec.structs.replace()` keeps the `_id` but not the home, so 
 row again instead of saving such a copy.
 
 **Which table a class uses.** Every route (`save(db=)`, `using(db)`, references,
-`FTSIndex`, the registry) uses one rule: the table bound with `set_db()`, else
+`FTSIndex`, the registry) uses one rule: the table the class is bound to (see
+[`set_db()` and `bind()` (deprecated)](#set_db-and-bind-deprecated)), else
 `__tablename__`, else the plural of the class name (`User` → `users`; a name that
-already ends in `s` is kept). A class bound with `set_db(db, "a")` reads `a` from any
+already ends in `s` is kept). A class bound to the table `a` reads `a` from any
 database given to `using()`.
 
 **`using(db, table=None)`.** With `table`, that one query reads the named table; the
@@ -206,13 +265,13 @@ search index) and "no such column" still raise. Writes (`save()`, the insert of
 `first_or_create()`) create the table as before. A read never needs the write lock, so
 it does not wait behind another connection's write.
 
-**References without `set_db()`.** A model saved with `save(db=db)` can be held by
+**References.** A model saved with `save(db=db)` can be held by
 another model; read back through `using(db)`, the related model is in place. Model
 classes are registered under their table when they are defined, so a stored reference
 finds its class even when that class was defined after the row was written. A class
-that is only defined never takes the place of a class bound to the same table with
-`set_db()` (a later import of a same-named class, a class defined inside a function, a
-subclass); `set_db()` always registers. When the referenced row cannot be read because
+that is only defined never takes the place of a class bound to the same table
+(a later import of a same-named class, a class defined inside a function, a
+subclass); binding a class always registers it. When the referenced row cannot be read because
 its table is missing, the stored reference stays the `{"_table", "_id"}` dict; any
 other error (a row that does not fit its class) raises, sync and async alike.
 
@@ -225,6 +284,113 @@ return `[]` when the class's table does not exist.
 unique index refuses the insert because another caller inserted the same lookup first,
 it reads again and returns that row with `created` false. If the refusal came from a
 unique index on a field outside the lookup, the `UniqueConstraintError` reaches you.
+
+### `set_db()` and `bind()` (deprecated)
+
+`Model.set_db(db, table=None)` binds a class to one database and table, and the lite models'
+`bind()` is its alias. Both are deprecated: each emits a `DeprecationWarning` that states the
+rule of "Every class call names its database". Pass the database to the call instead:
+
+| Instead of | Write |
+|------------|-------|
+| `Model.set_db(db)` then `Model.query()` | `Model.using(db)` |
+| `Model.set_db(db)` then `obj.save()` | `obj.save(db=db)` |
+| `Model.set_db(db)` then `Model.from_id(1)` | `Model.from_id(1, db=db)` |
+| `Model.set_db(db, "archive")` | `__tablename__ = "archive"` on the class, or `Model.using(db, "archive")` for one query |
+
+`set_db()` also creates the class's table, registers the class under it and, with
+`__promoted__`, adds the promoted columns; a class that is never bound does the same at its
+first save. A class that is bound keeps working: a call given no `db` uses its binding, and a
+call given `db` uses `db` and leaves the binding as it was.
+
+## Model Backends
+
+A model class has one of three kinds of base, each with the names below. An empty cell means
+that base does not exist.
+
+| Backend (needs) | Plain, sync | Safe, sync | Plain, async | Safe, async |
+|-----------------|-------------|------------|--------------|-------------|
+| pydantic | `SQLerModel` | `SQLerSafeModel` | `AsyncSQLerModel` | `AsyncSQLerSafeModel` |
+| lite (nothing) | `SQLerLiteModel` | `SQLerLiteSafeModel` | `AsyncSQLerLiteModel` | `AsyncSQLerLiteSafeModel` |
+| msgspec | `SQLerMsgspecModel` | | `AsyncSQLerMsgspecModel` | |
+
+A safe model keeps a version for [optimistic locking](#c06-optimistic-versioning). Lite models
+are dataclasses and need neither pydantic nor msgspec (for Pyodide, say). `SQLerLiteModelBase`
+and `SQLerMsgspecModelBase` are the classes the lite and msgspec models above are built on:
+they hold the pydantic-like part of a model (`_id`, the stored snapshot, `model_validate()`,
+`model_dump()`, `get_field_names()`) and no database methods (`save()`, `query()`, ...). Subclass
+`SQLerLiteModel` or `SQLerMsgspecModel` (or their async twins) for a model you store;
+`is_lite_model()` and `is_msgspec_model()` test against the base, so any subclass of it counts.
+`AsyncSQLerMsgspecModel` has every call of `SQLerMsgspecModel` under the same name, awaited
+where it reads or writes, on an `AsyncSQLerDB`; it takes the async mixins (`AsyncTrackedModel`,
+`AsyncPartialUpdateMixin`, `AsyncHooksMixin`, `AsyncFullMixin`, `AsyncAuditMixin`,
+`AsyncAuditLogMixin`, `TimestampMixin`, `CacheAwareModel`). A field of an async msgspec model
+can hold a sync msgspec model, stored as a reference and loaded as that model; a sync model
+refuses an async one, as the lite pair does. A msgspec model made with `rename=` is stored
+under the Python names of its fields, and a filter, an index and a promoted column name them
+so; the encoded names are for JSON the program makes itself with msgspec.
+
+Every base loads a field as the type it declares. A lite model, which checks no type itself,
+turns a stored value back by the rules a save stores it by: a `datetime`, `date` or `time`
+from its ISO text, a `UUID`, a path, an `Enum` member, a `Decimal`, a `timedelta`, a `tuple`,
+`set` or `frozenset` from its list, and the same inside a `list`, `tuple`, `set` or the values
+of a `dict`. A value that is not in its type's stored form loads as it was saved, and a field
+typed as a union of two or more types besides `None` loads as stored. A load is `from_id()`,
+`from_ids()`, a query, a followed reference, `refresh()` and an import.
+
+A field may hold a plain dataclass instance on every base: it is stored as an object of all its
+fields, each in its own stored form, and loads as the dataclass the field declares, each field
+by the same rule (a lite model builds it from the fields `__init__` takes; pydantic and msgspec
+validate it). A dataclass that is a lite model is a reference, never a nested value. A model
+inside a dataclass value (in a field of it, in a list, tuple or dict there, or in a dataclass
+inside it) is refused on save with an `UnstorableValueError` that names its place, as
+`home.owner`: make it a field of the model, where it is a reference. A field may hold a plain
+`msgspec.Struct` the same way: it is stored in the shape msgspec reads back (an object of its
+fields by the names the Struct encodes them with, `rename=`; with its tag when it has one; a
+list when it is `array_like`), and loads as the Struct the field declares on the msgspec and
+lite bases; a sqler msgspec model inside one is refused as inside a dataclass.
+
+`PYDANTIC_AVAILABLE` and `MSGSPEC_AVAILABLE` are `True` when the package imports, and
+`PYDANTIC_VERSION` and `MSGSPEC_VERSION` hold its version string (`None` when it is missing).
+`get_model_backend()` returns `"pydantic"` when pydantic is installed and `"dataclass"` when it
+is not; it does not look for msgspec. `is_pydantic_model(cls)`, `is_lite_model(cls)` and
+`is_msgspec_model(cls)` say whether a class is a pydantic model, a lite model or a msgspec
+model; each gives `False` for any other class, and `is_pydantic_model()` and
+`is_msgspec_model()` give `False` when their package is missing. `require_pydantic(feature)`
+and `require_msgspec(feature)` return `None` when the package is installed and raise
+`ImportError` naming `feature` when it is not.
+
+```python
+from dataclasses import dataclass
+from sqler import (
+    SQLerModel, SQLerLiteModel, SQLerMsgspecModel,
+    get_model_backend, is_pydantic_model, is_lite_model, is_msgspec_model,
+    require_pydantic, require_msgspec,
+)
+
+print(get_model_backend())  # pydantic
+
+class P(SQLerModel):
+    name: str
+
+@dataclass
+class L(SQLerLiteModel):
+    name: str
+
+class M(SQLerMsgspecModel):
+    name: str
+
+print([(c.__name__, is_pydantic_model(c), is_lite_model(c), is_msgspec_model(c)) for c in (P, L, M, dict)])
+# [('P', True, False, False), ('L', False, True, False), ('M', False, False, True), ('dict', False, False, False)]
+
+require_pydantic("My feature")  # returns None: pydantic is installed
+require_msgspec("My feature")
+```
+
+Without pydantic, `sqler.SQLerModel` and the other pydantic names are placeholders: calling
+one, or subclassing it, calls `require_pydantic()` and raises `ImportError`.
+
+---
 
 ---
 
@@ -241,12 +407,11 @@ class Order(SQLerModel):
     items: list[dict] | None = None
 
 db = SQLerDB.in_memory()
-Order.set_db(db)
-Order(customer="C1", items=[{"sku":"RamenSet","qty":3}, {"sku":"Gyoza","qty":1}]).save()
-Order(customer="C2", items=[{"sku":"RamenSet","qty":1}]).save()
+Order(customer="C1", items=[{"sku":"RamenSet","qty":3}, {"sku":"Gyoza","qty":1}]).save(db=db)
+Order(customer="C2", items=[{"sku":"RamenSet","qty":1}]).save(db=db)
 
 expr = F(["items"]).any().where((F("sku") == "RamenSet") & (F("qty") >= 2))
-hits = Order.query().filter(expr).all()
+hits = Order.using(db).filter(expr).all()
 assert [h.customer for h in hits] == ["C1"]
 ```
 
@@ -263,20 +428,23 @@ class Prefecture(SQLerModel):
     region: str
     population: int
 
-Prefecture.set_db(db)
-Prefecture(name="A", region="x", population=10).save()
-Prefecture(name="B", region="x", population=2_000_000).save()
+Prefecture(name="A", region="x", population=10).save(db=db)
+Prefecture(name="B", region="x", population=2_000_000).save(db=db)
 
 db.create_index("prefectures", "population")
-Prefecture.ensure_index("population")
+Prefecture.ensure_index("population", db=db)
 
-q = Prefecture.query().filter(F("population") >= 1_000_000)
+q = Prefecture.using(db).filter(F("population") >= 1_000_000)
 sql, params = q.debug()
 assert isinstance(sql, str) and isinstance(params, list)
 
-plan = q.explain_query_plan(Prefecture.db().adapter)
+plan = q.explain_query_plan(db.adapter)
 assert plan and len(list(plan)) >= 1
 ```
+
+`add_index(field, *, unique=False, name=None, where=None, db=None)` and `ensure_index(...)`
+with the same parameters index the class's table in `db` when it is given, else in the
+class's bound database: `Prefecture.ensure_index("population", db=db)` needs no binding.
 
 ### [C15] Query builder patterns
 
@@ -295,32 +463,30 @@ class QueryOrder(SQLerModel):
     items: list[dict] | None = None
 
 db = SQLerDB.in_memory()
-QueryUser.set_db(db)
-QueryOrder.set_db(db)
 
-QueryUser(name="Ada", age=36, tags=["pro", "python"], tier=1).save()
-QueryUser(name="Bob", age=20, tags=["hobby"], tier=3).save()
+QueryUser(name="Ada", age=36, tags=["pro", "python"], tier=1).save(db=db)
+QueryUser(name="Bob", age=20, tags=["hobby"], tier=3).save(db=db)
 
-QueryOrder(customer="Ada", items=[{"sku": "ABC", "qty": 3}]).save()
-QueryOrder(customer="Bob", items=[{"sku": "XYZ", "qty": 1}]).save()
+QueryOrder(customer="Ada", items=[{"sku": "ABC", "qty": 3}]).save(db=db)
+QueryOrder(customer="Bob", items=[{"sku": "XYZ", "qty": 1}]).save(db=db)
 
-q1 = QueryUser.query().filter(F("tags").contains("pro"))
+q1 = QueryUser.using(db).filter(F("tags").contains("pro"))
 assert [u.name for u in q1.all()] == ["Ada"]
 
-q2 = QueryUser.query().filter(F("tier").isin([1, 2]))
+q2 = QueryUser.using(db).filter(F("tier").isin([1, 2]))
 assert [u.name for u in q2.all()] == ["Ada"]
 
-q3 = QueryUser.query().exclude(F("name").like("test%"))
+q3 = QueryUser.using(db).exclude(F("name").like("test%"))
 assert {u.name for u in q3.all()} == {"Ada", "Bob"}
 
 expr = F(["items"]).any().where((F("sku") == "ABC") & (F("qty") >= 2))
-q4 = QueryOrder.query().filter(expr)
+q4 = QueryOrder.using(db).filter(expr)
 assert [o.customer for o in q4.all()] == ["Ada"]
 
-sql, params = QueryUser.query().filter(F("age") >= 18).debug()
+sql, params = QueryUser.using(db).filter(F("age") >= 18).debug()
 assert isinstance(sql, str) and params == [18]
 
-plan = QueryUser.query().filter(F("age") >= 18).explain_query_plan(QueryUser.db().adapter)
+plan = QueryUser.using(db).filter(F("age") >= 18).explain_query_plan(db.adapter)
 assert plan and len(list(plan)) >= 1
 ```
 
@@ -336,20 +502,19 @@ class Product(SQLerModel):
     quantity: int
 
 db = SQLerDB.in_memory()
-Product.set_db(db)
 
-Product(name="Apple", price=1.50, quantity=100).save()
-Product(name="Banana", price=0.75, quantity=150).save()
-Product(name="Cherry", price=3.00, quantity=50).save()
+Product(name="Apple", price=1.50, quantity=100).save(db=db)
+Product(name="Banana", price=0.75, quantity=150).save(db=db)
+Product(name="Cherry", price=3.00, quantity=50).save(db=db)
 
-q = Product.query()
+q = Product.using(db)
 assert q.sum("quantity") == 300
 assert q.avg("price") == 1.75
 assert q.min("price") == 0.75
 assert q.max("price") == 3.00
 
 # With filters
-expensive = Product.query().filter(F("price") > 1.0)
+expensive = Product.using(db).filter(F("price") > 1.0)
 assert expensive.sum("quantity") == 150  # Apple + Cherry
 ```
 
@@ -364,12 +529,11 @@ class Item(SQLerModel):
     active: bool = True
 
 db = SQLerDB.in_memory()
-Item.set_db(db)
 
-Item(name="Widget", active=True).save()
+Item(name="Widget", active=True).save(db=db)
 
-assert Item.query().filter(F("active") == True).exists() == True
-assert Item.query().filter(F("name") == "Missing").exists() == False
+assert Item.using(db).filter(F("active") == True).exists() == True
+assert Item.using(db).filter(F("name") == "Missing").exists() == False
 ```
 
 ### [C25] Pagination
@@ -382,13 +546,12 @@ class Article(SQLerModel):
     views: int = 0
 
 db = SQLerDB.in_memory()
-Article.set_db(db)
 
 for i in range(25):
-    Article(title=f"Article {i}", views=i * 10).save()
+    Article(title=f"Article {i}", views=i * 10).save(db=db)
 
 # Get page 2 with 10 items per page
-page = Article.query().order_by("views", desc=True).paginate(page=2, per_page=10)
+page = Article.using(db).order_by("views", desc=True).paginate(page=2, per_page=10)
 
 assert isinstance(page, PaginatedResult)
 assert len(page.items) == 10
@@ -413,27 +576,26 @@ class Employee(SQLerModel):
     email: str
 
 db = SQLerDB.in_memory()
-Employee.set_db(db)
 
-Employee(name="Alice", age=25, email="alice@example.com").save()
-Employee(name="Bob", age=35, email="bob@test.org").save()
-Employee(name="Charlie", age=45, email="charlie@example.com").save()
+Employee(name="Alice", age=25, email="alice@example.com").save(db=db)
+Employee(name="Bob", age=35, email="bob@test.org").save(db=db)
+Employee(name="Charlie", age=45, email="charlie@example.com").save(db=db)
 
 # between (inclusive)
-mid_age = Employee.query().filter(F("age").between(30, 40)).all()
+mid_age = Employee.using(db).filter(F("age").between(30, 40)).all()
 assert [e.name for e in mid_age] == ["Bob"]
 
 # startswith
-alice = Employee.query().filter(F("name").startswith("Al")).all()
+alice = Employee.using(db).filter(F("name").startswith("Al")).all()
 assert [e.name for e in alice] == ["Alice"]
 
 # endswith
-example_emails = Employee.query().filter(F("email").endswith("@example.com")).all()
+example_emails = Employee.using(db).filter(F("email").endswith("@example.com")).all()
 assert len(example_emails) == 2
 
 # is_null / is_not_null
-Employee(name="NoEmail", age=30, email="").save()  # empty but not null
-all_with_email = Employee.query().filter(F("email").is_not_null()).all()
+Employee(name="NoEmail", age=30, email="").save(db=db)  # empty but not null
+all_with_email = Employee.using(db).filter(F("email").is_not_null()).all()
 assert len(all_with_email) == 4
 ```
 
@@ -447,16 +609,15 @@ class SoftUser(SoftDeleteMixin, SQLerModel):
     name: str
 
 db = SQLerDB.in_memory()
-SoftUser.set_db(db)
 
-active = SoftUser(name="Active").save()
-deleted = SoftUser(name="Deleted").save()
+active = SoftUser(name="Active").save(db=db)
+deleted = SoftUser(name="Deleted").save(db=db)
 deleted.soft_delete()
 
 # F("field") == None generates IS NULL (correct SQL)
 # F("field") != None generates IS NOT NULL
-active_users = SoftUser.query().filter(F("deleted_at") == None).all()
-deleted_users = SoftUser.query().filter(F("deleted_at") != None).all()
+active_users = SoftUser.using(db).filter(F("deleted_at") == None).all()
+deleted_users = SoftUser.using(db).filter(F("deleted_at") != None).all()
 
 assert len(active_users) == 1 and active_users[0].name == "Active"
 assert len(deleted_users) == 1 and deleted_users[0].name == "Deleted"
@@ -473,20 +634,161 @@ class Status(SQLerModel):
     label: str
 
 db = SQLerDB.in_memory()
-Status.set_db(db)
 
-Status(code="A", label="Active").save()
-Status(code="P", label="Pending").save()
-Status(code="C", label="Closed").save()
-Status(code="D", label="Draft").save()
+Status(code="A", label="Active").save(db=db)
+Status(code="P", label="Pending").save(db=db)
+Status(code="C", label="Closed").save(db=db)
+Status(code="D", label="Draft").save(db=db)
 
 # in_list with values
-open_statuses = Status.query().filter(F("code").in_list(["A", "P"])).all()
+open_statuses = Status.using(db).filter(F("code").in_list(["A", "P"])).all()
 assert len(open_statuses) == 2
 
 # Empty list returns nothing
-empty = Status.query().filter(F("code").in_list([])).all()
+empty = Status.using(db).filter(F("code").in_list([])).all()
 assert len(empty) == 0
+```
+
+### Expressions and querysets: `SQLerExpression`, `SQLerQuerySet`, `AsyncSQLerQuerySet`, `AsyncSQLerQuery`
+
+A comparison on a field (`F("age") >= 21`, `F("name").like("A%")`, ...) is a
+`SQLerExpression`: a piece of SQL (`.sql`) with its parameters (`.params`). `&` joins two
+expressions with AND, `|` with OR and `~` negates one; the parameters follow in order.
+`filter()`, `exclude()`, `or_filter()` and `having()` take one.
+
+`Model.query()` and `Model.using(db)` return a `SQLerQuerySet` on a sync model of any base
+(pydantic, lite, msgspec), and an `AsyncSQLerQuerySet` on an async model (its `all()`,
+`first()`, `count()` and the others are awaited). A queryset wraps a query on one table and
+gives back model instances. The query it wraps is a `SQLerQuery`, or on the async side an
+`AsyncSQLerQuery`, which `db.query(table)` also gives (`await db.query(table)` on an
+`AsyncSQLerDB`): the same chain of `filter()`, `order_by()`, `limit()` and so on, but `all()` and
+`first()` return the stored JSON text of each row, and `all_dicts()` the parsed documents.
+
+`limit(n)` and `offset(n)`, on every query and queryset, sync and async, take a whole number,
+`0` or more: an `int`, or anything `operator.index()` takes (a numpy integer, an `IntEnum`),
+kept as a plain `int`. Anything else is refused at the call, before any SQL exists: a `bool`,
+a `str` (`"5"` too), a `float`, `None` or any other type raises `TypeError`
+(`limit() takes a whole number, not str`), a negative number `ValueError`
+(`limit must be >= 0`). Convert a request parameter with `int()` first. `limit(0)` returns no
+row, `offset(0)` skips none.
+
+```python
+from sqler import SQLerDB, SQLerModel, SQLerExpression, SQLerQuerySet
+from sqler.query import SQLerField as F
+
+class User(SQLerModel):
+    name: str
+    age: int
+
+db = SQLerDB.in_memory()
+User(name="Ada", age=36).save(db=db)
+User(name="Bob", age=20).save(db=db)
+
+adult = F("age") >= 21
+named = F("name") == "Ada"
+assert isinstance(adult, SQLerExpression)
+both = adult & named          # AND
+neither = ~adult              # NOT
+print(both.sql, both.params)
+# (JSON_EXTRACT(data, '$.age') >= ?) AND (JSON_EXTRACT(data, '$.name') = ?) [21, 'Ada']
+print(neither.sql, neither.params)
+# NOT (JSON_EXTRACT(data, '$.age') >= ?) [21]
+
+qs = User.using(db).filter(both)
+assert isinstance(qs, SQLerQuerySet)
+print([u.name for u in qs.all()])  # ['Ada']
+```
+
+#### Copy rows to another table, and delete them: `copy_to()` and `delete()`
+
+`queryset.copy_to(table)` copies the rows `all()` would return into `table` as they are
+stored (the same `_id`, document, `_version` and promoted columns) in one
+`INSERT ... SELECT` inside the database, and returns how many it copied; the rows it read
+are unchanged. `queryset.delete(on_delete="restrict")` deletes the rows `all()` would return
+and returns the count: it is `delete_all()` under this name, with the same policy ([C09]) and
+unit. Together they move rows to an archive; inside `with db.transaction():` (`async with`
+on an `AsyncSQLerDB`) the copy and the delete both happen or, after an exception or a
+rollback, neither. Outside one, each is its own unit. The async querysets have both, awaited.
+
+The target table:
+
+- a missing one is made in the layout of the queryset's table: its promoted columns, the
+  class's `__checks__`, and `_version` where that table has it;
+- an existing one gets the promoted columns it lacks, as `ensure_table` adds them;
+- refused with `ValueError` before anything is written: the queryset's own table, a table
+  with a promoted column the queryset's table has not, and one with `_version` where the
+  queryset's table has none, or the reverse; a name sqler does not take for a table raises
+  `InvalidTableNameError`;
+- a row whose `_id` is in the target already fails the statement with
+  `UniqueConstraintError`, and nothing is copied; so does a row a unique index on the target
+  refuses. A copy of a table that does not exist copies 0 rows and makes nothing.
+
+`copy_to()`, `delete()`, `delete_all()`, `update()`, `update_n()` and `update_one()` take
+the rows `all()` on the same query returns, so a copy and a delete of one query take the same
+rows: every row the filter matches, or, with a limit or an offset, the rows `all()` returns
+for that query (`order_by("n").limit(3).delete()` deletes three rows; `update_n(n)` takes the
+first `n` of them). Such a write first sends the read's own statement, in one transaction with
+the write that takes the write lock before it, then writes those rows by id
+(`... WHERE _id IN (SELECT value FROM json_each(?))`), so no other connection changes them in
+between, and an update of the ordered field still changes the rows the old order picked.
+Without an `order_by()`, which rows those are is SQLite's choice, and so is the order of rows
+that tie on the order: give the query an order to pick specific rows. A query with no limit
+and no offset sends its own `WHERE`, as before; an order alone changes nothing. `copy_to()` refuses
+`select()` and `group_by()`: it copies whole rows. A cached query of the target's table drops its entries,
+and a search index on the target finds the copied rows (its triggers write them);
+`copy_to()` writes no audit row, sets no timestamp and calls no hook.
+
+A copied row refers to what the original referred to: its references name the rows they
+named, in their tables. A later delete of a referenced row counts the copy as a referrer
+under each policy, as it counts any row of that class in any table: `restrict` refuses,
+`cascade` deletes the copy, `set_null` clears its field. So `copy_to()` refuses, with a
+`ValueError` beginning `copy_to:` before any statement, a class with a field that can refer
+to rows of the table it copies from (its own kind, or another class stored in that table,
+through the field, an `Optional`, each entry of a list or each value of a dict): its copies
+would still refer to the rows the delete that follows removes, and would block it, be
+deleted with it, or lose the reference. A class that refers only to other tables copies as
+above.
+
+A filter through a reference field works on a queryset of any table, also one read with
+`using(db, table)`, and finds the same rows whichever class keeps the field in a promoted
+column: the condition on the related row is laid out as the database remembers the related
+table, as a query on that table is, also when a field of it is promoted after the queryset
+ran:
+
+```python
+from typing import Optional
+
+from sqler import SQLerDB, SQLerModel
+from sqler.query import F
+
+class Crew(SQLerModel):
+    name: str
+
+class Job(SQLerModel):
+    title: str
+    done: bool = False
+    crew: Optional[Crew] = None
+
+db = SQLerDB.in_memory()
+ada = Crew(name="Ada").save(db=db)
+bob = Crew(name="Bob").save(db=db)
+Job(title="paint", done=True, crew=ada).save(db=db)
+Job(title="sand", done=False, crew=ada).save(db=db)
+Job(title="weld", done=True, crew=bob).save(db=db)
+
+finished = Job.using(db).filter(F("done") == True)
+with db.transaction():  # the copy and the delete: both, or neither
+    print(finished.copy_to("jobs_archive"))  # 2
+    print(finished.delete())  # 2
+
+archive = Job.using(db, "jobs_archive")
+print([(j._id, j.title) for j in archive.order_by("title").all()])  # [(1, 'paint'), (3, 'weld')]
+print([j.title for j in archive.filter(Job.ref("crew").field("name") == "Ada").all()])  # ['paint']
+print([j.title for j in Job.using(db).all()])  # ['sand']
+
+Job(title="tile").save(db=db)
+print(Job.using(db).order_by("title").limit(1).delete())  # 1: 'sand', the first by title
+print([j.title for j in Job.using(db).all()])  # ['tile']
 ```
 
 ---
@@ -507,15 +809,13 @@ class User(SQLerModel):
     address: Address | None = None
 
 db = SQLerDB.in_memory()
-Address.set_db(db)
-User.set_db(db)
-home = Address(city="Kyoto", country="JP").save()
-user = User(name="Alice", address=home).save()
+home = Address(city="Kyoto", country="JP").save(db=db)
+user = User(name="Alice", address=home).save(db=db)
 
-got = User.from_id(user._id)
+got = User.from_id(user._id, db=db)
 assert got.address.city == "Kyoto"
 
-qs = User.query().filter(User.ref("address").field("city") == "Kyoto")
+qs = User.using(db).filter(User.ref("address").field("city") == "Kyoto")
 assert any(row.name == "Alice" for row in qs.all())
 ```
 
@@ -533,16 +833,14 @@ class User(SQLerModel):
     address: Address | None = None
 
 db = SQLerDB.in_memory()
-Address.set_db(db)
-User.set_db(db)
 
-home = Address(city="Kyoto", country="JP").save()
-user = User(name="Alice", address=home).save()
+home = Address(city="Kyoto", country="JP").save(db=db)
+user = User(name="Alice", address=home).save(db=db)
 
-loaded = User.from_id(user._id)
+loaded = User.from_id(user._id, db=db)
 assert loaded.address.city == "Kyoto"
 
-q = User.query().filter(User.ref("address").field("city") == "Kyoto")
+q = User.using(db).filter(User.ref("address").field("city") == "Kyoto")
 assert [row.name for row in q.all()] == ["Alice"]
 ```
 
@@ -604,15 +902,32 @@ class Node(SQLerModel):
 
 Node.model_rebuild()
 db = SQLerDB.in_memory()
-Node.set_db(db)
-a = Node(name="a").save()
-b = Node(name="b", next=a).save()
+a = Node(name="a").save(db=db)
+b = Node(name="b", next=a).save(db=db)
 a.next = b
 a.save()
 
-got = Node.from_id(a._id)
+got = Node.from_id(a._id, db=db)
 assert got.next.name == "b" and got.next.next is got
-assert Node.query().resolve(False).first().next == {"_table": Node.__tablename__, "_id": b._id}
+assert Node.using(db).resolve(False).first().next == {"_table": "nodes", "_id": b._id}
+```
+
+### `register()`: the class a table's rows belong to
+
+Defining a model class registers it under its table (see "References" above).
+`register(table, cls)` does that by hand: afterwards `resolve(table)` gives
+`cls` (and `tables()` holds it), which is the class a stored reference to that table loads as.
+A table registered again keeps the latest class.
+
+```python
+from sqler import SQLerModel, register, resolve, tables
+
+class Note(SQLerModel):
+    text: str
+
+register("notes_table", Note)
+print(resolve("notes_table") is Note, tables()["notes_table"] is Note, resolve("nothing"))
+# True True None
 ```
 
 ---
@@ -629,13 +944,12 @@ class Account(SQLerSafeModel):
     balance: int
 
 db = SQLerDB.in_memory()
-Account.set_db(db)
 
-acc = Account(owner="Ada", balance=100).save()
+acc = Account(owner="Ada", balance=100).save(db=db)
 acc.balance = 120
 acc.save()
 
-table = getattr(Account, "__tablename__", "accounts")
+table = "accounts"
 db.adapter.execute(f"UPDATE {table} SET _version = _version + 1 WHERE _id = ?;", [acc._id])
 db.adapter.commit()
 
@@ -667,8 +981,8 @@ A table made before versioning (by a plain model, by SQL, or copied without its 
 column) is read as it is, through every door (`from_id`, `from_ids`, `refresh`, a
 reference, `query()`, `using(db)`): each row at version 0, and no read changes the schema,
 so it works on a database that cannot be written. The first versioned write adds the
-column: a `save()` (a holder who read at version 0 then saves) or a set-based update. Only
-the sync safe bases' `set_db()` adds it when the class is bound. A database object asks
+column: a `save()` (a holder who read at version 0 then saves) or a set-based update. A
+database object asks
 once whether a table has the column, with the table's other columns (see "Promoted columns"
 in `docs/STORAGE.md`), and learns again when SQLite refuses a statement built for them.
 
@@ -682,10 +996,9 @@ class Account(SQLerSafeModel):
     balance: int
 
 db = SQLerDB.on_disk("bank.db")
-Account.set_db(db)
 
 acc = Account(owner="Ada", balance=100)
-acc.save()                 # _version == 0
+acc.save(db=db)            # _version == 0
 
 acc.balance = 120
 acc.save()                 # _version == 1
@@ -739,20 +1052,31 @@ class StrictCounter(SQLerSafeModel):
     _rebase_config = NO_REBASE_CONFIG
 
 db = SQLerDB.in_memory()
-Counter.set_db(db)
-StrictCounter.set_db(db)
 
 # Permissive: increments can be rebased
-c = Counter(value=0, count=0).save()
+c = Counter(value=0, count=0).save(db=db)
 c.value += 1
 c.count += 1
 c.save()  # Works even if version changed (for small deltas)
 
 # Strict: no automatic rebasing
-s = StrictCounter(value=0).save()
+s = StrictCounter(value=0).save(db=db)
 s.value += 1
 s.save()
 assert s._version == 1
+```
+
+A safe model with no `_rebase_config` uses `DEFAULT_REBASE_CONFIG`: rebasing is on, but only for
+the field named `count`, and only for a change of 1 (`max_delta=1`). `PERMISSIVE_REBASE_CONFIG`
+widens that to any field (still a change of 1), and `NO_REBASE_CONFIG` turns it off.
+
+```python
+from sqler import DEFAULT_REBASE_CONFIG
+
+print(DEFAULT_REBASE_CONFIG.allowed_fields, DEFAULT_REBASE_CONFIG.max_delta)  # {'count'} 1
+print(DEFAULT_REBASE_CONFIG.can_rebase("count", 1))  # True
+print(DEFAULT_REBASE_CONFIG.can_rebase("count", 2))  # False
+print(DEFAULT_REBASE_CONFIG.can_rebase("value", 1))  # False
 ```
 
 ---
@@ -766,10 +1090,9 @@ from sqler import SQLerDB, SQLerModel
 
 class BU(SQLerModel):
     name: str
-    age: int
+    age: int | None = None
 
 db = SQLerDB.in_memory()
-BU.set_db(db)
 
 rows = [{"name":"A"}, {"name":"B"}, {"_id": 42, "name":"C"}]
 ids = db.bulk_upsert("bus", rows)
@@ -788,10 +1111,9 @@ class BulkUser(SQLerModel):
     age: int | None = None
 
 db = SQLerDB.in_memory()
-BulkUser.set_db(db)
 
 rows = [{"name": "A"}, {"name": "B"}, {"_id": 42, "name": "C"}]
-ids = db.bulk_upsert(BulkUser.__tablename__, rows)
+ids = db.bulk_upsert("bulkusers", rows)
 assert len(ids) == 3 and 42 in ids
 ```
 
@@ -805,7 +1127,6 @@ class TxUser(SQLerModel):
     balance: int = 0
 
 db = SQLerDB.in_memory()
-TxUser.set_db(db)
 
 # Verify transaction API exists and works
 tx = db.transaction()
@@ -819,7 +1140,7 @@ with db.transaction():
     db.insert_document("txusers", {"name": "Alice", "balance": 100})
     db.insert_document("txusers", {"name": "Bob", "balance": 200})
 
-assert TxUser.query().count() == 2
+assert TxUser.using(db).count() == 2
 
 # Explicit commit/rollback methods
 tx = db.transaction()
@@ -827,7 +1148,7 @@ tx.__enter__()
 db.insert_document("txusers", {"name": "Charlie", "balance": 300})
 tx.commit()
 
-assert TxUser.query().count() == 3
+assert TxUser.using(db).count() == 3
 ```
 
 ### [C30] Transaction-aware model.save()
@@ -839,25 +1160,29 @@ class TxItem(SQLerModel):
     name: str
 
 db = SQLerDB.in_memory()
-TxItem.set_db(db)
 
 # Saves inside transaction respect rollback
 try:
     with db.transaction():
-        TxItem(name="A").save()
-        TxItem(name="B").save()
+        TxItem(name="A").save(db=db)
+        TxItem(name="B").save(db=db)
         raise RuntimeError("abort!")
 except RuntimeError:
     pass
 
 # Nothing was saved due to rollback
-assert TxItem.query().count() == 0
+assert TxItem.using(db).count() == 0
 
 # Without transaction, saves commit immediately
-TxItem(name="C").save()
-TxItem(name="D").save()
-assert TxItem.query().count() == 2
+TxItem(name="C").save(db=db)
+TxItem(name="D").save(db=db)
+assert TxItem.using(db).count() == 2
 ```
+
+An instance is not part of your transaction. After a rollback it keeps what the write gave it:
+an instance first saved inside the transaction has an `_id` that no row has, and an instance
+deleted inside it has no `_id` while its row is still there. Read the row again
+(`from_id()`, a query) before going on with it.
 
 ### `commit()`, `auto_commit()` and the adapter block
 
@@ -947,7 +1272,15 @@ before it raises `sqlite3.OperationalError: database is locked`. Pass it to
 `SQLiteAdapter(...)`, `AsyncSQLiteAdapter(...)`, their `on_disk()` and `in_memory()`, or
 `SQLerDB`/`AsyncSQLerDB` `.on_disk()` and `.in_memory()`; it is SQLite's `busy_timeout` on
 every connection the adapter opens (every connection of an async pool), and on a plain
-sync `":memory:"` database also the wait for another thread's transaction. The async
+sync `":memory:"` database also the wait for another thread's transaction. On a
+shared-cache in-memory database (the default of `in_memory()`), where SQLite calls no busy
+handler, the adapter waits for another connection's table lock itself, sync and async
+alike: the statement goes through once the lock is released, or raises
+`sqlite3.OperationalError: database table is locked` once `timeout_ms` has passed, and is
+never run twice. `timeout_ms=0` waits for nothing. `executescript()`, and `executemany()`
+given rows from an iterator rather than a list or tuple, raise at once: their earlier
+statements or rows have run or been taken and cannot be sent again. The async
+adapter's `close()` ends such a wait with `NotConnectedError`. The async
 adapter has a second wait, `acquire_timeout` (seconds): the wait for a connection of its
 own pool and for a turn in a transaction tasks share; `timeout_ms` is the wait for a lock
 another connection or process holds. A `PRAGMA busy_timeout = N` in `pragmas` says the same thing:
@@ -955,8 +1288,7 @@ without `timeout_ms` it sets the number, and beside a `timeout_ms` that differs 
 raises `ValueError`. `connect()` on the async adapter opens its pool once: on a connected
 adapter, or beside another `connect()` or a statement's own connect, it opens nothing more;
 a `connect()` that fails closes every connection it opened and raises the error that made it
-fail. A shared-cache in-memory database does not wait: SQLite calls no busy
-handler for its table locks, so such a statement raises "database table is locked" at once.
+fail.
 
 ### Async transactions shared by tasks
 
@@ -1038,9 +1370,9 @@ rows too, and theirs.
   data at every position. `validate_references()` still reports a reference in any field
   whose row is gone, and never a dict that is not a reference.
 - The fields that count for a table are those of every class whose rows live in it: the
-  class registered for it, a subclass that inherits its table, another class bound to it
-  (`__tablename__`, `set_db(db, table)`) and a class whose rows were read or written there
-  through `using(db, table)`. A class defined later, or bound later, counts from then on;
+  class registered for it, a subclass that inherits its table, another class that names it
+  (`__tablename__`) and a class whose rows were read or written there
+  through `using(db, table)`. A class defined later counts from then on;
   a class bound elsewhere still counts for the table it wrote to. Only classes this
   process has defined are known: import the modules of the classes that refer to a table
   before deleting from it.
@@ -1073,11 +1405,9 @@ class Post(SQLerModel):
     author: U | None = None
 
 db = SQLerDB.in_memory()
-U.set_db(db)
-Post.set_db(db)
 
-u = U(name="Writer").save()
-Post(title="Post A", author=u).save()
+u = U(name="Writer").save(db=db)
+Post(title="Post A", author=u).save(db=db)
 
 try:
     u.delete_with_policy(on_delete="restrict")
@@ -1097,7 +1427,7 @@ class X(SQLerModel):
     email: str | None = None
 
 db = SQLerDB.in_memory()
-X.set_db(db)
+X(name="a").save(db=db)
 
 db.create_index("xs", "email", unique=True)
 db.create_index("xs", "name", where="json_extract(data,'$.name') IS NOT NULL")
@@ -1121,10 +1451,8 @@ class Post(SQLerModel):
 
 # restrict: raises while references exist
 restrict_db = SQLerDB.in_memory()
-DIUser.set_db(restrict_db)
-Post.set_db(restrict_db)
-writer = DIUser(name="Writer").save()
-Post(title="Post A", author=writer).save()
+writer = DIUser(name="Writer").save(db=restrict_db)
+Post(title="Post A", author=writer).save(db=restrict_db)
 try:
     writer.delete_with_policy(on_delete="restrict")
 except ReferentialIntegrityError:
@@ -1132,21 +1460,17 @@ except ReferentialIntegrityError:
 
 # set_null: clears JSON ref before delete
 set_null_db = SQLerDB.in_memory()
-DIUser.set_db(set_null_db)
-Post.set_db(set_null_db)
-nullable = DIUser(name="Nullable").save()
-post = Post(title="Post B", author=nullable).save()
+nullable = DIUser(name="Nullable").save(db=set_null_db)
+post = Post(title="Post B", author=nullable).save(db=set_null_db)
 nullable.delete_with_policy(on_delete="set_null")
-assert Post.from_id(post._id).author is None
+assert Post.from_id(post._id, db=set_null_db).author is None
 
 # cascade: remove dependents recursively
 cascade_db = SQLerDB.in_memory()
-DIUser.set_db(cascade_db)
-Post.set_db(cascade_db)
-cascade = DIUser(name="Cascade").save()
-Post(title="Post C", author=cascade).save()
+cascade = DIUser(name="Cascade").save(db=cascade_db)
+Post(title="Post C", author=cascade).save(db=cascade_db)
 cascade.delete_with_policy(on_delete="cascade")
-assert Post.query().count() == 0
+assert Post.using(cascade_db).count() == 0
 ```
 
 ### [C17] Reference validation
@@ -1162,18 +1486,19 @@ class RefPost(SQLerModel):
     author: dict | None = None
 
 db = SQLerDB.in_memory()
-RefUser.set_db(db)
-RefPost.set_db(db)
 
-user = RefUser(name="Ada").save()
-dangling = RefPost(title="Lost", author={"_table": RefUser.__tablename__, "_id": user._id}).save()
-db.delete_document(RefUser.__tablename__, user._id)  # simulate manual deletion
+user = RefUser(name="Ada").save(db=db)
+dangling = RefPost(title="Lost", author={"_table": "refusers", "_id": user._id}).save(db=db)
+db.delete_document("refusers", user._id)  # simulate manual deletion
 
-broken = RefPost.validate_references()
+broken = RefPost.validate_references(db=db)
 assert broken and broken[0].row_id == dangling._id
 
 # Returned items are sqler.models.BrokenRef dataclasses
 ```
+
+`validate_references(*, db=None)` checks `db` when it is given, else the class's
+bound database.
 
 ### [C20] Index helpers
 
@@ -1187,7 +1512,7 @@ class IndexedUser(SQLerModel):
     address: dict | None = None
 
 db = SQLerDB.in_memory()
-IndexedUser.set_db(db)
+IndexedUser(name="Ada").save(db=db)
 
 # DB-level indexes on JSON paths
 db.create_index("indexedusers", "age")
@@ -1203,6 +1528,60 @@ db.create_index("indexedusers", "address._id")
 db.create_index("indexedusers", "address.city")
 ```
 
+`create_index(table, field, unique=False, name=None, where=None)` takes one field, or a list
+whose entries are a field or `(field, "asc" | "desc")` (either word in any case), and makes one
+index over them in that order. Each field is indexed where the table stores it: a promoted
+column, `_id` and `_version` as their column, any other field as
+`json_extract(data, '$.<path>')`, so a query that filters on a promoted field searches the
+index. Without `name=` the name is `idx_<table>_<field>` for one ascending field (dots as
+`_`), else each field so, with `_desc` after a descending one, joined by `__`
+(`idx_jobs_queue__priority_desc__eta`): two lists that differ in order or in a direction make
+two indexes, except that a field whose own name ends in `_desc` or holds `__` can share a name
+with a list (`"x_desc"` and `[("x", "desc")]`, `"a__b"` and `["a", "b"]`): the second call is
+skipped as the name exists, so give `name=`. An empty list, a field named twice or an entry of another shape raises
+`ValueError`, a name that is no identifier the `Invalid...Error` of that name, before anything
+is sent; a list given to `add_index()` and `ensure_index()` of every model base works the same.
+
+`where=` is SQL, laid out as a filter is: name a field by its JSON path,
+`json_extract(data, '$.status') = 'pending'`, or, for a promoted field, by its column,
+`status = 'pending'`, and both give the same index. `json_extract(data, '$.<field>')` (any
+case, any space after the comma, as a filter takes it) reads the column when `<field>` is
+promoted in the table, at `create_index` and when the index follows a promotion; the rewrite is
+a text replace, so a string literal holding that text is rewritten too (a filter does the
+same). A `where=` that already names the column, or a field that is not promoted, is kept as
+written, byte for byte.
+
+When a field is promoted after an index over it (or over it in its `where=`) was made
+(`ensure_table(promoted=...)`, the first save of a class with `__promoted__`,
+`move_promoted()`), the index is made again on the column in the same transaction, under its
+name, with its `unique` and its `where`. Only an index whose text is, byte for byte, one
+`create_index` makes is made again; an index written by hand is left as it is. If the new
+column holds what the unique index refuses (rows without the key now hold the column's
+`DEFAULT`), the whole promotion is rolled back with the unique error. An index made by an
+earlier release over a field that was already promoted is not made again by a second
+`create_index` (the name exists): `drop_index` it and make it again.
+
+```python
+from sqler import F, SQLerDB
+
+db = SQLerDB.in_memory()
+db.ensure_table("jobs", promoted={"status": "TEXT", "priority": "INTEGER"})
+for p in range(3):
+    db.insert_document("jobs", {"queue": "a", "status": "pending", "priority": p, "eta": p})
+
+db.create_index(
+    "jobs",
+    ["queue", ("priority", "desc"), "eta"],
+    where="status = 'pending' AND json_extract(data, '$.eta') >= 0",
+)
+(index,) = db.list_indexes("jobs")
+assert index["name"] == "idx_jobs_queue__priority_desc__eta"
+assert "(json_extract(data, '$.queue'), priority DESC, json_extract(data, '$.eta'))" in index["sql"]
+
+q = db.query("jobs").filter((F("queue") == "a") & (F("status") == "pending")).order_by("priority", desc=True)
+assert [d["priority"] for d in q.all_dicts()] == [2, 1, 0]
+```
+
 ### [C35] list_indexes and index_exists
 
 ```python
@@ -1213,7 +1592,7 @@ class Product(SQLerModel):
     price: float
 
 db = SQLerDB.in_memory()
-Product.set_db(db)
+Product(sku="a-1", price=1.0).save(db=db)
 
 # Create indexes
 db.create_index("products", "sku", unique=True, name="idx_products_sku")
@@ -1289,7 +1668,7 @@ column added later by other means is seen by a new database object (see
 [STORAGE.md](STORAGE.md)).
 
 **Promoting a field on a table that has rows.** A column added to an existing table
-(by `ensure_table`, by `set_db()` or the first save of a model class whose
+(by `ensure_table` or the first save of a model class whose
 `__promoted__` names it) takes each row's value out of the row's document and puts it
 in the column, in one transaction with the `ALTER TABLE` (one pass over the table, once;
 inside an open `transaction()` it is part of it). The column then holds what a `save()`
@@ -1309,7 +1688,7 @@ values in the documents, and a later write may have changed either. sqler record
 table of its own, `_sqler_promoted`, which columns hold their values (see
 [STORAGE.md](STORAGE.md)). A database object checks a table whose columns beside `data`
 are not all recorded there once, at whichever comes first: an ensure (`ensure_table`,
-`set_db()`, the first save of a model class), a read (`find_document`,
+the first save of a model class), a read (`find_document`,
 `find_documents`, `from_id`, `from_ids`, and a model query's `all()`, `first()`,
 `iter()`, `count()` and every other call that runs it, `update()` and `delete_all()`
 included) or a document write (above). The check reads the table once for documents that
@@ -1325,8 +1704,7 @@ A read writes no record. An ensure records what it found settled; when the datab
 takes no write then (opened read-only, or another connection holds the write lock past
 the busy timeout) the table is used all the same and the next ensure writes the record. A
 column that has to be added, or values that have to move, still need the write lock.
-`execute_sql()` runs your own SQL and is not checked. A search index made with
-`content_sync` on the table gets its triggers made again, inside the promotion, so that it
+`execute_sql()` runs your own SQL and is not checked. A search index on the table gets its triggers made again, inside the promotion, so that it
 reads a moved field from its column and still finds the rows.
 
 ```python
@@ -1449,7 +1827,7 @@ its `delete()` logs the stored values, not its edits.
 
 ### The set-based ways and the rows a delete's policy changes
 
-A queryset's `update()`, `update_one()`, `update_n()` and `delete_all()`, and the rows that
+A queryset's `update()`, `update_one()`, `update_n()`, `delete_all()` and `delete()`, and the rows that
 `delete_with_policy(on_delete="set_null")` nulls or `on_delete="cascade"` deletes (each by
 the rules of its own table's registered class), meet the same rules but the hooks:
 
@@ -1459,13 +1837,17 @@ the rules of its own table's registered class), meet the same rules but the hook
 | `TimestampMixin` / `AuditMixin` | each updated (or nulled) row gets `updated_at` (and `updated_by`) in the same statement, stored as `save()` stores it; one time for all rows of the statement (the strictly-later promise of `save()` is per instance). A field you name in the update is yours: `update(updated_at=x)` writes `x` |
 | `AuditLogMixin` | one `update` row per row changed (`changes` holds the old and new of each key that differs; the new value is what the row holds afterwards, F-expressions included) and one `delete` row per row deleted, in one unit with the write; each row is read and written inside that unit, so no other connection writes it in between |
 | `HooksMixin` | calls no hook; use a loop of `save()` where a hook must run |
+| a queryset's `copy_to()` | copies each row as it is stored, `_version` and stamps included, in one statement inside the database: it writes no audit row, sets no stamp, moves no version and calls no hook; a cache of the target table drops its entries |
 
 A class with no rule sends the one statement it sent before. `delete_all(on_delete=...)`
 meets the delete policy as `delete()` does ([C09]): the default `restrict` refuses while a
 row outside the set refers to a row in it, and nothing is deleted. A class with no rule that
 no class can refer to sends its one `DELETE`; otherwise the `DELETE` returns the rows it
-deleted, and the look, the policy and the audit rows join it in one unit. A queryset's
-order and limit do not narrow the `DELETE`: it deletes every row the filter matches.
+deleted, and the look, the policy and the audit rows join it in one unit. A queryset with a
+limit or an offset writes the rows `all()` on it returns, and only those: `update()`,
+`update_one()`, `update_n()` (the first `n` of them), `delete_all()`, `delete()` and
+`copy_to()`, and with them the policy's look and changes, the audit rows, the version moves
+and the search index.
 
 A write made with `db.*` directly (`db.bulk_upsert`, `db.insert_document`, `db.execute`) is
 below the model and meets no rule of any class.
@@ -1480,11 +1862,10 @@ class Post(TimestampMixin, SQLerModel):
     content: str
 
 db = SQLerDB.in_memory()
-Post.set_db(db)
 
 post = Post(title="Hello", content="World")
 post._set_timestamps()  # Call before save for auto-timestamps
-post = post.save()
+post = post.save(db=db)
 
 assert post.created_at is not None
 assert post.updated_at is not None
@@ -1499,9 +1880,8 @@ class Comment(SoftDeleteMixin, SQLerModel):
     text: str
 
 db = SQLerDB.in_memory()
-Comment.set_db(db)
 
-c = Comment(text="Nice post!").save()
+c = Comment(text="Nice post!").save(db=db)
 assert c.is_deleted == False
 
 c.soft_delete()
@@ -1513,7 +1893,7 @@ assert c.is_deleted == False
 assert c.deleted_at is None
 
 # Verify the comment was restored and can be queried
-all_comments = Comment.query().all()
+all_comments = Comment.using(db).all()
 assert len(all_comments) == 1
 assert all_comments[0].is_deleted == False
 ```
@@ -1536,13 +1916,9 @@ class AuditedUser(HooksMixin, SQLerModel):
         pass  # Log, notify, etc.
 
 db = SQLerDB.in_memory()
-AuditedUser.set_db(db)
 
-# Hooks are called manually by caller
-u = AuditedUser(email="  ALICE@Example.COM  ")
-if u.before_save():
-    u = u.save()
-    u.after_save()
+# save() calls before_save() and, once the row is written, after_save()
+u = AuditedUser(email="  ALICE@Example.COM  ").save(db=db)
 
 assert u.email == "alice@example.com"
 assert u.normalized == True
@@ -1557,27 +1933,29 @@ class Document(SoftDeleteMixin, SQLerModel):
     title: str
 
 db = SQLerDB.in_memory()
-Document.set_db(db)
 
-doc1 = Document(title="Active Doc").save()
-doc2 = Document(title="Deleted Doc").save()
-doc3 = Document(title="Another Active").save()
+doc1 = Document(title="Active Doc").save(db=db)
+doc2 = Document(title="Deleted Doc").save(db=db)
+doc3 = Document(title="Another Active").save(db=db)
 doc2.soft_delete()
 
 # active() - only non-deleted
-active = Document.active().all()
+active = Document.active(db=db).all()
 assert len(active) == 2
 assert all(d.deleted_at is None for d in active)
 
 # only_deleted() - only deleted
-deleted = Document.only_deleted().all()
+deleted = Document.only_deleted(db=db).all()
 assert len(deleted) == 1
 assert deleted[0].title == "Deleted Doc"
 
 # with_deleted() - all records
-all_docs = Document.with_deleted().all()
+all_docs = Document.with_deleted(db=db).all()
 assert len(all_docs) == 3
 ```
+
+`active(*, db=None)`, `with_deleted(*, db=None)` and `only_deleted(*, db=None)` read `db`
+through `using(db)` when it is given, else the class's bound database.
 
 ### [C37] HooksMixin auto-calling
 
@@ -1598,11 +1976,10 @@ class AuditedItem(HooksMixin, SQLerModel):
         self.save_count += 1
 
 db = SQLerDB.in_memory()
-AuditedItem.set_db(db)
 
 # Hooks are called automatically in save()
 item = AuditedItem(name="  HELLO WORLD  ")
-item = item.save()
+item = item.save(db=db)
 
 assert item.name == "hello world"
 assert item.normalized == True
@@ -1617,12 +1994,62 @@ class AbortableItem(HooksMixin, SQLerModel):
         return self.valid  # Abort if not valid
 
 db2 = SQLerDB.in_memory()
-AbortableItem.set_db(db2)
 
 try:
-    AbortableItem(name="test", valid=False).save()
+    AbortableItem(name="test", valid=False).save(db=db2)
 except RuntimeError as e:
     assert "before_save() returned False" in str(e)
+```
+
+### Async mixins and the combined mixins
+
+For an async model (`AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite twins) the mixins
+with I/O have async twins; the rules in the two tables above hold for them as for the sync ones.
+
+| Sync | Async | What differs |
+|------|-------|--------------|
+| `SoftDeleteMixin` | `AsyncSoftDeleteMixin` | `await row.soft_delete()` and `await row.restore()`; `active()`, `with_deleted()` and `only_deleted()` return async querysets |
+| `HooksMixin` | `AsyncHooksMixin` | the hooks are `async def` |
+| `AuditMixin` | `AsyncAuditMixin` | its current user is its own: set it with `AsyncAuditMixin.set_current_user(...)`; `AuditMixin.set_current_user(...)` does not reach it |
+| `AuditLogMixin` | `AsyncAuditLogMixin` | `await row.get_audit_log()`; the user of each audit row is the one set on `AsyncAuditMixin` |
+
+`TimestampMixin` has no async twin: an async model uses it as it is.
+
+`FullMixin` is `TimestampMixin`, `SoftDeleteMixin` and `HooksMixin` in one base, and
+`AsyncFullMixin` is `TimestampMixin`, `AsyncSoftDeleteMixin` and `AsyncHooksMixin`. Neither adds
+an audit mixin: add `AuditMixin` or `AuditLogMixin` (or their async twins) beside it.
+
+```python
+import asyncio
+from sqler import AsyncSQLerDB, AsyncSQLerModel, AsyncFullMixin, AsyncAuditMixin, AsyncAuditLogMixin
+
+class Post(AsyncFullMixin, AsyncSQLerModel):
+    title: str
+
+    async def before_save(self) -> bool:
+        self.title = self.title.strip()
+        return True
+
+class Entry(AsyncAuditMixin, AsyncAuditLogMixin, AsyncSQLerModel):
+    text: str
+
+async def main():
+    db = AsyncSQLerDB.in_memory()
+    await db.connect()
+
+    post = await Post(title="  hello ").save(db=db)
+    print(repr(post.title), post.created_at is not None)  # 'hello' True
+    await post.soft_delete()
+    print(post.is_deleted, len(await Post.active(db=db).all()), len(await Post.with_deleted(db=db).all()))
+    # True 0 1
+
+    AsyncAuditMixin.set_current_user("ada")
+    entry = await Entry(text="x").save(db=db)
+    print(entry.created_by, [(r["action"], r["user"]) for r in await entry.get_audit_log()])
+    # ada [('create', 'ada')]
+    await db.close()
+
+asyncio.run(main())
 ```
 
 ---
@@ -1637,7 +2064,7 @@ rows = db.execute_sql(
     ["A"],
 )
 ids = [r.get("_id") if isinstance(r, dict) else r[0] for r in rows]
-hydrated = [BU.from_id(i) for i in ids]
+hydrated = [BU.from_id(i, db=db) for i in ids]
 assert all(isinstance(h, BU) for h in hydrated)
 ```
 
@@ -1651,9 +2078,8 @@ class ReportUser(SQLerModel):
     email: str | None = None
 
 db = SQLerDB.in_memory()
-ReportUser.set_db(db)
-ReportUser(name="Ada", email="ada@example.com").save()
-ReportUser(name="Bob", email="bob@example.com").save()
+ReportUser(name="Ada", email="ada@example.com").save(db=db)
+ReportUser(name="Bob", email="bob@example.com").save(db=db)
 
 rows = db.execute_sql("""
   SELECT u._id, u.data
@@ -1678,13 +2104,12 @@ class LoggedUser(SQLerModel):
     age: int
 
 db = SQLerDB.in_memory()
-LoggedUser.set_db(db)
 
 # Enable logging
 query_logger.enable()
 
-LoggedUser(name="Ada", age=36).save()
-LoggedUser(name="Bob", age=25).save()
+LoggedUser(name="Ada", age=36).save(db=db)
+LoggedUser(name="Bob", age=25).save(db=db)
 
 # Note: query_logger captures queries when integrated with adapter
 # Here we demonstrate the logger API
@@ -1706,6 +2131,36 @@ assert "avg_time_ms" in stats
 
 query_logger.disable()
 query_logger.clear()
+```
+
+`query_logger` is a `QueryLogger`, the one instance the library logs to; make your own with
+`QueryLogger(max_logs=1000)` to keep a separate log (only `query_logger` is wired to the
+adapters). Each entry in `.logs` is a `QueryLog`: `sql`, `params`, `duration_ms`, `timestamp`,
+`rows_affected` and `error`; `str(log)` prints it as one line. `get_failed_queries()` returns
+the entries that have an `error`, and `capture()` is a context manager that collects the
+queries logged inside its block.
+
+`timed_query()` is a context manager that times a block: `timer.duration_ms` is the time since
+the block began, or its length once it ended.
+
+```python
+import time
+from sqler import QueryLog, QueryLogger, timed_query
+
+logger = QueryLogger(max_logs=10)
+logger.enable(log_to_logger=False)
+logger.log("SELECT 1", [], 0.5, rows_affected=1)
+logger.log("SELECT oops", [], 2.0, error="boom")
+
+first = logger.logs[0]
+print(isinstance(first, QueryLog), first.sql, first.duration_ms, first.rows_affected, first.error)
+# True SELECT 1 0.5 1 None
+print(str(logger.logs[1]))  # [2.00ms] SELECT oops | params=[] | ERROR: boom
+print(len(logger.get_failed_queries()), logger.get_stats()["count"])  # 1 2
+
+with timed_query() as timer:
+    time.sleep(0.01)
+print(timer.duration_ms >= 10)  # True
 ```
 
 ### [C38] Query caching
@@ -1731,7 +2186,56 @@ cache.invalidate_table("users")
 # Use the decorator for automatic caching
 @cached_query(ttl_seconds=60, table=User)
 def get_active_users():
-    return User.query().filter(F("active") == True).all()
+    return User.using(db).filter(F("active") == True).all()
+```
+
+`get_cache()` returns the process-wide `QueryCache` that a decorator without `cache=` uses,
+creating it with the defaults (1000 entries, 300 s) on first use; `configure_cache(max_size=1000,
+default_ttl_seconds=300, cleanup_interval_seconds=60)` replaces it with a new one and returns it.
+`async_cached_query` is `cached_query` for `async def` functions (same arguments; the result of
+the awaited call is cached).
+
+`cache.stats` is a `CacheStats`: `hits`, `misses`, `evictions`, `expirations`, `invalidations`,
+`size`, `max_size`, the `hit_rate` property and `to_dict()`. `misses` counts the lookups
+that found nothing: a `get()`, and a call of a decorated function that had to run.
+`cache.get_entry(key)` returns the
+`CacheEntry` of a key: `value`, `created_at`, `expires_at`, `hits`, `table`, and the properties
+`is_expired`, `age_seconds` and `ttl_remaining` (`None` for an entry that never expires).
+
+```python
+import asyncio
+from sqler import QueryCache, async_cached_query, cached_query, configure_cache, get_cache
+
+cache = configure_cache(max_size=50, default_ttl_seconds=60)
+print(get_cache() is cache)  # True
+
+calls = []
+
+@cached_query(ttl_seconds=30)
+def slow():
+    calls.append(1)
+    return [1, 2]
+
+slow()
+slow()
+print(len(calls), get_cache().stats.hits)  # 1 1
+
+c = QueryCache()
+c.set("k", "v", ttl_seconds=10, table="t")
+entry = c.get_entry("k")
+print(entry.value, entry.table, entry.is_expired, entry.ttl_remaining > 0)  # v t False True
+
+runs = []
+
+@async_cached_query(ttl_seconds=30, cache=c)
+async def double(x):
+    runs.append(x)
+    return x * 2
+
+async def main():
+    print(await double(2), await double(2), len(runs))  # 4 4 1
+
+asyncio.run(main())
 ```
 
 `table=` names what a cached function reads: a table name, or a model class, which stands
@@ -1765,18 +2269,18 @@ long it can serve rows that write replaced.
 ```python
 from sqler import export_csv, export_csv_string, import_csv
 
-# Export to file
-result = export_csv(User, "users.csv")
+# Export to file: the source is a queryset of the database
+result = export_csv(User.using(db), "users.csv")
 print(f"Exported {result.count} records ({result.size_bytes} bytes)")
 
 # Export specific fields
-export_csv(User, "users.csv", fields=["name", "email"], include_id=False)
+export_csv(User.using(db), "users.csv", fields=["name", "email"], include_id=False)
 
 # Export to string
-csv_string = export_csv_string(User)
+csv_string = export_csv_string(User.using(db))
 
 # Import from CSV
-result = import_csv(User, "users.csv")
+result = import_csv(User, "users.csv", db=db)
 print(f"Imported {result.succeeded}/{result.count} records")
 
 # Import with transform
@@ -1784,20 +2288,42 @@ def normalize(row):
     row["email"] = row["email"].lower()
     return row
 
-import_csv(User, "users.csv", transform=normalize)
+import_csv(User, "users.csv", transform=normalize, db=db)
 ```
 
 ```python
 from sqler import export_json, export_json_string, import_json
 
 # Export to file
-export_json(User, "users.json", indent=2)
+export_json(User.using(db), "users.json", indent=2)
 
 # Export to string
-json_string = export_json_string(User)
+json_string = export_json_string(User.using(db))
 
 # Import from JSON array file
-result = import_json(User, "users.json")
+result = import_json(User, "users.json", db=db)
+```
+
+An export takes a queryset (`User.using(db)`, narrowed with `filter()` when only some rows
+go out) and reads the database it was made on. Every export function returns an `ExportResult` (`path`, `format`, `count`, `size_bytes`,
+`to_dict()`); every import function returns an `ImportResult`: `count` rows read, `succeeded`
+and `failed` (also `success_count` and `error_count`), `success_rate`, and `errors`, a list with
+one dict per failed row (`row`, `data`, `error`, `error_type`). By default the first
+row that fails ends the import; with `skip_errors=True` the import goes on and `errors` holds
+every failed row.
+
+An empty CSV cell is a missing value: `None` in a field that can hold `None`, the field's
+default in any other (with `update_existing`, the row's value stays). The empty string is
+not an empty cell: an export writes it as one apostrophe and an import reads it back.
+
+```python
+from sqler import export_csv, import_csv
+
+result = export_csv(User.using(db), "users.csv")
+print(result.format, result.count, result.size_bytes > 0)  # csv 2 True
+
+result = import_csv(User, "users.csv", db=db)
+print(result.count, result.succeeded, result.failed, round(result.success_rate, 2))
 ```
 
 ### [C40] JSONL export/import
@@ -1806,13 +2332,13 @@ result = import_json(User, "users.json")
 from sqler import export_jsonl, import_jsonl, stream_jsonl
 
 # Export one record per line (streaming-friendly)
-export_jsonl(User, "users.jsonl")
+export_jsonl(User.using(db), "users.jsonl")
 
 # Import JSONL
-import_jsonl(User, "users.jsonl")
+import_jsonl(User, "users.jsonl", db=db)
 
 # Stream records without loading all into memory
-for record_json in stream_jsonl(User):
+for record_json in stream_jsonl(User.using(db)):
     process(record_json)
 ```
 
@@ -1833,7 +2359,7 @@ The async query and query set stream with `async for`:
 async for doc in (await db.query("users")).iter_dicts():
     process(doc)
 
-async for user in User.query().filter(F("age") > 30).iter():
+async for user in User.using(db).filter(F("age") > 30).iter():
     process(user)
 ```
 
@@ -1856,9 +2382,14 @@ is held in memory from then on.
 from sqler import async_export_jsonl, async_import_jsonl
 
 # Async versions for high-throughput scenarios
-await async_export_jsonl(User, "users.jsonl")
-await async_import_jsonl(User, "users.jsonl")
+await async_export_jsonl(User.using(db), "users.jsonl")
+await async_import_jsonl(User, "users.jsonl", db=db)
 ```
+
+Every import that takes a model class (`import_csv`, `import_json`, `import_jsonl`, their
+`_string` forms and `async_import_jsonl`) takes `db=None` as its last keyword: the rows are
+written to `db` and, with `update_existing`, read from it; without it, to the class's
+database. `import_jsonl(User, "users.jsonl", db=db)` needs no class binding.
 
 ### [C41] Full-text search (FTS5)
 
@@ -1870,10 +2401,8 @@ class Article(SQLerModel):
     content: str
     author: str
 
-Article.set_db(db)
-
 # Create FTS index on specific fields
-fts = FTSIndex(Article, fields=["title", "content"])
+fts = FTSIndex(Article, fields=["title", "content"], db=db)
 fts.create(db)  # also indexes the rows already in the table
 
 # Search
@@ -1893,7 +2422,7 @@ count = fts.count("Python")
 results = fts.search("C++ it's foo-bar", plain=True)
 
 # A new row is indexed by the triggers create() added
-new_article = Article(title="New", content="content").save()
+new_article = Article(title="New", content="content", author="x").save(db=db)
 assert fts.count("New") == 1
 ```
 
@@ -1911,36 +2440,33 @@ is syntax, so `C++`, `it's`, `foo-bar`, `AT&T` and `100%` work, `OR` and `NOT` a
 and the pieces of `foo-bar` must stand next to each other. Text with no word in it (empty,
 spaces, `*`) finds nothing. It never raises `SearchQueryError`.
 
-**`content_sync=True`** (the default): `create()` creates the model's table if it is
-missing and adds three triggers (`<index>_ai`, `<index>_au`, `<index>_ad`) that update the
-index on every insert, update and delete of the table, whoever writes: `save()`,
-`update()`, `bulk_upsert()`, the document methods, raw SQL, another connection. The index
-change commits or rolls back with the write. `index()` and `remove()` change nothing then:
-an entry leaves only with its row. **`content_sync=False`** adds no trigger: the index
-changes only through `index()`, `remove()`, `rebuild()` and the mixin's `save()` and
-`delete()`. The mixin keeps the entry in the database the row is written to or deleted from
-(inside that database's transaction), and only for a row of the index's table: a database
-that has no table of this index is left alone.
+**One way to keep an index:** `create()` creates the model's table if it is missing and
+adds three triggers (`<index>_ai`, `<index>_au`, `<index>_ad`) that update the index on every
+insert, update and delete of the table, whoever writes: `save()`, `update()`,
+`bulk_upsert()`, the document methods, raw SQL, another connection. The index change
+commits or rolls back with the write. An entry leaves only with its row. There is no
+`content_sync` argument (passing it raises `TypeError`), and `FTSIndex` has no `index()` or
+`remove()`: `rebuild()` repairs an index that a program wrote around. `copy_to()` into the
+table needs nothing: the triggers index the copied rows.
 
 **What a trigger costs:** each insert and delete of a row writes its index row as well;
 an update writes it only when the row id or the stored value of an indexed field changed,
 so an update of other fields costs one comparison of the indexed values per row.
 
-**`create()`** makes the index what its definition (fields, their order, tokenizer,
-`content_sync`) says, or refuses, in one transaction:
+**`create()`** makes the index what its definition (fields, their order, tokenizer)
+says, or refuses, in one transaction:
 
-- No index table: it is created; with `content_sync=True` the triggers are added and the
+- No index table: it is created, the triggers are added and the
   index is filled from the rows already in the table.
 - An index table with the same fields in the same order and the same tokenizer is kept,
   however its statement is spelled (an index made by an older sqler is the same index).
 - An index table with other fields, another order or another tokenizer: `create()` raises
   `SchemaError`, naming the index, what it has and what was asked, and changes nothing.
   To change an index, call `drop()` then `create()`.
-- With `content_sync=True`, a trigger that is missing or is not the one the definition
+- A trigger that is missing or is not the one the definition
   writes now (a field promoted to a column since, an older sqler) is replaced, and the
   index is filled again from the table. So an index made by an older sqler, without
   triggers, gets them and its missing rows on the first `create()` after the upgrade.
-- With `content_sync=False`, triggers of the index are dropped.
 
 A `create()` that fails leaves the index and its triggers as they were; one that finds
 everything as defined writes nothing (it does not wait for another writer's lock).
@@ -1950,10 +2476,14 @@ triggers, and every later write to the table then fails; `drop()` removes both, 
 
 Every way in indexes a field as it is stored: a promoted column from its column, any other
 field from `data` (a list or dict as its JSON text, a number as the number, `None` as
-nothing). `index(model)` reads the saved row, not the instance's unsaved values.
+nothing).
 
-A search index works on a `SQLerDB`: given an `AsyncSQLerDB` (through `db=` or the
-model's binding), every method raises `TypeError` before it sends anything.
+`FTSIndex` and `SearchableMixin` work on a `SQLerDB`; `AsyncFTSIndex` and
+`AsyncSearchableMixin` are their twins for an `AsyncSQLerDB` (below). An index given a
+database of the other kind (through `db=` or the class's bound database) raises `TypeError`,
+naming the index that takes it, before it sends anything. `SearchableMixin` on an async model
+class, and `AsyncSearchableMixin` on a sync one, raise `TypeError` when the class is made,
+naming the mixin to use.
 
 ```python
 from sqler import SearchableMixin
@@ -1965,18 +2495,71 @@ class Post(SearchableMixin, SQLerModel):
     class FTS:
         fields = ["title", "body"]
 
-Post.set_db(db)
-
 # Create index once
 Post.create_search_index(db)
 
 # Add posts: the index follows
-Post(title="Python Tips", body="Learn Python").save()
+Post(title="Python Tips", body="Learn Python").save(db=db)
 
 # Search
-results = Post.search("Python")
-count = Post.search_count("Python")
-results = Post.search("C++", plain=True)
+results = Post.search("Python", db=db)
+count = Post.search_count("Python", db=db)
+results = Post.search("C++", plain=True, db=db)
+```
+
+Every search call takes the database: `Post.create_search_index(db)`, then
+`Post.search("Python", db=db)`, `search_ranked(..., db=db)`, `search_count(..., db=db)`,
+`rebuild_search_index(db=db)` and `drop_search_index(db=db)` (see "Every class call names
+its database").
+
+The mixin works on every sync base (`SQLerModel`, `SQLerSafeModel`, `SQLerLiteModel`,
+`SQLerLiteSafeModel`, `SQLerMsgspecModel`). Without an `FTS` class it indexes every public
+field whose declared type holds text, on every base: `str`, `Optional[str]` and `str | None`,
+and a container of text such as `list[str]`, which is indexed as its JSON text. An `FTS`
+class names the fields itself.
+
+**On an `AsyncSQLerDB`** the same calls are awaited: `AsyncFTSIndex` has every public call of
+`FTSIndex` (`create`, `drop`, `rebuild`, `search`, `search_ranked`,
+`search_with_highlights`, `snippet`, `count`, `stats`, `optimize`) as a coroutine of the same
+name, arguments and result, and `AsyncSearchableMixin` the mixin's, on every async base. Both
+send the statements the sync ones send, so an index made through a `SQLerDB` is searched
+through an `AsyncSQLerDB` on the same file, and the reverse.
+
+```python
+import asyncio
+from sqler import AsyncFTSIndex, AsyncSearchableMixin, AsyncSQLerDB, AsyncSQLerModel
+
+class Note(AsyncSearchableMixin, AsyncSQLerModel):
+    title: str
+    body: str = ""
+
+async def main():
+    adb = AsyncSQLerDB.in_memory()
+    await adb.connect()
+    await Note.create_search_index(adb)          # every str field: title, body
+    await Note(title="Python Tips", body="Learn Python").save(db=adb)
+
+    hits = await Note.search("python", db=adb)
+    count = await Note.search_count("python", db=adb)
+    fts = AsyncFTSIndex(Note, ["title"], index_name="note_titles", db=adb)
+    await fts.create()
+    ranked = await fts.search_ranked("tips")
+    print([n.title for n in hits], count, [r.model.title for r in ranked])
+    # ['Python Tips'] 1 ['Python Tips']
+    await adb.close()
+
+asyncio.run(main())
+```
+
+`fts.stats()` returns an `FTSStats`: `table_name` (the index table), `indexed_rows`, `fields`
+and `total_tokens`, an estimate made from the length of the first indexed field.
+
+```python
+from sqler import FTSStats
+
+stats = fts.stats()
+print(isinstance(stats, FTSStats), stats.table_name, stats.indexed_rows, stats.fields)
+# True articles_fts 1 ['title', 'content']
 ```
 
 ### [C42] Connection pooling
@@ -2045,6 +2628,20 @@ result = await runner.migrate()
 
 Each async migration runs in one transaction with its version row, so inside `up()` and `down()` use one `adapter.execute()` per statement: `adapter.executescript()` fails there with "cannot run inside a transaction" (SQLite commits before a script), and the failed `result.error` says so.
 
+`migrate()` and `rollback()` return a `MigrationResult`: `success`, `applied` and `rolled_back`
+(lists of `MigrationRecord`), `current_version`, `target_version`, and `error` and
+`error_at_version` (both `None` unless a migration failed); `to_dict()` serialises it. A
+`MigrationRecord` is one migration that ran: `version`, `name`, `applied_at`, `duration_ms` and
+`checksum`.
+
+```python
+res = runner.migrate()
+print(res.success, res.current_version, res.target_version, res.error)  # True 1 1 None
+rec = res.applied[0]
+print(rec.version, rec.name, rec.duration_ms >= 0)  # 1 t True
+print(runner.rollback(target_version=0).rolled_back[0].version)  # 1
+```
+
 ### [C44] Metrics collection
 
 ```python
@@ -2054,8 +2651,8 @@ from sqler import metrics
 metrics.enable()
 
 # ... run queries (metrics collected automatically) ...
-User(name="Alice").save()
-User.query().all()
+User(name="Alice").save(db=db)
+User.using(db).all()
 
 # Get metrics data
 data = metrics.get_metrics()
@@ -2079,6 +2676,12 @@ metrics.reset()
 # Disable when done
 metrics.disable()
 ```
+
+`metrics` is a `MetricsCollector`, the instance the examples above use. Make another with
+`MetricsCollector()` to keep separate counts: each collector reads the same query logger, and
+`enable()` turns that logger on if it was off (`disable()` puts it back as it was).
+`enable(slow_threshold_ms=100.0, labels=None)` takes the slow-query threshold and extra
+Prometheus labels.
 
 ### [C45] Database operations (backup, restore, health)
 
@@ -2145,6 +2748,18 @@ stats = await async_get_stats(db)
 await async_vacuum(db)
 ```
 
+`async_is_healthy(db, timeout_ms=5000)` is the boolean form of `async_health_check()`, as
+`is_healthy()` is of `health_check()`. `async_checkpoint(db, mode="PASSIVE")` is the async
+`checkpoint()`: it returns `{"busy": ..., "log": ..., "checkpointed": ...}`, and a `mode` other
+than `PASSIVE`, `FULL`, `RESTART` or `TRUNCATE` (in either case) raises `ValueError`.
+
+```python
+from sqler import async_checkpoint, async_is_healthy
+
+print(await async_is_healthy(db))  # True
+print(await async_checkpoint(db, mode="TRUNCATE"))  # {'busy': 0, 'log': 0, 'checkpointed': 0}
+```
+
 ### [C46] Change tracking
 
 ```python
@@ -2155,10 +2770,8 @@ class User(TrackedModel, SQLerModel):
     email: str
     age: int
 
-User.set_db(db)
-
 user = User(name="Alice", email="alice@test.com", age=30)
-user.save()
+user.save(db=db)
 user.mark_clean()
 
 # Modify fields
@@ -2182,11 +2795,29 @@ On a tracked model `is_dirty` is a property (the tracker's answer), where the mo
 have an `is_dirty()` method: write `user.is_dirty`, and `SQLerModel.is_dirty(user)` for the
 base's answer.
 
-`TrackedModel` works with the sync pydantic and lite bases (`SQLerModel`, `SQLerSafeModel`,
-`SQLerLiteModel`, `SQLerLiteSafeModel`). An async model uses `AsyncTrackedModel` (with
-`AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite twins); `TrackedModel` on an async
-model raises `TypeError` when the class is defined. A msgspec model cannot take either:
-msgspec refuses the mixin when the class is defined.
+`TrackedModel` works with the sync bases (`SQLerModel`, `SQLerSafeModel`, `SQLerLiteModel`,
+`SQLerLiteSafeModel`, `SQLerMsgspecModel`). An async model uses `AsyncTrackedModel` (with
+`AsyncSQLerModel`, `AsyncSQLerSafeModel` and their lite and msgspec twins); `TrackedModel` on
+an async model raises `TypeError` when the class is defined. On a frozen msgspec model an
+assignment raises `AttributeError: immutable type: '<class>'`, as without the tracker.
+
+Under the model is a `ChangeTracker`, kept on the instance as `_tracker`: it holds the values
+from the last snapshot and a list of `FieldChange` records, one per assignment that changed a
+value (`field`, `old_value`, `new_value`, `changed_at`, and `to_dict()`).
+`user.get_change_history()` returns that list in order; `ChangeTracker.has_changes` is true once
+it holds one.
+
+```python
+from sqler import ChangeTracker, FieldChange
+
+user.mark_clean()
+user.name = "Bob"
+user.name = "Cy"
+history = user.get_change_history()
+print([(c.field, c.old_value, c.new_value) for c in history])
+# [('name', 'Alice', 'Bob'), ('name', 'Bob', 'Cy')]
+print(isinstance(history[0], FieldChange), type(user._tracker) is ChangeTracker)  # True True
+```
 
 ```python
 from sqler import PartialUpdateMixin, TrackedModel
@@ -2241,8 +2872,6 @@ class Item(DiffMixin, SQLerModel):
     name: str
     quantity: int
 
-Item.set_db(db)
-
 item1 = Item(name="Apple", quantity=10)
 item2 = Item(name="Apple", quantity=15)
 
@@ -2270,22 +2899,31 @@ SQLer provides a unified exception hierarchy under `sqler.exceptions`:
 - **Query errors**
   - `NoAdapterError` — query executed without adapter
   - `InvariantViolationError` — malformed row invariant (e.g., NULL JSON)
-  - `QueryTimeoutError` — query exceeded timeout
-- **Concurrency errors**
+  - `QueryTimeoutError` — for a query that exceeded a timeout. Nothing in sqler raises it today;
+    you can raise it yourself.
+- **Concurrency errors** — all are a `ConcurrencyError`, so `except ConcurrencyError` catches them
   - `StaleVersionError` — optimistic check failed (HTTP 409)
-  - `DeadlockError` — deadlock detected
+  - `DeadlockError` — for a deadlock. Nothing in sqler raises it today; a locked database
+    that stays locked raises `sqlite3.OperationalError`.
   - `LockTimeoutError` — unable to acquire lock
+  - `TransactionStateError` — a transaction can no longer be trusted to commit what it was told to (see "Nested transactions whose end fails")
 - **Integrity errors**
   - `ReferentialIntegrityError` — foreign key constraint violated
   - `UniqueConstraintError` — unique constraint violated (also a `sqlite3.IntegrityError`; see [D02](#d02-a-unique-index-that-refuses-a-row-raises-uniqueconstrainterror))
-- **Model errors**
+- **Model errors** — all are a `ModelError`, so `except ModelError` catches them
   - `NotBoundError` — model not bound to database
   - `NotFoundError` — model instance not found
   - `ValidationError` — model validation failed
   - `UnstorableValueError` — a value has no stored form (a kind sqler does not store; a `Decimal` or `timedelta` no number holds exactly, a `timedelta` being stored as its number of seconds; or `bytes` in a JSON document: promote the field to a `BLOB` column, or store text); `value` is the value and `field` its place in the document, where known; also a `TypeError`
+- **Batch errors**
+  - `BatchOperationError` — carries `succeeded` (a list of ids) and `failed` (a list of
+    `(index, message)` pairs) for a batch that partly failed. Nothing in sqler raises it today;
+    you can raise it yourself.
 - **Hook errors**
-  - `BeforeSaveError`, `AfterSaveError` — save hook failures
-  - `BeforeDeleteError`, `AfterDeleteError` — delete hook failures
+  - `BeforeSaveError`, `AfterSaveError`, `BeforeDeleteError`, `AfterDeleteError` — for hook
+    failures. Nothing in sqler raises them today: an exception a hook raises reaches the caller
+    as it is, and a `before_save()` or `before_delete()` that returns `False` raises
+    `RuntimeError`.
 
 All exceptions inherit from `SQLerError` for unified catching. SQLite exceptions (`sqlite3.*`) bubble with context.
 
@@ -2342,12 +2980,14 @@ SQLite allows only one writer at a time. If you see this error:
   `AsyncSQLerDB.on_disk("app.db", timeout_ms=15000)` (`acquire_timeout` is a different wait)
 - For high write loads, consider a write queue or single-writer pattern
 
-**"Model X is not bound"**
+**"Model X is not bound"** (`NotBoundError`)
 
-Call `Model.set_db(db)` before using the model:
+A class call needs the database it works on. Pass it:
 ```python
 db = SQLerDB.in_memory()
-User.set_db(db)  # Must call this before save/query
+User(name="Ada", age=36).save(db=db)   # a write
+users = User.using(db).all()           # a query
+user = User.from_id(1, db=db)          # every other class call
 ```
 
 **StaleVersionError on save**
@@ -2385,7 +3025,7 @@ await db.close()    # Clean up
 
 ```python
 # See generated SQL
-q = User.query().filter(F("age") > 30)
+q = User.using(db).filter(F("age") > 30)
 print(q.sql())     # SELECT _id, data FROM users WHERE ...
 print(q.params())  # [30]
 

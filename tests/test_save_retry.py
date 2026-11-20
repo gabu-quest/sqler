@@ -15,11 +15,19 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import pytest
-from sqler import AsyncSQLerDB, SQLerDB
+
+from sqler import (
+    DEFAULT_REBASE_CONFIG,
+    PERMISSIVE_REBASE_CONFIG,
+    AsyncPartialUpdateMixin,
+    AsyncSQLerDB,
+    AsyncTrackedModel,
+    SQLerDB,
+)
 from sqler.adapter.asynchronous import AsyncSQLiteAdapter
 from sqler.adapter.synchronous import SQLiteAdapter
 from sqler.exceptions import LockTimeoutError, StaleVersionError
@@ -30,9 +38,17 @@ from sqler.models.lite.async_model import AsyncSQLerLiteModel
 from sqler.models.lite.async_safe import AsyncSQLerLiteSafeModel
 from sqler.models.lite.model import SQLerLiteModel
 from sqler.models.lite.safe import SQLerLiteSafeModel
+from sqler.models.mixins import TimestampMixin
 from sqler.models.model import SQLerModel
 from sqler.models.safe import SQLerSafeModel
-from sqler.models.utils import NO_REBASE_CONFIG, RebaseConfig
+from sqler.models.utils import (
+    NO_REBASE_CONFIG,
+    RebaseConfig,
+    apply_numeric_scalar_deltas,
+    can_rebase_deltas,
+    compute_numeric_scalar_deltas,
+)
+from sqler.tracking import PartialUpdateMixin, TrackedModel
 
 KINDS = ["sync", "async", "lite_sync", "lite_async"]
 LOCKED = "database is locked"
@@ -700,7 +716,13 @@ def _flat(doc) -> tuple:
 
 def _stored(row) -> tuple:
     child = row["child"]
-    return (row["title"], row["count"], row["hits"], row["tags"], None if child is None else child["_id"])
+    return (
+        row["title"],
+        row["count"],
+        row["hits"],
+        row["tags"],
+        None if child is None else child["_id"],
+    )
 
 
 def _rebase(kind, steps):
@@ -722,9 +744,21 @@ def _sets_a_date(rows, doc):
 
 
 _THEIR_EDITS = [
-    ("title", lambda r, d: setattr(d, "title", "theirs"), ("theirs", 11, 0, ["a"], 1, {}, [], None)),
-    ("dict-key", lambda r, d: d.meta.update(k="v"), ("first", 11, 0, ["a"], 1, {"k": "v"}, [], None)),
-    ("typed-list", lambda r, d: setattr(d, "kids", [r.c2, r.c1]), ("first", 11, 0, ["a"], 1, {}, [2, 1], None)),
+    (
+        "title",
+        lambda r, d: setattr(d, "title", "theirs"),
+        ("theirs", 11, 0, ["a"], 1, {}, [], None),
+    ),
+    (
+        "dict-key",
+        lambda r, d: d.meta.update(k="v"),
+        ("first", 11, 0, ["a"], 1, {"k": "v"}, [], None),
+    ),
+    (
+        "typed-list",
+        lambda r, d: setattr(d, "kids", [r.c2, r.c1]),
+        ("first", 11, 0, ["a"], 1, {}, [2, 1], None),
+    ),
     ("none", lambda r, d: setattr(d, "child", None), ("first", 11, 0, ["a"], None, {}, [], None)),
 ]
 _THEIR_EDIT_CASES = [
@@ -732,11 +766,15 @@ _THEIR_EDIT_CASES = [
     for name, edit, expect in _THEIR_EDITS
     for kind in KINDS
 ] + [
-    # a date field: the pydantic base gives a date back, the lite bases the stored string;
-    # the async pydantic bases cannot save one at all, so there is no case for them
-    pytest.param("sync", _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], date(2026, 11, 14)), id="date-sync"),
-    pytest.param("lite_sync", _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], "2026-11-14"), id="date-lite_sync"),
-    pytest.param("lite_async", _sets_a_date, ("first", 11, 0, ["a"], 1, {}, [], "2026-11-14"), id="date-lite_async"),
+    # a date field: every base gives a date back; the async pydantic bases cannot save one
+    # at all, so there is no case for them
+    pytest.param(
+        kind,
+        _sets_a_date,
+        ("first", 11, 0, ["a"], 1, {}, [], date(2026, 11, 14)),
+        id=f"date-{kind}",
+    )
+    for kind in ("sync", "lite_sync", "lite_async")
 ]
 
 
@@ -770,7 +808,10 @@ def test_rebase_where_both_changed_a_field_to_different_values_raises_and_writes
         return _stored(stored), stored["_version"], _held(mine), mine._version
 
     assert _rebase(kind, steps) == (
-        ("theirs", 10, 0, ["a"], 1), 1, ("mine", 11, 0, ["a"], 1), 0,
+        ("theirs", 10, 0, ["a"], 1),
+        1,
+        ("mine", 11, 0, ["a"], 1),
+        0,
     )
 
 
@@ -786,7 +827,10 @@ def test_rebase_where_both_changed_a_field_to_one_value_adds_the_counter(kind):
         return _stored(stored), stored["_version"], _held(mine), mine._version
 
     assert _rebase(kind, steps) == (
-        ("agreed", 11, 0, ["a"], 1), 2, ("agreed", 11, 0, ["a"], 1), 2,
+        ("agreed", 11, 0, ["a"], 1),
+        2,
+        ("agreed", 11, 0, ["a"], 1),
+        2,
     )
 
 
@@ -795,10 +839,22 @@ def _moves_its_date(rows, doc):
 
 
 _MY_EDITS = [
-    ("list", lambda r, d: d.tags.append("b"), ("theirs", 11, 0, ["a", "b"], 1, {"k": 1}, [1], None)),
+    (
+        "list",
+        lambda r, d: d.tags.append("b"),
+        ("theirs", 11, 0, ["a", "b"], 1, {"k": 1}, [1], None),
+    ),
     ("dict-key", lambda r, d: d.meta.update(k=2), ("theirs", 11, 0, ["a"], 1, {"k": 2}, [1], None)),
-    ("reference", lambda r, d: setattr(d, "child", r.c2), ("theirs", 11, 0, ["a"], 2, {"k": 1}, [1], None)),
-    ("typed-list", lambda r, d: setattr(d, "kids", [r.c2]), ("theirs", 11, 0, ["a"], 1, {"k": 1}, [2], None)),
+    (
+        "reference",
+        lambda r, d: setattr(d, "child", r.c2),
+        ("theirs", 11, 0, ["a"], 2, {"k": 1}, [1], None),
+    ),
+    (
+        "typed-list",
+        lambda r, d: setattr(d, "kids", [r.c2]),
+        ("theirs", 11, 0, ["a"], 1, {"k": 1}, [2], None),
+    ),
 ]
 _MY_EDIT_CASES = [
     pytest.param(kind, None, edit, expect, id=f"{name}-{kind}")
@@ -806,8 +862,13 @@ _MY_EDIT_CASES = [
     for kind in KINDS
 ] + [
     # the async pydantic bases cannot save a date at all, so there is no case for them
-    pytest.param(kind, date(2026, 11, 14), _moves_its_date,
-                 ("theirs", 11, 0, ["a"], 1, {"k": 1}, [1], date(2026, 11, 15)), id=f"date-{kind}")
+    pytest.param(
+        kind,
+        date(2026, 11, 14),
+        _moves_its_date,
+        ("theirs", 11, 0, ["a"], 1, {"k": 1}, [1], date(2026, 11, 15)),
+        id=f"date-{kind}",
+    )
     for kind in ("sync", "lite_sync", "lite_async")
 ]
 
@@ -817,7 +878,13 @@ def test_rebase_of_a_model_never_reloaded_keeps_the_field_only_it_changed(kind, 
     # its snapshot is the payload it saved, not a row it read
     async def steps(rows, _mine, _theirs):
         mine = rows.doc_cls(
-            title="own", count=10, tags=["a"], child=rows.c1, kids=[rows.c1], meta={"k": 1}, when=when
+            title="own",
+            count=10,
+            tags=["a"],
+            child=rows.c1,
+            kids=[rows.c1],
+            meta={"k": 1},
+            when=when,
         )
         await _aw(mine.save())
         theirs = await _aw(rows.doc_cls.from_id(mine._id))
@@ -893,7 +960,10 @@ def test_rebase_keeps_a_list_the_other_writer_changed_in_place(kind):
         await _aw(mine.save())
         return _stored(await rows.row()), _held(mine)
 
-    assert _rebase(kind, steps) == (("first", 11, 0, ["a", "b"], 1), ("first", 11, 0, ["a", "b"], 1))
+    assert _rebase(kind, steps) == (
+        ("first", 11, 0, ["a", "b"], 1),
+        ("first", 11, 0, ["a", "b"], 1),
+    )
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -912,7 +982,13 @@ def test_rebase_keeps_a_reference_the_other_writer_set(kind):
             child._id,
         )
 
-    assert _rebase(kind, steps) == (("first", 11, 0, ["a"], 2), ("first", 11, 0, ["a"], 2), True, "two", 2)
+    assert _rebase(kind, steps) == (
+        ("first", 11, 0, ["a"], 2),
+        ("first", 11, 0, ["a"], 2),
+        True,
+        "two",
+        2,
+    )
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -949,7 +1025,9 @@ def test_rebase_of_a_deleted_row_raises_stale(kind):
     "edit",
     [
         pytest.param(lambda d: setattr(d, "count", d.count + 2), id="delta-above-max"),
-        pytest.param(lambda d: (setattr(d, "count", d.count + 1), setattr(d, "hits", 1)), id="two-counters"),
+        pytest.param(
+            lambda d: (setattr(d, "count", d.count + 1), setattr(d, "hits", 1)), id="two-counters"
+        ),
     ],
 )
 def test_change_that_does_not_qualify_raises_and_touches_nothing(kind, edit, monkeypatch):
@@ -1095,7 +1173,9 @@ def test_a_save_that_raises_on_its_second_rebase_leaves_the_model_as_it_was(kind
         ]
 
         def bump():
-            return f"UPDATE rb_doc SET data = {writes.pop(0)}, _version = _version + 1 WHERE _id = 1;"
+            return (
+                f"UPDATE rb_doc SET data = {writes.pop(0)}, _version = _version + 1 WHERE _id = 1;"
+            )
 
         async def wrapped(table, _id, payload, version):
             if writes and table == "rb_doc":
@@ -1181,15 +1261,13 @@ def test_two_rebases_inside_one_save_keep_both_foreign_saves(kind):
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_lock_on_the_reference_read_of_the_merged_row_writes_it_once(kind, sleeps):
+def test_lock_on_the_reread_of_the_row_before_the_merge_writes_it_once(kind, sleeps):
     async def steps(rows, mine, theirs):
         db = rows.db
         real = db._read_rows
         locked = [1]
-        reads = [0]
 
         def pick():
-            reads[0] += 1
             if locked[0]:
                 locked[0] -= 1
                 raise sqlite3.OperationalError(TABLE_LOCKED)
@@ -1231,6 +1309,279 @@ def test_lock_on_the_reference_read_of_the_merged_row_writes_it_once(kind, sleep
         del db.upsert_with_version
         row = await rows.row()
         # the first write is refused as stale; the second is the only one that lands
-        return row["count"], row["_version"], row["child"]["_id"], mine.child._id, locked[0], writes[0]
+        return (
+            row["count"],
+            row["_version"],
+            row["child"]["_id"],
+            mine.child._id,
+            locked[0],
+            writes[0],
+        )
 
     assert _rebase(kind, steps) == (11, 2, 2, 2, 0, 2)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_lock_on_reading_the_reference_of_the_merged_row_is_waited_out(kind, sleeps):
+    # the re-read passes; the first read of the child the merged row names finds a lock
+    async def steps(rows, mine, theirs):
+        db = rows.db
+        real = db._read_rows
+        locked = [1]
+
+        def pick(table):
+            if table == "rb_child" and locked[0]:
+                locked[0] -= 1
+                raise sqlite3.OperationalError(TABLE_LOCKED)
+
+        if kind in ("async", "lite_async"):
+
+            async def wrapped(table, *args, **kwargs):
+                pick(table)
+                return await real(table, *args, **kwargs)
+
+        else:
+
+            def wrapped(table, *args, **kwargs):
+                pick(table)
+                return real(table, *args, **kwargs)
+
+        theirs.child = rows.c2
+        await _aw(theirs.save())
+        db._read_rows = wrapped
+        mine.count += 1
+        await _aw(mine.save())
+        del db._read_rows
+        row = await rows.row()
+        return (
+            row["count"],
+            row["_version"],
+            row["child"]["_id"],
+            mine.child._id,
+            locked[0],
+            len(sleeps),
+        )
+
+    # two sleeps: one after the conflict, one after the lock
+    assert _rebase(kind, steps) == (11, 2, 2, 2, 0, 2)
+
+
+class TsDoc(TimestampMixin, SQLerSafeModel):
+    __tablename__ = "ts_doc"
+    title: str = ""
+    count: int = 0
+
+
+class ATsDoc(TimestampMixin, AsyncSQLerSafeModel):
+    __tablename__ = "ts_doc"
+    title: str = ""
+    count: int = 0
+
+
+@dataclass
+class LTsDoc(TimestampMixin, SQLerLiteSafeModel):
+    __tablename__ = "ts_doc"
+    title: str = ""
+    count: int = 0
+
+
+@dataclass
+class ALTsDoc(TimestampMixin, AsyncSQLerLiteSafeModel):
+    __tablename__ = "ts_doc"
+    title: str = ""
+    count: int = 0
+
+
+TIMESTAMPED = {"sync": TsDoc, "async": ATsDoc, "lite_sync": LTsDoc, "lite_async": ALTsDoc}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebase_of_a_timestamped_model_keeps_its_own_stamp(kind, ticking_clock):
+    # both saves move updated_at, to two different values; the stamp is no conflict
+    cls = TIMESTAMPED[kind]
+    start = datetime(2026, 1, 1, 12, 0, 0, 1, tzinfo=timezone.utc)
+
+    async def scenario():
+        db = AsyncSQLerDB.in_memory() if kind in ("async", "lite_async") else SQLerDB.in_memory()
+        await _aw(db.connect()) if hasattr(db, "connect") else None
+        try:
+            first = await _aw(cls(title="first").save(db=db))
+            mine, theirs = (
+                await _aw(cls.from_id(first._id, db=db)),
+                await _aw(cls.from_id(first._id, db=db)),
+            )
+            theirs.title = "theirs"
+            await _aw(theirs.save(db=db))
+            mine.count += 1
+            await _aw(mine.save(db=db))
+            fresh = await _aw(cls.from_id(first._id, db=db))
+            return (
+                (fresh.title, fresh.count, fresh._version, fresh.updated_at),
+                (mine.title, mine.count, mine._version, mine.updated_at),
+                theirs.updated_at,
+            )
+        finally:
+            await _aw(db.close())
+
+    mine_stamp = start + timedelta(milliseconds=2)
+    assert asyncio.run(scenario()) == (
+        ("theirs", 1, 2, mine_stamp),
+        ("theirs", 1, 2, mine_stamp),
+        start + timedelta(milliseconds=1),
+    )
+
+
+class PsCounter(PartialUpdateMixin, TrackedModel, SQLerSafeModel):
+    __tablename__ = "ps_counter"
+    _rebase_config = RebaseConfig(allowed_fields={"hits"}, max_delta=5)
+    hits: int = 0
+    label: str = ""
+
+
+class APsCounter(AsyncPartialUpdateMixin, AsyncTrackedModel, AsyncSQLerSafeModel):
+    __tablename__ = "ps_counter"
+    _rebase_config = RebaseConfig(allowed_fields={"hits"}, max_delta=5)
+    hits: int = 0
+    label: str = ""
+
+
+@dataclass
+class LPsCounter(PartialUpdateMixin, TrackedModel, SQLerLiteSafeModel):
+    __tablename__ = "ps_counter"
+    _rebase_config = RebaseConfig(allowed_fields={"hits"}, max_delta=5)
+    hits: int = 0
+    label: str = ""
+
+
+@dataclass
+class ALPsCounter(AsyncPartialUpdateMixin, AsyncTrackedModel, AsyncSQLerLiteSafeModel):
+    __tablename__ = "ps_counter"
+    _rebase_config = RebaseConfig(allowed_fields={"hits"}, max_delta=5)
+    hits: int = 0
+    label: str = ""
+
+
+PARTIAL = {
+    "sync": PsCounter,
+    "async": APsCounter,
+    "lite_sync": LPsCounter,
+    "lite_async": ALPsCounter,
+}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_rebased_partial_save_writes_onto_the_newer_row(kind):
+    cls = PARTIAL[kind]
+
+    async def scenario():
+        db = AsyncSQLerDB.in_memory() if kind in ("async", "lite_async") else SQLerDB.in_memory()
+        await _aw(db.connect()) if hasattr(db, "connect") else None
+        try:
+            mine = await _aw(cls(label="first").save(db=db))
+            theirs = await _aw(cls.from_id(mine._id, db=db))
+            theirs.hits, theirs.label = 10, "theirs"
+            await _aw(theirs.save(db=db))
+            mine.hits += 2
+            await _aw(mine.save_partial(db=db))
+            row = await _aw(db.find_document_with_version("ps_counter", mine._id))
+            return (row["hits"], row["label"], row["_version"]), (
+                mine.hits,
+                mine.label,
+                mine._version,
+            )
+        finally:
+            await _aw(db.close())
+
+    assert asyncio.run(scenario()) == ((12, "theirs", 2), (12, "theirs", 2))
+
+
+class TestRebaseConfig:
+    """Tests for configurable intent rebasing in SQLerSafeModel."""
+
+    def test_default_rebase_config(self):
+        """Test default rebase config allows count field with ±1."""
+        config = DEFAULT_REBASE_CONFIG
+
+        assert config.can_rebase("count", 1)
+        assert config.can_rebase("count", -1)
+        assert not config.can_rebase("count", 2)  # exceeds max_delta
+        assert not config.can_rebase("views", 1)  # not in allowed_fields
+
+    def test_permissive_rebase_config(self):
+        """Test permissive config allows any integer field."""
+        config = PERMISSIVE_REBASE_CONFIG
+
+        assert config.can_rebase("count", 1)
+        assert config.can_rebase("views", 1)
+        assert config.can_rebase("likes", -1)
+        assert not config.can_rebase("score", 5)  # exceeds max_delta
+
+    def test_no_rebase_config(self):
+        """Test disabled rebase config."""
+        config = NO_REBASE_CONFIG
+
+        assert not config.can_rebase("count", 1)
+        assert not config.can_rebase("anything", 0)
+
+    def test_custom_rebase_config(self):
+        """Test custom rebase configuration."""
+        config = RebaseConfig(
+            enabled=True,
+            allowed_fields={"likes", "views"},
+            max_delta=10,
+        )
+
+        assert config.can_rebase("likes", 5)
+        assert config.can_rebase("views", -10)
+        assert not config.can_rebase("likes", 11)  # exceeds max_delta
+        assert not config.can_rebase("count", 1)  # not in allowed_fields
+
+    def test_can_rebase_deltas(self):
+        """Test the can_rebase_deltas helper function."""
+        # Single field delta within limits
+        assert can_rebase_deltas({"count": 1})
+        assert can_rebase_deltas({"count": -1})
+
+        # Multiple fields should fail (safety check)
+        assert not can_rebase_deltas({"count": 1, "views": 1})
+
+        # Empty delta
+        assert not can_rebase_deltas({})
+
+        # Exceeds max_delta
+        assert not can_rebase_deltas({"count": 5})
+
+        # Field not in allowed_fields
+        assert not can_rebase_deltas({"views": 1})
+
+
+class TestNumericDeltaUtils:
+    """Tests for numeric delta computation and application utilities."""
+
+    def test_compute_deltas_basic(self):
+        """Test basic delta computation."""
+        orig = {"count": 5, "score": 10}
+        target = {"count": 7, "score": 10}
+
+        deltas = compute_numeric_scalar_deltas(orig, target)
+
+        assert deltas == {"count": 2}  # score unchanged
+
+    def test_compute_deltas_with_missing_field(self):
+        """Test delta computation when original field is missing."""
+        orig = {}
+        target = {"count": 3}
+
+        deltas = compute_numeric_scalar_deltas(orig, target)
+
+        assert deltas == {"count": 3}
+
+    def test_apply_deltas(self):
+        """Test applying deltas to a document."""
+        base = {"count": 10, "name": "test"}
+        delta = {"count": 5}
+
+        result = apply_numeric_scalar_deltas(base, delta)
+
+        assert result["count"] == 15
+        assert result["name"] == "test"

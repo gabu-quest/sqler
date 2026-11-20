@@ -21,8 +21,6 @@ import sqlite3
 import tempfile
 import time
 
-from sqler import F, SQLerDB, backup, export_csv, export_json, export_jsonl, restore
-
 from benchmarks.core.base import BenchmarkResult
 from benchmarks.core.config import BenchmarkConfig
 from benchmarks.core.sqlite_baseline import (
@@ -34,6 +32,7 @@ from benchmarks.core.sqlite_baseline import (
 from benchmarks.core.timer import PrecisionTimer, timing_stats_from_list
 from benchmarks.generators.documents import DocumentGenerator
 from benchmarks.generators.models import BenchmarkItem
+from sqler import F, SQLerDB, backup, export_csv, export_json, export_jsonl, restore
 
 SUITE_NAME = "ops"
 
@@ -131,12 +130,17 @@ class IndexCreationTime:
                         gc.collect()
 
                 for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
-                    results.append(BenchmarkResult(
-                        scenario=self.name, suite=self.suite,
-                        parameter="rows", value=f"{arm_label}_{prefix}_{size}",
-                        timing=arm_results[arm_label], rows=size,
-                        metadata={"storage_mode": mode, "baseline": baseline},
-                    ))
+                    results.append(
+                        BenchmarkResult(
+                            scenario=self.name,
+                            suite=self.suite,
+                            parameter="rows",
+                            value=f"{arm_label}_{prefix}_{size}",
+                            timing=arm_results[arm_label],
+                            rows=size,
+                            metadata={"storage_mode": mode, "baseline": baseline},
+                        )
+                    )
 
         return results
 
@@ -262,12 +266,17 @@ class ColdVsWarm:
             ("sqlite_disk_cold", "sqlite_cold", "sqlite"),
             ("sqlite_disk_warm", "sqlite_warm", "sqlite"),
         ]:
-            results.append(BenchmarkResult(
-                scenario=self.name, suite=self.suite,
-                parameter="state", value=label,
-                timing=arm_results[stats_key], rows=size,
-                metadata={"storage_mode": "disk", "baseline": baseline},
-            ))
+            results.append(
+                BenchmarkResult(
+                    scenario=self.name,
+                    suite=self.suite,
+                    parameter="state",
+                    value=label,
+                    timing=arm_results[stats_key],
+                    rows=size,
+                    metadata={"storage_mode": "disk", "baseline": baseline},
+                )
+            )
 
         return results
 
@@ -321,25 +330,31 @@ class ExportPerformance:
                     def measure_sqler():
                         def do_csv(qs=qs, tmpdir=tmpdir):
                             export_csv(qs, os.path.join(tmpdir, "out.csv"))
+
                         arm_results["sqler_csv"] = timer.measure(do_csv)
 
                         gc.collect()
 
                         def do_json(tmpdir=tmpdir):
                             export_json(BenchmarkItem, os.path.join(tmpdir, "out.json"))
+
                         arm_results["sqler_json"] = timer.measure(do_json)
 
                         gc.collect()
 
                         def do_jsonl(qs=qs, tmpdir=tmpdir):
                             export_jsonl(qs, os.path.join(tmpdir, "out.jsonl"))
+
                         arm_results["sqler_jsonl"] = timer.measure(do_jsonl)
 
                         gc.collect()
 
                         # Fast path: include_id=False skips json.loads/json.dumps entirely
                         def do_jsonl_noid(qs=qs, tmpdir=tmpdir):
-                            export_jsonl(qs, os.path.join(tmpdir, "out_noid.jsonl"), include_id=False)
+                            export_jsonl(
+                                qs, os.path.join(tmpdir, "out_noid.jsonl"), include_id=False
+                            )
+
                         arm_results["sqler_jsonl_noid"] = timer.measure(do_jsonl_noid)
 
                     def measure_sqlite():
@@ -359,6 +374,7 @@ class ExportPerformance:
                                         obj = json_mod.loads(r["data"])
                                         obj["_id"] = r["_id"]
                                         w.writerow(obj)
+
                         arm_results["sqlite_csv"] = timer.measure(do_sqlite_csv)
 
                         gc.collect()
@@ -372,6 +388,7 @@ class ExportPerformance:
                                 data.append(obj)
                             with open(os.path.join(tmpdir, "sq_out.json"), "w") as f:
                                 json_mod.dump(data, f, ensure_ascii=False)
+
                         arm_results["sqlite_json"] = timer.measure(do_sqlite_json)
 
                         gc.collect()
@@ -385,6 +402,7 @@ class ExportPerformance:
                                     obj = json_mod.loads(r["data"])
                                     obj["_id"] = r["_id"]
                                     f.write(json_mod.dumps(obj) + "\n")
+
                         arm_results["sqlite_jsonl"] = timer.measure(do_sqlite_jsonl)
 
                         gc.collect()
@@ -395,6 +413,7 @@ class ExportPerformance:
                             with open(os.path.join(tmpdir, "sq_out_noid.jsonl"), "w") as f:
                                 for r in rows:
                                     f.write(r["data"] + "\n")
+
                         arm_results["sqlite_jsonl_noid"] = timer.measure(do_sqlite_jsonl_noid)
 
                     arms = _alternate_arms(
@@ -415,12 +434,17 @@ class ExportPerformance:
                         (f"sqlite_{prefix}_jsonl_{size}", "sqlite_jsonl", "sqlite"),
                         (f"sqlite_{prefix}_jsonl_noid_{size}", "sqlite_jsonl_noid", "sqlite"),
                     ]:
-                        results.append(BenchmarkResult(
-                            scenario=self.name, suite=self.suite,
-                            parameter="format", value=label,
-                            timing=arm_results[stats_key], rows=size,
-                            metadata={"storage_mode": mode, "baseline": baseline},
-                        ))
+                        results.append(
+                            BenchmarkResult(
+                                scenario=self.name,
+                                suite=self.suite,
+                                parameter="format",
+                                value=label,
+                                timing=arm_results[stats_key],
+                                rows=size,
+                                metadata={"storage_mode": mode, "baseline": baseline},
+                            )
+                        )
 
                     conn.close()
 
@@ -466,6 +490,7 @@ class BackupRestore:
                         if os.path.exists(bak):
                             os.unlink(bak)
                         backup(db, bak)
+
                     arm_results["sqler_backup"] = timer.measure(do_backup)
 
                     gc.collect()
@@ -476,6 +501,7 @@ class BackupRestore:
                             os.unlink(rst)
                         target_db = SQLerDB.on_disk(rst)
                         restore(target_db, bak)
+
                     arm_results["sqler_restore"] = timer.measure(do_restore)
 
                 def measure_sqlite():
@@ -491,6 +517,7 @@ class BackupRestore:
                         dest = sqlite3.connect(bak)
                         src.backup(dest)
                         dest.close()
+
                     arm_results["sqlite_backup"] = timer.measure(do_sqlite_backup)
 
                     gc.collect()
@@ -508,6 +535,7 @@ class BackupRestore:
                         dest_conn = create_conn(rst, "disk")
                         src_conn.backup(dest_conn)
                         src_conn.close()
+
                     arm_results["sqlite_restore"] = timer.measure(do_sqlite_restore)
 
                     sqlite_src.close()
@@ -526,12 +554,17 @@ class BackupRestore:
                     (f"sqlite_disk_backup_{size}", "sqlite_backup", "sqlite"),
                     (f"sqlite_disk_restore_{size}", "sqlite_restore", "sqlite"),
                 ]:
-                    results.append(BenchmarkResult(
-                        scenario=self.name, suite=self.suite,
-                        parameter="operation", value=label,
-                        timing=arm_results[stats_key], rows=size,
-                        metadata={"storage_mode": "disk", "baseline": baseline},
-                    ))
+                    results.append(
+                        BenchmarkResult(
+                            scenario=self.name,
+                            suite=self.suite,
+                            parameter="operation",
+                            value=label,
+                            timing=arm_results[stats_key],
+                            rows=size,
+                            metadata={"storage_mode": "disk", "baseline": baseline},
+                        )
+                    )
 
         return results
 
@@ -585,11 +618,13 @@ class AggregatePerformance:
                         def measure_sqler(q=q, agg=agg_name):
                             def do_agg():
                                 return getattr(q, agg)("value")
+
                             arm_results["sqler"] = timer.measure(do_agg)
 
                         def measure_sqlite(conn=conn, agg=agg_name):
                             def do_sqlite_agg():
                                 return aggregate(conn, "bench", agg.upper(), "value")
+
                             arm_results["sqlite"] = timer.measure(do_sqlite_agg)
 
                         arms = _alternate_arms(
@@ -601,13 +636,17 @@ class AggregatePerformance:
                             gc.collect()
 
                         for arm_label, baseline in [("sqler", "sqler"), ("sqlite", "sqlite")]:
-                            results.append(BenchmarkResult(
-                                scenario=self.name, suite=self.suite,
-                                parameter="aggregate",
-                                value=f"{arm_label}_{prefix}_{agg_name}_{size}",
-                                timing=arm_results[arm_label], rows=size,
-                                metadata={"storage_mode": mode, "baseline": baseline},
-                            ))
+                            results.append(
+                                BenchmarkResult(
+                                    scenario=self.name,
+                                    suite=self.suite,
+                                    parameter="aggregate",
+                                    value=f"{arm_label}_{prefix}_{agg_name}_{size}",
+                                    timing=arm_results[arm_label],
+                                    rows=size,
+                                    metadata={"storage_mode": mode, "baseline": baseline},
+                                )
+                            )
 
                     conn.close()
 
