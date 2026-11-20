@@ -1,6 +1,7 @@
 """A soak of sqler: concurrent writers for minutes or hours, and a checker of every row.
 
-Run it from the repository root::
+Linux and macOS only: it locks its folder with ``fcntl.flock`` and stops its writers with POSIX
+signals. Run it from the repository root::
 
     uv run --frozen python tests/soak/soak.py --minutes 2 --seed 7 --storage file
 

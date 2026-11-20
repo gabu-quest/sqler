@@ -19,6 +19,10 @@ from types import SimpleNamespace
 
 import pytest
 
+# The soak locks its folder with ``fcntl.flock`` and stops its writers with POSIX signals, so it
+# runs on Linux and macOS only. Windows has no ``fcntl``: every test here is skipped there.
+pytest.importorskip("fcntl", reason="the soak needs fcntl and POSIX signals (not on Windows)")
+
 SOAK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soak")
 sys.path.insert(0, SOAK_DIR)
 
