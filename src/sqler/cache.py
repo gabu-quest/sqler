@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Generic, Optional, TypeVar, Union, overload
 
+from sqler import _fork
 from sqler.models._table_names import _unchecked_table_name
 from sqler.models._write_rules import WriteRules
 
@@ -52,6 +53,15 @@ _caches: tuple["weakref.ref[QueryCache]", ...] = ()
 _held: dict[str, int] = {}
 # taken to change ``_caches`` or ``_held``
 _held_lock = threading.Lock()
+
+
+@_fork.register_module
+def _start_in_child() -> None:
+    """In a forked child (``sqler._fork``): no table held, as no transaction is open there,
+    and a new lock, as a thread that held it does not exist there. Cached entries stay."""
+    global _held, _held_lock
+    _held = {}
+    _held_lock = threading.Lock()
 
 
 @overload
@@ -186,10 +196,16 @@ class QueryCache:
         global _caches
         with _held_lock:
             _caches = (*(ref for ref in _caches if ref() is not None), weakref.ref(self))
+        _fork.register(self)
 
         # Start background cleanup
         self._cleanup_thread: Optional[threading.Thread] = None
         self._running = False
+
+    def _start_in_child(self) -> None:
+        """In a forked child (``sqler._fork``): a new lock, as a thread that held it does not
+        exist there."""
+        self._lock = threading.RLock()
 
     def start_cleanup(self) -> None:
         """Start background cleanup thread."""

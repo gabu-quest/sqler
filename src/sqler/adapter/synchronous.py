@@ -1,4 +1,5 @@
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -9,6 +10,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from typing import Any, ContextManager, NoReturn, Optional, Self, Sequence
 
+from sqler import _fork
 from sqler.logging import query_logger
 
 from ..exceptions import NotConnectedError, QueryError, TransactionStateError, unique_violation_from
@@ -53,6 +55,12 @@ def _broken(failed: tuple[str, Optional[BaseException]]) -> TransactionStateErro
     error = TransactionStateError(failed[0])
     error.__cause__ = failed[1]
     return error
+
+
+_FORKED_MEMORY = (
+    "this in-memory database was opened in another process: its rows live in that process "
+    "and cannot be reached after fork(); open a database in this process"
+)
 
 
 _KEPT = (
@@ -254,21 +262,49 @@ def _names_memory_database(path: str) -> bool:
     return name == ":memory:" or "mode=memory" in options or "vfs=memdb" in options
 
 
-class _ThreadConnection:
-    """Closes one thread's connection when the thread ends.
+def _opened_here(pid: int) -> bool:
+    """True in the process whose id is ``pid``: the process that opened what recorded it.
 
-    Only the thread's local storage holds it (the adapter's registry holds it
-    weakly). CPython drops a thread's local storage as the thread ends, before
-    ``join()`` returns, so the connection closes then: SQLite rolls back what the
-    thread left uncommitted and its lock is free.
+    SQLite forbids a forked child to use a connection its parent opened, and even to close
+    it: the close can undo work under the parent, and it waits forever for a lock that a
+    thread of the parent held at the fork. This is the one test of "this process opened
+    it". It asks the system every time, because a connection's end hook can run inside
+    ``fork()`` itself, in the child, before any at-fork hook (CPython drops the local
+    storage of every thread but the forking one there).
+    """
+    return pid == os.getpid()
+
+
+# What a process keeps of the connections it did not open: never closed or finalized here.
+_INHERITED: list[sqlite3.Connection] = []
+
+
+class _OwnedConnection:
+    """One connection the adapter opened and the process that opened it; its end closes the
+    connection there, and does nothing to it anywhere else.
+
+    A thread's connection is held only by the thread's local storage (the adapter's
+    registry holds it weakly). CPython drops a thread's local storage as the thread ends,
+    before ``join()`` returns, so the connection closes then: SQLite rolls back what the
+    thread left uncommitted and its lock is free. The connection a plain ``":memory:"``
+    adapter shares and the one that keeps a shared-cache database alive end with the
+    adapter.
+
+    In a forked child (CPython drops every other thread's local storage inside ``fork()``),
+    the end neither closes the connection nor lets Python finalize it: the connection is
+    kept in ``_INHERITED`` for the life of the child, untouched.
     """
 
-    __slots__ = ("conn", "__weakref__")
+    __slots__ = ("conn", "pid", "__weakref__")
 
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+        self.pid = os.getpid()
 
     def close(self) -> None:
+        if not _opened_here(self.pid):
+            _INHERITED.append(self.conn)
+            return
         try:
             self.conn.close()
         except sqlite3.Error:
@@ -288,7 +324,7 @@ class _ThreadState(threading.local):
     """
 
     conn: Optional[sqlite3.Connection] = None
-    owner: Optional[_ThreadConnection] = None
+    owner: Optional[_OwnedConnection] = None
     txn_depth = 0
     broken: Optional[tuple[str, Optional[BaseException]]] = None
     turn_end: Optional["_TurnEnd"] = None
@@ -381,6 +417,7 @@ class _SharedConnection:
 
     __slots__ = (
         "conn",
+        "owner",
         "timeout",
         "lock",
         "_turn",
@@ -394,6 +431,8 @@ class _SharedConnection:
 
     def __init__(self, conn: sqlite3.Connection, timeout: float):
         self.conn = conn
+        # ends the connection with this object, in the process that opened it only
+        self.owner = _OwnedConnection(conn)
         self.timeout = timeout
         self.lock = threading.Lock()
         self._turn = threading.Condition(self.lock)  # waits and wakes; never entered with ``with``
@@ -519,25 +558,27 @@ class _SharedConnection:
             self._closed = True
             self._holder = self._kept = None
             try:
-                self.conn.close()
-            except sqlite3.Error:
-                pass
+                self.owner.close()
             finally:
                 self._turn.notify_all()
 
 
 class _TurnEnd:
     """Held by one thread's local storage only: dropped as the thread ends, it hands the
-    turn of the shared connection back (see ``_ThreadConnection`` for when that runs).
-    ``token``, a weak reference to it, names the thread as the holder."""
+    turn of the shared connection back (see ``_OwnedConnection`` for when that runs).
+    ``token``, a weak reference to it, names the thread as the holder. Dropped in a forked
+    child, it does nothing: it takes no lock and rolls nothing back there."""
 
-    __slots__ = ("shared", "token", "__weakref__")
+    __slots__ = ("shared", "token", "pid", "__weakref__")
 
     def __init__(self, shared: _SharedConnection):
         self.shared = weakref.ref(shared)  # weak: a thread does not keep a closed connection alive
         self.token = weakref.ref(self)
+        self.pid = os.getpid()
 
     def __del__(self) -> None:
+        if not _opened_here(self.pid):
+            return
         shared = self.shared()
         if shared is not None:
             shared.end_of(self.token)
@@ -720,17 +761,38 @@ class SQLiteAdapter(AdapterABC):
         self.timeout_ms, self._timeout_given = _lock_wait(timeout_ms)
         self.path = path
         self.pragmas = pragmas or []
+        self._connected: bool = False
+        self._memory_singleton = path == ":memory:"
+        # Why the adapter is not connected in this process, when the reason is a fork: an
+        # in-memory database the parent opened (``_FORKED_MEMORY``); cleared by close().
+        self._gone: Optional[str] = None
+        self._start_in_this_process()
+        _fork.register(self)
+
+    def _start_in_this_process(self) -> None:
+        """Connections and per-thread state of this process, none yet: no connection, no
+        transaction, new locks, an empty registry. What they replace is dropped untouched."""
         self._local = _ThreadState()
         self._conns_lock = threading.RLock()
-        self._conns: weakref.WeakSet[_ThreadConnection] = weakref.WeakSet()
-        self._connected: bool = False
+        self._conns: weakref.WeakSet[_OwnedConnection] = weakref.WeakSet()
         # The one connection of a plain ":memory:" adapter (see ``_SharedConnection``).
         self._shared: Optional[_SharedConnection] = None
         # SQLite drops a shared-cache in-memory database when its last connection closes,
         # and a thread's connection closes when the thread ends. This connection runs no
         # statement; it keeps the database alive from connect() to close().
-        self._anchor: Optional[sqlite3.Connection] = None
-        self._memory_singleton = path == ":memory:"
+        self._anchor: Optional[_OwnedConnection] = None
+
+    def _start_in_child(self) -> None:
+        """In a forked child (``sqler._fork``): everything inherited is left as it is
+        (``_OwnedConnection`` keeps the connections, never closing them) and the adapter
+        starts from no connection: a file database opens a new connection, with the same
+        pragmas and lock wait, at its next statement; an in-memory database, whose rows live
+        in the parent, raises ``NotConnectedError`` until close()."""
+        memory = self._memory_singleton or _names_memory_database(self.path)
+        if self._connected and memory:
+            self._connected = False
+            self._gone = _FORKED_MEMORY
+        self._start_in_this_process()
 
     @property
     def _txn_depth(self) -> int:
@@ -798,6 +860,8 @@ class SQLiteAdapter(AdapterABC):
                     shared.give(local)
 
     def connect(self) -> None:
+        if self._gone is not None:
+            raise NotConnectedError(self._gone)
         if self._memory_singleton:
             with self._conns_lock:
                 if self._shared is None:
@@ -807,7 +871,9 @@ class SQLiteAdapter(AdapterABC):
         elif self._anchor is None and _names_memory_database(self.path):
             with self._conns_lock:
                 if self._anchor is None:
-                    self._anchor = sqlite3.connect(self.path, uri=True, check_same_thread=False)
+                    self._anchor = _OwnedConnection(
+                        sqlite3.connect(self.path, uri=True, check_same_thread=False)
+                    )
         was_connected = self._connected
         self._connected = True
         try:
@@ -886,7 +952,7 @@ class SQLiteAdapter(AdapterABC):
         Raises ``TransactionStateError`` in a transaction whose nested end failed: the ends
         of a transaction read ``_local.conn`` themselves."""
         if not self._connected:
-            raise NotConnectedError("Database not connected, call connect() first")
+            raise NotConnectedError(self._gone or "Database not connected, call connect() first")
         local = self._local  # read once: close() on another thread replaces it
         if local.broken is not None:
             raise _broken(local.broken)
@@ -902,12 +968,15 @@ class SQLiteAdapter(AdapterABC):
             return shared.conn
         conn = self._open()
         local.conn = conn  # what every statement reads
-        local.owner = owner = _ThreadConnection(conn)
+        local.owner = owner = _OwnedConnection(conn)
         with self._conns_lock:
             self._conns.add(owner)
         return conn
 
     def close(self) -> None:
+        """Close the connections this process opened; in a forked child, those the parent
+        opened are left as they are."""
+        self._gone = None
         self._connected = False
         with self._conns_lock:
             for owner in list(self._conns):
@@ -919,10 +988,7 @@ class SQLiteAdapter(AdapterABC):
         with self._conns_lock:
             anchor, self._anchor = self._anchor, None
         if anchor is not None:
-            try:
-                anchor.close()
-            except sqlite3.Error:
-                pass
+            anchor.close()
         # A fresh thread-local object: a thread that outlives close() holds nothing of the
         # old one (connection, transaction depth) and opens a new connection on connect().
         self._local = _ThreadState()

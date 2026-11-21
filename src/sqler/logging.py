@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 
+from sqler import _fork
+
 # Default logger for SQLer
 logger = logging.getLogger("sqler")
 
@@ -70,6 +72,12 @@ class QueryLogger:
         self._captures_lock = threading.Lock()
         self._log_to_logger = False
         self._log_level = logging.DEBUG
+        _fork.register(self)
+
+    def _start_in_child(self) -> None:
+        """In a forked child (``sqler._fork``): a new lock, as a thread that held it does not
+        exist there."""
+        self._captures_lock = threading.Lock()
 
     def enable(self, log_to_logger: bool = True, level: int = logging.DEBUG) -> None:
         """Enable query logging.
