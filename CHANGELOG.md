@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [1.2026.11.3] - 2026-11-21
+
+### Fixed
+
+- **A process that forks while its threads use a database gets a child that runs.** Since 1.2026.11.1, a child forked while another thread was inside a statement (`os.fork()`, `multiprocessing` with the `fork` start method, a server that starts a subprocess) never returned from `fork()`, and a child forked while the threads were idle closed the parent's connections, which SQLite forbids. A child now leaves every connection its parent opened as it is (not used, not closed, not rolled back) and opens its own at its first statement; it is not inside a transaction the parent had open, and its `close()` closes only what it opened. The database object and the caches start again in the child as well: it is in no transaction of the parent's, and a lock a thread of the parent held at the fork does not stop it. An in-memory database, whose rows live in the parent, raises `NotConnectedError` in the child, saying it was opened in another process.
+
 ## [1.2026.11.2] - 2026-11-20
 
 ### Added

@@ -2,7 +2,7 @@ import sqlite3
 import threading
 from typing import Any, Optional
 
-from sqler import cache
+from sqler import _fork, cache
 from sqler.adapter import SQLiteAdapter
 from sqler.db._promotion import (
     _copy_layout,
@@ -115,6 +115,14 @@ class SQLerDB(_TableMemory):
         self._init_memory()
         # what each open level of this object's own transactions learned, innermost last; per
         # thread, like the adapter's depth
+        self._open = _OpenLevels()
+        _fork.register(self)
+
+    def _start_in_child(self) -> None:
+        """In a forked child (``sqler._fork``): no open level and a new DDL lock, as the
+        adapter starts in no transaction there and a thread that held the lock does not
+        exist there."""
+        self._ddl_lock = threading.RLock()
         self._open = _OpenLevels()
 
     def _levels(self) -> list[_Level]:

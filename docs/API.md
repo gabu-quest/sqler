@@ -2577,6 +2577,8 @@ print(isinstance(stats, FTSStats), stats.table_name, stats.indexed_rows, stats.f
 ### [C42] Connection pooling
 
 `SQLerDB` gives each thread its own connection and returns it when the thread ends, so threads share one `SQLerDB`.
+A connection belongs to the process that opened it: after `fork()` (`os.fork()`, `multiprocessing` with the `fork` start method) the child leaves the parent's connections alone, neither using nor closing them, and opens its own at its first statement, with the same pragmas and lock wait; it is not inside a transaction the parent had open. An in-memory database does not cross a fork: its rows stay in the parent, and in the child every statement raises `NotConnectedError` until `close()`.
+Two limits are SQLite's own. It keeps its record of file locks per process, and `fork()` copies that record: when a thread of the parent is inside a transaction at the fork, the child's writes to that file can fail with `database is locked` and its reads are not protected from another process's writes, for as long as the child lives. So fork while the other threads are between transactions, or start workers with the `spawn` start method. And end a forked child with `os._exit()`, as `multiprocessing` does: a normal interpreter exit finalizes the connections the child inherited.
 `AsyncSQLerDB` pools its connections; `db.pool_stats()` returns a `PoolStats` with the pool's size, free and in-use connections, checkouts, timeouts and wait times.
 
 ### [C43] Schema migrations

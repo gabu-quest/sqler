@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 
+from sqler import _fork
 from sqler.logging import QueryLog, query_logger
 
 
@@ -217,6 +218,12 @@ class MetricsCollector:
 
         # Callbacks for real-time monitoring
         self._callbacks: list[Callable[[QueryLog], None]] = []
+        _fork.register(self)
+
+    def _start_in_child(self) -> None:
+        """In a forked child (``sqler._fork``): a new lock, as a thread that held it does not
+        exist there."""
+        self._lock = threading.RLock()
 
     def enable(
         self,
