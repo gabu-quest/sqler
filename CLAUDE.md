@@ -10,11 +10,6 @@ Document-oriented JSON store on SQLite.
 4. **Run at medium scale minimum** (50K rows) — small scale results are noisy and misleading.
 5. **Document known caveats** — every benchmark has weaknesses. State them, don't hide them.
 
-## Follow-up TODO
-
-- [ ] Remove `set_db()` and `bind()`. They are deprecated and warn; a call names its database
-  with `db=` or `using(db)`.
-
 ## Layout
 
 `src/sqler/` (most things come as a sync class and an async twin; a change to one needs the
